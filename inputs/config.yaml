@@ -1,0 +1,38 @@
+REEF:
+  5KM: https://coralreefwatch.noaa.gov/product/vs/vs_polygons.json 
+  1KM: https://datadownload-production.s3.us-east-1.amazonaws.com/WCMC008_CoralReefs2021_v4_1.zip
+  ARTIFICIAL: https://marinecadastre.gov/downloads/data/mc/ArtificialReef.zip
+  POLYGONS_1KM: global_reefs_1km\14_001_WCMC008_CoralReefs2021_v4_1\01_Data\WCMC008_CoralReef2021_Py_v4_1.shp
+  POLYGONS_5KM: global_reef_polygons_5k.shp
+  BUFFER_DISTANCE: 
+    - 1852
+    - 3704
+  TANKER_BUFFER_DISTANCE:
+    - 4360
+    - 9260
+    - 18520
+    - 37040
+  # BUFFER_DISTANCE: 
+  #   - 0.15
+  #   - 0.30
+  # TANKER_BUFFER_DISTANCE:
+  #   - 0.40
+  #   - 1.10
+  #   - 2.20
+  #   - 4.40
+  # REVERSE_BUFFER_DISTANCE: 
+  #   - -3148
+  #   - -1296
+  # REVERSE_TANKER_BUFFER_DISTANCE:
+  #   - -640
+  #   - 4260
+  #   - 13520
+  #   - 32040
+  REVERSE_BUFFER_DISTANCE: 
+    - -0.05
+    - -0.1
+  REVERSE_TANKER_BUFFER_DISTANCE:
+    - -0.15
+    - -0.25
+    - 0.15
+    - 0.25
