@@ -1,2 +1,7 @@
+# Ignore
 outputs/*
 inputs/*
+
+# Allow
+!inputs/*wgs84*
+!inputs/config.yaml
