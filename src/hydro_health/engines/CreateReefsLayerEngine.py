@@ -100,11 +100,6 @@ class CreateReefsLayerEngine(Engine):
                 xmin, xmax, ymin, ymax = shp_layer.GetExtent()
                 print(f'Rasterizing: {buffer_file}')
                 no_data = -999
-                # TODO add compression with creationOptions
-                # cog_ds = cogdriver.CreateCopy(str(export.cog_filename), 
-                #                               generalized_ds, 0, options=['TILED=YES', 'PREDICTOR=3', 
-                #                                                         'RESAMPLING=NEAREST', 'OVERVIEW_RESAMPLING=NEAREST', 
-                #                                                         'COMPRESS=LZW', "BIGTIFF=YES", 'OVERVIEWS=IGNORE_EXISTING'])
                 raster = gdal.Rasterize(reef_raster, buffer_file,
                                         creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"],
                                         noData=no_data,
