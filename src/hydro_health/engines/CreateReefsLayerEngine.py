@@ -4,7 +4,7 @@ import subprocess
 # import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
-from Engine import Engine
+from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -21,6 +21,16 @@ class CreateReefsLayerException(Exception):
 
 class CreateReefsLayerEngine(Engine):
     """Class to hold the logic for processing the Reefs layer"""
+
+
+    def __init__(self, param_lookup:dict):
+        self.param_lookup = param_lookup
+        if self.param_lookup['input_directory'].valueAsText:
+            global INPUTS
+            INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
+        if self.param_lookup['output_directoty'].valueAsText:
+            global OUTPUTS
+            OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
 
     def create_gdal_multiple_buffer(self, reef_polygons: str) -> None:
         """Create multiple buffers around reef polygons using GDAL"""
@@ -89,10 +99,16 @@ class CreateReefsLayerEngine(Engine):
                 xmin, xmax, ymin, ymax = shp_layer.GetExtent()
                 print(f'Rasterizing: {buffer_file}')
                 no_data = -999
+                # TODO add compression with creationOptions
+                # cog_ds = cogdriver.CreateCopy(str(export.cog_filename), 
+                #                               generalized_ds, 0, options=['TILED=YES', 'PREDICTOR=3', 
+                #                                                         'RESAMPLING=NEAREST', 'OVERVIEW_RESAMPLING=NEAREST', 
+                #                                                         'COMPRESS=LZW', "BIGTIFF=YES", 'OVERVIEWS=IGNORE_EXISTING'])
                 raster = gdal.Rasterize(reef_raster, buffer_file,
+                                        # creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"],
                                         noData=no_data,
                                         format='GTiff',
-                                        outputType=gdal.GDT_Float32,
+                                        outputType=gdal.GDT_Float32,  # TODO Try with Integer
                                         outputBounds=[xmin, ymin, xmax, ymax],
                                         attribute='distance',
                                         xRes=pixel_size,
