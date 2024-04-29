@@ -23,14 +23,15 @@ class CreateReefsLayerEngine(Engine):
     """Class to hold the logic for processing the Reefs layer"""
 
 
-    def __init__(self, param_lookup:dict):
-        self.param_lookup = param_lookup
-        if self.param_lookup['input_directory'].valueAsText:
-            global INPUTS
-            INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
-        if self.param_lookup['output_directoty'].valueAsText:
-            global OUTPUTS
-            OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
+    def __init__(self, param_lookup:dict=None):
+        if param_lookup:
+            self.param_lookup = param_lookup
+            if self.param_lookup['input_directory'].valueAsText:
+                global INPUTS
+                INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
+            if self.param_lookup['output_directoty'].valueAsText:
+                global OUTPUTS
+                OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
 
     def create_gdal_multiple_buffer(self, reef_polygons: str) -> None:
         """Create multiple buffers around reef polygons using GDAL"""
@@ -105,10 +106,10 @@ class CreateReefsLayerEngine(Engine):
                 #                                                         'RESAMPLING=NEAREST', 'OVERVIEW_RESAMPLING=NEAREST', 
                 #                                                         'COMPRESS=LZW', "BIGTIFF=YES", 'OVERVIEWS=IGNORE_EXISTING'])
                 raster = gdal.Rasterize(reef_raster, buffer_file,
-                                        # creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"],
+                                        creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"],
                                         noData=no_data,
                                         format='GTiff',
-                                        outputType=gdal.GDT_Float32,  # TODO Try with Integer
+                                        outputType=gdal.GDT_Int32,
                                         outputBounds=[xmin, ymin, xmax, ymax],
                                         attribute='distance',
                                         xRes=pixel_size,
@@ -122,7 +123,7 @@ class CreateReefsLayerEngine(Engine):
                 continue
             print(f'Merging {buffer_type} rasters')
             raster = gdal.Warp(merged_final_raster, buffer_files, format="GTiff",
-                        options=["COMPRESS=LZW", "TILED=YES"]) # if you want
+                        creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"])
             raster = None # Close file and flush to disk
 
     def create_reef_rasters(self, reef_buffer_paths: str) -> None:
