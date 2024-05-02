@@ -4,7 +4,7 @@ import subprocess
 # import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
-from Engine import Engine
+from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -22,203 +22,104 @@ class CreateReefsLayerException(Exception):
 class CreateReefsLayerEngine(Engine):
     """Class to hold the logic for processing the Reefs layer"""
 
-    # def __init__(self, param_lookup: dict=None) -> None:
-    #     # TODO copy over functions that process Reefs
-    #     pass
 
-    # def create_gpd_multiple_buffer(self, reef_polygons: str) -> None:
-    #     """Create multiple buffers around reef polygons using Geopandas"""
-
-    #     buffer_distance = get_config_item('REEF', 'BUFFER_DISTANCE')
-    #     tanker_buffer_distance = get_config_item(
-    #         'REEF', 'TANKER_BUFFER_DISTANCE')
-
-    #     reef_polygons_buffer = str(OUTPUTS / 'reef_polygons_buffer.shp')
-    #     reef_polygons_tanker_buffer = str(
-    #         OUTPUTS / 'reef_polygons_tanker_buffer.shp')
-
-    #     # def multiring_buffer(df, distances):
-    #     #     buffers = []
-    #     #     for distance in distances:
-    #     #         reef_buffer = reef_gdf.geometry.buffer(distance)
-    #     #         buffers.append(reef_buffer.difference(reef_gdf['geometry']))
-    #     #     return buffers
-
-    #     buffers = {reef_polygons_buffer: buffer_distance,
-    #                reef_polygons_tanker_buffer: tanker_buffer_distance}
-    #     for buffer_file, distances in buffers.items():
-    #         reef_gdf = gpd.read_file(reef_polygons)
-    #         reef_polygons_crs = reef_gdf.crs
-    #         print(f'Attempting: {buffer_file}')
-    #         if os.path.exists(reef_polygons_buffer) and os.path.exists(reef_polygons_tanker_buffer):
-    #             print('Buffer files already exist')
-    #             return [reef_polygons_buffer, reef_polygons_tanker_buffer]
-
-    #         # reef_gdf['buffers'] = reef_gdf.apply(lambda row: multiring_buffer(row, distances))
-    #         for i, row in reef_gdf.iterrows():
-    #             print(i)
-    #             buffers = []
-    #             for distance in distances:
-    #                 reef_buffer = row.geometry.buffer(distance)
-    #                 buffers.append(reef_buffer.difference(row['geometry']))
-    #             row['buffers'] = buffers
-    #         reef_gdf = reef_gdf.explode('buffers')
-    #         reef_gdf = reef_gdf.set_geometry('buffers')
-    #         reef_gdf = reef_gdf.drop(columns=['geometry']).rename_geometry(
-    #             'geometry').set_crs(reef_polygons_crs)
-    #         reef_gdf = gpd.GeoDataFrame(
-    #             geometry=[reef_gdf.unary_union]).explode(
-    #                 index_parts=False).reset_index(
-    #                 drop=True)
-    #         reef_gdf.to_file(buffer_file)
-    #     return buffers.keys()
-
-    # def create_gdal_multiple_buffer(self, reef_polygons: str) -> None:
-    #     """Create multiple buffers around reef polygons using GDAL"""
-
-    #     buffer_distance = get_config_item('REEF', 'REVERSE_BUFFER_DISTANCE')
-    #     tanker_buffer_distance = get_config_item('REEF', 'REVERSE_TANKER_BUFFER_DISTANCE')
-
-    #     driver = ogr.GetDriverByName('ESRI Shapefile')
-    #     reef_data = ogr.Open(reef_polygons)
-    #     reef_layer = reef_data.GetLayer()
-
-    #     reef_polygons_buffer = str(OUTPUTS / 'reef_polygons_buffer.shp')
-    #     reef_polygons_tanker_buffer = str(OUTPUTS / 'reef_polygons_tanker_buffer.shp')
-
-    #     buffers = {reef_polygons_buffer: buffer_distance,
-    #                reef_polygons_tanker_buffer: tanker_buffer_distance}
-    #     for buffer_file, distances in buffers.items():
-    #         print(f'Attempting: {buffer_file}')
-    #         if os.path.exists(reef_polygons_buffer) and os.path.exists(reef_polygons_tanker_buffer):
-    #             print('Buffer files already exist')
-    #             return [reef_polygons_buffer, reef_polygons_tanker_buffer]
-    #         buffer_data = driver.CreateDataSource(buffer_file)
-    #         buffer_layer = buffer_data.CreateLayer(
-    #             'buffer_file', geom_type=ogr.wkbPolygon)
-    #         distance_field = ogr.FieldDefn('distance', ogr.OFTReal)
-    #         buffer_layer.CreateField(distance_field)
-    #         buffer_lyr_definition = buffer_layer.GetLayerDefn()
-    #         for distance in distances:
-    #             print(distance)
-    #             # -0.15
-    #             # -0.25
-    #             # 0.15
-    #             # 0.25
-    #             previous_outter_buffer = None
-    #             previous_inner_buffer = None
-    #             for feature in reef_layer:
-    #                 ingeom = feature.GetGeometryRef()
-    #                 geomBuffer = ingeom.Buffer(distance, 30)
-    #                 geom_difference = geomBuffer.Difference(ingeom)
-    #                 first_inner = True
-    #                 first_outter = True
-    #                 if distance < 0: # OG is big, buffer is small, 
-    #                     # first time - difference, and buffer
-    #                     # second time - need difference of previous buffer and new buffer
-    #                     if first_inner: # first
-    #                         first_inner = False
-    #                         previous_inner_buffer = geomBuffer
-    #                         # difference
-    #                         buffered_feature = ogr.Feature(buffer_lyr_definition)
-    #                         buffered_feature.SetField('distance', distance)
-    #                         buffered_feature.SetGeometry(geom_difference)
-    #                         buffer_layer.CreateFeature(buffered_feature)
-    #                         # buffer
-    #                         buffered_feature = ogr.Feature(buffer_lyr_definition)
-    #                         buffered_feature.SetField('distance', distance)
-    #                         buffered_feature.SetGeometry(geomBuffer)
-    #                         buffer_layer.CreateFeature(buffered_feature)
-    #                     else: # second
-    #                         # previous difference
-    #                         previous_geom_difference = previous_inner_buffer.Difference(geomBuffer)
-    #                         buffered_feature = ogr.Feature(buffer_lyr_definition)
-    #                         buffered_feature.SetField('distance', distance)
-    #                         buffered_feature.SetGeometry(previous_geom_difference)
-    #                         buffer_layer.CreateFeature(buffered_feature)
-    #                 else: # buffer is big, OG is small
-    #                     # difference
-    #                     # multiple bigger, needs difference of previous buffer and new buffer
-    #                     if first_outter: # first
-    #                         first_outter = False
-    #                         previous_outter_buffer = geomBuffer
-    #                         # difference
-    #                         buffered_feature = ogr.Feature(buffer_lyr_definition)
-    #                         buffered_feature.SetField('distance', distance)
-    #                         buffered_feature.SetGeometry(geom_difference)
-    #                         buffer_layer.CreateFeature(buffered_feature)
-    #                     else: # second
-    #                         # previous difference
-    #                         previous_geom_difference = previous_outter_buffer.Difference(geomBuffer)
-    #                         buffered_feature = ogr.Feature(buffer_lyr_definition)
-    #                         buffered_feature.SetField('distance', distance)
-    #                         buffered_feature.SetGeometry(previous_geom_difference)
-    #                         buffer_layer.CreateFeature(buffered_feature)
-    #                 original_feature = None
-    #                 outFeature = None
-    #             # TODO try to clip las geometry from each distance geomBuffer
-    #             # might need to write out separate shapefiles and use the final clipped one
-    #         buffer_data = None
-    #     reef_data = None
-
-    #     return buffers.keys()
+    def __init__(self, param_lookup:dict=None):
+        if param_lookup:
+            self.param_lookup = param_lookup
+            if self.param_lookup['input_directory'].valueAsText:
+                global INPUTS
+                INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
+            if self.param_lookup['output_directoty'].valueAsText:
+                global OUTPUTS
+                OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
 
     def create_gdal_multiple_buffer(self, reef_polygons: str) -> None:
         """Create multiple buffers around reef polygons using GDAL"""
 
+        
         buffer_distance = list(reversed(get_config_item('REEF', 'BUFFER_DISTANCE')))
         tanker_buffer_distance = list(reversed(get_config_item('REEF', 'TANKER_BUFFER_DISTANCE')))
-        print(buffer_distance, tanker_buffer_distance)
+
         driver = ogr.GetDriverByName('ESRI Shapefile')
         reef_data = ogr.Open(reef_polygons)
         reef_layer = reef_data.GetLayer()
 
-        reef_polygons_buffer = OUTPUTS / 'reef_polygons_buffer.shp'
-        reef_polygons_tanker_buffer = OUTPUTS / 'reef_polygons_tanker_buffer.shp'
-
-        buffers = {reef_polygons_buffer: buffer_distance,
-                   reef_polygons_tanker_buffer: tanker_buffer_distance}
-        for buffer_path, distances in buffers.items():
-            buffer_file = str(buffer_path)
-            if os.path.exists(reef_polygons_buffer) and os.path.exists(reef_polygons_tanker_buffer):
-                print('Buffer files already exist')
-                return [reef_polygons_buffer, reef_polygons_tanker_buffer]
-            
-            print(f'Attempting: {buffer_file}')
-            buffer_data = driver.CreateDataSource(buffer_file)
-            buffer_layer = buffer_data.CreateLayer(
-                "reef_polygons", geom_type=ogr.wkbPolygon)
-            distance_field = ogr.FieldDefn('distance', ogr.OFTReal)
-            buffer_layer.CreateField(distance_field)
-            buffer_lyr_definition = buffer_layer.GetLayerDefn()
-            for i, distance in enumerate(distances):
+        buffer_types = {}
+        buffer_distances = {'regular': buffer_distance, 'tanker': tanker_buffer_distance}
+        for name, distances in buffer_distances.items():
+            buffer_paths = []
+            for distance in distances:
+                buffer_path = OUTPUTS / f'reef_{name}_buffer_{distance}.shp'
+                buffer_file = str(buffer_path)
+                buffer_paths.append(buffer_file)
+                if os.path.exists(buffer_file):
+                    print(f'Buffer file already exists: {buffer_file}')
+                    continue
+                print(f'Attempting: {buffer_file}')
+                buffer_data = driver.CreateDataSource(buffer_file)
+                buffer_layer = buffer_data.CreateLayer("buffer_polygons", geom_type=ogr.wkbPolygon)
+                distance_field = ogr.FieldDefn('distance', ogr.OFTReal)
+                buffer_layer.CreateField(distance_field)
+                buffer_lyr_definition = buffer_layer.GetLayerDefn()
+                # Buffer each feature to the current distance and output shapefile
                 for feature in reef_layer:
                     ingeom = feature.GetGeometryRef()
                     geomBuffer = ingeom.Buffer(distance, 10)
                     buffered_feature = ogr.Feature(buffer_lyr_definition)
-                    if i == len(distances) - 1: # original and difference
-                        original_feature = ogr.Feature(buffer_lyr_definition)
-                        original_feature.SetField('distance', 0)
-                        original_feature.SetGeometry(ingeom)
-                        buffer_layer.CreateFeature(original_feature)
-                        original_feature = None
-
-                        buffered_feature.SetField('distance', distance)
-                        geom_difference = geomBuffer.Difference(ingeom)
-                        buffered_feature.SetGeometry(geom_difference)
-                        buffer_layer.CreateFeature(buffered_feature)
-                    else: # previous distance difference only
-                        buffered_feature.SetField('distance', distance)
-                        previous_distance_buffer = ingeom.Buffer(distances[i+1], 10)  # plus to run reversed buffers
-                        geom_difference = geomBuffer.Difference(previous_distance_buffer)
-                        buffered_feature.SetGeometry(geom_difference)
-                        buffer_layer.CreateFeature(buffered_feature)
+                    buffered_feature.SetField('distance', distance)
+                    buffered_feature.SetGeometry(geomBuffer)
+                    buffer_layer.CreateFeature(buffered_feature)
                     buffered_feature = None
-            buffer_data = None
-            self.make_esri_projection(buffer_path.stem, 5070)
+                buffer_data = None
+                self.make_esri_projection(buffer_path.stem, 5070)
+            buffer_types[name] = buffer_paths
         reef_data = None
+        return buffer_types
+    
 
-        return buffers.keys()
+    def rasterize_buffer_polygons(self, buffer_types: dict=None) -> None:
+        """Merge buffer polygons into single shapefiles for rasterization"""
+        
+        output_projection = osr.SpatialReference()
+        output_projection.ImportFromEPSG(5070)
+        # gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
+        raster_files = {}
+        for buffer_type, buffer_files in buffer_types.items():
+            raster_files[buffer_type] = []
+            for buffer_file in buffer_files:
+                buffer_size = pathlib.Path(buffer_file).stem.split('_')[-1]
+                reef_raster = str(pathlib.Path(OUTPUTS / f'reef_{buffer_type}_{buffer_size}_raster.tif'))
+                if os.path.exists(reef_raster):
+                    print(f'Raster file already exists: {reef_raster}')
+                    raster_files[buffer_type].append(reef_raster)    
+                    continue
+                raster_files[buffer_type].append(reef_raster)    
+                input_shp = ogr.Open(buffer_file)
+                shp_layer = input_shp.GetLayer()
+                pixel_size = 200
+                xmin, xmax, ymin, ymax = shp_layer.GetExtent()
+                print(f'Rasterizing: {buffer_file}')
+                no_data = -999
+                raster = gdal.Rasterize(reef_raster, buffer_file,
+                                        creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"],
+                                        noData=no_data,
+                                        format='GTiff',
+                                        outputType=gdal.GDT_Int32,
+                                        outputBounds=[xmin, ymin, xmax, ymax],
+                                        attribute='distance',
+                                        xRes=pixel_size,
+                                        yRes=pixel_size)
+                raster = None
+        
+        for buffer_type, buffer_files in raster_files.items():
+            merged_final_raster = str(OUTPUTS / f'merged_{buffer_type}_raster.tif')
+            if os.path.exists(merged_final_raster):
+                print(f'Merged raster already exists: {merged_final_raster}')
+                continue
+            print(f'Merging {buffer_type} rasters')
+            raster = gdal.Warp(merged_final_raster, buffer_files, format="GTiff",
+                        creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"])
+            raster = None # Close file and flush to disk
 
     def create_reef_rasters(self, reef_buffer_paths: str) -> None:
         """Create GeoTiff raster files from each shapefile"""
@@ -231,6 +132,7 @@ class CreateReefsLayerEngine(Engine):
                 print(f'Raster file already exists: {reef_raster}')
                 raster_files.append(reef_raster)
                 continue
+
             input_shp = ogr.Open(shp_path)
             shp_layer = input_shp.GetLayer()
             pixel_size = 0.01
@@ -249,16 +151,14 @@ class CreateReefsLayerEngine(Engine):
         return raster_files
 
     def clip_reef_shapefile(self, projected_reef_shp):
+        """Clip global reef polygons to a North America window"""
+
+        clipped_reef_shp = str(OUTPUTS / 'reef_polygons_clip.shp')
+        if os.path.exists(clipped_reef_shp):
+            print('Clipped Reef shapefile already exists')
+            return clipped_reef_shp
+        print('Clipping reef polygons to North America')
         driver = ogr.GetDriverByName('ESRI Shapefile')
-
-        # valid_projected_reef = str(OUTPUTS / 'valid_projected_reef.shp')
-        # subprocess.run([
-        #     'ogr2ogr',
-        #     f'{valid_projected_reef}',
-        #     f'{projected_reef_shp}',
-        #     '-makevalid'
-        # ])
-
         projected_reef_data = driver.Open(projected_reef_shp, 0)
         projected_reef_layer = projected_reef_data.GetLayer()
 
@@ -266,7 +166,7 @@ class CreateReefsLayerEngine(Engine):
             str(INPUTS / 'north_america_clip_wgs84.shp'), 0)  # using Albers for clip does not work with GDAL?!
         reef_extent_layer = reef_extent_data.GetLayer()
 
-        clipped_reef_shp = str(OUTPUTS / 'reef_polygons_clip.shp')
+        
         output_reef_clip_data = driver.CreateDataSource(clipped_reef_shp)
         output_reef_clip_layer = output_reef_clip_data.CreateLayer(
             "reef_polygons", geom_type=ogr.wkbMultiPolygon)
@@ -280,24 +180,27 @@ class CreateReefsLayerEngine(Engine):
         reef_extent_data = None
         output_reef_clip_data = None
 
-        return clipped_reef_shp
+        return clipped_reef_shp        
     
-    def dissolve_overlapping_buffers(self, buffer_paths):
+    def dissolve_overlapping_buffers(self, buffer_paths: dict) -> dict:
         """Dissolve overlapping buffers"""
 
-        dissolved_buffers = [self.dissolve_overlapping_polygons(buffer_shp, with_distance=True) for buffer_shp in buffer_paths]
-
+        dissolved_buffers = {}
+        for buffer_type, buffer_files in buffer_paths.items():
+            dissolved_buffers[buffer_type] = []
+            for buffer_file in buffer_files:
+                dissolved_buffers[buffer_type].append(self.dissolve_overlapping_polygons(buffer_file))
         return dissolved_buffers
     
-    def dissolve_overlapping_polygons(self, input_shapefile, with_distance=False):
-        """Dissolve simplified polygons"""
+    def dissolve_overlapping_polygons(self, input_shapefile, with_distance=True):
+        """Dissolve buffer polygons"""
 
         shp_path = pathlib.Path(input_shapefile)
         dissolved_reef_polygons = str(OUTPUTS / f'dis_{shp_path.stem}.shp')
         if os.path.exists(dissolved_reef_polygons):
-            print('Dissolved Reef shapefile already exists')
+            print('Dissolved Buffer shapefile already exists')
             return dissolved_reef_polygons
-        print('Dissolving simplified reef polygons')
+        print(f'Dissolving buffer: {shp_path.stem}')
         if with_distance:
             sql = f"SELECT ST_Union(geometry), distance FROM {shp_path.stem} GROUP BY distance"
         else:
@@ -412,15 +315,15 @@ class CreateReefsLayerEngine(Engine):
     def start(self):
         """Entrypoint for processing Reefs layer""" 
 
-        # TODO load other shapefile and buffer backwards
-        reef_polygons = str(OUTPUTS / get_config_item('REEF', 'POLYGONS_1KM'))
+        reef_polygons = str(INPUTS / get_config_item('REEF', 'POLYGONS_1KM'))
         clipped_reef_shp = self.clip_reef_shapefile(reef_polygons)
         projected_reef_shp = self.project_reef_shapefile(clipped_reef_shp)
         simplified_reef_shp = self.simplify_reef_shapefile(projected_reef_shp)
-        dissolved_reef_shp = self.dissolve_overlapping_polygons(simplified_reef_shp)
+        dissolved_reef_shp = self.dissolve_overlapping_polygons(simplified_reef_shp, with_distance=False)
         reef_buffer_paths = self.create_gdal_multiple_buffer(dissolved_reef_shp)
         dissolved_buffer_paths = self.dissolve_overlapping_buffers(reef_buffer_paths)
-        self.create_reef_rasters(dissolved_buffer_paths)
+        self.rasterize_buffer_polygons(dissolved_buffer_paths)
+        # self.create_reef_rasters(dissolved_buffer_paths)
 
     def validate_reef_shapefile(self, clipped_reef_shp):
         valid_projected_reef = str(OUTPUTS / 'valid_clipped_reef.shp')
