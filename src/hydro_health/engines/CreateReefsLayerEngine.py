@@ -1,7 +1,6 @@
 import os
 import pathlib
 import subprocess
-# import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
 from hydro_health.engines.Engine import Engine
@@ -220,16 +219,6 @@ class CreateReefsLayerEngine(Engine):
         self.make_esri_projection(f'dis_{shp_path.stem}', 5070)
 
         return dissolved_reef_polygons
-    
-    def make_esri_projection(self, file_name, epsg=4326):
-        """Create an Esri .prj file for a shapefile"""
-
-        output_projection = osr.SpatialReference()
-        output_projection.ImportFromEPSG(epsg)
-        output_projection.MorphToESRI()
-        file = open(OUTPUTS / f'{file_name}.prj', 'w')
-        file.write(output_projection.ExportToWkt())
-        file.close()
     
     def project_reef_shapefile(self, shp_path: str) -> str:
         """Reproject a shapefile using GDAL"""

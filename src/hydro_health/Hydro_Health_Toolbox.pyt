@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
-from ags_tools.CreateReefsLayer import CreateReefsLayer
+from hydro_health.ags_tools.CreateReefsLayer import CreateReefsLayer
+from hydro_health.ags_tools.CreateActiveCaptainLayer import CreateActiveCaptainLayer
 
 
 class Toolbox:
@@ -10,4 +11,7 @@ class Toolbox:
         self.label = "Hydro Health Toolbox"
         self.alias = "Hydro Health Toolbox"
 
-        self.tools = [CreateReefsLayer]
+        self.tools = [
+            CreateReefsLayer,
+            CreateActiveCaptainLayer
+        ]

@@ -16,3 +16,4 @@ REEF:
 ACTIVECAPTAIN:
   API: https://marine.garmin.com/thirdparty-stage/api/v2/points-of-interest/bbox
   BBOX_SHP: north_america_clip_wgs84.shp
+  JSON: active_captain_points.json
