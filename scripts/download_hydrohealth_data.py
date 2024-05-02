@@ -4,9 +4,12 @@ import json
 import requests
 import zipfile
 import geopandas
+from osgeo import ogr, osr
+
 from hydro_health.helpers.tools import get_config_item
 
 
+osr.DontUseExceptions()
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 
 
@@ -66,7 +69,40 @@ def get_reef_1km_data() -> dict:
         reef_zip.extractall(zip_folder)
 
 
+def get_active_captain() -> dict:
+    """
+    Request Active Captain POI data from Garmin
+    - Obtain API Key from HSTB
+    """
+
+    bbox_url = get_config_item('ACTIVECAPTAIN', 'API')
+    driver = ogr.GetDriverByName('ESRI Shapefile')
+    wgs84_bbox = str(INPUTS / get_config_item('ACTIVECAPTAIN', 'BBOX_SHP'))
+    bbox_data = driver.Open(wgs84_bbox, 0)  # using Albers for clip does not work with GDAL?!
+    bbox_extent = bbox_data.GetLayer().GetExtent()
+    api_key = input('Paste Garmin Active Captain API Key:')
+    header = {
+        "Content-Type": "application/json",
+        'apikey': api_key
+    }
+    body = {
+        'north': str(int(bbox_extent[3])),
+        'east': str(int(bbox_extent[2])),
+        'south': str(int(bbox_extent[1])),
+        'west': str(int(bbox_extent[0]))
+    }
+    
+    try:
+        active_captain_result = requests.post(bbox_url, headers=header, json=body)
+        active_captain_result.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(e)
+    print(active_captain_result.text)
+    return active_captain_result.text
+
+
 if __name__ == '__main__':
-    get_reef_5k_json(True)
-    convert_json_to_shp()
-    get_reef_1km_data()
+    # get_reef_5k_json(True)
+    # convert_json_to_shp()
+    # get_reef_1km_data()
+    get_active_captain()

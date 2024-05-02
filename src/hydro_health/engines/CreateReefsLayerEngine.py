@@ -162,8 +162,8 @@ class CreateReefsLayerEngine(Engine):
         projected_reef_data = driver.Open(projected_reef_shp, 0)
         projected_reef_layer = projected_reef_data.GetLayer()
 
-        reef_extent_data = driver.Open(
-            str(INPUTS / 'north_america_clip_wgs84.shp'), 0)  # using Albers for clip does not work with GDAL?!
+        wgs84_bbox = str(INPUTS / get_config_item('REEF', 'BBOX_SHP'))
+        reef_extent_data = driver.Open(wgs84_bbox, 0)  # using Albers for clip does not work with GDAL?!
         reef_extent_layer = reef_extent_data.GetLayer()
 
         

@@ -12,3 +12,7 @@ REEF:
     - 9260
     - 18520
     - 37040
+  BBOX_SHP: north_america_clip_wgs84.shp
+ACTIVECAPTAIN:
+  API: https://marine.garmin.com/thirdparty-stage/api/v2/points-of-interest/bbox
+  BBOX_SHP: north_america_clip_wgs84.shp
