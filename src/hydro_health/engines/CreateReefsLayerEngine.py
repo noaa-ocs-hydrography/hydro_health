@@ -161,7 +161,7 @@ class CreateReefsLayerEngine(Engine):
         projected_reef_data = driver.Open(projected_reef_shp, 0)
         projected_reef_layer = projected_reef_data.GetLayer()
 
-        wgs84_bbox = str(INPUTS / get_config_item('REEF', 'BBOX_SHP'))
+        wgs84_bbox = str(INPUTS / get_config_item('SHARED', 'BBOX_SHP'))
         reef_extent_data = driver.Open(wgs84_bbox, 0)  # using Albers for clip does not work with GDAL?!
         reef_extent_layer = reef_extent_data.GetLayer()
 
@@ -304,6 +304,7 @@ class CreateReefsLayerEngine(Engine):
     def start(self):
         """Entrypoint for processing Reefs layer""" 
 
+        # TODO try in-memory datasets: https://stackoverflow.com/questions/44293091/use-gdal-open-to-open-an-in-memory-gdal-dataset
         reef_polygons = str(INPUTS / get_config_item('REEF', 'POLYGONS_1KM'))
         clipped_reef_shp = self.clip_reef_shapefile(reef_polygons)
         projected_reef_shp = self.project_reef_shapefile(clipped_reef_shp)

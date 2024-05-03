@@ -40,6 +40,7 @@ class CreateActiveCaptainLayerEngine(Engine):
         driver = ogr.GetDriverByName('ESRI Shapefile')
         ac_points_path = OUTPUTS / 'active_captain_points.shp'
         ac_points_file = str(ac_points_path)
+        
         ac_points_data = driver.CreateDataSource(ac_points_file)
         ac_points_layer = ac_points_data.CreateLayer("ac_points", geom_type=ogr.wkbPoint)
 
@@ -52,6 +53,8 @@ class CreateActiveCaptainLayerEngine(Engine):
             ac_points_layer.CreateField(field)
         ac_points_lyr_definition = ac_points_layer.GetLayerDefn()
         for point in ac_points['pointsOfInterest']:
+            if not self.within_extent(driver, point['mapLocation']['longitude'], point['mapLocation']['latitude']):
+                continue
             feature = ogr.Feature(ac_points_lyr_definition)
             feature.SetField('iconUrl', point['iconUrl'])
             feature.SetField('poiCount', point['poiCount'])

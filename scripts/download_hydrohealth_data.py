@@ -77,7 +77,7 @@ def get_active_captain() -> None:
 
     bbox_url = get_config_item('ACTIVECAPTAIN', 'API')
     driver = ogr.GetDriverByName('ESRI Shapefile')
-    wgs84_bbox = str(INPUTS / get_config_item('ACTIVECAPTAIN', 'BBOX_SHP'))
+    wgs84_bbox = str(INPUTS / get_config_item('SHARED', 'BBOX_SHP'))
     bbox_data = driver.Open(wgs84_bbox, 0)  # using Albers for clip does not work with GDAL?!
     bbox_extent = bbox_data.GetLayer().GetExtent()
     api_key = input('Paste Garmin Active Captain API Key:')
