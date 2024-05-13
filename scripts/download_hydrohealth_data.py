@@ -4,9 +4,12 @@ import json
 import requests
 import zipfile
 import geopandas
+from osgeo import ogr, osr
+
 from hydro_health.helpers.tools import get_config_item
 
 
+osr.DontUseExceptions()
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 
 
@@ -37,7 +40,7 @@ def get_reef_5k_json(save: bool=False) -> dict:
     return polygons
 
 
-def convert_json_to_shp():
+def convert_json_to_shp() -> str:
     """Convert Reef 5k polygons to shapefile using Geopandas"""
 
     reef_polygons_json = str(INPUTS / 'global_reef_polygons.geojson')
@@ -50,7 +53,7 @@ def convert_json_to_shp():
     return global_reef_polygons
 
 
-def get_reef_1km_data() -> dict:
+def get_reef_1km_data() -> None:
     """Download global reef-1km features"""
 
     url = get_config_item('REEF', '1KM')
@@ -66,7 +69,43 @@ def get_reef_1km_data() -> dict:
         reef_zip.extractall(zip_folder)
 
 
+def get_active_captain() -> None:
+    """
+    Request Active Captain POI data from Garmin
+    - Obtain API Key from HSTB
+    """
+
+    bbox_url = get_config_item('ACTIVECAPTAIN', 'API')
+    driver = ogr.GetDriverByName('ESRI Shapefile')
+    wgs84_bbox = str(INPUTS / get_config_item('SHARED', 'BBOX_SHP'))
+    bbox_data = driver.Open(wgs84_bbox, 0)  # using Albers for clip does not work with GDAL?!
+    bbox_extent = bbox_data.GetLayer().GetExtent()
+    api_key = input('Paste Garmin Active Captain API Key:')
+    header = {
+        "Content-Type": "application/json",
+        'apikey': api_key
+    }
+    body = {
+        'north': str(int(bbox_extent[3])),
+        'east': str(int(bbox_extent[1])),
+        'south': str(int(bbox_extent[2])),
+        'west': str(int(bbox_extent[0]))
+    }
+
+    try:
+        active_captain_result = requests.post(bbox_url, headers=header, json=body)
+        active_captain_result.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(e)
+
+    print(f'Found Reports: {len(active_captain_result.text)}')
+    with open(INPUTS / f'active_captain_points.json', 'w') as points:
+        print('Saving Active Captain points as JSON')
+        points.write(active_captain_result.text.replace("\n", ""))
+
+
 if __name__ == '__main__':
     get_reef_5k_json(True)
     convert_json_to_shp()
     get_reef_1km_data()
+    get_active_captain()

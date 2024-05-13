@@ -1,7 +1,6 @@
 import os
 import pathlib
 import subprocess
-# import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
 from hydro_health.engines.Engine import Engine
@@ -162,8 +161,8 @@ class CreateReefsLayerEngine(Engine):
         projected_reef_data = driver.Open(projected_reef_shp, 0)
         projected_reef_layer = projected_reef_data.GetLayer()
 
-        reef_extent_data = driver.Open(
-            str(INPUTS / 'north_america_clip_wgs84.shp'), 0)  # using Albers for clip does not work with GDAL?!
+        wgs84_bbox = str(INPUTS / get_config_item('SHARED', 'BBOX_SHP'))
+        reef_extent_data = driver.Open(wgs84_bbox, 0)  # using Albers for clip does not work with GDAL?!
         reef_extent_layer = reef_extent_data.GetLayer()
 
         
@@ -220,16 +219,6 @@ class CreateReefsLayerEngine(Engine):
         self.make_esri_projection(f'dis_{shp_path.stem}', 5070)
 
         return dissolved_reef_polygons
-    
-    def make_esri_projection(self, file_name, epsg=4326):
-        """Create an Esri .prj file for a shapefile"""
-
-        output_projection = osr.SpatialReference()
-        output_projection.ImportFromEPSG(epsg)
-        output_projection.MorphToESRI()
-        file = open(OUTPUTS / f'{file_name}.prj', 'w')
-        file.write(output_projection.ExportToWkt())
-        file.close()
     
     def project_reef_shapefile(self, shp_path: str) -> str:
         """Reproject a shapefile using GDAL"""
@@ -315,6 +304,7 @@ class CreateReefsLayerEngine(Engine):
     def start(self):
         """Entrypoint for processing Reefs layer""" 
 
+        # TODO try in-memory datasets: https://stackoverflow.com/questions/44293091/use-gdal-open-to-open-an-in-memory-gdal-dataset
         reef_polygons = str(INPUTS / get_config_item('REEF', 'POLYGONS_1KM'))
         clipped_reef_shp = self.clip_reef_shapefile(reef_polygons)
         projected_reef_shp = self.project_reef_shapefile(clipped_reef_shp)
