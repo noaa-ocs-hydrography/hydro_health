@@ -1,3 +1,9 @@
+ACTIVECAPTAIN:
+  API: https://marine.garmin.com/thirdparty-stage/api/v2/points-of-interest/bbox
+  JSON: active_captain_points.json
+GROUNDINGS:
+  CSV: ResponseLink-incidents-download-5.9.24.csv
+  SERVICE: https://services8.arcgis.com/6ldl6K67FkYzPtEE/ArcGIS/rest/services/Significant_Maritime_Incidents__REG_Parameters__WFL1/FeatureServer/0/query?where=Incident_Type='GROUNDING'&outFields=*&units=esriSRUnit_Meter&returnGeometry=true&featureEncoding=esriDefault&returnQueryGeometry=true&returnExceededLimitFeatures=true&orderByFields='Year'&f=pgeojson
 REEF:
   5KM: https://coralreefwatch.noaa.gov/product/vs/vs_polygons.json 
   1KM: https://datadownload-production.s3.us-east-1.amazonaws.com/WCMC008_CoralReefs2021_v4_1.zip
@@ -12,8 +18,5 @@ REEF:
     - 9260
     - 18520
     - 37040
-ACTIVECAPTAIN:
-  API: https://marine.garmin.com/thirdparty-stage/api/v2/points-of-interest/bbox
-    JSON: active_captain_points.json
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp

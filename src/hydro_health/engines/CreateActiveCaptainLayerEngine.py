@@ -1,7 +1,7 @@
 import pathlib
 import json
 
-from osgeo import ogr, osr, gdal
+from osgeo import ogr, osr
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
