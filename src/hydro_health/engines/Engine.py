@@ -1,5 +1,6 @@
 import yaml
 import pathlib
+import sys
 
 from osgeo import osr
 from hydro_health.helpers.tools import get_config_item
@@ -16,6 +17,15 @@ class Engine:
             config = yaml.safe_load(lookup)
         return config[item]
     
+    def message(self, content:str) -> None:
+        """Wrap Arcpy for printing"""
+
+        if 'arcpy' in sys.modules:
+            module = __import__('arcpy')
+            getattr(module, 'AddMessage')(content)
+        else:
+            print(content)
+
     def within_extent(self, shapefile_driver, longitude: float, latitude: float) -> bool:
         """Check if lat/lon is within the WGS84 extent"""
 

@@ -2,6 +2,7 @@
 
 from hydro_health.ags_tools.CreateReefsLayer import CreateReefsLayer
 from hydro_health.ags_tools.CreateActiveCaptainLayer import CreateActiveCaptainLayer
+from hydro_health.ags_tools.CreateGroundingsLayer import CreateGroundingsLayer
 
 
 class Toolbox:
@@ -13,5 +14,6 @@ class Toolbox:
 
         self.tools = [
             CreateReefsLayer,
-            CreateActiveCaptainLayer
+            CreateActiveCaptainLayer,
+            CreateGroundingsLayer
         ]

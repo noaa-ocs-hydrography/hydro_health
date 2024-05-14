@@ -1,9 +1,9 @@
+import csv
 import pathlib
 import requests
-import pandas as pd
-import geopandas as gpd
+# import geopandas as gpd
 
-from osgeo import osr
+from osgeo import ogr, osr
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
@@ -33,37 +33,60 @@ class CreateGroundingsLayerEngine(Engine):
                 global OUTPUTS
                 OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
 
-    def get_grounding_incidents(self) -> gpd.GeoDataFrame:
+    def get_grounding_incidents(self) -> str:
         """Convert NOAA Office of Response and Restoration CSV file to shapefile"""
 
-        print('Creating ORR Groundings point shapefile')
+        self.message('Creating ORR Groundings point shapefile')
         incidents_csv = str(INPUTS / get_config_item('GROUNDINGS', 'CSV'))
-        filter = ['Grounding']
-        groundings_gdf = gpd.read_file(incidents_csv,
-                                       encoding='iso8859_7', # Needed iso encoding for bytes field
-                                       X_POSSIBLE_NAMES="lon",
-                                       Y_POSSIBLE_NAMES="lat").query('tags in @filter')
-        output_shp = str(OUTPUTS / 'groundings.shp')
-        # Shapefile only allows 10 char attributes
-        # TODO to_file('dataframe.gpkg', driver='GPKG', layer='name')  
-        groundings_gdf.to_file(output_shp, driver='ESRI Shapefile')
+        with open(incidents_csv, 'r', encoding='iso8859_7') as orr_data:
+            data_reader = csv.DictReader(orr_data)
+            fields = data_reader.fieldnames
+            driver = ogr.GetDriverByName('ESRI Shapefile')
+            output_path = OUTPUTS / 'orr_groundings.shp'
+            output_shp = str(output_path)
+            points_data = driver.CreateDataSource(output_shp)
+            points_layer = points_data.CreateLayer("points", geom_type=ogr.wkbPoint)
+
+            # Create fields
+            for field in fields:
+                ogr_field = ogr.FieldDefn(field, ogr.OFTString)
+                points_layer.CreateField(ogr_field)
+                
+            points_lyr_definition = points_layer.GetLayerDefn()
+            for row in data_reader:
+                if 'Grounding' not in row['tags']:
+                    continue
+
+                point = (float(row['lon']), float(row['lat']))
+                if not self.within_extent(driver, *point):
+                    continue
+                feature = ogr.Feature(points_lyr_definition)
+                for key, value in row.items():
+                    feature.SetField(key, value)
+                geom = ogr.Geometry(ogr.wkbPoint)
+                geom.AddPoint(*point)
+                feature.SetGeometry(geom)
+                points_layer.CreateFeature(feature)
+                feature = None
+            points_data = None
+            self.make_esri_projection(output_path.stem)
 
         return output_shp
     
-    def get_uscg_groundings(self) -> gpd.GeoDataFrame:
-        """Convert US Coast Guard Maritime Incidents service to shapefile"""
+    # def get_uscg_groundings(self) -> gpd.GeoDataFrame:
+    #     """Convert US Coast Guard Maritime Incidents service to shapefile"""
 
-        print('Creating USCG Groundings point shapefile')
-        url = get_config_item('GROUNDINGS', 'SERVICE')
-        grounding_json = requests.get(url).json()
-        groundings_df = gpd.GeoDataFrame.from_features(grounding_json['features'])
-        output_shp = str(OUTPUTS / 'uscg_groundings.shp')
-        groundings_df.to_file(output_shp, driver='ESRI Shapefile')
+    #     print('Creating USCG Groundings point shapefile')
+    #     url = get_config_item('GROUNDINGS', 'SERVICE')
+    #     grounding_json = requests.get(url).json()
+    #     groundings_df = gpd.GeoDataFrame.from_features(grounding_json['features'])
+    #     output_shp = str(OUTPUTS / 'uscg_groundings.shp')
+    #     groundings_df.to_file(output_shp, driver='ESRI Shapefile')
 
-        return output_shp
+    #     return output_shp
 
     def start(self):
         """Entrypoint for processing Groundings layer""" 
 
-        groundings_df = self.get_grounding_incidents()
-        self.get_uscg_groundings()
+        self.get_grounding_incidents()
+        # self.get_uscg_groundings()

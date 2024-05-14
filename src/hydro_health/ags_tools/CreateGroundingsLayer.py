@@ -1,4 +1,3 @@
-import arcpy
 from hydro_health.ags_tools.HHLayer import HHLayer
 from hydro_health.engines.CreateGroundingsLayerEngine import CreateGroundingsLayerEngine
 
@@ -6,7 +5,7 @@ from hydro_health.engines.CreateGroundingsLayerEngine import CreateGroundingsLay
 class CreateGroundingsLayer(HHLayer):
     def __init__(self):
         """Define the tool (tool name is the name of the class)."""
-        self.label = "Create the Active Captain Layer"
+        self.label = "Create the Groundings Layer"
         self.description = ""
         self.param_lookup = {}
 
