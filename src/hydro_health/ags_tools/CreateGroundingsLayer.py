@@ -35,8 +35,6 @@ class CreateGroundingsLayer(HHLayer):
         param_lookup = self.setup_param_lookup(parameters)
         engine = CreateGroundingsLayerEngine(param_lookup)
         engine.start()
-        return
-        
 
     def postExecute(self, parameters):
         """This method takes place after outputs are processed and

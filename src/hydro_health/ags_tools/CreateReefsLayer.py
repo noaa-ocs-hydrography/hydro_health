@@ -1,6 +1,5 @@
-import arcpy
-from ags_tools.HHLayer import HHLayer
-from engines.CreateReefsLayerEngine import CreateReefsLayerEngine
+from hydro_health.ags_tools.HHLayer import HHLayer
+from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
 
 
 class CreateReefsLayer(HHLayer):
@@ -36,8 +35,6 @@ class CreateReefsLayer(HHLayer):
         param_lookup = self.setup_param_lookup(parameters)
         engine = CreateReefsLayerEngine(param_lookup)
         engine.start()
-        return
-        
 
     def postExecute(self, parameters):
         """This method takes place after outputs are processed and

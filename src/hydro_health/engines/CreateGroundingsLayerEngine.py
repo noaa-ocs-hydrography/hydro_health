@@ -21,7 +21,6 @@ class CreateGroundingsLayerException(Exception):
 class CreateGroundingsLayerEngine(Engine):
     """Class to hold the logic for processing the Reefs layer"""
 
-
     def __init__(self, param_lookup:dict=None):
         super().__init__()
         if param_lookup:

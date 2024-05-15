@@ -20,8 +20,8 @@ class CreateActiveCaptainLayerException(Exception):
 class CreateActiveCaptainLayerEngine(Engine):
     """Class to hold the logic for processing the Reefs layer"""
 
-
     def __init__(self, param_lookup:dict=None):
+        super().__init__()
         if param_lookup:
             self.param_lookup = param_lookup
             if self.param_lookup['input_directory'].valueAsText:
@@ -34,7 +34,7 @@ class CreateActiveCaptainLayerEngine(Engine):
     def create_ac_shapefile(self, ac_points_json:str) -> str:
         """Create Active Captain Point shapefile"""
 
-        print('Creating Active Captain point shapefile')
+        self.message('Creating Active Captain point shapefile')
         with open(ac_points_json) as file:
             ac_points = json.load(file)
         driver = ogr.GetDriverByName('ESRI Shapefile')
