@@ -1,21 +1,46 @@
 import yaml
 import pathlib
 import sys
+import logging
 
-from osgeo import osr
+from osgeo import osr, gdal
 from hydro_health.helpers.tools import get_config_item
+
+
+gdal.UseExceptions()
+gdal.PushErrorHandler('CPLQuietErrorHandler')
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
+
 class Engine:
+    def __init__(self):
+        # set up logging
+        # TODO do we need daily logs?
+        self.log_path = str(OUTPUTS / 'hh_log.txt')
+        self.logger = logging.getLogger(__name__)
+        logging.basicConfig(filename=self.log_path,
+                    format='%(levelname)s:%(asctime)s %(message)s',
+                    level=logging.INFO)
+        self.logged = False
+
+    def check_logging(self) -> None:
+        if self.logged:
+            self.message(f'Check log: {self.log_path}')
+        
     def get_config_item(item:str) -> str:
         """Load config and return speciific key"""
 
         with open(str(INPUTS / 'config.yaml'), 'r') as lookup:
             config = yaml.safe_load(lookup)
         return config[item]
+    
+    def log_error(self) -> None:
+        self.logger.error(gdal.GetLastErrorMsg())
+        if not self.logged:
+            self.logged = True
     
     def message(self, content:str) -> None:
         """Wrap Arcpy for printing"""

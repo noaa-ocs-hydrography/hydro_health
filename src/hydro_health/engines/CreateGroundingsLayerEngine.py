@@ -3,12 +3,11 @@ import pathlib
 import requests
 # import geopandas as gpd
 
-from osgeo import ogr, osr
+from osgeo import ogr
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
-osr.DontUseExceptions()
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
@@ -24,6 +23,7 @@ class CreateGroundingsLayerEngine(Engine):
 
 
     def __init__(self, param_lookup:dict=None):
+        super().__init__()
         if param_lookup:
             self.param_lookup = param_lookup
             if self.param_lookup['input_directory'].valueAsText:
@@ -48,9 +48,12 @@ class CreateGroundingsLayerEngine(Engine):
             points_layer = points_data.CreateLayer("points", geom_type=ogr.wkbPoint)
 
             # Create fields
+            field_map = {} # gdal shortens field names
             for field in fields:
-                ogr_field = ogr.FieldDefn(field, ogr.OFTString)
+                shp_field = field[:10]  # TODO shapefile field limit of 10, switch to GPKG?
+                ogr_field = ogr.FieldDefn(shp_field, ogr.OFTString)
                 points_layer.CreateField(ogr_field)
+                field_map[field] = shp_field 
                 
             points_lyr_definition = points_layer.GetLayerDefn()
             for row in data_reader:
@@ -61,8 +64,11 @@ class CreateGroundingsLayerEngine(Engine):
                 if not self.within_extent(driver, *point):
                     continue
                 feature = ogr.Feature(points_lyr_definition)
-                for key, value in row.items():
-                    feature.SetField(key, value)
+                try:
+                    for key, value in row.items():
+                        feature.SetField(field_map[key], value)
+                except:
+                    self.log_error()
                 geom = ogr.Geometry(ogr.wkbPoint)
                 geom.AddPoint(*point)
                 feature.SetGeometry(geom)
@@ -90,3 +96,4 @@ class CreateGroundingsLayerEngine(Engine):
 
         self.get_grounding_incidents()
         # self.get_uscg_groundings()
+        self.check_logging()
