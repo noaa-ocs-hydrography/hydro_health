@@ -58,6 +58,9 @@ class RunHydroHealthModel(HHLayer):
 
         params = super().get_params()
 
+        slider_id = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
+        slider_range = [1, 10]
+
         reef_slider = arcpy.Parameter(
             displayName="Reefs - Weighting",
             name="reefs_weighting",
@@ -66,10 +69,10 @@ class RunHydroHealthModel(HHLayer):
             direction="Input"
         )
 
-        reef_slider.controlCLSID = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
+        reef_slider.controlCLSID = slider_id
         reef_slider.value = 7
         reef_slider.filter.type = "Range"
-        reef_slider.filter.list = [1, 10]
+        reef_slider.filter.list = slider_range
         params.append(reef_slider)
         
         active_captain_slider = arcpy.Parameter(
@@ -79,10 +82,10 @@ class RunHydroHealthModel(HHLayer):
             parameterType="Required",
             direction="Input"
         )
-        active_captain_slider.controlCLSID = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
+        active_captain_slider.controlCLSID = slider_id
         active_captain_slider.value = 5
         active_captain_slider.filter.type = "Range"
-        active_captain_slider.filter.list = [1, 10]
+        active_captain_slider.filter.list = slider_range
         params.append(active_captain_slider)
 
         groundings_slider = arcpy.Parameter(
@@ -92,10 +95,10 @@ class RunHydroHealthModel(HHLayer):
             parameterType="Required",
             direction="Input"
         )
-        groundings_slider.controlCLSID = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
+        groundings_slider.controlCLSID = slider_id
         groundings_slider.value = 5
         groundings_slider.filter.type = "Range"
-        groundings_slider.filter.list = [1, 10]
+        groundings_slider.filter.list = slider_range
         params.append(groundings_slider)
 
         return params

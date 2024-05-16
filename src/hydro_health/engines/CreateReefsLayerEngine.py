@@ -50,9 +50,9 @@ class CreateReefsLayerEngine(Engine):
                 buffer_path = OUTPUTS / f'reef_{name}_buffer_{distance}.shp'
                 buffer_file = str(buffer_path)
                 buffer_paths.append(buffer_file)
-                if os.path.exists(buffer_file):
-                    self.message(f'Buffer file already exists: {buffer_file}')
-                    continue
+                # if os.path.exists(buffer_file):
+                #     self.message(f'Buffer file already exists: {buffer_file}')
+                #     continue
                 self.message(f'Attempting: {buffer_file}')
                 buffer_data = driver.CreateDataSource(buffer_file)
                 buffer_layer = buffer_data.CreateLayer("buffer_polygons", geom_type=ogr.wkbPolygon)
@@ -87,10 +87,10 @@ class CreateReefsLayerEngine(Engine):
             for buffer_file in buffer_files:
                 buffer_size = pathlib.Path(buffer_file).stem.split('_')[-1]
                 reef_raster = str(pathlib.Path(OUTPUTS / f'reef_{buffer_type}_{buffer_size}_raster.tif'))
-                if os.path.exists(reef_raster):
-                    self.message(f'Raster file already exists: {reef_raster}')
-                    raster_files[buffer_type].append(reef_raster)    
-                    continue
+                # if os.path.exists(reef_raster):
+                #     self.message(f'Raster file already exists: {reef_raster}')
+                #     raster_files[buffer_type].append(reef_raster)    
+                #     continue
                 raster_files[buffer_type].append(reef_raster)    
                 input_shp = ogr.Open(buffer_file)
                 shp_layer = input_shp.GetLayer()
@@ -111,9 +111,9 @@ class CreateReefsLayerEngine(Engine):
         
         for buffer_type, buffer_files in raster_files.items():
             merged_final_raster = str(OUTPUTS / f'merged_{buffer_type}_raster.tif')
-            if os.path.exists(merged_final_raster):
-                self.message(f'Merged raster already exists: {merged_final_raster}')
-                continue
+            # if os.path.exists(merged_final_raster):
+            #     self.message(f'Merged raster already exists: {merged_final_raster}')
+            #     continue
             self.message(f'Merging {buffer_type} rasters')
             raster = gdal.Warp(merged_final_raster, buffer_files, format="GTiff",
                         creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"])
@@ -126,10 +126,10 @@ class CreateReefsLayerEngine(Engine):
         for shp_path in reef_buffer_paths:
             raster_name = pathlib.Path(shp_path).stem
             reef_raster = str(OUTPUTS / f'{raster_name}.tif')
-            if os.path.exists(reef_raster):
-                self.message(f'Raster file already exists: {reef_raster}')
-                raster_files.append(reef_raster)
-                continue
+            # if os.path.exists(reef_raster):
+            #     self.message(f'Raster file already exists: {reef_raster}')
+            #     raster_files.append(reef_raster)
+            #     continue
 
             input_shp = ogr.Open(shp_path)
             shp_layer = input_shp.GetLayer()
@@ -152,9 +152,9 @@ class CreateReefsLayerEngine(Engine):
         """Clip global reef polygons to a North America window"""
 
         clipped_reef_shp = str(OUTPUTS / 'reef_polygons_clip.shp')
-        if os.path.exists(clipped_reef_shp):
-            self.message('Clipped Reef shapefile already exists')
-            return clipped_reef_shp
+        # if os.path.exists(clipped_reef_shp):
+        #     self.message('Clipped Reef shapefile already exists')
+        #     return clipped_reef_shp
         self.message('Clipping reef polygons to North America')
         driver = ogr.GetDriverByName('ESRI Shapefile')
         projected_reef_data = driver.Open(projected_reef_shp, 0)
@@ -195,16 +195,16 @@ class CreateReefsLayerEngine(Engine):
 
         shp_path = pathlib.Path(input_shapefile)
         dissolved_reef_polygons = str(OUTPUTS / f'dis_{shp_path.stem}.shp')
-        if os.path.exists(dissolved_reef_polygons):
-            self.message('Dissolved Buffer shapefile already exists')
-            return dissolved_reef_polygons
+        # if os.path.exists(dissolved_reef_polygons):
+        #     self.message('Dissolved Buffer shapefile already exists')
+        #     return dissolved_reef_polygons
         self.message(f'Dissolving buffer: {shp_path.stem}')
         if with_distance:
             sql = f"SELECT ST_Union(geometry), distance FROM {shp_path.stem} GROUP BY distance"
         else:
             sql = f"SELECT ST_Union(geometry) FROM {shp_path.stem}"
         subprocess.run([
-            'ogr2ogr',
+            str(INPUTS / 'ogr2ogr.exe'),
             '-explodecollections',
             '-f',
             "ESRI Shapefile",
@@ -232,9 +232,9 @@ class CreateReefsLayerEngine(Engine):
         reef_data = driver.Open(shp_path)
         reef_layer = reef_data.GetLayer()
         projected_reef_shp = str(OUTPUTS / 'projected_reef_polygons.shp')
-        if os.path.exists(projected_reef_shp):
-            self.message('Projected Reef shapefile already exists')
-            return projected_reef_shp
+        # if os.path.exists(projected_reef_shp):
+        #     self.message('Projected Reef shapefile already exists')
+        #     return projected_reef_shp
             # driver.DeleteDataSource(projected_reef_shp)
 
         output_reef_data = driver.CreateDataSource(projected_reef_shp)
@@ -277,9 +277,9 @@ class CreateReefsLayerEngine(Engine):
         """Simplify the 1km reef polygons with a small buffer"""
 
         simplified_reef_polygons = str(OUTPUTS / 'simp_reef_poly.shp')
-        if os.path.exists(simplified_reef_polygons):
-            self.message('Simplified Reef shapefile already exists')
-            return simplified_reef_polygons
+        # if os.path.exists(simplified_reef_polygons):
+        #     self.message('Simplified Reef shapefile already exists')
+        #     return simplified_reef_polygons
         self.message('Simplifying 1km reef polygons')
         driver = ogr.GetDriverByName('ESRI Shapefile')
         reef_data = ogr.Open(cilpped_reef_shp)
@@ -317,7 +317,7 @@ class CreateReefsLayerEngine(Engine):
     def validate_reef_shapefile(self, clipped_reef_shp):
         valid_projected_reef = str(OUTPUTS / 'valid_clipped_reef.shp')
         subprocess.run([
-            'ogr2ogr',
+            str(INPUTS / 'ogr2ogr.exe'),
             f'{valid_projected_reef}',
             f'{clipped_reef_shp}',
             '-makevalid'
