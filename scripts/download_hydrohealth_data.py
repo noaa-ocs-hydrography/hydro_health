@@ -104,8 +104,13 @@ def get_active_captain() -> None:
         points.write(active_captain_result.text.replace("\n", ""))
 
 
+def get_groundings_csv() -> None:
+    pass
+
+
 if __name__ == '__main__':
     get_reef_5k_json(True)
     convert_json_to_shp()
     get_reef_1km_data()
     get_active_captain()
+    get_groundings_csv()

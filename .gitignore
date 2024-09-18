@@ -1,6 +1,7 @@
 # Ignore
 outputs/*
 inputs/*
+*.pyc
 
 # Allow
 !inputs/*wgs84*

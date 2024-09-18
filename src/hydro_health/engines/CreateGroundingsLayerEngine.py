@@ -1,7 +1,6 @@
 import csv
 import pathlib
 import requests
-# import geopandas as gpd
 
 from osgeo import ogr
 from hydro_health.engines.Engine import Engine
@@ -31,19 +30,20 @@ class CreateGroundingsLayerEngine(Engine):
             if self.param_lookup['output_directoty'].valueAsText:
                 global OUTPUTS
                 OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
+    
+    def create_groundings_shapefile(self) -> str:
+        """Download and convert ORR Incidents CSV file to shapefile"""
 
-    def get_grounding_incidents(self) -> str:
-        """Convert NOAA Office of Response and Restoration CSV file to shapefile"""
-
-        self.message('Creating ORR Groundings point shapefile')
-        incidents_csv = str(INPUTS / get_config_item('GROUNDINGS', 'CSV'))
-        with open(incidents_csv, 'r', encoding='iso8859_7') as orr_data:
+        self.message('Creating ORR Incidents point shapefile')
+        incidents_url = get_config_item('GROUNDINGS', 'INCIDENTS')
+        with requests.get(incidents_url, stream=True) as reader:
+            orr_data = [line.decode('utf-8') for line in reader.iter_lines()]
             data_reader = csv.DictReader(orr_data)
             fields = data_reader.fieldnames
             driver = ogr.GetDriverByName('ESRI Shapefile')
-            output_path = OUTPUTS / 'orr_groundings.shp'
-            output_shp = str(output_path)
-            points_data = driver.CreateDataSource(output_shp)
+            output_path = OUTPUTS / 'orr_incidents.shp'
+            groundings_shp = str(output_path)
+            points_data = driver.CreateDataSource(groundings_shp)
             points_layer = points_data.CreateLayer("points", geom_type=ogr.wkbPoint)
 
             # Create fields
@@ -56,6 +56,8 @@ class CreateGroundingsLayerEngine(Engine):
                 
             points_lyr_definition = points_layer.GetLayerDefn()
             for row in data_reader:
+                # Only use Grounding rows
+                # Do we need spills, etc.?
                 if 'Grounding' not in row['tags']:
                     continue
 
@@ -76,23 +78,10 @@ class CreateGroundingsLayerEngine(Engine):
             points_data = None
             self.make_esri_projection(output_path.stem)
 
-        return output_shp
-    
-    # def get_uscg_groundings(self) -> gpd.GeoDataFrame:
-    #     """Convert US Coast Guard Maritime Incidents service to shapefile"""
-
-    #     print('Creating USCG Groundings point shapefile')
-    #     url = get_config_item('GROUNDINGS', 'SERVICE')
-    #     grounding_json = requests.get(url).json()
-    #     groundings_df = gpd.GeoDataFrame.from_features(grounding_json['features'])
-    #     output_shp = str(OUTPUTS / 'uscg_groundings.shp')
-    #     groundings_df.to_file(output_shp, driver='ESRI Shapefile')
-
-    #     return output_shp
+        return groundings_shp
 
     def start(self):
         """Entrypoint for processing Groundings layer""" 
 
-        self.get_grounding_incidents()
-        # self.get_uscg_groundings()
+        groundings_shp = self.create_groundings_shapefile()
         self.check_logging()
