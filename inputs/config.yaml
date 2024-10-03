@@ -18,5 +18,7 @@ REEF:
     - 9260
     - 18520
     - 37040
+SEDIMENT:
+  USSEABED: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
