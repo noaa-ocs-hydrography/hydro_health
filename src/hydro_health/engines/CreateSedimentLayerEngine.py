@@ -28,3 +28,4 @@ class CreateGroundingsLayerEngine(Engine):
 
     def start(self):
         """Entrypoint for processing Grouundings layer"""
+        # TODO prep all the data

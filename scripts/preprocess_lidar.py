@@ -120,6 +120,7 @@ def process():
             os.remove(str(OUTPUT / f'{raster_path.stem}_nad83.tif'))
 
 
+        # TODO this only runs the first 5.  Remove to run all rasters
         if i == 4:
             break
 
