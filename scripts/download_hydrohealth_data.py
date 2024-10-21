@@ -3,6 +3,7 @@ import os
 import json
 import requests
 import zipfile
+import pandas as pd
 import geopandas
 from osgeo import ogr, osr
 
@@ -67,6 +68,24 @@ def get_reef_1km_data() -> None:
     with zipfile.ZipFile(zip_file, 'r') as reef_zip:
         print('Unzipping 1km Reef zip file')
         reef_zip.extractall(zip_folder)
+        
+
+def get_sediment_data(self, csv_columns=['Latitude', 'Longitude', 'Gravel', 'Sand', 'Mud', 'Clay', 'Grainsze']):
+    """
+    Downloads the USGS sediment dataset. 
+    :param list csv_columns: Columns required from the CSV file
+    """     
+    data_url = 'https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv'
+    response = requests.get(data_url)
+
+    if response.status_code == 200:
+        with open('US9_ONE.csv', "wb") as f:
+            f.write(response.content)
+            print("Sediment data downloaded successfully")
+    else:
+        print("Failed to download CSV file. Status code:", response.status_code)
+
+    self.sediment_data = pd.read_csv('US9_ONE.csv', usecols=csv_columns)         
 
 
 def get_active_captain() -> None:
@@ -111,6 +130,7 @@ def get_groundings_csv() -> None:
 if __name__ == '__main__':
     get_reef_5k_json(True)
     convert_json_to_shp()
+    get_sediment_data()
     get_reef_1km_data()
     get_active_captain()
     get_groundings_csv()
