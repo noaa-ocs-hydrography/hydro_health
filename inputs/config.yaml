@@ -22,3 +22,7 @@ SEDIMENT:
   USSEABED: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
+  DATABASE: HH_Data.gpkg
+  TILES: Tileset_BF_pt3
+  STATES: USA_Census_States_200km_Overlap
+  BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
