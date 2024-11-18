@@ -26,5 +26,5 @@ def victim():
 
 def test_get_state_tiles(victim):
     # # pytest -s C:\Users\Stephen.Patterson\Data\Repos\hydro_health\tests\helpers\test_tools.py
-    param_lookup={"coastal_states": Param('Florida;Louisiana')}
+    param_lookup={"coastal_states": Param('California;Florida;North Carolina')}
     result = victim.get_state_tiles(param_lookup)

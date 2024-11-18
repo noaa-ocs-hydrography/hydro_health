@@ -22,17 +22,17 @@ def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     """Obtain a subset of tiles based on state names"""
 
     geopackage = INPUTS / get_config_item('SHARED', 'DATABASE')
+
     all_states = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'STATES'), columns=['STATE_NAME'])
-    
-    coastal_states = param_lookup['coastal_states'].valueAsText.split(';')
+    coastal_states = param_lookup['coastal_states'].valueAsText.replace("'", "").split(';')
     selected_states = all_states[all_states['STATE_NAME'].isin(coastal_states)]
 
     all_tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['Tilename'], mask=selected_states)
-    state_tiles = gpd.sjoin(all_tiles, selected_states)  # needed to keep STATE_NAME
+    state_tiles = all_tiles.sjoin(selected_states)  # needed to keep STATE_NAME
     state_tiles = state_tiles.drop(['index_right'], axis=1)
 
     coastal_boundary = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'BOUNDARY'))
-    tiles = gpd.sjoin(state_tiles, coastal_boundary, how='inner')
-    # tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
+    tiles = state_tiles.sjoin(coastal_boundary)
+    tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
 
     return tiles
