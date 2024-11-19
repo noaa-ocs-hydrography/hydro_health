@@ -25,6 +25,10 @@ def victim():
 
 
 def test_get_state_tiles(victim):
-    # # pytest -s C:\Users\Stephen.Patterson\Data\Repos\hydro_health\tests\helpers\test_tools.py
-    param_lookup={"coastal_states": Param('California;Florida;North Carolina')}
+    param_lookup={"coastal_states": Param('California;North Carolina')}
     result = victim.get_state_tiles(param_lookup)
+    assert result.shape[0] == 576
+    assert 'STATE_NAME' in result.columns.tolist()
+    states = result['STATE_NAME'].unique()
+    assert 'California' in states
+    assert 'North Carolina' in states

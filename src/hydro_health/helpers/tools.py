@@ -33,6 +33,6 @@ def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     coastal_boundary = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'BOUNDARY'))
     tiles = state_tiles.sjoin(coastal_boundary)
-    tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
+    # tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
 
     return tiles
