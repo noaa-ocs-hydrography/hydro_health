@@ -2,6 +2,9 @@ import yaml
 import pathlib
 import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and activating cloned env in Pro
 
+from hydro_health.engines.tiling.TileProcessor import TileProcessor
+
+
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
@@ -36,3 +39,18 @@ def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     # tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
 
     return tiles
+
+
+def process_tiles(tiles: gpd.GeoDataFrame) -> None:
+    # get environment (dev, prod)
+    # if dev, use multiprocessing
+    # if prod, send to API endpoint of listeners in kubernetes
+        # pickle each tuple of engine and tile
+        # unpickle the object
+        # call the class method with the tile argument
+        # log success of each call
+        # notify the main caller of completion?!
+
+    processor = TileProcessor()
+    processor.process(tiles)
+    
