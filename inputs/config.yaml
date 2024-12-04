@@ -23,6 +23,9 @@ SEDIMENT:
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   DATABASE: HH_Data.gpkg
-  TILES: Tileset_BF_pt3
+  TILES: BlueTopo_Tile_Scheme_20241203_114458
+  TILENAME: tile
+  # TILES: Tileset_BF_pt3
+  # TILENAME: Tilename
   STATES: USA_Census_States_200km_Overlap
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km

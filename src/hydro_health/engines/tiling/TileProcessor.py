@@ -9,27 +9,25 @@ import multiprocessing as mp
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+# OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
-def run_hydro_health(index: int, row: gpd.GeoSeries):
-    # Sample process
-    return (index, f'Finished {index}: {row}')
+def run_hydro_health(output_folder, index: int, row: gpd.GeoSeries):
+    # Mocking full process
+    # Normal process would take all inputs needed and run GDAL requirements
+    filename = str(index) + '.txt'
+    with open(os.path.join(output_folder, filename), 'w') as writer:
+        writer.write(str(list(row)))
 
 
 class TileProcessor:
     def get_pool(self, processes=4):
         return mp.Pool(processes=processes)
     
-
-    def process(self, tile_gdf: gpd.GeoDataFrame):
+    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         with self.get_pool() as process_pool:
-            results = [process_pool.apply_async(run_hydro_health, [index, row]) for index, row in tile_gdf.iterrows()]
+            results = [process_pool.apply_async(run_hydro_health, [outputs, index, row]) for index, row in tile_gdf.iterrows()]
             for result in results:
-                indx, row_result = result.get()
-                self.write_result(indx, row_result)
+                result.get()
+                # Also tried calling self.write_output() here and that worked fine
 
-    def write_result(self, index, result: str) -> None:
-        filename = str(index) + '.txt'
-        with open(os.path.join(str(OUTPUTS), 'junk', filename), 'w') as writer:
-            writer.write(result)

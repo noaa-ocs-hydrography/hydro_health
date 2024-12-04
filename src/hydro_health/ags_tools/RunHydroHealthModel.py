@@ -41,7 +41,7 @@ class RunHydroHealthModel(HHLayer):
 
         # TODO how to add grid tiling to entire process?
         tiles = tools.get_state_tiles(param_lookup)
-        tools.process_tiles(tiles)
+        tools.process_tiles(tiles, self.param_lookup['output_directoty'].valueAsText)
 
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()

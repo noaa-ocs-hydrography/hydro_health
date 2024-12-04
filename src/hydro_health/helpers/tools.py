@@ -30,7 +30,7 @@ def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     coastal_states = param_lookup['coastal_states'].valueAsText.replace("'", "").split(';')
     selected_states = all_states[all_states['STATE_NAME'].isin(coastal_states)]
 
-    all_tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['Tilename'], mask=selected_states)
+    all_tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=[get_config_item('SHARED', 'TILENAME')], mask=selected_states)
     state_tiles = all_tiles.sjoin(selected_states)  # needed to keep STATE_NAME
     state_tiles = state_tiles.drop(['index_right'], axis=1)
 
@@ -41,7 +41,7 @@ def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     return tiles
 
 
-def process_tiles(tiles: gpd.GeoDataFrame) -> None:
+def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
     # get environment (dev, prod)
     # if dev, use multiprocessing
     # if prod, send to API endpoint of listeners in kubernetes
@@ -51,6 +51,7 @@ def process_tiles(tiles: gpd.GeoDataFrame) -> None:
         # log success of each call
         # notify the main caller of completion?!
 
+    output_folder = OUTPUTS if not outputs else outputs
     processor = TileProcessor()
-    processor.process(tiles)
+    processor.process(tiles, output_folder)
     
