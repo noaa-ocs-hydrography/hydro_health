@@ -281,45 +281,68 @@ def clip_polygons():
     clipped_gdf.to_file(hurricane_data_path, layer=layer_name, driver='GPKG')
 
 def polygons_to_rasters():
-    gdf = gpd.read_file(hurricane_data_path, layer='clipped_polygons') 
-    for (year, name), group in gdf.groupby(['year', 'name']):
-        dissolved_gdf = group.dissolve(by='wind_speed', aggfunc='first')  
-        dissolved_gdf = dissolved_gdf.reset_index()
-        print(dissolved_gdf.head(5))
+    gpkg = ogr.Open(gpkg_path, 1)
+    layer = gpkg.GetLayerByName('sediment_polys_clipped')
 
-        raster_resolution = 100  # in meters
-        bounds = dissolved_gdf.total_bounds
-        minx, miny, maxx, maxy = bounds
-        width = int((maxx - minx) / raster_resolution)
-        height = int((maxy - miny) / raster_resolution)
-        transform = rasterio.transform.from_origin(minx, maxy, raster_resolution, raster_resolution)
+    tiff = gdal.Open(tile_path)
+    geotransform = tiff.GetGeoTransform()
+    proj = tiff.GetProjection()
+    cols = tiff.RasterXSize
+    rows = tiff.RasterYSize
 
-        shapes = ((geom, row['wind_speed']) for geom, row in dissolved_gdf.iterrows())
-        print(shapes)
+    driver = gdal.GetDriverByName('GTIFF')
+    file_path = INPUTS / "sediment_data" / f"{tile_number}_{field_name}_raster.tif"
+    out_raster = driver.Create(file_path, cols, rows, 1, gdal.GDT_Float32, options=["COMPRESS=LZW"])
+    out_raster.SetGeoTransform(geotransform)
+    out_raster.SetProjection(proj)
 
-        raster = np.zeros((height, width), dtype='float32')
-        raster = rasterize(
-            shapes,
-            out_shape=(height, width),
-            transform=transform,
-            fill='NaN',  
-            dtype='float32',
-            all_touched=True,
-        )
+    gdal.RasterizeLayer(out_raster, [1], layer, options=['ALL_TOUCHED=FALSE', 'ATTRIBUTE={field_name}'])
 
-        output_raster_path = str(folder_path / 'hurricane_rasters' / f'wind_speed_raster_{year}_{name}.tif')
-        with rasterio.open(
-            output_raster_path,
-            "w",
-            driver="GTiff",
-            height=height,
-            width=width,
-            count=1,
-            dtype='float32',
-            crs=gdf.crs.to_string(),
-            transform=transform,
-        ) as dst:
-            dst.write(raster, 1)
+    band = out_raster.GetRasterBand(1)
+    band.SetNoDataValue(0) 
+    out_raster = None
+    gpkg = None
+    tiff = None    
+
+    # gdf = gpd.read_file(hurricane_data_path, layer='clipped_polygons') 
+    # for (year, name), group in gdf.groupby(['year', 'name']):
+    #     dissolved_gdf = group.dissolve(by='wind_speed', aggfunc='first')  
+    #     dissolved_gdf = dissolved_gdf.reset_index()
+    #     print(dissolved_gdf.head(5))
+
+    #     raster_resolution = 100  # in meters
+    #     bounds = dissolved_gdf.total_bounds
+    #     minx, miny, maxx, maxy = bounds
+    #     width = int((maxx - minx) / raster_resolution)
+    #     height = int((maxy - miny) / raster_resolution)
+    #     transform = rasterio.transform.from_origin(minx, maxy, raster_resolution, raster_resolution)
+
+    #     shapes = ((geom, row['wind_speed']) for geom, row in dissolved_gdf.iterrows())
+    #     print(shapes)
+
+    #     raster = np.zeros((height, width), dtype='float32')
+    #     raster = rasterize(
+    #         shapes,
+    #         out_shape=(height, width),
+    #         transform=transform,
+    #         fill='NaN',  
+    #         dtype='float32',
+    #         all_touched=True,
+    #     )
+
+    #     output_raster_path = str(folder_path / 'hurricane_rasters' / f'wind_speed_raster_{year}_{name}.tif')
+    #     with rasterio.open(
+    #         output_raster_path,
+    #         "w",
+    #         driver="GTiff",
+    #         height=height,
+    #         width=width,
+    #         count=1,
+    #         dtype='float32',
+    #         crs=gdf.crs.to_string(),
+    #         transform=transform,
+    #     ) as dst:
+    #         dst.write(raster, 1)
 
 # download_hurricane_data()    
 # create_line_layer()
