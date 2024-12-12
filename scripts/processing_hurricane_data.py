@@ -6,9 +6,6 @@ import numpy as np
 import os
 from shapely.geometry import LineString, Polygon, GeometryCollection
 from shapely.ops import unary_union  # Import unary_union function
-from ftplib import FTP
-import xarray as xr
-import matplotlib.pyplot as plt
 import rasterio
 from rasterio.features import rasterize
 
@@ -22,48 +19,6 @@ atlantic_point_layer_name = 'atlantic_hurricane_points'
 pacific_point_layer_name = 'pacific_hurricane_points'
 atlantic_line_layer_name = 'atlantic_hurricane_lines'
 pacific_line_layer_name = 'pacific_hurricane_lines'
-
-def download_tsm_data():
-    server = 'ftp.hermes.acri.fr'
-    username = 'ftp_hermes'
-    password = 'hermes%'
-    directory = '824777975'
-
-    download_folder = INPUTS / 'hurricane_data' / 'tsm_data'
-
-    ftp = FTP(server)
-    ftp.login(user=username, passwd=password)
-    ftp.cwd(directory)
-
-    files = ftp.nlst()
-    print(files)
-
-    for file_name in files:
-        local_file_path = os.path.join(download_folder, file_name)
-        print(f'Downloading {file_name} to {local_file_path}...')
-        with open(local_file_path, 'wb') as file:
-            ftp.retrbinary(f'RETR {file_name}', file.write)
-
-    ftp.quit()    
-
-def read_tsm_data():
-    file_path = INPUTS / 'hurricane_data' / 'tsm_data' / 'L3m_20020429__GLOB_4_AV-MER_TSM_DAY_00.nc'
-    ds = xr.open_dataset(file_path)
-
-    print(ds)
-    print(f'Variables:', list(ds.data_vars))
-
-    TSM_mean = ds['TSM_mean']
-
-    plt.figure(figsize=(10, 6))
-    TSM_mean.plot(cmap='viridis', robust=True)
-    plt.title('TSM mean')
-    plt.xlabel('Longitude')
-    plt.ylabel('Latitude')
-    plt.show()
-
-    ds.close
-
 
 def download_hurricane_data():
     urls = [('atlantic_hurricane_data.txt', 'https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt'), 
@@ -346,8 +301,6 @@ def polygons_to_rasters():
 
 # download_hurricane_data()    
 # create_line_layer()
-# download_tsm_data()
-# read_tsm_data()
 create_overlapping_buffers()
 clip_polygons()
 # polygons_to_rasters()
