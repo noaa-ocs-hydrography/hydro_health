@@ -91,9 +91,12 @@ def create_rasters_and_plots():
 
     for year in range(2016, 2025):
         files = [f for f in os.listdir(folder_path) if f"L3m_{year}" in f]
-        datasets = []
-        
-        for file in files:
+        grid_shape = (4320, 8640) 
+        file_count = len(files) 
+
+        datasets = np.full((file_count, *grid_shape), np.nan)  # Preallocate with NaNs for missing values
+
+        for i, file in enumerate(files):
             print(file)
             file_path = os.path.join(folder_path, file)
             ds = xr.open_dataset(file_path)
@@ -112,21 +115,27 @@ def create_rasters_and_plots():
             shapes = [(geom, 1) for geom in shapefile.geometry]
             rasterized_mask = rasterize(shapes, out_shape=grid_shape, transform=transform, fill=0, dtype="uint8")
             
+            # Mask out values where the rasterized shapefile is 0
             tsm_data[rasterized_mask == 0] = np.nan
-            datasets.append(tsm_data)
+            
+            # Store the data in the preallocated array (index by file)
+            datasets[i, :, :] = tsm_data  # Assuming you want the first time step (index 0)
         
         # annual_variance = np.nanvar(np.stack(datasets), axis=0)  
-        annual_stddev = np.nanmean(np.stack(datasets), axis=0)
+        annual_stddev = np.nansum(datasets, axis=0)
+        annual_stddev[annual_stddev == 0] = np.nan
+        # annual_stddev = np.nansum(np.stack(datasets), axis=0)
         
-        raster_path = os.path.join(output_folder, f"mean_{year}.tif")
+        raster_path = os.path.join(output_folder, f"sum_{year}.tif")
         height, width = annual_stddev.shape
+        
         out_meta = {
             "driver": "GTiff",
             "height": height,
             "width": width,
             "count": 1,
             "dtype": "float32",
-            "crs": "EPSG:4326",  # Change if different
+            "crs": "EPSG:4326",  
             "transform": transform,
             "nodata": np.nan,
         }
@@ -158,7 +167,6 @@ def create_rasters_and_plots():
 
     plt.tight_layout()
     plt.show()        
-        
 
 def load_data(data_folder):
     file_paths = sorted(glob.glob(os.path.join(data_folder, '*.nc')))

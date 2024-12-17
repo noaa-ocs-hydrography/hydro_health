@@ -8,6 +8,10 @@ from shapely.geometry import LineString, Polygon, GeometryCollection
 from shapely.ops import unary_union  # Import unary_union function
 import rasterio
 from rasterio.features import rasterize
+from rasterio.transform import from_bounds
+from scipy.stats import pearsonr
+from rasterio.warp import reproject, Resampling, calculate_default_transform, aligned_target
+from rasterio.transform import from_origin
 
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
@@ -167,13 +171,11 @@ def create_overlapping_buffers():
         })
 
     buffer_gdf = gpd.GeoDataFrame(merged_buffer_data, geometry='geometry', crs=gdf.crs)
-    # buffer_gdf = buffer_gdf.dissolve(by='id')
     buffer_gdf = buffer_gdf.dissolve(by='dissolve_id')
     buffer_gdf.to_file(hurricane_data_path, layer='atlantic_polygon_buffer', driver='GPKG', overwrite=True)
 
 def get_corner_points(quarter_circle, quadrant):
     coords = list(quarter_circle.exterior.coords)
-    # print(coords)
     # TODO this will need to be refined some, maybe map out points and see if there is a pattern
     if quadrant == 'ne':
         return [coords[0], coords[1], coords[-1]]
@@ -227,80 +229,212 @@ def clip_polygons():
     gdf_to_clip = gpd.read_file(hurricane_data_path, layer='atlantic_polygon_buffer') 
     clip_boundary = gpd.read_file(r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp')
 
+    if gdf_to_clip.crs is None or clip_boundary.crs is None:
+        raise ValueError("One or both GeoDataFrames are missing a CRS.")
+
     if gdf_to_clip.crs != clip_boundary.crs:
         clip_boundary = clip_boundary.to_crs(gdf_to_clip.crs)
 
-    clipped_gdf = gpd.clip(gdf_to_clip, clip_boundary)
+    gdf = gpd.clip(gdf_to_clip, clip_boundary)
+    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.is_valid]
+
+    clipped_rows = []
+    for (name, year), group in gdf.groupby(["name", "year"]):
+        group = group.sort_values(by="wind_speed", ascending=False).reset_index(drop=True)
+        for _, row in group.iterrows():
+            geom = row.geometry
+            for clipped_row in clipped_rows:
+                if clipped_row["name"] == name and clipped_row["year"] == year:
+                    geom = geom.difference(clipped_row.geometry)
+            if not geom.is_empty:
+                new_row = row.copy()
+                new_row.geometry = geom
+                clipped_rows.append(new_row)
+
+    clipped_gdf = gpd.GeoDataFrame(clipped_rows, columns=gdf.columns, crs=gdf.crs)
+    clipped_gdf = clipped_gdf[clipped_gdf.geometry.is_valid]
+
+    clipped_gdf['dissolve_id'] = clipped_gdf['dissolve_id'].astype(str)
+    clipped_gdf['id'] = clipped_gdf['id'].astype(str)
+    clipped_gdf['name'] = clipped_gdf['name'].astype(str)
+    clipped_gdf['year'] = pd.to_numeric(clipped_gdf['year'], errors='coerce').astype('Int64')
+    clipped_gdf['wind_speed'] = pd.to_numeric(clipped_gdf['wind_speed'], errors='coerce').astype('Int64')
 
     layer_name = 'clipped_polygons'
     clipped_gdf.to_file(hurricane_data_path, layer=layer_name, driver='GPKG')
 
-def polygons_to_rasters():
-    gpkg = ogr.Open(gpkg_path, 1)
-    layer = gpkg.GetLayerByName('sediment_polys_clipped')
 
-    tiff = gdal.Open(tile_path)
-    geotransform = tiff.GetGeoTransform()
-    proj = tiff.GetProjection()
-    cols = tiff.RasterXSize
-    rows = tiff.RasterYSize
+def polygons_to_raster(resolution=1000):
+    """
+    Converts groups of polygons into separate rasters based on `name` and `year`.
 
-    driver = gdal.GetDriverByName('GTIFF')
-    file_path = INPUTS / "sediment_data" / f"{tile_number}_{field_name}_raster.tif"
-    out_raster = driver.Create(file_path, cols, rows, 1, gdal.GDT_Float32, options=["COMPRESS=LZW"])
-    out_raster.SetGeoTransform(geotransform)
-    out_raster.SetProjection(proj)
+    Parameters:
+        gdf (GeoDataFrame): Input GeoDataFrame with polygons and a `wind_speed` field.
+        output_folder (str): Folder to save the generated rasters.
+        resolution (float): Resolution of the raster in the units of the GeoDataFrame CRS.
+    """
 
-    gdal.RasterizeLayer(out_raster, [1], layer, options=['ALL_TOUCHED=FALSE', 'ATTRIBUTE={field_name}'])
+    output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_rasters'
+    gdf = gpd.read_file(hurricane_data_path, layer="clipped_polygons")
 
-    band = out_raster.GetRasterBand(1)
-    band.SetNoDataValue(0) 
-    out_raster = None
-    gpkg = None
-    tiff = None    
+    grouped = gdf.groupby(['name', 'year'])
 
-    # gdf = gpd.read_file(hurricane_data_path, layer='clipped_polygons') 
-    # for (year, name), group in gdf.groupby(['year', 'name']):
-    #     dissolved_gdf = group.dissolve(by='wind_speed', aggfunc='first')  
-    #     dissolved_gdf = dissolved_gdf.reset_index()
-    #     print(dissolved_gdf.head(5))
+    for (name, year), group in grouped:
+        minx, miny, maxx, maxy = group.total_bounds
+        width = int(np.ceil((maxx - minx) / resolution))
+        height = int(np.ceil((maxy - miny) / resolution))
+        transform = from_bounds(minx, miny, maxx, maxy, width, height)
 
-    #     raster_resolution = 100  # in meters
-    #     bounds = dissolved_gdf.total_bounds
-    #     minx, miny, maxx, maxy = bounds
-    #     width = int((maxx - minx) / raster_resolution)
-    #     height = int((maxy - miny) / raster_resolution)
-    #     transform = rasterio.transform.from_origin(minx, maxy, raster_resolution, raster_resolution)
+        raster_data = np.zeros((height, width), dtype=np.float32)
 
-    #     shapes = ((geom, row['wind_speed']) for geom, row in dissolved_gdf.iterrows())
-    #     print(shapes)
+        for _, row in group.iterrows():
+            shapes = [(row.geometry, row['wind_speed'])]
+            rasterio.features.rasterize(
+                shapes,
+                out=raster_data,
+                transform=transform,
+                fill=np.nan,  # Default value for areas outside polygons
+            )
 
-    #     raster = np.zeros((height, width), dtype='float32')
-    #     raster = rasterize(
-    #         shapes,
-    #         out_shape=(height, width),
-    #         transform=transform,
-    #         fill='NaN',  
-    #         dtype='float32',
-    #         all_touched=True,
-    #     )
+        raster_file = os.path.join(output_folder, f"{name}_{year}.tif")
 
-    #     output_raster_path = str(folder_path / 'hurricane_rasters' / f'wind_speed_raster_{year}_{name}.tif')
-    #     with rasterio.open(
-    #         output_raster_path,
-    #         "w",
-    #         driver="GTiff",
-    #         height=height,
-    #         width=width,
-    #         count=1,
-    #         dtype='float32',
-    #         crs=gdf.crs.to_string(),
-    #         transform=transform,
-    #     ) as dst:
-    #         dst.write(raster, 1)
+        with rasterio.open(
+            raster_file,
+            "w",
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=raster_data.dtype,
+            crs=gdf.crs,
+            transform=transform,
+        ) as dst:
+            dst.write(raster_data, 1)
+
+        print(f"Raster for {name} - {year} saved to {raster_file}.")
+
+def cumulative_sum_rasters(resolution=1000):
+    input_gdf_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_data.gpkg'
+    gdf = gpd.read_file(input_gdf_path, layer="clipped_polygons")
+    output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
+    clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp'
+
+    clip_boundary = gpd.read_file(clip_boundary_path)
+    minx, miny, maxx, maxy = clip_boundary.total_bounds
+
+    width = int(np.ceil((maxx - minx) / resolution))
+    height = int(np.ceil((maxy - miny) / resolution))
+
+    transform = from_bounds(minx, miny, maxx, maxy, width, height)
+    years = sorted(gdf['year'].unique())
+
+    for year in years:
+        yearly_gdf = gdf[gdf['year'] == year]
+
+        cumulative_raster = np.zeros((height, width), dtype=np.float32)
+
+        for _, row in yearly_gdf.iterrows():
+            raster_data = np.zeros((height, width), dtype=np.float32)
+            shapes = [(row.geometry, row['wind_speed'])]
+            rasterio.features.rasterize(
+                shapes,
+                out=raster_data,
+                transform=transform,
+                fill=np.nan, 
+            )
+            cumulative_raster += raster_data
+
+        cumulative_raster[cumulative_raster == 0] = -99
+
+        raster_file = os.path.join(output_folder, f"cumulative_{year}.tif")
+        with rasterio.open(
+            raster_file,
+            "w",
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=cumulative_raster.dtype,
+            crs=gdf.crs,
+            transform=transform,
+        ) as dst:
+            dst.write(cumulative_raster, 1)
+        print(f"Cumulative raster for {year} saved to {raster_file}.")
+
+def yearly_average_rasters(resolution=1000):
+    input_gdf_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_data.gpkg'
+    gdf = gpd.read_file(input_gdf_path, layer="clipped_polygons")
+    output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
+    # clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp'
+    clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\GIS_map_files\Pilot_model_Final.tif'
+
+    clip_boundary = gpd.read_file(clip_boundary_path)
+    minx, miny, maxx, maxy = clip_boundary.total_bounds
+
+    width = int(np.ceil((maxx - minx) / resolution))
+    height = int(np.ceil((maxy - miny) / resolution))
+
+    transform = from_bounds(minx, miny, maxx, maxy, width, height)
+    years = sorted(gdf['year'].unique())
+
+    for year in years:
+        yearly_gdf = gdf[gdf['year'] == year]
+
+        cumulative_raster = np.zeros((height, width), dtype=np.float32)
+        count_raster = np.zeros((height, width), dtype=np.int32)
+
+        for _, row in yearly_gdf.iterrows():
+            raster_data = np.zeros((height, width), dtype=np.float32)
+            shapes = [(row.geometry, row['wind_speed'])]
+
+            rasterio.features.rasterize(
+                shapes,
+                out=raster_data,
+                transform=transform,
+                fill=0,  
+            )
+
+            mask = raster_data > 0  # Only consider valid wind_speed values
+            cumulative_raster[mask] += raster_data[mask]
+            count_raster[mask] += 1
+
+        average_raster = np.divide(
+            cumulative_raster, 
+            count_raster, 
+            out=np.full_like(cumulative_raster, -99, dtype=np.float32),
+            where=count_raster > 0
+        )
+
+        raster_file = os.path.join(output_folder, f"mean_{year}.tif")
+        with rasterio.open(
+            raster_file,
+            "w",
+            driver="GTiff",
+            height=height,
+            width=width,
+            count=1,
+            dtype=average_raster.dtype,
+            crs=gdf.crs,
+            transform=transform,
+            nodata=-99
+        ) as dst:
+            dst.write(average_raster, 1)
+
+        print(f"Mean raster for {year} saved to {raster_file}.")
+
+yearly_average_rasters(resolution=5)        
+
 
 # download_hurricane_data()    
 # create_line_layer()
-create_overlapping_buffers()
-clip_polygons()
-# polygons_to_rasters()
+# create_overlapping_buffers()
+# clip_polygons()
+# polygons_to_raster()
+# cumulative_sum_rasters(resolution=1000)
+
+windspeed_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
+tsm_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\tsm_data\tsm_rasters'  # 2016–2018 rn
+output_raster_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\correlation_2016_2018.tif'
+
+# calculate_correlation(windspeed_folder, tsm_folder, output_raster_path)
+
