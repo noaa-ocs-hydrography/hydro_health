@@ -41,10 +41,10 @@ def get_record_count(url):
     return response.json()["count"]
 
 def get_all_dredge_data():
-    # download_gpkg(borrow_url, dredge_output, borrow_layer_name)
-    # download_gpkg(placement_url, dredge_output, placement_layer_name)
-    # download_gpkg(epa_disposal_url, dredge_output, epa_disposal_name) # TODO does it need transformed?
-    # download_gpkg(dredge_url, dredge_output, dredge_layer_name)
+    download_gpkg(borrow_url, dredge_output, borrow_layer_name)
+    download_gpkg(placement_url, dredge_output, placement_layer_name)
+    download_gpkg(epa_disposal_url, dredge_output, epa_disposal_name) # TODO does it need transformed?
+    download_gpkg(dredge_url, dredge_output, dredge_layer_name)
     download_gpkg(channel_url, dredge_output, channel_layer_name)
 
 
@@ -68,22 +68,13 @@ def download_gpkg(url, gpkg_output, layer_name):
         features = response.json()["features"]
         all_features.extend(features)
         offset += max_records
-        print(offset)
 
     gdf = gpd.GeoDataFrame.from_features(all_features)
     gdf.drop(['datenotified', 'projectedarea'],  axis='columns', inplace=True)
-    # if layer_name == channel_layer_name:
-    #     gdf['projectedarea'] = gdf['projectedarea'].round(2)
-    
-    # print(gdf.head(5))
 
     gdf.set_crs('EPSG:4269', inplace=True)
-    # gdf['projectedarea'] = gdf['projectedarea'].round(2)
-
     gdf.to_file(gpkg_output, layer=layer_name, driver='GPKG')
     gdf.to_file(channel_path, driver='ESRI Shapefile', encoding='utf-8')
-    # print(gdf.columns)
-
 
 def download_usace_data():
     urls = [('https://ndc.ops.usace.army.mil/dis/placement-locations/{year}.json',
@@ -154,7 +145,6 @@ def create_job_locations_gpkg():
 
 def caculate_frequency_data():
     print('Calculating frequency metrics.')
-    # polygon_gdf = gpd.read_file(dredge_output, layer=harbour_layer_name)  
     polygon_gdf = gpd.read_file(channel_path)  
     polygon_gdf = polygon_gdf.to_crs("EPSG:4269") 
 
@@ -166,7 +156,6 @@ def caculate_frequency_data():
     aggregate_years = (joined_gdf.groupby('index_right').agg(years=('year', list)).reset_index())
 
     result_gdf = polygon_gdf.merge(aggregate_years, left_index=True, right_on='index_right', how='left')
-    # print(result_gdf.head(5))
     result_gdf = result_gdf[['geometry', 'years']]
     result_gdf['years'] = result_gdf['years'].apply(lambda x: x if isinstance(x, list) else [])
     result_gdf['count_1994_2003'] = result_gdf['years'].apply(lambda x: count_years(x, 1994, 2003))
