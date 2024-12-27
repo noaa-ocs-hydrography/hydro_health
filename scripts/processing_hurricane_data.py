@@ -12,6 +12,8 @@ from rasterio.transform import from_bounds
 from scipy.stats import pearsonr
 from rasterio.warp import reproject, Resampling, calculate_default_transform, aligned_target
 from rasterio.transform import from_origin
+from rasterio.transform import from_bounds
+from rasterio.mask import mask
 
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
@@ -261,19 +263,10 @@ def clip_polygons():
     clipped_gdf['wind_speed'] = pd.to_numeric(clipped_gdf['wind_speed'], errors='coerce').astype('Int64')
 
     layer_name = 'clipped_polygons'
-    clipped_gdf.to_file(hurricane_data_path, layer=layer_name, driver='GPKG')
+    clipped_gdf.to_file(hurricane_data_path, layer=layer_name, driver='GPKG', overwrite=True)
 
 
 def polygons_to_raster(resolution=1000):
-    """
-    Converts groups of polygons into separate rasters based on `name` and `year`.
-
-    Parameters:
-        gdf (GeoDataFrame): Input GeoDataFrame with polygons and a `wind_speed` field.
-        output_folder (str): Folder to save the generated rasters.
-        resolution (float): Resolution of the raster in the units of the GeoDataFrame CRS.
-    """
-
     output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_rasters'
     gdf = gpd.read_file(hurricane_data_path, layer="clipped_polygons")
 
@@ -313,117 +306,215 @@ def polygons_to_raster(resolution=1000):
 
         print(f"Raster for {name} - {year} saved to {raster_file}.")
 
-def cumulative_sum_rasters(resolution=1000):
+# def cumulative_sum_rasters(resolution=1000):
+#     input_gdf_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_data.gpkg'
+#     gdf = gpd.read_file(input_gdf_path, layer="clipped_polygons")
+#     output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
+#     clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp'
+
+#     clip_boundary = gpd.read_file(clip_boundary_path)
+#     minx, miny, maxx, maxy = clip_boundary.total_bounds
+
+#     width = int(np.ceil((maxx - minx) / resolution))
+#     height = int(np.ceil((maxy - miny) / resolution))
+
+#     transform = from_bounds(minx, miny, maxx, maxy, width, height)
+#     years = sorted(gdf['year'].unique())
+
+#     for year in years:
+#         yearly_gdf = gdf[gdf['year'] == year]
+
+#         cumulative_raster = np.zeros((height, width), dtype=np.float32)
+
+#         for _, row in yearly_gdf.iterrows():
+#             raster_data = np.zeros((height, width), dtype=np.float32)
+#             shapes = [(row.geometry, row['wind_speed'])]
+#             rasterio.features.rasterize(
+#                 shapes,
+#                 out=raster_data,
+#                 transform=transform,
+#                 fill=np.nan, 
+#             )
+#             cumulative_raster += raster_data
+
+#         cumulative_raster[cumulative_raster == 0] = np.NaN
+
+#         raster_file = os.path.join(output_folder, f"cumulative_{year}.tif")
+#         with rasterio.open(
+#             raster_file,
+#             "w",
+#             driver="GTiff",
+#             height=height,
+#             width=width,
+#             count=1,
+#             dtype=cumulative_raster.dtype,
+#             crs=gdf.crs,
+#             transform=transform,
+#         ) as dst:
+#             dst.write(cumulative_raster, 1)
+#         print(f"Cumulative raster for {year} saved to {raster_file}.")
+
+def generate_cumulative_rasters(output_folder, mode, clip=True):
+    mask_raster_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.tif'
     input_gdf_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_data.gpkg'
     gdf = gpd.read_file(input_gdf_path, layer="clipped_polygons")
-    output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
-    clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp'
 
-    clip_boundary = gpd.read_file(clip_boundary_path)
-    minx, miny, maxx, maxy = clip_boundary.total_bounds
+    years = sorted(gdf["year"].unique())
 
-    width = int(np.ceil((maxx - minx) / resolution))
-    height = int(np.ceil((maxy - miny) / resolution))
-
-    transform = from_bounds(minx, miny, maxx, maxy, width, height)
-    years = sorted(gdf['year'].unique())
+    with rasterio.open(mask_raster_path) as mask_src:
+        mask_data = mask_src.read(1)
+        mask_transform = mask_src.transform
+        mask_crs = mask_src.crs
+        mask_height, mask_width = mask_src.height, mask_src.width
+        mask_valid = mask_data == 1
 
     for year in years:
-        yearly_gdf = gdf[gdf['year'] == year]
+        yearly_gdf = gdf[gdf["year"] == year]
 
-        cumulative_raster = np.zeros((height, width), dtype=np.float32)
+        if mode == "cumulative_count":
+            output_raster = generate_count_raster(yearly_gdf, mask_height, mask_width, mask_transform, mask_valid if clip else None)
+            nodata = np.nan if clip else None
+            output_name = f"hurricane_count_{year}_{'clipped' if clip else 'unclipped'}.tif"
 
-        for _, row in yearly_gdf.iterrows():
-            raster_data = np.zeros((height, width), dtype=np.float32)
-            shapes = [(row.geometry, row['wind_speed'])]
-            rasterio.features.rasterize(
-                shapes,
-                out=raster_data,
-                transform=transform,
-                fill=np.nan, 
-            )
-            cumulative_raster += raster_data
+        elif mode == "cumulative_windspeed":
+            output_raster = generate_cumulative_raster(yearly_gdf, mask_height, mask_width, mask_transform, mask_valid if clip else None)
+            nodata = np.nan if clip else None
+            output_name = f"cumulative_windspeed_{year}_{'clipped' if clip else 'unclipped'}.tif"
 
-        cumulative_raster[cumulative_raster == 0] = -99
+        output_path = os.path.join(output_folder, output_name)
+        save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs, nodata)
+        print(f"Raster for {year} saved to {output_path}.")
 
-        raster_file = os.path.join(output_folder, f"cumulative_{year}.tif")
-        with rasterio.open(
-            raster_file,
-            "w",
-            driver="GTiff",
-            height=height,
-            width=width,
-            count=1,
-            dtype=cumulative_raster.dtype,
-            crs=gdf.crs,
-            transform=transform,
-        ) as dst:
-            dst.write(cumulative_raster, 1)
-        print(f"Cumulative raster for {year} saved to {raster_file}.")
+def generate_count_raster(yearly_gdf, height, width, transform, mask_valid):
+    """
+    Generate a yearly hurricane count raster.
+    - Areas outside the mask (mask = 0) will be NaN.
+    - Areas inside the mask (mask == 1) will have counts or 0 if no data.
+    """
+    count_raster = np.zeros((height, width), dtype=np.float32)
 
-def yearly_average_rasters(resolution=1000):
-    input_gdf_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_data.gpkg'
-    gdf = gpd.read_file(input_gdf_path, layer="clipped_polygons")
-    output_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
-    # clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp'
-    clip_boundary_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\GIS_map_files\Pilot_model_Final.tif'
+    for _, row in yearly_gdf.iterrows():
+        temp_raster = np.zeros((height, width), dtype=np.uint8)
+        shapes = [(row.geometry, 1)]
+        rasterize(shapes, out=temp_raster, transform=transform, fill=0)
+        count_raster += temp_raster
 
-    clip_boundary = gpd.read_file(clip_boundary_path)
-    minx, miny, maxx, maxy = clip_boundary.total_bounds
+    count_raster[~mask_valid] = np.nan  
+    count_raster[mask_valid & (count_raster == 0)] = 0
 
-    width = int(np.ceil((maxx - minx) / resolution))
-    height = int(np.ceil((maxy - miny) / resolution))
+    return count_raster
 
-    transform = from_bounds(minx, miny, maxx, maxy, width, height)
-    years = sorted(gdf['year'].unique())
+def generate_cumulative_raster(yearly_gdf, height, width, transform, mask_valid):
+    """
+    Generate a yearly cumulative wind speed raster.
+    - Areas outside the mask (mask = 0) will be NaN.
+    - Areas inside the mask (mask = 1) will have cumulative wind speed or 0 if no data.
+    """
+    cumulative_raster = np.zeros((height, width), dtype=np.float32)
 
-    for year in years:
-        yearly_gdf = gdf[gdf['year'] == year]
+    for _, row in yearly_gdf.iterrows():
+        temp_raster = np.zeros((height, width), dtype=np.float32)
+        shapes = [(row.geometry, row["wind_speed"])]
+        rasterize(shapes, out=temp_raster, transform=transform, fill=0)
 
-        cumulative_raster = np.zeros((height, width), dtype=np.float32)
-        count_raster = np.zeros((height, width), dtype=np.int32)
+        valid_mask = (temp_raster > 0) & mask_valid
+        cumulative_raster[valid_mask] += temp_raster[valid_mask]
 
-        for _, row in yearly_gdf.iterrows():
-            raster_data = np.zeros((height, width), dtype=np.float32)
-            shapes = [(row.geometry, row['wind_speed'])]
+    cumulative_raster[~mask_valid] = np.nan
 
-            rasterio.features.rasterize(
-                shapes,
-                out=raster_data,
-                transform=transform,
-                fill=0,  
-            )
+    if np.sum(cumulative_raster > 0) == 0:
+        print("No data for this year; filling mask area with 0.")
+        zero_raster = np.full((height, width), np.nan, dtype=np.float32)  # Initialize with NaN
+        zero_raster[mask_valid] = 0  # Set only valid areas to 0
+        return zero_raster
 
-            mask = raster_data > 0  # Only consider valid wind_speed values
-            cumulative_raster[mask] += raster_data[mask]
-            count_raster[mask] += 1
+    return cumulative_raster
 
-        average_raster = np.divide(
-            cumulative_raster, 
-            count_raster, 
-            out=np.full_like(cumulative_raster, -99, dtype=np.float32),
-            where=count_raster > 0
-        )
+def save_raster(data, path, height, width, transform, crs, nodata):
+    """
+    Save a raster to disk with LZW compression.
+    """
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=height,
+        width=width,
+        count=1,
+        dtype=data.dtype,
+        crs=crs,
+        transform=transform,
+        nodata=nodata,
+        compress="lzw",
+    ) as dst:
+        dst.write(data, 1)
 
-        raster_file = os.path.join(output_folder, f"mean_{year}.tif")
-        with rasterio.open(
-            raster_file,
-            "w",
-            driver="GTiff",
-            height=height,
-            width=width,
-            count=1,
-            dtype=average_raster.dtype,
-            crs=gdf.crs,
-            transform=transform,
-            nodata=-99
-        ) as dst:
-            dst.write(average_raster, 1)
+def average_rasters(input_folder, start_year, end_year, output_name):
+    output_folder = r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\year_averages"
 
-        print(f"Mean raster for {year} saved to {raster_file}.")
+    raster_files = [
+        os.path.join(input_folder, f)
+        for f in os.listdir(input_folder)
+        if f.endswith(".tif") and any(str(year) in f for year in range(start_year, end_year + 1))
+    ]
 
-yearly_average_rasters(resolution=5)        
+    if not raster_files:
+        print(f"No rasters found between {start_year} and {end_year}.")
+        return
 
+    with rasterio.open(raster_files[0]) as src:
+        meta = src.meta.copy()
+        meta.update(dtype="float32", nodata=np.nan, compress="lzw")
+        raster_shape = src.shape
+        mask = src.read_masks(1)  # Read the mask to identify valid areas
+
+    sum_array = np.zeros(raster_shape, dtype=np.float32)
+    count_array = np.zeros(raster_shape, dtype=np.int32)
+
+    for raster_file in raster_files:
+        # print(f"Processing {raster_file}...")
+        with rasterio.open(raster_file) as src:
+            data = src.read(1)
+            data[data == 0] = np.nan  # Treat 0 as no data
+
+            valid_mask = ~np.isnan(data)
+            sum_array[valid_mask] += data[valid_mask]
+            count_array[valid_mask] += 1
+
+    with np.errstate(divide='ignore', invalid='ignore'):
+        average_array = np.where(count_array > 0, sum_array / count_array, 0)
+
+    # Areas outside the mask remain as NaN
+    average_array[mask == 0] = np.nan
+
+    os.makedirs(output_folder, exist_ok=True)
+    output_path = os.path.join(output_folder, f"{start_year}_{end_year}_{output_name}")
+    with rasterio.open(output_path, "w", **meta) as dst:
+        dst.write(average_array, 1)
+
+    print(f"Averaged raster saved to {output_path}.")
+
+year_ranges = [
+    (2004, 2006),
+    (2006, 2010),
+    (2010, 2015),
+    (2015, 2022),
+]
+
+for start_year, end_year in year_ranges:
+    average_rasters(
+        input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters",
+        start_year=start_year,
+        end_year=end_year,
+        output_name=f"hurricane_count_mean.tif"
+    )
+
+    average_rasters(
+        input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
+        start_year=start_year,
+        end_year=end_year,
+        output_name=f"hurricane_strength_mean.tif"
+    )
 
 # download_hurricane_data()    
 # create_line_layer()
@@ -432,9 +523,16 @@ yearly_average_rasters(resolution=5)
 # polygons_to_raster()
 # cumulative_sum_rasters(resolution=1000)
 
-windspeed_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters'
-tsm_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\tsm_data\tsm_rasters'  # 2016–2018 rn
-output_raster_path = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\correlation_2016_2018.tif'
+# generate_cumulative_rasters(
+#     output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
+#     mode="cumulative_count",
+#     clip=True
+# )
 
-# calculate_correlation(windspeed_folder, tsm_folder, output_raster_path)
+# generate_cumulative_rasters(
+#     output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
+#     mode="cumulative_windspeed",
+#     clip=True
+# )
+
 
