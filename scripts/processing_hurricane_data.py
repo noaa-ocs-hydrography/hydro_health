@@ -5,15 +5,11 @@ import pandas as pd
 import numpy as np
 import os
 from shapely.geometry import LineString, Polygon, GeometryCollection
-from shapely.ops import unary_union  # Import unary_union function
+from shapely.ops import unary_union
 import rasterio
 from rasterio.features import rasterize
 from rasterio.transform import from_bounds
-from scipy.stats import pearsonr
-from rasterio.warp import reproject, Resampling, calculate_default_transform, aligned_target
-from rasterio.transform import from_origin
 from rasterio.transform import from_bounds
-from rasterio.mask import mask
 
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
@@ -286,7 +282,7 @@ def polygons_to_raster(resolution=1000):
                 shapes,
                 out=raster_data,
                 transform=transform,
-                fill=np.nan,  # Default value for areas outside polygons
+                fill=np.nan, 
             )
 
         raster_file = os.path.join(output_folder, f"{name}_{year}.tif")
@@ -424,8 +420,8 @@ def generate_cumulative_raster(yearly_gdf, height, width, transform, mask_valid)
 
     if np.sum(cumulative_raster > 0) == 0:
         print("No data for this year; filling mask area with 0.")
-        zero_raster = np.full((height, width), np.nan, dtype=np.float32)  # Initialize with NaN
-        zero_raster[mask_valid] = 0  # Set only valid areas to 0
+        zero_raster = np.full((height, width), np.nan, dtype=np.float32)  
+        zero_raster[mask_valid] = 0  
         return zero_raster
 
     return cumulative_raster
@@ -466,7 +462,7 @@ def average_rasters(input_folder, start_year, end_year, output_name):
         meta = src.meta.copy()
         meta.update(dtype="float32", nodata=np.nan, compress="lzw")
         raster_shape = src.shape
-        mask = src.read_masks(1)  # Read the mask to identify valid areas
+        mask = src.read_masks(1)
 
     sum_array = np.zeros(raster_shape, dtype=np.float32)
     count_array = np.zeros(raster_shape, dtype=np.int32)
@@ -475,7 +471,7 @@ def average_rasters(input_folder, start_year, end_year, output_name):
         # print(f"Processing {raster_file}...")
         with rasterio.open(raster_file) as src:
             data = src.read(1)
-            data[data == 0] = np.nan  # Treat 0 as no data
+            data[data == 0] = np.nan
 
             valid_mask = ~np.isnan(data)
             sum_array[valid_mask] += data[valid_mask]
@@ -484,7 +480,6 @@ def average_rasters(input_folder, start_year, end_year, output_name):
     with np.errstate(divide='ignore', invalid='ignore'):
         average_array = np.where(count_array > 0, sum_array / count_array, 0)
 
-    # Areas outside the mask remain as NaN
     average_array[mask == 0] = np.nan
 
     os.makedirs(output_folder, exist_ok=True)
