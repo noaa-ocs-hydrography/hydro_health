@@ -1,11 +1,11 @@
-from hydro_health.ags_tools.HHLayerTool import HHLayerTool
-from hydro_health.engines.CreateGroundingsLayerEngine import CreateGroundingsLayerEngine
+from hydro_health.HHLayerTool import HHLayerTool
+from hydro_health.engines.CreateActiveCaptainLayerEngine import CreateActiveCaptainLayerEngine
 
 
-class CreateGroundingsLayerTool(HHLayerTool):
+class CreateActiveCaptainLayerTool(HHLayerTool):
     def __init__(self):
         """Define the tool (tool name is the name of the class)."""
-        self.label = "Create the Groundings Layer"
+        self.label = "Create the Active Captain Layer"
         self.description = ""
         self.param_lookup = {}
 
@@ -33,8 +33,8 @@ class CreateGroundingsLayerTool(HHLayerTool):
         """The source code of the tool."""
 
         param_lookup = self.setup_param_lookup(parameters)
-        engine = CreateGroundingsLayerEngine(param_lookup)
-        engine.start()
+        engine = CreateActiveCaptainLayerEngine(param_lookup)
+        engine.start()        
 
     def postExecute(self, parameters):
         """This method takes place after outputs are processed and

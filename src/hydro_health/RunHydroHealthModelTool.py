@@ -1,6 +1,6 @@
 import arcpy
 
-from hydro_health.ags_tools.HHLayerTool import HHLayerTool
+from hydro_health.HHLayerTool import HHLayerTool
 from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
 from hydro_health.engines.CreateActiveCaptainLayerEngine import CreateActiveCaptainLayerEngine
 from hydro_health.engines.CreateGroundingsLayerEngine import CreateGroundingsLayerEngine

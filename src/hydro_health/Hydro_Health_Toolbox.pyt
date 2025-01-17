@@ -8,10 +8,10 @@ if HH_MODULE.name != 'src':
 import sys
 sys.path.append(str(HH_MODULE))
 
-from hydro_health.ags_tools.CreateReefsLayerTool import CreateReefsLayerTool
-from hydro_health.ags_tools.CreateActiveCaptainLayerTool import CreateActiveCaptainLayerTool
-from hydro_health.ags_tools.CreateGroundingsLayerTool import CreateGroundingsLayerTool
-from hydro_health.ags_tools.RunHydroHealthModelTool import RunHydroHealthModelTool
+from hydro_health.CreateReefsLayerTool import CreateReefsLayerTool
+from hydro_health.CreateActiveCaptainLayerTool import CreateActiveCaptainLayerTool
+from hydro_health.CreateGroundingsLayerTool import CreateGroundingsLayerTool
+from hydro_health.RunHydroHealthModelTool import RunHydroHealthModelTool
 
 
 class Toolbox:

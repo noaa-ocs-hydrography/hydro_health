@@ -9,10 +9,10 @@ The Hydro Health model current contains an ArcGIS Python Toolbox and associated 
 **The Toolbox file:** hydro_health/src/hydro_health/Hydro_Health_Toolbox.pyt
 
 ## Tools
-1. hydro_health/src/hydro_health/ags_tools/CreateActiveCaptain.py
-2. hydro_health/src/hydro_health/ags_tools/CreateGroundingsLayer.py
-3. hydro_health/src/hydro_health/ags_tools/HHLayer.py
-4. hydro_health/src/hydro_health/ags_tools/RunHydroHealthModel.py
+1. hydro_health/src/hydro_health/CreateActiveCaptainTool.py
+2. hydro_health/src/hydro_health/CreateGroundingsLayerTool.py
+3. hydro_health/src/hydro_health/HHLayerTool.py
+4. hydro_health/src/hydro_health/RunHydroHealthModelTool.py
 
 ### Add Folder Connection example
 1. Open ArcGIS Pro
