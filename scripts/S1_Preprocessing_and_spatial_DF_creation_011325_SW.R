@@ -11,7 +11,8 @@
 # merge all indavidual survey end date rasters into a combined raster (currently mosaic via ArcGIS)
 # load all JALBTCX bathymetry mosaic rasters and associated slope rasters
 # load in other model variables (sediment type, sediment grain size - other contributers surface current to come)
-# standardise rasters and clip to both prediction.mask and training.mask: ensure all datasets are in the same crs / projection, resolution (5m), and clip to different masks to ensure same size
+# standardise rasters and clip to both prediction.mask and training.mask: ensure all datasets are in the same crs / projection, resolution (5m), 
+# and clip to different masks to ensure same size
 # ensure all bathy elevation values above 0m are removed after clipping, if not filter (0m mark varies on boundary)
 # stack all data and convert to Spatial Points Dataframe / for proeccesing / save
 
