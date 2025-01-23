@@ -1,6 +1,5 @@
 # ## 1. is preprocess all lidar data
 # Directory for tiff files is: N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Modeling/UTM17
-
 # 1. get all tiff files in a specific folder
 # 2. get file name
 # 3. get the XML metadata file for the current tile
@@ -17,7 +16,6 @@
 
 # ## 2. standardize all rasters to have same X, Y, FID
 # Directory is N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model
-
 # 1. Load the prediction mask
 # 2. get the CRS of the mask
 # 3. convert mask to dataframe 
@@ -31,3 +29,29 @@
 # 11. Set ground values > 0 to NA for the "_bathy" raster files
 # 12. write out the updated files to the processed folder
 # 13. verify all rasters have the same extent
+
+
+# ## 3. Create dataframes for Training and Prediction masks
+# make a dataframe from Training extent mask
+# 1. Extract mask coordinates and match X and Y from mask with 1 and 2 coords f - Review lin 363
+# 2. Create FID column based on unique XY columns
+# 3. filter DF where mask == 1
+# 4. write out the filtered dataframe
+# make a dataframe from Prediction extent mask
+# 1. Extract mask coordinates and match X and Y from mask with 1 and 2 coords f - Review lin 363
+# 2. Create FID column based on unique XY columns
+# 3. filter DF where mask == 1
+# 4. write out the filtered dataframe
+
+
+# ## 4. Helper functions
+# 1. split_tile - subdivide a tile into smaller grids
+# 2. prepare_subgrids - TODO need to review
+# 3. process_rasters - TODO need to review
+
+
+# ## 5. Run model processing
+# 1. run prediction sub grid 
+# 2. run training sub grid
+# 3. call process_rasters() for training 
+# 4. call process_rasters() for prediction
