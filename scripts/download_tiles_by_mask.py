@@ -3,6 +3,7 @@ import pathlib
 import geopandas as gpd
 import boto3
 
+from osgeo import gdal, osr
 from botocore.client import Config
 from botocore import UNSIGNED
 from rasterio.features import shapes
@@ -10,6 +11,21 @@ from rasterio.features import shapes
 
 OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
+
+
+
+def create_raster_vrt():
+    blue_topo_folder = OUTPUTS / 'BlueTopo'
+    geotiffs = list(blue_topo_folder.rglob('*.tiff'))
+    vrt_filename = str(OUTPUTS / 'mask_tiles_mosaic.vrt')
+    gdal.BuildVRT(vrt_filename, geotiffs, callback=gdal.TermProgress_nocb)
+    final_image = gdal.Open(vrt_filename, gdal.GA_ReadOnly)
+
+    # This makes a separate single raster
+    # gdal.Translate(str(OUTPUTS / 'mask_tiles.tif'), final_image, format='GTiff',
+    #            creationOptions=['COMPRESS:DEFLATE', 'TILED:YES'],
+    #            callback=gdal.TermProgress_nocb)
+    # final_image = None
 
 
 def download_nbs_tiles(tiles):
@@ -37,8 +53,8 @@ def get_intersected_tiles(mask_polygons_gdf):
     intersected_gdf = gpd.sjoin(mask_polygons_wgs84, nbs_tile_gdf, how = 'left')
     tiles = intersected_gdf['tile'].unique()
     print(f'Intersected tiles: {tiles}')
-    # output_intersection = OUTPUTS / 'mask_tiles.shp'
-    # intersected_gdf.to_file(output_intersection, driver='ESRI Shapefile')
+    output_intersection = OUTPUTS / 'mask_tiles.shp'
+    intersected_gdf.to_file(output_intersection, driver='ESRI Shapefile')
 
     return tiles
 
@@ -47,14 +63,18 @@ def get_mask_shapes(raster):
     with rasterio.Env():
         with rasterio.open(raster) as source:
             image = source.read(1)
-            results = [
-                {"properties": {"raster_val": v}, "geometry": s}
-                for i, (s, v) in enumerate(
-                    shapes(image, mask=None, transform=source.transform)
-                )
-            ]
+            results = []
+            for i, (s, v) in enumerate(shapes(image, mask=None, transform=source.transform)):
+                if v == 1:
+                    results.append({"properties": {"raster_val": v}, "geometry": s})
+            # results = [
+            #     {"properties": {"raster_val": v}, "geometry": s}
+            #     for i, (s, v) in enumerate(
+            #         shapes(image, mask=None, transform=source.transform)
+            #     )
+            # ]
 
-            return list(results)
+            return results
         
 
 def project_gdf(gdf, wkid=4326):
@@ -66,4 +86,7 @@ if __name__ == "__main__":
     mask_polygons = get_mask_shapes(mask)
     mask_polygons_gdf  = gpd.GeoDataFrame.from_features(mask_polygons, crs=26917)
     tiles = get_intersected_tiles(mask_polygons_gdf)
+    if 'BH4S2574' in tiles:
+        print('yay')
     download_nbs_tiles(tiles)
+    create_raster_vrt()

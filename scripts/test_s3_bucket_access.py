@@ -36,7 +36,7 @@ creds = {
 }
 s3 = boto3.resource('s3', **creds)
 nbs_bucket = s3.Bucket(bucket)
-tile_id = 'BH55Z4Z8'
+tile_id = 'BH4S2574'
 for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
     print(f'downloading: {obj_summary.key}')
     output_tile = OUTPUTS / obj_summary.key
