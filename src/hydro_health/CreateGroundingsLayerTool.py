@@ -1,11 +1,11 @@
-from hydro_health.ags_tools.HHLayer import HHLayer
-from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
+from hydro_health.HHLayerTool import HHLayerTool
+from hydro_health.engines.CreateGroundingsLayerEngine import CreateGroundingsLayerEngine
 
 
-class CreateReefsLayer(HHLayer):
+class CreateGroundingsLayerTool(HHLayerTool):
     def __init__(self):
         """Define the tool (tool name is the name of the class)."""
-        self.label = "Create the Reefs Layer"
+        self.label = "Create the Groundings Layer"
         self.description = ""
         self.param_lookup = {}
 
@@ -33,7 +33,7 @@ class CreateReefsLayer(HHLayer):
         """The source code of the tool."""
 
         param_lookup = self.setup_param_lookup(parameters)
-        engine = CreateReefsLayerEngine(param_lookup)
+        engine = CreateGroundingsLayerEngine(param_lookup)
         engine.start()
 
     def postExecute(self, parameters):

@@ -1,13 +1,13 @@
 import arcpy
 
-from hydro_health.ags_tools.HHLayer import HHLayer
+from hydro_health.HHLayerTool import HHLayerTool
 from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
 from hydro_health.engines.CreateActiveCaptainLayerEngine import CreateActiveCaptainLayerEngine
 from hydro_health.engines.CreateGroundingsLayerEngine import CreateGroundingsLayerEngine
 from hydro_health.helpers import tools
 
 
-class RunHydroHealthModel(HHLayer):
+class RunHydroHealthModelTool(HHLayerTool):
     def __init__(self):
         """Define the tool (tool name is the name of the class)."""
         self.label = "Run the Hydro Health Model"

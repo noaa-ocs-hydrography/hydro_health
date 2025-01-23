@@ -1,7 +1,7 @@
 import arcpy
 
 
-class HHLayer:
+class HHLayerTool:
     def get_params(self):
         """Set up the default tool parameters"""
         

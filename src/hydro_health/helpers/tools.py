@@ -12,7 +12,7 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
     """Load config and return speciific key"""
 
-    with open(str(INPUTS / 'config.yaml'), 'r') as lookup:
+    with open(str(INPUTS / 'lookups' / 'config.yaml'), 'r') as lookup:
         config = yaml.safe_load(lookup)
         parent_item = config[parent]
         if child:
