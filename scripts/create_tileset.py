@@ -55,7 +55,7 @@ def global_region_tileset(tileset_name, sizes) -> str:
         ds = ogr.GetDriverByName('GPKG').CreateDataSource(location)
         srs = osr.SpatialReference()
         srs.ImportFromEPSG(4326)
-        layer = ds.CreateLayer(f'Tileset_{name}_{size_str.replace('.', 'pt')}', srs, ogr.wkbMultiPolygon)
+        layer = ds.CreateLayer(f'Tileset_{name}_{size_str.replace(".", "pt")}', srs, ogr.wkbMultiPolygon)
         layer.CreateFields([ogr.FieldDefn("Tilename", ogr.OFTString), ogr.FieldDefn("Tileset", ogr.OFTString),
                             ogr.FieldDefn("UTM_Zone", ogr.OFTInteger), ogr.FieldDefn("Hemisphere", ogr.OFTString),
                             ogr.FieldDefn("Resolution", ogr.OFTString)])
