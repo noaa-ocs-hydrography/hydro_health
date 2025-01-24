@@ -40,10 +40,8 @@ def deploy_hydro_health_to_working():
                     CODE_FOLDER / 'src' / 'hydro_health' / 'engines', 
                     dirs_exist_ok=True, 
                     ignore=shutil.ignore_patterns('run*.py'))
-    tools_folder = HYDRO_HEALTH / 'ags_tools'
-    os.makedirs(CODE_FOLDER / 'src' / 'hydro_health' / 'ags_tools', exist_ok=True)
-    for tool in tools_folder.glob('*Tool*.py'):
-        shutil.copy2(tool, CODE_FOLDER / 'src' / 'hydro_health' / 'ags_tools' / tool.name)
+    for tool in HYDRO_HEALTH.glob('*Tool*.py'):
+        shutil.copy2(tool, CODE_FOLDER / 'src' / 'hydro_health' / tool.name)
 
     for toolbox in HYDRO_HEALTH.glob('*Tool*.pyt'):
         shutil.copy2(toolbox, CODE_FOLDER / 'src' / 'hydro_health' / toolbox.name)
