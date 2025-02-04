@@ -21,7 +21,7 @@ def run_hydro_health(output_folder, index: int, row: gpd.GeoSeries):
 
 
 class TileProcessor:
-    def get_pool(self, processes=4):
+    def get_pool(self, processes=int(mp.cpu_count() / 2)):
         return mp.Pool(processes=processes)
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
@@ -30,4 +30,3 @@ class TileProcessor:
             for result in results:
                 result.get()
                 # Also tried calling self.write_output() here and that worked fine
-

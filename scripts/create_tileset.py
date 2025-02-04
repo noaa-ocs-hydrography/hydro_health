@@ -119,5 +119,5 @@ def global_region_tileset(tileset_name, sizes) -> str:
 # global_region_tileset(tileset_name, tileset_sizes)
 
 tileset_name = "Global"
-tileset_sizes = {0:'6.', 4:'.15', 5:'.075'}
+tileset_sizes = {3:'.3', 4:'.15', 5:'.075'}
 global_region_tileset(tileset_name, tileset_sizes)

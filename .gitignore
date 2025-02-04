@@ -7,3 +7,4 @@ inputs/*
 # Allow
 !inputs/*wgs84*
 !inputs/config.yaml
+!inputs/HH_Data.gpkg
