@@ -6,13 +6,8 @@ import pandas as pd
 import rasterio
 import numpy as np
 import geopandas as gpd
-from rasterio.mask import mask
-from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.features import geometry_mask
-from shapely.geometry import box, mapping
-import dask.array as da  # Dask for parallel computation
-from dask.diagnostics import visualize
-from dask.diagnostics import ProgressBar
+from osgeo import gdal
+import multiprocessing
 
 
 ## 1. is preprocess all lidar data
@@ -116,77 +111,35 @@ def create_survey_end_date_tiffs():
 # 1. Location of support rasters for processing- N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw
 # 2. Create output "processed" folders if they don't exist
 
-def process_raster(raster_path, mask_path, output_path, target_crs = 'EPSG:4326', target_res=8):
-    # 3.Load mask data
-    with rasterio.open(mask_path) as mask_src:
-        mask_crs = mask_src.crs
-        mask_gdf = gpd.GeoDataFrame(geometry=[box(*mask_src.bounds)], crs=mask_crs)
-        mask_gdf = mask_gdf.to_crs(target_crs)
-        mask_geom = [mapping(mask_gdf.geometry.values[0])]
-
-    with rasterio.open(raster_path) as src:
-        src_crs = src.crs
-        transform = src.transform
-
-        # 8. Loop through tiff files and make sure they have the same CRS - WGS84
-        if src_crs != target_crs:
-            print('Reprojecting...')
-            transform, width, height = calculate_default_transform(
-                src_crs, target_crs, src.width, src.height, *src.bounds
-            )
-            data = da.from_array(np.empty((height, width), dtype=np.float32), chunks=(512, 512))
-            with ProgressBar():
-                result = da.compute(data)
-            reproject(
-                source=src.read(1),  
-                destination=data.compute(),
-                src_transform=src.transform,
-                src_crs=src_crs,
-                dst_transform=transform,
-                dst_crs=target_crs,
-                resampling=Resampling.bilinear
-            )
-        else:
-            data = da.from_array(src.read(1), chunks=(512, 512))
-
-        # 9. verify all rasters have the same extent
-        # data, transform = mask(src, mask_geom, crop=True, filled=True)
-
-        # 10. Resample all rasters to 8m resolution
-        print('Resampling...')
-        new_width = int((src.bounds.right - src.bounds.left) / target_res)
-        new_height = int((src.bounds.top - src.bounds.bottom) / target_res)
-        resampled_data = da.from_array(np.empty((new_height, new_width), dtype=np.float32), chunks=(512, 512))
-
-        reproject(
-            source=data.compute(),
-            destination=resampled_data.compute(),
-            src_transform=transform,
-            src_crs=target_crs,
-            dst_transform=transform,
-            dst_crs=target_crs,
-            resampling=Resampling.bilinear
+def process_raster(raster_path, output_path, target_crs="EPSG:4326", target_res=8):
+    # Step 1: Use GDAL to reproject & resample in one go
+    temp_path = raster_path.replace(".tif", "_temp.tif")
+    gdal.Warp(
+            temp_path, raster_path,
+            dstSRS=target_crs,
+            xRes=target_res, yRes=target_res,
+            resampleAlg=gdal.GRA_Bilinear,
+            format="GTiff",
+            options=gdal.WarpOptions(options=["COMPRESS=LZW"])
         )
 
-        # 11. Set ground values > 0 to NA for the "_bathy" raster files
+    # Step 2: Apply bathymetry mask if needed
+    with rasterio.open(temp_path) as src:
+        data = src.read(1)
+        transform = src.transform
+
         if '_bathy' in os.path.basename(raster_path):
-            print('Applying bathy mask...')
-            resampled_data = da.where(resampled_data > 0, np.nan, resampled_data)
+            data[data > 0] = np.nan  # Set positive values to NaN
 
+        # Step 3: Write final output
         out_meta = src.meta.copy()
-        out_meta.update({
-            'driver': 'GTiff',
-            'height': resampled_data.shape[0],
-            'width': resampled_data.shape[1],
-            'transform': transform,
-            'crs': target_crs,
-            'dtype': 'float32',
-            'compress': 'lzw'
-        })
+        out_meta.update({"dtype": "float32"})
 
-        print('Writing output...')
-        with rasterio.open(output_path, 'w', **out_meta) as dst:
-            dst.write(resampled_data.compute(), 1)
+        with rasterio.open(output_path, "w", **out_meta) as dst:
+            dst.write(data, 1)
+
+    # Cleanup temporary file
+    os.remove(temp_path)
 
 ## 2. Standardize all rasters (PREDICTION Extent first as its larger)----
 #makes all same extent, for processing into spatial points dataframe and removes all land based elevation values > 0 as well
@@ -197,11 +150,13 @@ def process_raster(raster_path, mask_path, output_path, target_crs = 'EPSG:4326'
 #columns afterward.
 
 def standardize_rasters():
-    max_size = 100 * 1024 * 1024  # 100 MB in bytes
-    prediction_files = [f for f in os.listdir(prediction_dir) 
-                    if f.endswith('.tif')]
+    max_size = 50 * 1024 * 1024  # 100 MB in bytes
+    prediction_files = [
+    f for f in os.listdir(prediction_dir)
+    if f.endswith('.tif') and os.path.getsize(os.path.join(prediction_dir, f)) < max_size]
 
     for file in prediction_files:
+        print(f'Processing {file}...')
         input_path = os.path.join(prediction_dir, file)
         output_path = os.path.join(prediction_out, file)
         # 12. write out the updated files to the processed folder 
@@ -212,6 +167,7 @@ def standardize_rasters():
     training_files = [f for f in os.listdir(prediction_out) if f.endswith('.tif') and not f.startswith('blue_topo')]
 
     for file in training_files:
+        print(f'Processing {file}...')
         input_path = os.path.join(prediction_out, file)  # use processed prediction rasters
         output_path = os.path.join(training_out, file)
         # 12. write out the updated files to the processed folder 
@@ -274,7 +230,6 @@ def raster_to_spatial_df(raster_path):
 if __name__ == '__main__':
     
     # create_survey_end_date_tiffs() 
-    print('starting')
     standardize_rasters() # part 2
     # make a dataframe from Training extent mask
     # training_mask_df = raster_to_spatial_df(mask_training)
