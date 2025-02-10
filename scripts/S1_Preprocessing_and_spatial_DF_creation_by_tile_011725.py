@@ -8,6 +8,8 @@ import numpy as np
 import geopandas as gpd
 from osgeo import gdal
 import multiprocessing
+from shapely.geometry import Polygon
+
 
 
 ## 1. is preprocess all lidar data
@@ -217,8 +219,68 @@ def raster_to_spatial_df(raster_path):
 
 # ## 4. Helper functions, need to check the updated code from steph
 # 1. split_tile - subdivide a tile into smaller grids
-# 2. prepare_subgrids - TODO need to review
-# 3. process_rasters - TODO need to review
+def split_tile(tile):
+    # Get the bounding box of the input tile (xmin, ymin, xmax, ymax)
+    xmin, ymin, xmax, ymax = tile.geometry.bounds
+
+    # Calculate the midpoints for x and y
+    mid_x = (xmin + xmax) / 2
+    mid_y = (ymin + ymax) / 2
+    
+    # Define the sub-grid polygons in clockwise order
+    sub_grids = [
+        Polygon([(xmin, ymin), (mid_x, ymin), (mid_x, mid_y), (xmin, mid_y)]),  # Bottom-left
+        Polygon([(mid_x, ymin), (xmax, ymin), (xmax, mid_y), (mid_x, mid_y)]),  # Bottom-right
+        Polygon([(mid_x, mid_y), (xmax, mid_y), (xmax, ymax), (mid_x, ymax)]),  # Top-right
+        Polygon([(xmin, mid_y), (mid_x, mid_y), (mid_x, ymax), (xmin, ymax)])   # Top-left
+    ]
+
+    # Create sub-grid IDs based on the original tile's ID (tile_id + 1, 2, 3, 4)
+    sub_grid_ids = [f"Tile_{tile['tile_id']}_{i+1}" for i in range(4)]
+
+    # Create a DataFrame with the sub-grid details
+    sub_grid_data = {
+        'tile_id': sub_grid_ids,
+        'xmin': [s.bounds[0] for s in sub_grids],
+        'ymin': [s.bounds[1] for s in sub_grids],
+        'xmax': [s.bounds[2] for s in sub_grids],
+        'ymax': [s.bounds[3] for s in sub_grids],
+        'geometry': sub_grids
+    }
+    
+    # Convert the dictionary into a GeoDataFrame
+    sub_grid_df = gpd.GeoDataFrame(sub_grid_data, crs=tile.crs)
+    
+    return sub_grid_df
+# 2. prepare_subgrids - splits grid tiles into sub-grids, filters w/ mask, 
+# saves intersecting sub-grids to the gpkg
+def prepare_subgrids(grid_gpkg, mask_df, mask, output_dir):
+    print("Preparing grid tiles and sub-grids...")
+    
+    # Read and transform the grid tiles to match the CRS of the mask
+    grid_tiles = gpd.read_file(grid_gpkg)
+    grid_tiles = grid_tiles.to_crs(mask.crs)
+    
+    # Convert mask_df to a GeoDataFrame
+    training_gdf = gpd.GeoDataFrame(mask_df, geometry=gpd.points_from_xy(mask_df['X'], mask_df['Y']), crs=mask.crs)
+    
+    # Split grid tiles into sub-grids
+    sub_grids_list = [split_tile(tile) for _, tile in grid_tiles.iterrows()]
+    sub_grids = gpd.GeoDataFrame(pd.concat(sub_grids_list, ignore_index=True), crs=grid_tiles.crs)
+    
+    # Filter sub-grids that intersect with the mask points
+    intersecting_sub_grids = gpd.sjoin(sub_grids, training_gdf, how="inner", op='intersects')
+    
+    # Save intersecting sub-grids to a GeoPackage
+    intersecting_sub_grids.to_file(os.path.join(output_dir, "intersecting_sub_grids.gpkg"), driver="GPKG")
+    
+    # Save the training sub-grid extents
+    intersecting_sub_grids[['tile_id', 'geometry']].to_file(os.path.join(output_dir, "grid_tile_extents.gpkg"), driver="GPKG")    
+    
+    return intersecting_sub_grids
+
+# 3. process_rasters - processes raster files by clipping, extracting values, 
+# combining them, calculating depth changes, and saving the data per tile
 
 
 # ## 5. Run model processing
@@ -228,7 +290,6 @@ def raster_to_spatial_df(raster_path):
 # 4. call process_rasters() for prediction
 
 if __name__ == '__main__':
-    
     # create_survey_end_date_tiffs() 
     standardize_rasters() # part 2
     # make a dataframe from Training extent mask
