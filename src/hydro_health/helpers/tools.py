@@ -9,6 +9,15 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
+class Param:
+        def __init__(self, path):
+            self.value = path
+
+        @property
+        def valueAsText(self):
+            return self.value
+
+
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
     """Load config and return speciific key"""
 

@@ -12,9 +12,9 @@ class HHLayerTool:
             parameterType="Optional",
             direction="Input"
         )
-        output_directoty = arcpy.Parameter(
+        output_directory = arcpy.Parameter(
             displayName="Output Data Directory",
-            name="output_directoty",
+            name="output_directory",
             datatype="DEFolder",
             parameterType="Optional",
             direction="Input"
@@ -22,11 +22,11 @@ class HHLayerTool:
 
         return [
             input_directory,
-            output_directoty
+            output_directory
         ]
     
     def get_param_names(self):
         return [
             'input_directory', 
-            'output_directoty'
+            'output_directory'
             ]

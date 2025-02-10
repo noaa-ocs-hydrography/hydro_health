@@ -27,9 +27,9 @@ class CreateActiveCaptainLayerEngine(Engine):
             if self.param_lookup['input_directory'].valueAsText:
                 global INPUTS
                 INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
-            if self.param_lookup['output_directoty'].valueAsText:
+            if self.param_lookup['output_directory'].valueAsText:
                 global OUTPUTS
-                OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
+                OUTPUTS = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
 
     def create_ac_shapefile(self, ac_points_json:str) -> str:
         """Create Active Captain Point shapefile"""

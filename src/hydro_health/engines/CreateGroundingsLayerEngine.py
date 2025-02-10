@@ -27,9 +27,9 @@ class CreateGroundingsLayerEngine(Engine):
             if self.param_lookup['input_directory'].valueAsText:
                 global INPUTS
                 INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
-            if self.param_lookup['output_directoty'].valueAsText:
+            if self.param_lookup['output_directory'].valueAsText:
                 global OUTPUTS
-                OUTPUTS = pathlib.Path(self.param_lookup['output_directoty'].valueAsText)
+                OUTPUTS = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
     
     def create_groundings_shapefile(self) -> str:
         """Download and convert ORR Incidents CSV file to shapefile"""
