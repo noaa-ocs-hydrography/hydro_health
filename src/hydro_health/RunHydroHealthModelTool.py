@@ -40,7 +40,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         param_lookup = self.setup_param_lookup(parameters)
 
         # TODO how to add grid tiling to entire process?
-        tiles = tools.get_state_tiles(param_lookup)
+        tiles = tools.get_ecoregion_tiles(param_lookup)
         tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
 
         # reefs = CreateReefsLayerEngine(param_lookup)
@@ -65,36 +65,55 @@ class RunHydroHealthModelTool(HHLayerTool):
 
         params = super().get_params()
 
-        coastal_states = arcpy.Parameter(
-            displayName="Pick coastal state(s) to run model",
-            name="coastal_states",
+        # coastal_states = arcpy.Parameter(
+        #     displayName="Pick coastal state(s) to run model",
+        #     name="coastal_states",
+        #     datatype="GPString",
+        #     parameterType="Required",
+        #     direction="Input",
+        #     multiValue=True
+        # )
+        # coastal_states.filter.type = "ValueList"
+        # coastal_states.filter.list = [
+        #         "California",
+        #         "Connecticut",
+        #         "Delaware",
+        #         "Florida",
+        #         "Georgia",
+        #         "Louisiana",
+        #         "Maine",
+        #         "Maryland",
+        #         "Massachusetts",
+        #         "New Hampshire",
+        #         "New Jersey",
+        #         "New York",
+        #         "North Carolina",
+        #         "Oregon",
+        #         "Rhode Island",
+        #         "South Carolina",
+        #         "Virginia",
+        #         "Washington"
+        # ]
+        # params.append(coastal_states)
+
+        eco_regions = arcpy.Parameter(
+            displayName="Pick eco region(s) to run model",
+            name="eco_regions",
             datatype="GPString",
             parameterType="Required",
             direction="Input",
             multiValue=True
         )
-        coastal_states.filter.type = "ValueList"
-        coastal_states.filter.list = [
-                "California",
-                "Connecticut",
-                "Delaware",
-                "Florida",
-                "Georgia",
-                "Louisiana",
-                "Maine",
-                "Maryland",
-                "Massachusetts",
-                "New Hampshire",
-                "New Jersey",
-                "New York",
-                "North Carolina",
-                "Oregon",
-                "Rhode Island",
-                "South Carolina",
-                "Virginia",
-                "Washington"
+        eco_regions.filter.type = "ValueList"
+        eco_regions.filter.list = [
+            'ER_1-Texas',
+            'ER_2-Louisiana',
+            'ER_3-Florida-West',
+            'ER_4-Florida-East',
+            'ER_5-Mid-Atlantic',
+            'ER_6-Upper-Atlantic'
         ]
-        params.append(coastal_states)
+        params.append(eco_regions)
 
         slider_id = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
         slider_range = [1, 10]
@@ -157,7 +176,8 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Build key/value lookup for parameters"""
 
         param_names = super().get_param_names()
-        param_names.append('coastal_states')
+        # param_names.append('coastal_states')
+        param_names.append('eco_regions')
 
         lookup = {}
         for name, param in zip(param_names, params):
