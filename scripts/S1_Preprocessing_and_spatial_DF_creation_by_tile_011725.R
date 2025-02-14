@@ -121,99 +121,86 @@ print("All TIFF files processed and saved with the same naming convention.")
 ## 2. Standardize all rasters (PREDICTION Extent first as its larger)----
 #makes all same extent, for processing into spatial points dataframe and removes all land based elevation values > 0 as well
 
-#### NOTE:------ It is critical that BOTH the prediction and training datasets must have the same values of X, Y and FID within each, ---###
-# although they are different extents, the smaller training data must be a direct subset of the prediction data
-# for variables they have in common, even if the datasets vary between the two final datasets, we will divide the pertiant 
-#columns afterward.
 
-# Step 1: Load the mask and prepare spatial points dataframe
-setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model") 
-mask <- raster("prediction.mask.tif")
-crs_mask <- crs(mask)  # CRS of the mask for projection checks
 
-# Convert mask to a dataframe with precision spatial points
-mask_df <- as.data.frame(rasterToPoints(mask))  # Includes X (Easting), Y (Northing), and values
-mask_coords <- mask_df[, c("x", "y")]  # Extract X, Y coordinates
+# Set WD on N drive 
+setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model")
+mask <- raster("prediction.mask.UTM17_8m.tif")  # Load mask
+crs_mask <- crs(mask)  # Get CRS of the mask
+# plot(mask)
 
-# Step 2: Load the list of rasters to be processed
-setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw")
-f250m <- list.files(getwd(), pattern = "\\.tif$", full.names = TRUE)
-ras250m <- lapply(f250m, raster)  # Load all .tif files as raster objects
-
-# Step 3: Ensure output directory exists
+# Get raster list 
+input_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw"
 output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed"
 if (!dir.exists(output_dir)) dir.create(output_dir)
 
-# Step 4: First Loop - Ensure CRS consistency
-for (i in 1:length(ras250m)) {
-  ras <- ras250m[[i]]
-  source_name <- tools::file_path_sans_ext(basename(f250m[i]))
+f8m <- list.files(input_dir, pattern = "\\.tif$", full.names = TRUE)
+
+# Progress Bar Setup
+total_rasters <- length(f8m)
+pboptions(type = "txt")  # Set progress bar type
+start_time <- Sys.time()  # Start timer
+
+# Process each raster individually
+# Processing function
+process_raster <- function(i) {
+  file <- f8m[i]
+  source_name <- file_path_sans_ext(basename(file))
+  cat(sprintf("\nProcessing [%d/%d]: %s\n", i, total_rasters, source_name))
   
-  # Ensure CRS matches the mask
-  if (!compareCRS(ras, mask)) {
-    ras <- projectRaster(ras, crs = crs_mask)  # Reproject to match mask CRS
-  }
-  
-  # Replace in list
-  ras250m[[i]] <- ras
-  cat("CRS processed for:", source_name, "\n")
+  tryCatch({
+    # Load raster
+    ras <- raster(file)
+    
+    # Ensure CRS matches the mask
+    if (!compareCRS(ras, mask)) {
+      ras <- projectRaster(ras, crs = crs_mask, method = "bilinear")
+    }
+    
+    # Align extent properly (this ensures snapping to the mask)
+    ras <- resample(ras, mask, method = "bilinear")
+    
+    # Masking step
+    temp_ras <- mask(ras, mask)
+    
+    # Set values > 0 to NA for "_bathy" rasters
+    if (grepl("_bathy", source_name)) {
+      temp_ras[temp_ras > 0] <- NA
+    }
+    
+    # Save output
+    output_name <- file.path(output_dir, paste0(source_name, ".tif"))
+    writeRaster(temp_ras, output_name, overwrite = TRUE)
+    
+    # Memory cleanup
+    rm(ras, temp_ras)
+    gc()
+    
+    # Estimate and display remaining time
+    elapsed_time <- difftime(Sys.time(), start_time, units = "mins")
+    avg_time <- as.numeric(elapsed_time) / i
+    remaining_time <- avg_time * (total_rasters - i)
+    cat(sprintf("completed [%d/%d]: %s (Estimated Time Left: ~%.1f min)\n",
+                i, total_rasters, source_name, remaining_time))
+    
+  }, error = function(e) {
+    cat(sprintf("ERROR: Skipping %s due to error: %s\n", source_name, e$message))
+  })
 }
 
-# Step 5: Second Loop - Adjust extents to match mask
-for (i in 1:length(ras250m)) {
-  ras <- ras250m[[i]]
-  source_name <- tools::file_path_sans_ext(basename(f250m[i]))
-  
-  # Extend raster if extent is smaller than the mask
-  if (!all(extent(ras) == extent(mask))) {
-    # Crop or extend based on relative extents
-    ras <- crop(ras, mask)  # Crop to mask extent
-    ras <- extend(ras, mask, value = NA)  # Extend to match mask extent
-  }
-  
-  # Resample to 5m resolution if needed
-  if (xres(ras) != 5 || yres(ras) != 5) {
-    ras <- resample(ras, mask, method = "bilinear")  # Resample to match mask resolution
-  }
-  
-  # # Save intermediate raster for debugging (optional)
-  # temp_file <- file.path(output_dir, paste0(source_name, "_extent.tif"))
-  # writeRaster(ras, filename = temp_file, overwrite = TRUE)
-  
-  # Replace in list
-  ras250m[[i]] <- ras
-  cat("Extent adjusted for:", source_name, "\n")
-}
+# Run sequentially to avoid memory overload
+pblapply(seq_along(f8m), process_raster, cl = 1)
 
-# Step 6: Third Loop - Mask combination and final processing
-for (i in 1:length(ras250m)) {
-  ras <- ras250m[[i]]
-  source_name <- tools::file_path_sans_ext(basename(f250m[i]))
-  
-  # Combine mask spatial points with raster values for precise cropping/extending
-  temp_df <- cbind(mask_coords, value = extract(ras, mask_coords))  # Bind X, Y, and raster values
-  temp_df[is.na(temp_df)] <- NA  # Ensure consistency in NA handling
-  temp_ras <- rasterFromXYZ(temp_df, crs = crs_mask)  # Convert back to raster
-  
-  # Set values > 0 to NA for "_bathy" rasters
-  if (grepl("_bathy", source_name)) {
-    temp_ras[temp_ras > 0] <- NA
-  }
-  
-  # Save the final raster
-  output_name <- file.path(output_dir, paste0(source_name, ".tif"))
-  writeRaster(temp_ras, filename = output_name, overwrite = TRUE)
-  
-  cat("Processed and saved:", source_name, "\n")
-}
+
+# Final time summary
+total_time <- difftime(Sys.time(), start_time, units = "mins")
+cat(sprintf("\n All rasters processed in %.1f minutes! \n", total_time))
+
 
 ### Check if the rasters achieved the same extent###
-# Get the list of raster files
 raster_files <- list.files("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed", pattern = "\\.tif$", full.names = TRUE)
-
 # Create a list of rasters
 raster_list <- lapply(raster_files, raster)
-
 # Function to check if all rasters have the same extents
 check_rasters_same_extent <- function(raster_list) {
   ext <- extent(raster_list[[1]])
@@ -225,7 +212,6 @@ check_rasters_same_extent <- function(raster_list) {
   }
   return(TRUE)
 }
-
 # Check if all rasters have the same extents
 if (check_rasters_same_extent(raster_list)) {
   print("All rasters have the same extents.")
@@ -233,106 +219,87 @@ if (check_rasters_same_extent(raster_list)) {
 }
 
 
-
 ## 2 Standardize all rasters (TRAINING Extent - sub sample of prediction extent)----
-
 #- THIS IS A DIRECT SUBSET OF THE PREDICTION AREA - clipped using the training mask. 
-# Step 1: Load the mask and prepare spatial points dataframe
-setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model") 
-mask <- raster("training.mask.tif")
-plot(mask)
-crs_mask <- crs(mask)  # CRS of the mask for projection checks
 
-# Convert mask to a dataframe with precision spatial points
-mask_df <- as.data.frame(rasterToPoints(mask))  # Includes X (Easting), Y (Northing), and values
-mask_coords <- mask_df[, c("x", "y")]  # Extract X, Y coordinates
+# Set working directory and load the training mask
+setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model")
+mask <- raster("training.mask.UTM17_8m.tif")  # Ensure this is a 1/0 mask
+crs_mask <- crs(mask)  # Extract CRS from the mask
+plot(mask) # visualize that this is binary 
 
-# Step 2: Load the list of rasters to be processed and Retain only pertinent data
-setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed")
-f250m <- list.files(getwd(), pattern = "\\.tif$", full.names = TRUE)
-print(f250m)
-# Create a new list that excludes files starting with "blue_topo" 
-filtered_files <- f250m[!grepl("^blue_topo", basename(f250m))] # === we dont need the wider prediction blue topo data 
-f250m <- filtered_files
-# Print the filtered list of files print(filtered_files)
-ras250m <- lapply(f250m, raster)  # Load all .tif files as raster objects
-
-# Step 3: Ensure output directory exists
+# Set input and output directories
+input_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed"
 output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed"
 if (!dir.exists(output_dir)) dir.create(output_dir)
 
-# Step 4: First Loop - Ensure CRS consistency
-Sys.time() # print to check processing time
-for (i in 1:length(ras250m)) {
-  ras <- ras250m[[i]]
-  source_name <- tools::file_path_sans_ext(basename(f250m[i]))
+f8m <- list.files(input_dir, pattern = "\\.tif$", full.names = TRUE)
+
+# Progress Bar Setup
+total_rasters <- length(f8m)
+pboptions(type = "txt")  # Set progress bar type
+start_time <- Sys.time()  # Start timer
+
+# Process each raster individually
+# Processing function
+process_raster <- function(i) {
+  file <- f8m[i]
+  source_name <- file_path_sans_ext(basename(file))
+  cat(sprintf("\nProcessing [%d/%d]: %s\n", i, total_rasters, source_name))
   
-  # Ensure CRS matches the mask
-  if (!compareCRS(ras, mask)) {
-    ras <- projectRaster(ras, crs = crs_mask)  # Reproject to match mask CRS
-  }
-  
-  # Replace in list
-  ras250m[[i]] <- ras
-  cat("CRS processed for:", source_name, "\n")
+  tryCatch({
+    # Load raster
+    ras <- raster(file)
+    
+    # Ensure CRS matches the mask
+    if (!compareCRS(ras, mask)) {
+      ras <- projectRaster(ras, crs = crs_mask, method = "bilinear")
+    }
+    
+    # Align extent properly (this ensures snapping to the mask)
+    ras <- resample(ras, mask, method = "bilinear")
+    
+    # Masking step
+    temp_ras <- mask(ras, mask)
+    
+    # Set values > 0 to NA for "_bathy" rasters
+    if (grepl("_bathy", source_name)) {
+      temp_ras[temp_ras > 0] <- NA
+    }
+    
+    # Save output
+    output_name <- file.path(output_dir, paste0(source_name, ".tif"))
+    writeRaster(temp_ras, output_name, overwrite = TRUE)
+    
+    # Memory cleanup
+    rm(ras, temp_ras)
+    gc()
+    
+    # Estimate and display remaining time
+    elapsed_time <- difftime(Sys.time(), start_time, units = "mins")
+    avg_time <- as.numeric(elapsed_time) / i
+    remaining_time <- avg_time * (total_rasters - i)
+    cat(sprintf("completed [%d/%d]: %s (Estimated Time Left: ~%.1f min)\n",
+                i, total_rasters, source_name, remaining_time))
+    
+  }, error = function(e) {
+    cat(sprintf("ERROR: Skipping %s due to error: %s\n", source_name, e$message))
+  })
 }
 
-# Step 5: Second Loop - Adjust extents to match mask
-for (i in 1:length(ras250m)) {
-  ras <- ras250m[[i]]
-  source_name <- tools::file_path_sans_ext(basename(f250m[i]))
-  
-  # Extend raster if extent is smaller than the mask
-  if (!all(extent(ras) == extent(mask))) {
-    # Crop or extend based on relative extents
-    ras <- crop(ras, mask)  # Crop to mask extent
-    ras <- extend(ras, mask, value = NA)  # Extend to match mask extent
-  }
-  
-  # Resample to 5m resolution if needed
-  if (xres(ras) != 5 || yres(ras) != 5) {
-    ras <- resample(ras, mask, method = "bilinear")  # Resample to match mask resolution
-  }
-  
-  # # Save intermediate raster for debugging (optional)
-  # temp_file <- file.path(output_dir, paste0(source_name, "_extent.tif"))
-  # writeRaster(ras, filename = temp_file, overwrite = TRUE)
-  
-  # Replace in list
-  ras250m[[i]] <- ras
-  cat("Extent adjusted for:", source_name, "\n")
-}
+# Run sequentially to avoid memory overload
+pblapply(seq_along(f8m), process_raster, cl = 1)
 
-# Step 6: Third Loop - Mask combination and final processing
-for (i in 1:length(ras250m)) {
-  ras <- ras250m[[i]]
-  source_name <- tools::file_path_sans_ext(basename(f250m[i]))
-  
-  # Combine mask spatial points with raster values for precise cropping/extending
-  temp_df <- cbind(mask_coords, value = extract(ras, mask_coords))  # Bind X, Y, and raster values
-  temp_df[is.na(temp_df)] <- NA  # Ensure consistency in NA handling
-  temp_ras <- rasterFromXYZ(temp_df, crs = crs_mask)  # Convert back to raster
-  
-  # Set values > 0 to NA for "_bathy" rasters
-  if (grepl("_bathy", source_name)) {
-    temp_ras[temp_ras > 0] <- NA
-  }
-  
-  # Save the final raster
-  output_name <- file.path(output_dir, paste0(source_name, ".tif"))
-  writeRaster(temp_ras, filename = output_name, overwrite = TRUE)
-  
-  cat("Processed and saved:", source_name, "\n")
-  Sys.time()
-}
+# Final time summary
+total_time <- difftime(Sys.time(), start_time, units = "mins")
+cat(sprintf("\n All rasters processed in %.1f minutes! \n", total_time))
+
 
 ### Check if the rasters achieved the same extent###
 # Get the list of raster files
 raster_files <- list.files("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed", pattern = "\\.tif$", full.names = TRUE)
-
 # Create a list of rasters
 raster_list <- lapply(raster_files, raster)
-
 # Function to check if all rasters have the same extents
 check_rasters_same_extent <- function(raster_list) {
   ext <- extent(raster_list[[1]])
@@ -344,17 +311,17 @@ check_rasters_same_extent <- function(raster_list) {
   }
   return(TRUE)
 }
-
 # Check if all rasters have the same extents
 if (check_rasters_same_extent(raster_list)) {
   print("All rasters have the same extents.")
-} else {
-  print("Rasters do not have the same extents.")
+} else { print("Rasters do not have the same extents.")
 }
 
 
-
 #3. Create a spatial DF from TRAINING extent mask----
+#### NOTE:------ It is critical that BOTH the prediction and training datasets must have the same values of X, Y and FID within each, ---###
+# although they are different extents, the smaller training data must be a direct subset of the prediction data
+# for variables they have in common, even if the datasets vary between the two final datasets, we will divide the pertiant columns afterward.
 library(dplyr)
 training.mask <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.tif") # for reference CRS of training grid
 # Convert raster to a spatial points dataframe
@@ -447,6 +414,9 @@ prepare_subgrids <- function(grid_gpkg, mask.df, mask, output_dir) {
 } # universal grid creation for any spatial DF and mask extent
 
 # Function to process raster data into a chunk size spatial datasets per tile folder
+# the process rasters function creates a sub sample of all the raster data (model variables) from which the model training 
+# code will pull from to run the model, so in each tile folder it will create a .rds file for all data in that 
+#tile extent e.g., Tile_BH4S656W_4_training_clipped_data.rds
 process_rasters <- function(sub_grid_gpkg, raster_dir, output_dir, data_type) {
   # Ensure sub_grid_gpkg is a valid path
   if (is.character(sub_grid_gpkg)) {
