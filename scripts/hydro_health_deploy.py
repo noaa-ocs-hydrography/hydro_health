@@ -38,8 +38,8 @@ def deploy_hydro_health_to_working():
     # src/hydro_health 
     shutil.copytree(HYDRO_HEALTH / 'engines', 
                     CODE_FOLDER / 'src' / 'hydro_health' / 'engines', 
-                    dirs_exist_ok=True, 
-                    ignore=shutil.ignore_patterns('run*.py'))
+                    dirs_exist_ok=True,)
+                    # ignore=shutil.ignore_patterns('run*.py'))
     for tool in HYDRO_HEALTH.glob('*Tool*.py'):
         shutil.copy2(tool, CODE_FOLDER / 'src' / 'hydro_health' / tool.name)
 
