@@ -60,7 +60,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     eco_regions = [region.split('-')[0] for region in eco_regions]
     selected_regions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
     tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=[get_config_item('SHARED', 'TILENAME')], mask=selected_regions)
-    tiles.to_file(OUTPUTS / 'selected_tiles.shp')  
+    # tiles.to_file(OUTPUTS / 'selected_tiles.shp')  
     return tiles
 
 
