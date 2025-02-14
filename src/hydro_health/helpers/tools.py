@@ -73,8 +73,6 @@ def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
         # call the class method with the tile argument
         # log success of each call
         # notify the main caller of completion?!
-
-    output_folder = OUTPUTS if not outputs else outputs
     processor = TileProcessor()
-    processor.process(tiles, output_folder)
+    processor.process(tiles, outputs)
     

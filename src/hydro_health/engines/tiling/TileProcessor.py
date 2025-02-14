@@ -22,9 +22,13 @@ class TileProcessor:
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            print(f'downloading: {obj_summary.key}')
             output_tile_path = output_pathlib / obj_summary.key
-            tile_folder = output_tile_path.parents[0] 
+            tile_folder = output_tile_path.parents[0]
+            if os.path.exists(output_tile_path):
+                self.write_message(f'Skipping: {output_tile_path.name}', output_folder)
+                continue
+            else:
+                self.write_message(f'Downloading: {output_tile_path.name}', output_folder)
             tile_folder.mkdir(parents=True, exist_ok=True)   
             nbs_bucket.download_file(obj_summary.key, output_tile_path)
         
@@ -48,7 +52,11 @@ class TileProcessor:
 
         return mp.Pool(processes=processes)
     
-    def process_tile(self, output_folder, index: int, row: gpd.GeoSeries):
+    def write_message(self, message, output_folder):
+        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
+            writer.write(message + '\n')
+    
+    def process_tile(self, output_folder: str, index: int, row: gpd.GeoSeries):
         """Handle processing of a single tile"""
 
         tile_id = row[0]
@@ -59,11 +67,11 @@ class TileProcessor:
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         with self.get_pool() as process_pool:
-            results = [process_pool.apply_async(self.process_tile, [outputs, index, row]) for index, row in tile_gdf.head(5).iterrows()]
+            results = [process_pool.apply_async(self.process_tile, [outputs, index, row]) for index, row in tile_gdf.iterrows()]
             for result in results:
                 result.get()
         
         # log all tiles using tile_gdf
-        tiles = list(tile_gdf.head(5)['tile'])
-        record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': 5, 'tile_list': tiles}
+        tiles = list(tile_gdf['tile'])
+        record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}
         hibase_logging.send_record(record, table='bluetopo_test')  # TODO update to prod hibase

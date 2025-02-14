@@ -8,3 +8,4 @@ inputs/*
 !inputs/*wgs84*
 !inputs/config.yaml
 !inputs/HH_Data.gpkg
+!inputs/Master_grids.gpkg
