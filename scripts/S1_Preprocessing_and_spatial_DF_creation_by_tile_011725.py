@@ -7,11 +7,26 @@ import rasterio
 import numpy as np
 import geopandas as gpd
 from osgeo import gdal
-import multiprocessing
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
 from rasterio.features import shapes
 from shapely.geometry import shape
-
+import pyreadr # only for reading the .rds files, I need to save them as something different
+import joblib
+import matplotlib.pyplot as plt
+import seaborn as sns
+import dask.dataframe as dd
+from dask import delayed, compute
+from dask.distributed import Client, progress
+import cProfile
+import pstats
+import mlflow
+import mlflow.sklearn
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import r2_score, root_mean_squared_error
+from sklearn.inspection import partial_dependence
+import os
+import gc
+from dask import delayed, compute
 
 
 ## 1. is preprocess all lidar data
@@ -36,7 +51,8 @@ training_sub_grids = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_mo
 prediction_sub_grids = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles_testing/intersecting_sub_grids.gpkg"
 
 
-target_crs = 'EPSG:4326'  #WGS84
+target_crs = 'EPSG:4326'  #WGS84, # TODO this needs to be changed to take crs from the grid, will be a UTM zone
+# that will changed based on location
 target_res = 8  # 8m resolution
 
 # Create output "processed" folders if they don't exist
@@ -313,17 +329,185 @@ def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
         # TODO need to think how we want to access the data for each tile
         combined_data.to_csv(clipped_data_path, index=False)
 
+
+######## part 2 Model training, I'm puting everything in this script bc overlapping files
+# Initialize Dask Client for parallel processing
+
+# Start MLflow Run
+mlflow.set_experiment("sediment_change_model")
+
+year_pairs = ["2004_2006", "2006_2010", "2010_2015", "2015_2022"]
+# 1. Model training over all subgrids
+
+def process_tiles(tiles_df, output_dir_train, year_pairs):
+    print("Starting processing of all tiles...")
+
+    # 1 Static predictors (used across all year pairs)
+    static_predictors = ["prim_sed_layer", "grain_size_layer", "survey_end_date"]
+    results_summary = []
+
+    for _, tile in tiles_df.iterrows():
+        tile_id = tile["tile"]
+        tile_dir = os.path.join(output_dir_train, f'{tile_id}')
+        # os.makedirs(tile_dir, exist_ok=True)
+
+        print(f"Processing tile: {tile_id}")
+
+        # 2 Load corresponding training data
+        # training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.pkl")
+        training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.rds")
+        if not os.path.exists(training_data_path):
+            print(f"  Training data missing for tile: {tile_id}")
+            continue
+
+        # training_data = pd.read_pickle(training_data_path)
+        result = pyreadr.read_r(training_data_path)  # Returns a dictionary, only for .rds file type
+        training_data = next(iter(result.values()))  # Extracts the dataframe, only for .rds file type
+
+        # 3. Parse year pair
+        for pair in year_pairs:
+            start_year, end_year = map(int, pair.split("_"))
+
+            # 4 Select dynamic predictors matching the year pair
+            dynamic_predictors = [
+                f"bathy_{start_year}", f"bathy_{end_year}",
+                f"slope_{start_year}", f"slope_{end_year}",
+                f"hurr_count_{pair}", f"hurr_strength_{pair}",
+                f"tsm_{pair}"
+            ]
+
+            # 5 Combine dynamic and static predictors
+            predictors = list(set(dynamic_predictors + static_predictors) & set(training_data.columns))
+            response_var = f"b.change.{pair}"
+
+            # 6 Filter and select data for the year pair
+            subgrid_data = training_data.dropna(subset=[f"bathy_{start_year}", f"bathy_{end_year}"])[predictors + [response_var]].dropna()
+
+            if subgrid_data.empty:
+                print(f"  No valid data for year pair: {pair}")
+                continue
+
+            # 7 Train Random Forest
+            X = subgrid_data[predictors]
+            y = subgrid_data[response_var]
+            
+            with mlflow.start_run():
+                rf_model = RandomForestRegressor(n_estimators=500, max_features="sqrt", random_state=42)
+                rf_model.fit(X, y)
+
+                # 8 Save model, #TODO is pickle the right way to save?
+                model_path = os.path.join(tile_dir, f"model_{pair}.pkl")
+                joblib.dump(rf_model, model_path)
+                print(f"  Model saved for year pair: {pair}")
+                mlflow.log_param("tile_id", tile_id)
+                mlflow.log_param("year_pair", pair)
+                mlflow.sklearn.log_model(rf_model, f"random_forest_{pair}")
+
+                predictions = rf_model.predict(X)
+                r2 = r2_score(y, predictions)
+                mse = root_mean_squared_error(y, predictions)
+
+                mlflow.log_metric("R2", r2)
+                mlflow.log_metric("ResidualError", mse)
+                
+                importance_df = pd.DataFrame({
+                    "Variable": predictors,
+                    "Importance": rf_model.feature_importances_
+                }).sort_values(by="Importance", ascending=False)
+                
+                # 10 Compute Performance Metrics 
+                results_summary.append({
+                    "Tile": tile_id,
+                    "YearPair": pair,
+                    "R2": r2,
+                    "ResidualError": mse,
+                    "Importance": list(importance_df["Importance"]),
+                    "Variable": list(importance_df["Variable"])
+                })
+
+                # 9 Generate Partial Dependence Plots and Initialize PDP data
+                # Save PDP data
+                # Plot PDP
+                generate_pdp(rf_model, X, tile_dir, pair)
+    
+    results_df = pd.DataFrame(results_summary)
+    results_csv_path = os.path.join(output_dir_train, "model_performance_summary.csv")
+    results_df.to_csv(results_csv_path, index=False)
+    print("Processing complete and ssummary saved with mlflow.")
+
+def generate_pdp(model, X, tile_dir, pair):
+    pdp_data = {}
+    
+    for feature in X.columns:
+        pdp_values = partial_dependence(model, X, [feature])
+        pdp_data[feature] = pd.DataFrame({
+            "Predictor": feature,
+            "Value": pdp_values["values"][0],
+            "Prediction": pdp_values["average"][0]
+        })
+    
+    pdp_df = pd.concat(pdp_data.values(), ignore_index=True)
+    pdp_path = os.path.join(tile_dir, f"pdp_{pair}.pkl")
+    joblib.dump(pdp_df, pdp_path)
+    print(f"  PDP saved for year pair: {pair}")
+    
+    plt.figure(figsize=(12, 8))
+    for feature, df in pdp_data.items():
+        sns.lineplot(x=df["Value"], y=df["Prediction"], label=feature)
+    
+    plt.xlabel("Feature Value")
+    plt.ylabel("Predicted Bathy Change (m)")
+    plt.legend()
+    plt.title(f"Partial Dependence Plot for {pair}")
+    plt.savefig(os.path.join(tile_dir, f"pdp_{pair}.jpeg"), dpi=300)
+    plt.close()
+    print(f"  PDP plot saved for year pair: {pair}")
+
+
 # ## 6. Run model processing
-if __name__ == '__main__':
+# if __name__ == '__main__':
     # create_survey_end_date_tiffs() # part 1
 
     # standardize_rasters() # part 2, #TODO fix mask, and is there a faster process to use or cloud solution?
 
-    training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
-    prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
+    # training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
+    # prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
 
-    prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=training_mask_df, output_dir=output_dir_train) # part 4a
-    prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # part 4b
+    # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=training_mask_df, output_dir=output_dir_train) # part 4a
+    # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # part 4b
 
     # clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training") # part 5a
     # clip_rasters_by_tile(sub_grid_gpkg=prediction_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction") # part 5a
+
+# model_path = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/Tile_BH4S2577_4/model_2015_2022.pkl"
+# mod1 = joblib.load(model_path)
+
+def clean_tile_folders(root_folder):
+    for dirpath, dirnames, filenames in os.walk(root_folder):
+        if 'Tile' in os.path.basename(dirpath):  # Check if folder name contains 'Tile'
+            for filename in filenames:
+                if 'Tile' not in filename:  # Delete files that don't have 'Tile' in their name
+                    file_path = os.path.join(dirpath, filename)
+                    os.remove(file_path)
+                    print(f"Deleted: {file_path}")
+
+tiles_df = gpd.read_file(r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles\intersecting_sub_grids.gpkg")
+output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles"
+
+if __name__ == "__main__":
+    clean_tile_folders(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles')
+
+    client = Client(n_workers=1, threads_per_worker=2, memory_limit="16GB")
+    client.run(gc.collect)
+    print(client)
+
+    with cProfile.Profile() as pr:
+        delayed_task = delayed(process_tiles)(tiles_df, output_dir_train, year_pairs)  
+        result = compute(delayed_task)  # Dask actually executes the function
+    
+    stats = pstats.Stats(pr)
+    stats.strip_dirs().sort_stats("cumulative").print_stats(10)
+
+    print("Dask Task Progress:")
+    progress(result)
+    print("Dask Dashboard is running at http://localhost:8787")
