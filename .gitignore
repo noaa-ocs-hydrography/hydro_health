@@ -6,6 +6,6 @@ inputs/*
 
 # Allow
 !inputs/*wgs84*
-!inputs/config.yaml
+!inputs/lookups/
 !inputs/HH_Data.gpkg
 !inputs/Master_grids.gpkg
