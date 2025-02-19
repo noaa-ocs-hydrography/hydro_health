@@ -18,7 +18,6 @@ def create_tile_ids(blue_topo_tile, sub_grid_within, model_sub_grid):
             tile_id = 3
         elif bt_bl == bl:
             tile_id = 4
-        # sub_grid_row['Tile_ID'] = f"{blue_topo_tile['Tilename']}_{tile_id}"
         model_sub_grid.at[index, 'Tile_ID'] = f"{blue_topo_tile['Tilename']}_{tile_id}"
         
 
@@ -32,7 +31,6 @@ def process():
     print(model_sub_grid.head()['Tile_ID'])
     
     model_sub_grid.to_file(MASTER_GRIDS, layer='Model_sub_Grid_Tiles', driver='GPKG')
-    # TODO this fails to ovewrite existing layer
 
 
 if __name__ == "__main__":
