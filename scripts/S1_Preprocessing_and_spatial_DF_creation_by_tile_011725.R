@@ -318,105 +318,168 @@ if (check_rasters_same_extent(raster_list)) {
 }
 
 
-#3. Create a spatial DF from TRAINING extent mask----
-#### NOTE:------ It is critical that BOTH the prediction and training datasets must have the same values of X, Y and FID within each, ---###
-# although they are different extents, the smaller training data must be a direct subset of the prediction data
-# for variables they have in common, even if the datasets vary between the two final datasets, we will divide the pertiant columns afterward.
-library(dplyr)
-training.mask <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.tif") # for reference CRS of training grid
+#3.1. Create a spatial DF from TRAINING extent mask (IN UTM COORDINATES)----
+training.mask.UTM <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.UTM17_8m.tif") # for reference CRS of training grid
 # Convert raster to a spatial points dataframe
-training.mask.spdf <- rasterToPoints(training.mask, spatial = TRUE)
+training.mask.spdf <- rasterToPoints(training.mask.UTM, spatial = TRUE)
 # Extract coordinates and bind with raster data
 training.mask.df <- data.frame(training.mask.spdf@data, X = training.mask.spdf@coords[, 1], Y = training.mask.spdf@coords[, 2])
 # Set unique FID and extract X & Y data from the raster stack
-training.mask.df$FID <- cellFromXY(training.mask, training.mask.df[, c("X", "Y")])
+training.mask.df$FID <- cellFromXY(training.mask.UTM, training.mask.df[, c("X", "Y")])
 training.mask.df <- training.mask.df[training.mask.df$training.mask == 1, ]
 # Save the filtered dataframe
-setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/data")
-saveRDS(training.mask.df, file = "training.mask.df.011425.Rds")
-training.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/data/training.mask.df.011425.Rds")
+setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data")
+saveRDS(training.mask.df, file = "training.mask.df.021425.Rds")
+training.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/training.mask.df.021425.Rds")
 
-#3. Create a spatial DF from PREDICTION extent mask----
-prediction.mask <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.tif")
+#3.2 Create another spatial DF from TRAINING extent mask (IN WGS84 COORDINATES for sub grid creation only)----
+training.mask.WGS84 <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.WGS84_8m.tif") # for reference CRS of training grid
+# Convert raster to a spatial points dataframe
+training.mask.spdf <- rasterToPoints(training.mask.WGS84, spatial = TRUE)
+# Extract coordinates and bind with raster data
+training.mask.df <- data.frame(training.mask.spdf@data, X = training.mask.spdf@coords[, 1], Y = training.mask.spdf@coords[, 2])
+# Set unique FID and extract X & Y data from the raster stack
+training.mask.df$FID <- cellFromXY(training.mask.WGS84, training.mask.df[, c("X", "Y")])
+training.mask.df.wgs84 <- training.mask.df[training.mask.df$training.mask == 1, ]
+# Save the filtered dataframe
+setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data")
+saveRDS(training.mask.df.wgs84, file = "training.mask.df.wgs84.021425.Rds")
+training.mask.df.wgs84 <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/training.mask.df.wgs84.021425.Rds")
+
+#3.3 Create a spatial DF from PREDICTION extent mask (IN UTM COORDINATES)----
+prediction.mask.UTM <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.UTM17_8m.tif")
+prediction.mask.spdf <- rasterToPoints(prediction.mask.UTM, spatial = T) # turns data into a large spatial points dataframe
+prediction.mask.spdf@coords # a command to see the x and y from the raster data
+# Extract the coordinates, for the spatial points df, and bind it with the env data from the raster stack,and save as a new dataframe
+prediction.mask.df <- data.frame(prediction.mask.spdf@data, X =prediction.mask.spdf@coords[,1],Y = prediction.mask.spdf@coords[,2])
+head(prediction.mask.df)
+#--SET UNIQUE FID, EXTRACT X & Y(row and column numbers) data from raster stack
+prediction.mask.df$FID <- cellFromXY(prediction.mask.UTM, prediction.mask.df[,c("X", "Y")])
+prediction.mask.df <- prediction.mask.df[prediction.mask.df$prediction.mask == 1, ]
+head(prediction.mask.df)
+setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data")
+saveRDS (prediction.mask.df, file = "prediction.mask.df.021425.Rds")
+prediction.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/data/prediction.mask.df.021425.Rds")
+
+#3.4 Create a spatial DF from PREDICTION extent mask (IN WGS84 COORDINATES for sub grid creation only)----
+prediction.mask.WGS84 <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.WGS84_8m.tif")
 prediction.mask.spdf <- rasterToPoints(prediction.mask, spatial = T) # turns data into a large spatial points dataframe
 prediction.mask.spdf@coords # a command to see the x and y from the raster data
 # Extract the coordinates, for the spatial points df, and bind it with the env data from the raster stack,and save as a new dataframe
 prediction.mask.df <- data.frame(prediction.mask.spdf@data, X =prediction.mask.spdf@coords[,1],Y = prediction.mask.spdf@coords[,2])
 head(prediction.mask.df)
 #--SET UNIQUE FID, EXTRACT X & Y(row and column numbers) data from raster stack
-prediction.mask.df$FID <- cellFromXY(prediction.mask, prediction.mask.df[,c("X", "Y")])
-prediction.mask.df <- prediction.mask.df[prediction.mask.df$prediction.mask == 1, ]
-head(prediction.mask.df)
-setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/data")
-saveRDS (prediction.mask.df, file = "prediction.mask.df.011425.Rds")
-prediction.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/data/prediction.mask.df.011425.Rds")
+prediction.mask.df$FID <- cellFromXY(prediction.mask.WGS84, prediction.mask.df[,c("X", "Y")])
+prediction.mask.df.wgs84 <- prediction.mask.df[prediction.mask.df$prediction.mask == 1, ]
+head(prediction.mask.df.wgs84)
+setwd("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data")
+saveRDS (prediction.mask.df.wgs84, file = "prediction.mask.df.wgs84.021425.Rds")
+prediction.mask.df.wgs84 <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/data/prediction.mask.df.wgs84.021425.Rds")
 
-#4. Functions to split a tile into sub-grids and create tile sized spatial dataframes in each tile folder and return extents variables----
+#4.  # Processing Functions----
+# Functions to prepare and save a new sub-grid gpkg (master blue topo grid tile divided by 4, same tile I.Ds with sub identifier _1,_2_3,_4 in clockwise order)
+# FUNCTION: Split a single tile into 4 equal sub-grids, starting top left in clockwise order
 split_tile <- function(tile) {
+  # Get tile bounding box
   bbox <- st_bbox(tile)
-  mid_x <- (bbox["xmin"] + bbox["xmax"]) / 2
-  mid_y <- (bbox["ymin"] + bbox["ymax"]) / 2
   
-  # Define sub-grid polygons in clockwise order
+  # Compute sub-grid size (divide original size by 2)
+  sub_width <- (bbox["xmax"] - bbox["xmin"]) / 2
+  sub_height <- (bbox["ymax"] - bbox["ymin"]) / 2
+  
+  # Define 4 sub-grids
   sub_grids <- list(
-    st_polygon(list(matrix(c(bbox["xmin"], bbox["ymin"], mid_x, bbox["ymin"], 
-                             mid_x, mid_y, bbox["xmin"], mid_y, bbox["xmin"], bbox["ymin"]), ncol = 2, byrow = TRUE))),
-    st_polygon(list(matrix(c(mid_x, bbox["ymin"], bbox["xmax"], bbox["ymin"], 
-                             bbox["xmax"], mid_y, mid_x, mid_y, mid_x, bbox["ymin"]), ncol = 2, byrow = TRUE))),
-    st_polygon(list(matrix(c(mid_x, mid_y, bbox["xmax"], mid_y, 
-                             bbox["xmax"], bbox["ymax"], mid_x, bbox["ymax"], mid_x, mid_y), ncol = 2, byrow = TRUE))),
-    st_polygon(list(matrix(c(bbox["xmin"], mid_y, mid_x, mid_y, 
-                             mid_x, bbox["ymax"], bbox["xmin"], bbox["ymax"], bbox["xmin"], mid_y), ncol = 2, byrow = TRUE)))
+    st_polygon(list(matrix(c(
+      bbox["xmin"], bbox["ymin"],
+      bbox["xmin"] + sub_width, bbox["ymin"],
+      bbox["xmin"] + sub_width, bbox["ymin"] + sub_height,
+      bbox["xmin"], bbox["ymin"] + sub_height,
+      bbox["xmin"], bbox["ymin"]
+    ), ncol = 2, byrow = TRUE))),
+    
+    st_polygon(list(matrix(c(
+      bbox["xmin"] + sub_width, bbox["ymin"],
+      bbox["xmax"], bbox["ymin"],
+      bbox["xmax"], bbox["ymin"] + sub_height,
+      bbox["xmin"] + sub_width, bbox["ymin"] + sub_height,
+      bbox["xmin"] + sub_width, bbox["ymin"]
+    ), ncol = 2, byrow = TRUE))),
+    
+    st_polygon(list(matrix(c(
+      bbox["xmin"] + sub_width, bbox["ymin"] + sub_height,
+      bbox["xmax"], bbox["ymin"] + sub_height,
+      bbox["xmax"], bbox["ymax"],
+      bbox["xmin"] + sub_width, bbox["ymax"],
+      bbox["xmin"] + sub_width, bbox["ymin"] + sub_height
+    ), ncol = 2, byrow = TRUE))),
+    
+    st_polygon(list(matrix(c(
+      bbox["xmin"], bbox["ymin"] + sub_height,
+      bbox["xmin"] + sub_width, bbox["ymin"] + sub_height,
+      bbox["xmin"] + sub_width, bbox["ymax"],
+      bbox["xmin"], bbox["ymax"],
+      bbox["xmin"], bbox["ymin"] + sub_height
+    ), ncol = 2, byrow = TRUE)))
   )
   
-  # Combine extents with IDs into a DataFrame
-  sub_grid_ids <- paste0("Tile_", tile$tile, "_", 1:4)
-  sub_grid_extents <- lapply(sub_grids, st_bbox)
+  # Create sub-grid tile IDs
+  sub_grid_ids <- paste0(tile$tile, "_", 1:4)
   
-  data.frame(
-    tile_id = sub_grid_ids,
-    xmin = sapply(sub_grid_extents, `[[`, "xmin"),
-    ymin = sapply(sub_grid_extents, `[[`, "ymin"),
-    xmax = sapply(sub_grid_extents, `[[`, "xmax"),
-    ymax = sapply(sub_grid_extents, `[[`, "ymax"),
-    geometry = st_sfc(sub_grids, crs = st_crs(tile))
-  )
-}# defines the size and order of the sub grid - accompanying function to work inside the prepare_subgrids functions
+  # Preserve attributes
+  df <- data.frame(tile_id = sub_grid_ids, original_tile = tile$tile)
+  df_sf <- st_as_sf(df, geometry = st_sfc(sub_grids, crs = 4326))
+  
+  return(df_sf)
+}
 
-# Function to prepare and save a new sub-grid gpkg (master blue topo grid tile divided by 4, same tile I.Ds with sub identifier _1,_2_3,_4 in clockwise order)
-prepare_subgrids <- function(grid_gpkg, mask.df, mask, output_dir) {
+# FUNCTION: Prepare and save sub-grids
+prepare_subgrids <- function(grid_gpkg, mask.df, output_dir) {
   cat("Preparing grid tiles and sub-grids...\n")
   
-  # Read and transform the grid tiles to match the CRS of the mask
-  grid_tiles <- st_read(grid_gpkg) %>%
-    st_transform(st_crs(mask))
+  # Read the original grid (Already in WGS 84)
+  grid_tiles <- grid_gpkg
   
-  # Convert mask.df to an sf object
-  training_sf <- st_as_sf(mask.df, coords = c("X", "Y"), crs = st_crs(mask))
+  # Convert mask to sf object (Already in WGS 84)
+  mask_sf <- st_as_sf(mask.df, coords = c("X", "Y"), crs = 4326)
   
-  # Split grid tiles into sub-grids
+  #  Split ALL tiles into sub-grids
   sub_grids <- do.call(rbind, lapply(1:nrow(grid_tiles), function(i) split_tile(grid_tiles[i, ])))
   
-  # Convert sub_grids to an sf object
-  sub_grids_sf <- st_as_sf(sub_grids, coords = c("xmin", "ymin", "xmax", "ymax"), crs = st_crs(grid_tiles))
+  # Debugging: Check if sub-grids exist before filtering
+  cat("Total sub-grids generated:", nrow(sub_grids), "\n")
   
-  # Filter sub-grids that intersect with the mask points
-  intersecting_sub_grids <- st_filter(sub_grids_sf, st_union(training_sf))
+  #  Filter sub-grids that intersect with the mask
+  intersecting_sub_grids <- st_filter(sub_grids, st_union(mask_sf))
   
-  # Save intersecting sub-grids to a GeoPackage
-  st_write(intersecting_sub_grids, file.path(output_dir, "intersecting_sub_grids.gpkg"), delete_layer = TRUE)
+  # Save outputs
+  st_write(intersecting_sub_grids, file.path(output_dir, "intersecting_sub_grids_WGS84.gpkg"), delete_layer = TRUE, quiet = FALSE)
+  saveRDS(intersecting_sub_grids, file.path(output_dir, "grid_tile_extents_WGS84.rds"))
   
-  # Save the training sub-grid extents as RDS
-  saveRDS(intersecting_sub_grids, file.path(output_dir, "grid_tile_extents.rds"))
-  
-  cat("Sub-grids prepared:", nrow(intersecting_sub_grids), "\n")
+  cat("✅ Sub-grids successfully prepared:", nrow(intersecting_sub_grids), "\n")
   return(intersecting_sub_grids)
-} # universal grid creation for any spatial DF and mask extent
+}
+
+# Function to reproject sub grid and save new GPKG as UTM
+reproject_sub_grids <- function(input_gpkg, output_gpkg, target_crs = crs(training.mask.UTM)) {
+  cat("Reading:", input_gpkg, "\n")
+  
+  # Load the original sub-grid (WGS84)
+  sub_grids <- st_read(input_gpkg, quiet = TRUE)
+  
+  # 🚀 Reproject to UTM (same as the mask)
+  sub_grids_utm <- st_transform(sub_grids, target_crs)
+  
+  # 🚀 Save the new UTM version
+  cat("Saving:", output_gpkg, "\n")
+  st_write(sub_grids_utm, output_gpkg, delete_layer = TRUE, quiet = TRUE)
+  
+  cat("✅ Reprojection complete:", output_gpkg, "\n\n")
+}
 
 # Function to process raster data into a chunk size spatial datasets per tile folder
-# the process rasters function creates a sub sample of all the raster data (model variables) from which the model training 
-# code will pull from to run the model, so in each tile folder it will create a .rds file for all data in that 
-#tile extent e.g., Tile_BH4S656W_4_training_clipped_data.rds
+# the process rasters function creates a sub sample of all the raster data (model variables) from which the model training code will pull from to run the model, 
+# so in each tile folder it will create a .rds file for all data in that tile extent e.g., Tile_BH4S656W_4_training_clipped_data.rds
+
 process_rasters <- function(sub_grid_gpkg, raster_dir, output_dir, data_type) {
   # Ensure sub_grid_gpkg is a valid path
   if (is.character(sub_grid_gpkg)) {
@@ -434,7 +497,8 @@ process_rasters <- function(sub_grid_gpkg, raster_dir, output_dir, data_type) {
   for (i in seq_len(nrow(sub_grids))) {
     sub_grid <- sub_grids[i, ]
     tile_name <- sub_grid$tile_id  # Ensure sub-grid has a `tile_id` column
-    tile_extent <- st_bbox(sub_grid)  # Get spatial extent of the tile
+    tile_extent <- as(extent(st_bbox(sub_grid)), "SpatialPolygons")  # Convert extent to SpatialPolygons
+    crs(tile_extent) <- st_crs(sub_grids)$proj4string  # Assign CRS
     
     # Create sub-folder for the tile if it doesn't exist
     tile_dir <- file.path(output_dir, tile_name)
@@ -454,7 +518,14 @@ process_rasters <- function(sub_grid_gpkg, raster_dir, output_dir, data_type) {
     
     # Clip rasters to the tile extent and process
     clipped_data <- lapply(raster_files, function(r_file) {
-      r <- raster::raster(r_file)  # Load raster using `raster`
+      r <- raster::raster(r_file)  # Load raster
+      
+      # 🔍 **Check if raster and tile overlap before cropping**
+      if (is.null(raster::intersect(extent(r), tile_extent))) {
+        cat("  ⚠️ Skipping raster (no overlap):", basename(r_file), "\n")
+        return(NULL)  # Skip this raster
+      }
+      
       cropped_r <- raster::crop(r, tile_extent)  # Crop to tile extent
       
       # Extract raster values along with X and Y coordinates
@@ -465,42 +536,68 @@ process_rasters <- function(sub_grid_gpkg, raster_dir, output_dir, data_type) {
       return(raster_data)
     })
     
+    # Remove NULL elements (rasters that were skipped)
+    clipped_data <- Filter(Negate(is.null), clipped_data)
+    
     # Combine all rasters into a single data frame
-    combined_data <- Reduce(function(x, y) merge(x, y, by = c("X", "Y", "FID"), all = TRUE), clipped_data)
-    
-    # Create new b.change columns here (old code)
-    ## Create depth change columns between each pair of survey years as this will be our model response variable (what we want to predict)----
-    combined_data <- combined_data %>%
-      mutate(b.change.2004_2006 = `bathy_2006` - `bathy_2004`, # 2 years
-        b.change.2006_2010 = `bathy_2010` - `bathy_2006`, # 4 years
-        b.change.2010_2015 = `bathy_2015` - `bathy_2010`, # 5 years 
-        b.change.2015_2022 = `bathy_2022` - `bathy_2015`) # 7 years
-    
-    print(str(combined_data))  # Log structure to verify changes
-    
-    # Save the combined data as RDS
-    saveRDS(combined_data, file = clipped_data_path)
-    cat("Saved", data_type, "clipped data for tile:", tile_name, "\n")
+    if (length(clipped_data) > 0) {
+      combined_data <- Reduce(function(x, y) merge(x, y, by = c("X", "Y", "FID"), all = TRUE), clipped_data)
+      
+      # 🚀 **Remove specific columns based on `data_type`**
+      if (data_type == "training") {
+        combined_data <- combined_data %>% select(-starts_with("bt"))  # Remove "bt" columns
+        
+        # 🆕 **Create `b.change` columns**
+        combined_data <- combined_data %>%
+          mutate(
+            b.change.2004_2006 = bathy_2006 - bathy_2004, # 2 years
+            b.change.2006_2010 = bathy_2010 - bathy_2006, # 4 years
+            b.change.2010_2015 = bathy_2015 - bathy_2010, # 5 years 
+            b.change.2015_2022 = bathy_2022 - bathy_2015  # 7 years
+          )
+      } else if (data_type == "prediction") {
+        combined_data <- combined_data %>% select(-starts_with("bathy"), -starts_with("slope"), -starts_with("rugosity"))  # Remove specified columns
+      }
+      
+      # Save the combined data as RDS
+      saveRDS(combined_data, file = clipped_data_path)
+      cat("✅ Saved", data_type, "clipped data for tile:", tile_name, "\n")
+    } else {
+      cat("⚠️ No overlapping rasters for tile:", tile_name, "- Skipping saving.\n")
+    }
   }
-  cat("Finished processing all", data_type, "tiles in", output_dir, "\n")
+  
+  cat("✅ Finished processing all", data_type, "tiles in", output_dir, "\n")
 }
 
 
-# Define parameters
-grid_gpkg <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg" # from Blue topo
-training.mask <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.tif") # for reference CRS of training grid
-prediction.mask <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.tif")
+# 4. DEFINE FUNCTION PARAMETERS before running functions below- make sure the link points to the newest dataset----
+grid_gpkg <- st_read("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg") # from Blue topo
+#
+training_sub_grids_WGS84 <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/intersecting_sub_grids_WGS84.gpkg"
+prediction_sub_grids_WGS84 <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/intersecting_sub_grids_WGS84.gpkg"
+#
+training.mask <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.UTM17_8m.tif") # for reference CRS of training grid
+training.mask.wgs84 <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.WGS84_8m.tif")
+prediction.mask <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.UTM17_8m.tif")
+prediction.mask.wgs84 <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.WGS84_8m.tif")
+#
+training.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/training.mask.df.021425.Rds")# spatial DF of extent
+training.mask.df.wgs84 <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/training.mask.df.wgs84.021425.Rds")
+prediction.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/prediction.mask.df.021425.Rds")# spatial DF of extent
+prediction.mask.df.wgs84 <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/prediction.mask.df.wgs84.021425.Rds")# spatial DF of extent
+#
 output_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"
 output_dir_pred <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles"
 input_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed" # raster data 
 input_dir_pred <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed" # raster data 
 
+# 5 - RUN Functions----
 # Run prediction sub grid processing----
 Sys.time()
 prediction_sub_grids <- prepare_subgrids(
   grid_gpkg = grid_gpkg,
-  mask = prediction.mask,
-  mask.df = prediction.mask.df,
+  mask.df = prediction.mask.df.wgs84, # WGS 84 DataFrame version of mask DF
   output_dir = output_dir_pred
 )
 Sys.time() # Takes approx 40 minutes and 25GB of space for this size of area. 
@@ -508,31 +605,43 @@ Sys.time() # Takes approx 40 minutes and 25GB of space for this size of area.
 # Run training sub grid processing----
 Sys.time()
 training_sub_grids <- prepare_subgrids(
-  grid_gpkg = grid_gpkg,
-  mask = training.mask,
-  mask.df = training.mask.df,
+  grid_gpkg,
+  mask.df = training.mask.df.wgs84,  # WGS 84 DataFrame version of mask DF
   output_dir = output_dir_train
 )
-Sys.time()  # Takes approx 15 minutes time and 20GB of space for this size of area. 
+Sys.time()
 
-# Define new parameters
-training_sub_grids <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/intersecting_sub_grids.gpkg")
-prediction_sub_grids <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/intersecting_sub_grids.gpkg")
+
+# Run sub grid re-projection for both training and prediction grids to UTM
+#training 
+reproject_sub_grids(input_gpkg = training_sub_grids_WGS84,
+                    output_gpkg = training_sub_grids_UTM)
+#Prediction
+reproject_sub_grids(input_gpkg = prediction_sub_grids_WGS84,
+                    output_gpkg = prediction_sub_grids_UTM)
+
+# load the re-projected Sub_grids now in UTM (a training and prediction version)
+training_sub_grids_UTM <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/intersecting_sub_grids_UTM.gpkg")
+prediction_sub_grids_UTM <-st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/intersecting_sub_grids_UTM.gpkg")
 
 # Run the process_rasters function for raster subset creation
-#Training - 1.5 hrs & < 10GB
+#Training - 1.25 hrs &  10-15GB
 Sys.time()
 process_rasters(
-  sub_grid_gpkg = training_sub_grids,
+  sub_grid_gpkg = training_sub_grids_UTM,
   data_type = "training", 
   output_dir = output_dir_train,
   raster_dir = input_dir_train)
 Sys.time()
-# Prediction - 3.5hrs & < 10GB
+# Prediction - 1.75hrs & 10GB-15GB
 Sys.time()
 process_rasters(
-  sub_grid_gpkg = prediction_sub_grids,
+  sub_grid_gpkg = prediction_sub_grids_UTM,
   data_type = "prediction", 
   output_dir = output_dir_pred,
   raster_dir = input_dir_pred)
 Sys.time()
+
+# Check after processing what your data looks like, correct columns etc..----
+pred.data <- readRDS ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/BH4RZ577_3/BH4RZ577_3_prediction_clipped_data.rds")
+train.data <- readRDS ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4RZ577_3/BH4RZ577_3_training_clipped_data.rds")
