@@ -7,14 +7,12 @@ import rasterio
 import numpy as np
 import geopandas as gpd
 from osgeo import gdal
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, shape
 from rasterio.features import shapes
-from shapely.geometry import shape
 import pyreadr # only for reading the .rds files, I need to save them as something different
 import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
-import dask.dataframe as dd
 from dask import delayed, compute
 from dask.distributed import Client, progress
 import cProfile
@@ -24,9 +22,7 @@ import mlflow.sklearn
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.inspection import partial_dependence
-import os
 import gc
-from dask import delayed, compute
 
 
 ## 1. is preprocess all lidar data
@@ -62,7 +58,7 @@ os.makedirs(training_out, exist_ok=True)
 os.makedirs(output_dir_train, exist_ok=True)
 os.makedirs(output_dir_pred, exist_ok=True)      
 
-# 1. get all tiff files in a specific folder
+# 1. get all tiff files in a specific folder, should work correctly but check the crs
 def create_survey_end_date_tiffs():
     tiff_files = glob.glob(os.path.join(input_dir, "*.tiff"))
     for raster_path in tiff_files:
@@ -137,7 +133,6 @@ def create_survey_end_date_tiffs():
 ## 2. standardize all rasters to have same X, Y, FID # TODO need to double check I am not missing any steps
 # for training vs predicted
 # 1. Location of support rasters for processing- N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw
-# 2. Create output "processed" folders if they don't exist
 
 def process_raster(raster_path, output_path, target_crs="EPSG:4326", target_res=8):
     # Step 1: Use GDAL to reproject & resample in one go
@@ -333,14 +328,17 @@ def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
 ######## part 2 Model training, I'm puting everything in this script bc overlapping files
 # Initialize Dask Client for parallel processing
 
-# Start MLflow Run
-mlflow.set_experiment("sediment_change_model")
-
 year_pairs = ["2004_2006", "2006_2010", "2010_2015", "2015_2022"]
 # 1. Model training over all subgrids
 
 def process_tiles(tiles_df, output_dir_train, year_pairs):
     print("Starting processing of all tiles...")
+
+    # Start MLflow Run
+    # mlflow.sklearn.autolog()
+    # Set MLflow log location, will auto create the database
+    mlflow.set_tracking_uri("sqlite:///C:/Users/aubrey.mccutchan/Documents/HydroHealth/mlflow.db")
+        
 
     # 1 Static predictors (used across all year pairs)
     static_predictors = ["prim_sed_layer", "grain_size_layer", "survey_end_date"]
@@ -350,6 +348,14 @@ def process_tiles(tiles_df, output_dir_train, year_pairs):
         tile_id = tile["tile"]
         tile_dir = os.path.join(output_dir_train, f'{tile_id}')
         # os.makedirs(tile_dir, exist_ok=True)
+
+        experiment_name = "sediment_change_model"
+
+        # Create experiment only if it doesn't exist
+        if not mlflow.get_experiment_by_name(experiment_name):
+            mlflow.create_experiment(name=experiment_name, artifact_location=tile_dir)
+
+        mlflow.set_experiment(experiment_name)
 
         print(f"Processing tile: {tile_id}")
 
@@ -392,16 +398,25 @@ def process_tiles(tiles_df, output_dir_train, year_pairs):
             y = subgrid_data[response_var]
             
             with mlflow.start_run():
-                rf_model = RandomForestRegressor(n_estimators=500, max_features="sqrt", random_state=42)
+                rf_model = RandomForestRegressor(
+                n_estimators=500, # number of trees in the forest
+                max_features="sqrt",
+                bootstrap=True,
+                random_state=42)
+                # n_jobs=-1
+                
                 rf_model.fit(X, y)
+                # rf_model.estimators_ = None 
 
-                # 8 Save model, #TODO is pickle the right way to save?
+                # 8 Save model-MLflow should auto do it
+                # mlflow.log_param("tile_id", tile_id)
+                # mlflow.log_param("year_pair", pair)
+
                 model_path = os.path.join(tile_dir, f"model_{pair}.pkl")
-                joblib.dump(rf_model, model_path)
-                print(f"  Model saved for year pair: {pair}")
-                mlflow.log_param("tile_id", tile_id)
-                mlflow.log_param("year_pair", pair)
-                mlflow.sklearn.log_model(rf_model, f"random_forest_{pair}")
+                joblib.dump(rf_model, model_path, compress=3) # compression otherwise large 5 GB files
+
+                # mlflow.sklearn.log_model(rf_model, artifact_path=tile_dir)
+                print(f" - {pair} model saved for {tile_id} in {tile_dir}")
 
                 predictions = rf_model.predict(X)
                 r2 = r2_score(y, predictions)
@@ -426,14 +441,12 @@ def process_tiles(tiles_df, output_dir_train, year_pairs):
                 })
 
                 # 9 Generate Partial Dependence Plots and Initialize PDP data
-                # Save PDP data
-                # Plot PDP
-                generate_pdp(rf_model, X, tile_dir, pair)
+                # generate_pdp(rf_model, X, tile_dir, pair)
     
     results_df = pd.DataFrame(results_summary)
     results_csv_path = os.path.join(output_dir_train, "model_performance_summary.csv")
     results_df.to_csv(results_csv_path, index=False)
-    print("Processing complete and ssummary saved with mlflow.")
+    print("Processing complete and summary saved with mlflow.")
 
 def generate_pdp(model, X, tile_dir, pair):
     pdp_data = {}
@@ -442,7 +455,7 @@ def generate_pdp(model, X, tile_dir, pair):
         pdp_values = partial_dependence(model, X, [feature])
         pdp_data[feature] = pd.DataFrame({
             "Predictor": feature,
-            "Value": pdp_values["values"][0],
+            "Value": pdp_values["grid_values"][0],
             "Prediction": pdp_values["average"][0]
         })
     
@@ -501,13 +514,16 @@ if __name__ == "__main__":
     client.run(gc.collect)
     print(client)
 
+    print("Dask Dashboard is running at http://localhost:8787")
     with cProfile.Profile() as pr:
         delayed_task = delayed(process_tiles)(tiles_df, output_dir_train, year_pairs)  
         result = compute(delayed_task)  # Dask actually executes the function
     
     stats = pstats.Stats(pr)
     stats.strip_dirs().sort_stats("cumulative").print_stats(10)
+    print(mlflow.get_artifact_uri())
+
 
     print("Dask Task Progress:")
     progress(result)
-    print("Dask Dashboard is running at http://localhost:8787")
+    
