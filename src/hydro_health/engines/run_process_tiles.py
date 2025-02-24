@@ -8,6 +8,7 @@ sys.path.append(str(HH_MODEL))
 from hydro_health.helpers.tools import process_tiles, get_ecoregion_tiles, Param
 
 
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
@@ -19,8 +20,8 @@ if __name__ == '__main__':
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
         'eco_regions': Param('ER_3-Florida-West;'),
-        'tile_selector': Param(''),
-        'drawn_polygon': Param('')
+        'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson'))
+        # 'drawn_polygon': Param('')
     }
     tiles = get_ecoregion_tiles(param_lookup)
     start = time.time()

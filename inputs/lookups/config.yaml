@@ -23,7 +23,6 @@ SEDIMENT:
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
-  HH_DATA: HH_Data.gpkg
   TILES: BlueTopo_Tile_Scheme_20241203_114458
   STATES: USA_Census_States_200km_Overlap
   ECOREGIONS: EcoRegions
