@@ -16,7 +16,7 @@ class HHLayerTool:
             displayName="Output Data Directory",
             name="output_directory",
             datatype="DEFolder",
-            parameterType="Optional",
+            parameterType="Required",
             direction="Input"
         )
 

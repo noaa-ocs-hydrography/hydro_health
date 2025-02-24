@@ -18,11 +18,13 @@ if __name__ == '__main__':
     param_lookup = {
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
-        'eco_regions': Param('ER_3-Florida-West;')
+        'eco_regions': Param('ER_3-Florida-West;'),
+        'tile_selector': Param(''),
+        'drawn_polygon': Param('')
     }
     tiles = get_ecoregion_tiles(param_lookup)
     start = time.time()
-    process_tiles(tiles, param_lookup['output_directory'].valueAsText)
+    # process_tiles(tiles, param_lookup['output_directory'].valueAsText)
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
     # takes 102 seconds to verify if already downloaded

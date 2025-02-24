@@ -72,6 +72,6 @@ class TileProcessor:
                 result.get()
         
         # log all tiles using tile_gdf
-        tiles = list(tile_gdf['tile'])
+        tiles = list(tile_gdf['Tilename'])
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}
         hibase_logging.send_record(record, table='bluetopo_test')  # TODO update to prod hibase
