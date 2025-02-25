@@ -44,7 +44,7 @@ class RunHydroHealthModelTool(HHLayerTool):
             self.convert_tile_selector(param_lookup)
 
         tiles = tools.get_ecoregion_tiles(param_lookup)
-        # tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
+        tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
 
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
