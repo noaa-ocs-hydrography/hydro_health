@@ -44,8 +44,10 @@ class RunHydroHealthModelTool(HHLayerTool):
             self.convert_tile_selector(param_lookup)
 
         tiles = tools.get_ecoregion_tiles(param_lookup)
+        arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
         tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
-
+        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
+        tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText)
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
         # active_captain = CreateActiveCaptainLayerEngine(param_lookup)
