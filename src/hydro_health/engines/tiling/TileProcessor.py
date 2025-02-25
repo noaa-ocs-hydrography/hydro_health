@@ -21,6 +21,7 @@ class TileProcessor:
 
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
+        tile_folder = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
             output_tile_path = output_pathlib / obj_summary.key
             tile_folder = output_tile_path.parents[0]
@@ -62,8 +63,9 @@ class TileProcessor:
         tile_id = row[0]
         tile_folder = self.download_nbs_tile(output_folder, tile_id)
         # add general logging
-
-        # load tile
+        if tile_folder:
+            # load tile
+            pass
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         with self.get_pool() as process_pool:

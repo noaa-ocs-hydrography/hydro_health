@@ -1,4 +1,5 @@
 import arcpy
+import os
 
 from hydro_health.HHLayerTool import HHLayerTool
 from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
@@ -39,10 +40,14 @@ class RunHydroHealthModelTool(HHLayerTool):
 
         param_lookup = self.setup_param_lookup(parameters)
 
-        # TODO how to add grid tiling to entire process?
-        tiles = tools.get_ecoregion_tiles(param_lookup)
-        tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
+        if param_lookup['tile_selector'].value:
+            self.convert_tile_selector(param_lookup)
 
+        tiles = tools.get_ecoregion_tiles(param_lookup)
+        arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
+        tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
+        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
+        tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText)
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
         # active_captain = CreateActiveCaptainLayerEngine(param_lookup)
@@ -56,6 +61,18 @@ class RunHydroHealthModelTool(HHLayerTool):
         return
 
     # Custom Python code ##############################
+    def convert_tile_selector(self, param_lookup: dict) -> None:
+        """Convert any drawn features and store them on the hidden parameter 'drawn_polygon'"""
+
+        output_json = os.path.join(param_lookup['output_directory'].valueAsText, 'drawn_polygons.geojson')
+        arcpy.conversion.FeaturesToJSON(
+            param_lookup['tile_selector'].value,
+            output_json,
+            geoJSON="GEOJSON",
+            outputToWGS84="WGS84",
+        )
+        param_lookup['drawn_polygon'].value = output_json
+        
     def get_params(self):
         """
         Set up the tool parameters
@@ -114,6 +131,24 @@ class RunHydroHealthModelTool(HHLayerTool):
             'ER_6-Upper-Atlantic'
         ]
         params.append(eco_regions)
+
+        tile_selector = arcpy.Parameter(
+            displayName="Draw a polygon to limit model area",
+            name="tile_selector",
+            datatype="GPFeatureRecordSetLayer",
+            parameterType="Optional",
+            direction="Input"
+        )
+        tile_selector.filter.list = ["Polygon"]
+        params.append(tile_selector)
+        drawn_polygon = arcpy.Parameter(
+            displayName="Drawn polygon output geojson",
+            name="drawn_polygon",
+            datatype="GPString",
+            parameterType="Derived",
+            direction="Output"
+        )
+        params.append(drawn_polygon)
 
         slider_id = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
         slider_range = [1, 10]
@@ -178,6 +213,8 @@ class RunHydroHealthModelTool(HHLayerTool):
         param_names = super().get_param_names()
         # param_names.append('coastal_states')
         param_names.append('eco_regions')
+        param_names.append('tile_selector')
+        param_names.append('drawn_polygon')
 
         lookup = {}
         for name, param in zip(param_names, params):

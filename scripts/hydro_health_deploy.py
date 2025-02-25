@@ -23,7 +23,7 @@ def deploy_hydro_health_to_working():
     # Minimum files needed
     # inputs
     #   /lookups/*
-    #   /HH_Data.gpkg
+    #   /Master_Grids.gpkg
     # src/hydro_health
     #   /engines/[^run_]*
     #   *Tool.py
@@ -33,7 +33,7 @@ def deploy_hydro_health_to_working():
 
     # inputs folder
     shutil.copytree(INPUTS / 'lookups', CODE_FOLDER / 'inputs' / 'lookups', dirs_exist_ok=True)
-    shutil.copy2(INPUTS / 'HH_Data.gpkg', CODE_FOLDER / 'inputs' / 'HH_Data.gpkg')
+    shutil.copy2(INPUTS / 'Master_Grids.gpkg', CODE_FOLDER / 'inputs' / 'Master_Grids.gpkg')
 
     # src/hydro_health 
     shutil.copytree(HYDRO_HEALTH / 'engines', 
