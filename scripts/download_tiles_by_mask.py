@@ -86,7 +86,5 @@ if __name__ == "__main__":
     mask_polygons = get_mask_shapes(mask)
     mask_polygons_gdf  = gpd.GeoDataFrame.from_features(mask_polygons, crs=26917)
     tiles = get_intersected_tiles(mask_polygons_gdf)
-    if 'BH4S2574' in tiles:
-        print('yay')
     download_nbs_tiles(tiles)
     create_raster_vrt()

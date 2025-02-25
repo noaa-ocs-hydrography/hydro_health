@@ -32,3 +32,9 @@ def test_get_state_tiles(victim):
     states = result['STATE_NAME'].unique()
     assert 'California' in states
     assert 'North Carolina' in states
+
+
+def test_get_ecoregion_tiles(victim):
+    param_lookup={"eco_regions": Param('ER_1-Texas;')}
+    result = victim.get_ecoregion_tiles(param_lookup)
+    assert result.shape[0] == 246
