@@ -1,11 +1,12 @@
 """Class for processing everything for a single tile"""
 
+import boto3
 import os
 import sys
 import geopandas as gpd
 import pathlib
 import multiprocessing as mp
-import boto3
+import numpy as np
 
 from hydro_health.helpers import hibase_logging
 from botocore.client import Config
@@ -88,6 +89,7 @@ class TileProcessor:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
             self.multiband_to_singleband(mb_tiff_file)
             mb_tiff_file.unlink()
+            self.set_ground_to_nodata(tiff_file_path)
 
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         with self.get_pool() as process_pool:
@@ -105,3 +107,13 @@ class TileProcessor:
     def write_message(self, message, output_folder):
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
+
+    def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
+        """Set positive elevation to no data value"""
+        
+        raster_ds = gdal.Open(tiff_file_path, gdal.GA_Update)
+        no_data = -999999
+        raster_array = raster_ds.ReadAsArray()
+        meters_array = np.where(raster_array < 0, raster_array, no_data)
+        raster_ds.GetRasterBand(1).WriteArray(meters_array)
+        raster_ds = None
