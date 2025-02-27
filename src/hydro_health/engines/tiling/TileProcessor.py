@@ -119,7 +119,7 @@ class TileProcessor:
         raster_ds = gdal.Open(tiff_file_path, gdal.GA_Update)
         no_data = -999999
         raster_array = raster_ds.ReadAsArray()
-        meters_array = np.where(raster_array > 0, no_data, raster_array)
+        meters_array = np.where(raster_array < 0, raster_array, no_data)
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
