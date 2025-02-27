@@ -5,17 +5,13 @@ import os
 import sys
 import geopandas as gpd
 import pathlib
-import rasterio
-from rasterio.mask import mask
-import pyproj
-from shapely.ops import transform
 import multiprocessing as mp
 import numpy as np
 
 from hydro_health.helpers import hibase_logging
 from botocore.client import Config
 from botocore import UNSIGNED
-from osgeo import gdal, ogr
+from osgeo import gdal
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
