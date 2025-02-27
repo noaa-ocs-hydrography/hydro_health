@@ -1,3 +1,4 @@
+import os
 import pathlib
 import geopandas as gpd
 import pandas as pd
@@ -5,7 +6,6 @@ import time
 from osgeo import ogr, osr, gdal
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
-
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
@@ -24,6 +24,8 @@ class CreateSedimentLayerEngine(Engine):
         super().__init__()
         self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay'] 
         self.sediment_data = None
+        # TODO consider how this engine will be called for each tile
+        self.tile_path = None
         if param_lookup:
             self.param_lookup = param_lookup
             if self.param_lookup['input_directory'].valueAsText:
@@ -57,7 +59,7 @@ class CreateSedimentLayerEngine(Engine):
         """Clips the polygon layer to match the tile mask extent"""  
               
         data_gdf = gpd.read_file(gpkg_path, layer='sediment_polgons')
-        mask_gdf = gpd.read_file(tile_path)
+        mask_gdf = gpd.read_file(self.tile_path)
 
         mask_gdf = mask_gdf[mask_gdf["Value"] == 1]
 
@@ -65,13 +67,11 @@ class CreateSedimentLayerEngine(Engine):
         clipped_gdf.to_file(gpkg_path, layer='sediment_polys_clipped', driver="GPKG", overwrite=True)   
 
     def clip_sediment_points(self):
-        # TODO I need to run more testing to see if this first clip is needed, 
-        # I think I needed it originally bc this same process was so slow in ArcGIS
-        # but is actually fast in python
         """
         Clip the sediment point layer before converting to polygons to reduce polygon layer size.
         """        
-        mask = gpd.read_file(tile_path)
+
+        mask = gpd.read_file(self.tile_path)
         sed_point_shapefile = gpd.read_file(gpkg_path, layer='sediment_points')
 
         points = sed_point_shapefile.to_crs(mask.crs)
@@ -80,18 +80,19 @@ class CreateSedimentLayerEngine(Engine):
         clipped.to_file(gpkg_path, layer='sediment_points_clipped', driver="GPKG", overwrite=True) 
 
     def convert_polys_to_raster(self, field_name):
-        """ Rasterize the polygons with selected column as pixel value"""        
+        """Rasterize the polygons with selected column as pixel value"""        
 
         gpkg = ogr.Open(gpkg_path, 1)
         layer = gpkg.GetLayerByName('sediment_polys_clipped')
 
-        tiff = gdal.Open(tile_path)
+        tiff = gdal.Open(self.tile_path)
         geotransform = tiff.GetGeoTransform()
         proj = tiff.GetProjection()
         cols = tiff.RasterXSize
         rows = tiff.RasterYSize
 
         driver = gdal.GetDriverByName('GTIFF')
+        tile_number = os.path.basename(self.tile_path) # For individual tile data folders ie. BH4RZ575_1
         file_path = INPUTS / "sediment_data" / f"{tile_number}_{field_name}_raster.tif"
         out_raster = driver.Create(file_path, cols, rows, 1, gdal.GDT_Float32, options=["COMPRESS=LZW"])
         out_raster.SetGeoTransform(geotransform)
