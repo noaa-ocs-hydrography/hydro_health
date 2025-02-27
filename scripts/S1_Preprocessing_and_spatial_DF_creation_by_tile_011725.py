@@ -1,28 +1,30 @@
 import os
 import glob
+import gc
 from lxml import etree
 from datetime import datetime
 import pandas as pd
-import rasterio
-import numpy as np
 import geopandas as gpd
-from osgeo import gdal
+import rasterio
+from rasterio.warp import calculate_default_transform, reproject, Resampling
+import numpy as np
 from shapely.geometry import Polygon, shape
 from rasterio.features import shapes
 import pyreadr # only for reading the .rds files, I need to save them as something different
-import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
+import dask
 from dask import delayed, compute
 from dask.distributed import Client, progress
-import cProfile
-import pstats
-import mlflow
-import mlflow.sklearn
+from dask.diagnostics import ProgressBar
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.inspection import partial_dependence
-import gc
+import joblib # for exporting the model file
+import mlflow
+import mlflow.sklearn
+import cProfile
+import pstats
 
 
 ## 1. is preprocess all lidar data
@@ -31,12 +33,10 @@ output_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now
 kml_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\RATs'
 
 # 1. Location of support rasters for processing- N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw
-prediction_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Prediction\raw_testing'
-prediction_out = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Prediction\processed_python'
 training_out = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Training\processed_python'
 
-mask_prediction = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.tif'
-mask_training = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.tif'
+mask_prediction = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.UTM17_8m.tif'
+mask_training = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.UTM17_8m.tif'
 
 grid_gpkg = 'N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg' # from Blue topo
 output_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles_testing"
@@ -47,18 +47,13 @@ training_sub_grids = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_mo
 prediction_sub_grids = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles_testing/intersecting_sub_grids.gpkg"
 
 
-target_crs = 'EPSG:4326'  #WGS84, # TODO this needs to be changed to take crs from the grid, will be a UTM zone
-# that will changed based on location
-target_res = 8  # 8m resolution
-
 # Create output "processed" folders if they don't exist
 os.makedirs(output_dir, exist_ok=True)
-os.makedirs(prediction_out, exist_ok=True)
 os.makedirs(training_out, exist_ok=True)  
 os.makedirs(output_dir_train, exist_ok=True)
 os.makedirs(output_dir_pred, exist_ok=True)      
 
-# 1. get all tiff files in a specific folder, should work correctly but check the crs
+# 1. create survey date tiffs, works correctly but check the crs
 def create_survey_end_date_tiffs():
     tiff_files = glob.glob(os.path.join(input_dir, "*.tiff"))
     for raster_path in tiff_files:
@@ -130,39 +125,43 @@ def create_survey_end_date_tiffs():
         transform=transform,
         nodata=nodata) as dst: dst.write(reclassified_band, 1)       
 
-## 2. standardize all rasters to have same X, Y, FID # TODO need to double check I am not missing any steps
-# for training vs predicted
-# 1. Location of support rasters for processing- N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw
+## 2. standardize all rasters to have same X, Y, FID 
+def process_raster(raster_path, mask, output_path, target_crs="EPSG:32617", target_res=8):
+    with rasterio.open(raster_path) as src:
+        # Calculate the transform and metadata for the target CRS and resolution
+        bounds = src.bounds
+        transform, width, height = calculate_default_transform(
+            src.crs, target_crs, src.width, src.height, left=bounds.left, bottom=bounds.bottom, right=bounds.right, top=bounds.top, resolution=target_res)
+        kwargs = src.meta.copy()
+        kwargs.update({
+            'crs': target_crs,
+            'transform': transform,
+            'width': width,
+            'height': height,
+            'dtype': 'float32',
+            'compress': 'lzw'
+        })
 
-def process_raster(raster_path, output_path, target_crs="EPSG:4326", target_res=8):
-    # Step 1: Use GDAL to reproject & resample in one go
-    temp_path = raster_path.replace(".tif", "_temp.tif")
-    gdal.Warp(
-            temp_path, raster_path,
-            dstSRS=target_crs,
-            xRes=target_res, yRes=target_res,
-            resampleAlg=gdal.GRA_Bilinear,
-            format="GTiff",
-            options=gdal.WarpOptions(options=["COMPRESS=LZW"])
-        )
+        # Create the output file
+        with rasterio.open(output_path, 'w', **kwargs) as dst:
+            for i in range(1, src.count + 1):
+                reproject(
+                    source=rasterio.band(src, i),
+                    destination=rasterio.band(dst, i),
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=target_crs,
+                    resampling=Resampling.bilinear,
+                    dst_nodata=float('nan')
+                )
 
     # Step 2: Apply bathymetry mask if needed
-    with rasterio.open(temp_path) as src:
-        data = src.read(1)
-        transform = src.transform
-
+    with rasterio.open(output_path, 'r+') as dst:
+        data = dst.read(1)
         if '_bathy' in os.path.basename(raster_path):
             data[data > 0] = np.nan  # Set positive values to NaN
-
-        # Step 3: Write final output
-        out_meta = src.meta.copy()
-        out_meta.update({"dtype": "float32"})
-
-        with rasterio.open(output_path, "w", **out_meta) as dst:
-            dst.write(data, 1)
-
-    # Cleanup temporary file
-    os.remove(temp_path)
+        dst.write(data, 1)
 
 ## 2. Standardize all rasters (PREDICTION Extent first as its larger)----
 #makes all same extent, for processing into spatial points dataframe and removes all land based elevation values > 0 as well
@@ -170,93 +169,66 @@ def process_raster(raster_path, output_path, target_crs="EPSG:4326", target_res=
 # although they are different extents, the smaller training data must be a direct subset of the prediction data
 # for variables they have in common, even if the datasets vary between the two final datasets, we will divide the pertiant 
 #columns afterward.
-def standardize_rasters():
-    max_size = 50 * 1024 * 1024  # 100 MB in bytes
-    prediction_files = [
-    f for f in os.listdir(prediction_dir)
-    if f.endswith('.tif') and os.path.getsize(os.path.join(prediction_dir, f)) < max_size]
 
+def standardize_rasters():
+    prediction_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Prediction\raw_testing'
+    prediction_out = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\processed_python"
+    os.makedirs(prediction_out, exist_ok=True)
+
+    prediction_files = [f for f in os.listdir(prediction_dir) if f.endswith('.tif')]
+
+    client = Client()  # Start Dask client
+
+    tasks = []
     for file in prediction_files:
         print(f'Processing {file}...')
         input_path = os.path.join(prediction_dir, file)
         output_path = os.path.join(prediction_out, file)
-        # 12. write out the updated files to the processed folder 
-        process_raster(input_path, mask_prediction, output_path)
 
-    ## 2 Standardize all rasters (TRAINING Extent - sub sample of prediction extent)----
-    #- THIS IS A DIRECT SUBSET OF THE PREDICTION AREA - clipped using the training mask. 
-    training_files = [f for f in os.listdir(prediction_out) if f.endswith('.tif') and not f.startswith('blue_topo')]
+        # creates a lazy task object that Dask will execute later in parallel
+        tasks.append(dask.delayed(process_raster)(input_path, mask_prediction, output_path))
 
-    for file in training_files:
-        print(f'Processing {file}...')
-        input_path = os.path.join(prediction_out, file)  # use processed prediction rasters
-        output_path = os.path.join(training_out, file)
-        # 12. write out the updated files to the processed folder 
-        process_raster(input_path, mask_training, output_path, is_training=True)
+    dask.compute(*tasks)
+
+    client.close()
+
+    # ## 2 Standardize all rasters (TRAINING Extent - sub sample of prediction extent)----
+    # #- THIS IS A DIRECT SUBSET OF THE PREDICTION AREA - clipped using the training mask. 
+    # training_files = [f for f in os.listdir(prediction_out) if f.endswith('.tif') and not f.startswith('blue_topo')]
+
+    # for file in training_files:
+    #     print(f'Processing {file}...')
+    #     input_path = os.path.join(prediction_out, file)  # use processed prediction rasters
+    #     output_path = os.path.join(training_out, file)
+    #     # 12. write out the updated files to the processed folder 
+    #     clip_raster(input_path, mask_training, output_path)
 
 # ## 3. Create dataframes for Training and Prediction masks
 def raster_to_spatial_df(raster_path):
     with rasterio.open(raster_path) as src:
-        mask = src.read(1)  # Read first band
+        mask = src.read(1)
 
         # Extract geometries where mask == 1
         shapes_gen = shapes(mask, mask=mask == 1, transform=src.transform)
 
         # Convert to GeoDataFrame
         gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, value in shapes_gen]}, crs=src.crs)
-
-        gdf = gdf.to_crs(epsg=4326)  # Skips if already in wgs84
+        gdf = gdf.to_crs(epsg=32617)  # Skips if already in utm zone 17
 
     return gdf
 
-# ## 4. Helper functions, need to check the updated code from steph
-# 1. split_tile - subdivide a tile into smaller grids, this function is used in prepare_subgrids
-def split_tile(tile, crs):
-    # Get the bounding box of the input tile (xmin, ymin, xmax, ymax)
-    xmin, ymin, xmax, ymax = tile.geometry.bounds
-
-    # Calculate the midpoints for x and y
-    mid_x = (xmin + xmax) / 2
-    mid_y = (ymin + ymax) / 2
-    
-    # Define the sub-grid polygons in clockwise order
-    sub_grids = [
-        Polygon([(xmin, ymin), (mid_x, ymin), (mid_x, mid_y), (xmin, mid_y)]),  # Bottom-left
-        Polygon([(mid_x, ymin), (xmax, ymin), (xmax, mid_y), (mid_x, mid_y)]),  # Bottom-right
-        Polygon([(mid_x, mid_y), (xmax, mid_y), (xmax, ymax), (mid_x, ymax)]),  # Top-right
-        Polygon([(xmin, mid_y), (mid_x, mid_y), (mid_x, ymax), (xmin, ymax)])   # Top-left
-    ]
-
-    # Create sub-grid IDs based on the original tile's ID (tile + 1, 2, 3, 4)
-    sub_grid_ids = [f"Tile_{tile['tile']}_{i+1}" for i in range(4)]
-
-    # Create a DataFrame with the sub-grid details
-    sub_grid_data = {
-        'tile': sub_grid_ids,
-        'xmin': [s.bounds[0] for s in sub_grids],
-        'ymin': [s.bounds[1] for s in sub_grids],
-        'xmax': [s.bounds[2] for s in sub_grids],
-        'ymax': [s.bounds[3] for s in sub_grids],
-        'geometry': sub_grids
-    }
-    
-    # Convert the dictionary into a GeoDataFrame
-    sub_grid_df = gpd.GeoDataFrame(sub_grid_data, crs=crs)
-    
-    return sub_grid_df
-# 2. prepare_subgrids - splits grid tiles into sub-grids, filters w/ mask, 
-# saves intersecting sub-grids to the gpkg
-# TODO this is duplicating sub tiles, added a line to temp fix it but should review when time
+# 2. prepare_subgrids - saves intersecting sub-grids to the gpkg, filters w/ masks
+# TODO this is duplicating sub tiles, added a line to temp fix it but should review
 def prepare_subgrids(grid_gpkg, mask_gdf, output_dir):
     print("Preparing grid tiles and sub-grids...")
+    gpgk_path = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Tessellation\Master_Grids.gpkg"
     
     # Read and transform the grid tiles to match the CRS of the mask
     grid_tiles = gpd.read_file(grid_gpkg)
     grid_tiles = grid_tiles.to_crs(mask_gdf.crs)
     
-    # Split grid tiles into sub-grids
-    sub_grids_list = [split_tile(tile, crs=mask_gdf.crs) for _, tile in grid_tiles.iterrows()]
-    sub_grids = gpd.GeoDataFrame(pd.concat(sub_grids_list, ignore_index=True), crs=grid_tiles.crs)
+    # Uee the subgrids from master grids geopackage and matches the CRS of the mask
+    sub_grids = gpd.read_file(gpgk_path, layer="Model_sub_Grid_Tiles").to_crs(mask_gdf.crs)
     
     # Filter sub-grids that intersect with the mask points
     intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf, how="inner", predicate='intersects')
@@ -324,22 +296,17 @@ def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
         # TODO need to think how we want to access the data for each tile
         combined_data.to_csv(clipped_data_path, index=False)
 
-
-######## part 2 Model training, I'm puting everything in this script bc overlapping files
+######## part 2 Model training
 # Initialize Dask Client for parallel processing
-
-year_pairs = ["2004_2006", "2006_2010", "2010_2015", "2015_2022"]
-# 1. Model training over all subgrids
-
-def process_tiles(tiles_df, output_dir_train, year_pairs):
+def tile_model_training(tiles_df, output_dir_train, year_pairs):
     print("Starting processing of all tiles...")
 
-    # Start MLflow Run
-    # mlflow.sklearn.autolog()
+    year_pairs = ["2004_2006", "2006_2010", "2010_2015", "2015_2022"]
+
+    # mlflow.sklearn.autolog() # I had bugs with the autolog, so I'm doing it manually
     # Set MLflow log location, will auto create the database
     mlflow.set_tracking_uri("sqlite:///C:/Users/aubrey.mccutchan/Documents/HydroHealth/mlflow.db")
         
-
     # 1 Static predictors (used across all year pairs)
     static_predictors = ["prim_sed_layer", "grain_size_layer", "survey_end_date"]
     results_summary = []
@@ -349,9 +316,9 @@ def process_tiles(tiles_df, output_dir_train, year_pairs):
         tile_dir = os.path.join(output_dir_train, f'{tile_id}')
         # os.makedirs(tile_dir, exist_ok=True)
 
-        experiment_name = "sediment_change_model"
+        experiment_name = f"sediment_change_model_{tile_id}"
 
-        # Create experiment only if it doesn't exist
+        # Create experiment
         if not mlflow.get_experiment_by_name(experiment_name):
             mlflow.create_experiment(name=experiment_name, artifact_location=tile_dir)
 
@@ -360,10 +327,9 @@ def process_tiles(tiles_df, output_dir_train, year_pairs):
         print(f"Processing tile: {tile_id}")
 
         # 2 Load corresponding training data
-        # training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.pkl")
         training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.rds")
         if not os.path.exists(training_data_path):
-            print(f"  Training data missing for tile: {tile_id}")
+            print(f" - Training data missing for tile: {tile_id}")
             continue
 
         # training_data = pd.read_pickle(training_data_path)
@@ -408,7 +374,7 @@ def process_tiles(tiles_df, output_dir_train, year_pairs):
                 rf_model.fit(X, y)
                 # rf_model.estimators_ = None 
 
-                # 8 Save model-MLflow should auto do it
+                # 8 Save model-MLflow autolog would do this but decided not to use it
                 # mlflow.log_param("tile_id", tile_id)
                 # mlflow.log_param("year_pair", pair)
 
@@ -476,24 +442,43 @@ def generate_pdp(model, X, tile_dir, pair):
     plt.close()
     print(f"  PDP plot saved for year pair: {pair}")
 
+def dask_workflow():
+    client = Client(n_workers=2, threads_per_worker=1, memory_limit="16GB")
+    print(f"Dask Dashboard: {client.dashboard_link}")
 
-# ## 6. Run model processing
+    with ProgressBar():  # Enables progress bar
+        standardize_rasters()
+
+    client.close()    
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    dask_workflow()  # Executes the entire Dask workflow
+    
+    profiler.disable()
+    profiler.print_stats(sort='time')  
+
+# # Run data preprocessing
 # if __name__ == '__main__':
-    # create_survey_end_date_tiffs() # part 1
+#     profiler = cProfile.Profile()
+#     profiler.enable()
+#     # create_survey_end_date_tiffs() # works
 
-    # standardize_rasters() # part 2, #TODO fix mask, and is there a faster process to use or cloud solution?
+#     standardize_rasters() # part 2, testing
 
-    # training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
-    # prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
+#     # training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
+#     # prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
 
-    # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=training_mask_df, output_dir=output_dir_train) # part 4a
-    # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # part 4b
+#     # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=training_mask_df, output_dir=output_dir_train) # part 4a
+#     # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # part 4b
 
-    # clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training") # part 5a
-    # clip_rasters_by_tile(sub_grid_gpkg=prediction_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction") # part 5a
-
-# model_path = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/Tile_BH4S2577_4/model_2015_2022.pkl"
-# mod1 = joblib.load(model_path)
+#     # clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training") # part 5a
+#     # clip_rasters_by_tile(sub_grid_gpkg=prediction_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction") # part 5a
+#     profiler.disable()
+#     stats = pstats.Stats(profiler)
+#     stats.strip_dirs().sort_stats('cumulative').print_stats(20) 
 
 def clean_tile_folders(root_folder):
     for dirpath, dirnames, filenames in os.walk(root_folder):
@@ -507,23 +492,23 @@ def clean_tile_folders(root_folder):
 tiles_df = gpd.read_file(r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles\intersecting_sub_grids.gpkg")
 output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles"
 
-if __name__ == "__main__":
-    clean_tile_folders(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles')
-
-    client = Client(n_workers=1, threads_per_worker=2, memory_limit="16GB")
-    client.run(gc.collect)
-    print(client)
-
-    print("Dask Dashboard is running at http://localhost:8787")
-    with cProfile.Profile() as pr:
-        delayed_task = delayed(process_tiles)(tiles_df, output_dir_train, year_pairs)  
-        result = compute(delayed_task)  # Dask actually executes the function
-    
-    stats = pstats.Stats(pr)
-    stats.strip_dirs().sort_stats("cumulative").print_stats(10)
-    print(mlflow.get_artifact_uri())
+# if __name__ == "__main__":
 
 
-    print("Dask Task Progress:")
-    progress(result)
+    # clean_tile_folders(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles')
+
+    # client = Client(n_workers=1, threads_per_worker=2, memory_limit="16GB")
+    # client.run(gc.collect)
+    # print(client)
+
+    # print("Dask Dashboard is running at http://localhost:8787")
+
+    # with cProfile.Profile() as pr:
+    #     delayed_task = delayed(tile_model_training)(tiles_df, output_dir_train, year_pairs)
+    #     print("Dask Task Progress:")
+    #     result = compute(delayed_task)  # Compute once
+    #     progress(result)  # Track progress
+
+    # stats = pstats.Stats(pr)
+    # stats.strip_dirs().sort_stats("cumulative").print_stats(10)  
     
