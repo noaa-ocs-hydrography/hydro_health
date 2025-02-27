@@ -5,13 +5,17 @@ import os
 import sys
 import geopandas as gpd
 import pathlib
+import rasterio
+from rasterio.mask import mask
+import pyproj
+from shapely.ops import transform
 import multiprocessing as mp
 import numpy as np
 
 from hydro_health.helpers import hibase_logging
 from botocore.client import Config
 from botocore import UNSIGNED
-from osgeo import gdal
+from osgeo import gdal, ogr
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -59,12 +63,14 @@ class TileProcessor:
 
         return mp.Pool(processes=processes)
 
-    def multiband_to_singleband(self, tiff_file_path: pathlib.Path) -> None:
+    def multiband_to_singleband(self, tiff_file_path: pathlib.Path, geometry: str) -> None:
         """Convert multiband BlueTopo raster into a singleband file"""
-        
+
         multiband_tile_name = tiff_file_path.parents[0] / tiff_file_path.name
+        # temporarily rename file to output singleband with original name
         output_name = str(tiff_file_path.name).replace('_mb', '')
         singleband_tile_name = tiff_file_path.parents[0] / output_name
+
         gdal.Translate(
             singleband_tile_name,
             multiband_tile_name,
@@ -72,6 +78,7 @@ class TileProcessor:
             creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
             callback=gdal.TermProgress_nocb
         )
+        multiband_tile_name.unlink()
 
     def rename_multiband(self, tiff_file_path) -> pathlib.Path:
         """Update file name for singleband conversion"""
@@ -80,23 +87,21 @@ class TileProcessor:
         mb_tiff_file = tiff_file_path.replace(pathlib.Path(new_name))
         return mb_tiff_file
 
-    def process_tile(self, output_folder: str, index: int, row: gpd.GeoSeries):
+    def process_tile(self, output_folder: str, row: gpd.GeoSeries):
         """Handle processing of a single tile"""
 
         tile_id = row[0]
+        geometry = row['geometry']
         tiff_file_path = self.download_nbs_tile(output_folder, tile_id)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
-            self.multiband_to_singleband(mb_tiff_file)
-            mb_tiff_file.unlink()
+            self.multiband_to_singleband(mb_tiff_file, geometry)
             self.set_ground_to_nodata(tiff_file_path)
 
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         with self.get_pool() as process_pool:
-            results = [process_pool.apply_async(self.process_tile, [outputs, index, row]) for index, row in tile_gdf.iterrows()]
+            results = [process_pool.apply_async(self.process_tile, [outputs, row]) for _, row in tile_gdf.iterrows()]
             for result in results:
-                # try to add logging here
-                # self.write_message(f'testing: {str(result)}', outputs)
                 result.get()
 
         # log all tiles using tile_gdf
@@ -110,10 +115,11 @@ class TileProcessor:
 
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
         """Set positive elevation to no data value"""
-        
+
         raster_ds = gdal.Open(tiff_file_path, gdal.GA_Update)
         no_data = -999999
         raster_array = raster_ds.ReadAsArray()
         meters_array = np.where(raster_array < 0, raster_array, no_data)
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
+        raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
