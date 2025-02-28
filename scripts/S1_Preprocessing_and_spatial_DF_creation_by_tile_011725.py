@@ -27,34 +27,21 @@ import cProfile
 import pstats
 
 
-## 1. is preprocess all lidar data
-input_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\UTM17'
-output_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\survey_date_end_python'
-kml_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\RATs'
-
 # 1. Location of support rasters for processing- N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw
 training_out = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Training\processed_python'
+os.makedirs(training_out, exist_ok=True)  
 
-mask_prediction = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.UTM17_8m.tif'
-mask_training = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.UTM17_8m.tif'
-
-grid_gpkg = 'N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg' # from Blue topo
-output_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles_testing"
-output_dir_pred = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles_testing"
-input_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed" # raster data 
-input_dir_pred = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed" # raster data 
 training_sub_grids = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles_testing/intersecting_sub_grids.gpkg"
 prediction_sub_grids = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles_testing/intersecting_sub_grids.gpkg"
 
 
-# Create output "processed" folders if they don't exist
-os.makedirs(output_dir, exist_ok=True)
-os.makedirs(training_out, exist_ok=True)  
-os.makedirs(output_dir_train, exist_ok=True)
-os.makedirs(output_dir_pred, exist_ok=True)      
-
 # 1. create survey date tiffs, works correctly but check the crs
 def create_survey_end_date_tiffs():
+    input_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\UTM17'
+    output_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\survey_date_end_python'
+    kml_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Modeling\RATs'
+    os.makedirs(output_dir, exist_ok=True)
+
     tiff_files = glob.glob(os.path.join(input_dir, "*.tiff"))
     for raster_path in tiff_files:
         # 2. get file name
@@ -186,7 +173,7 @@ def standardize_rasters():
         output_path = os.path.join(prediction_out, file)
 
         # creates a lazy task object that Dask will execute later in parallel
-        tasks.append(dask.delayed(process_raster)(input_path, mask_prediction, output_path))
+        tasks.append(dask.delayed(process_raster)(input_path, prediction_mask_df, output_path))
 
     dask.compute(*tasks)
 
@@ -296,8 +283,49 @@ def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
         # TODO need to think how we want to access the data for each tile
         combined_data.to_csv(clipped_data_path, index=False)
 
-######## part 2 Model training
-# Initialize Dask Client for parallel processing
+# all functions that will use dask
+def dask_workflow():
+    client = Client(n_workers=2, threads_per_worker=1, memory_limit="16GB")
+    print(f"Dask Dashboard: {client.dashboard_link}")
+
+    with ProgressBar():  # Enables progress bar
+        standardize_rasters()
+
+    client.close()   
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+    # create_survey_end_date_tiffs() # works
+
+    mask_prediction = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.UTM17_8m.tif'
+    mask_training = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.UTM17_8m.tif'
+    training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
+    prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
+
+    dask_workflow()  # Executes the entire Dask workflow to standarize rasters
+
+    input_dir_pred = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed" 
+    output_dir_pred = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles_testing"
+    input_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed"
+    # output_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles_testing"
+    output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles"
+
+      # os.makedirs(input_dir_pred, exist_ok=True)     
+      # os.makedirs(output_dir_pred, exist_ok=True)   
+      # os.makedirs(input_dir_train, exist_ok=True)    
+      # os.makedirs(output_dir_train, exist_ok=True)
+
+#     # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=training_mask_df, output_dir=output_dir_train) # part 4a
+#     # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # part 4b
+
+#     # clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training") # part 5a
+#     # clip_rasters_by_tile(sub_grid_gpkg=prediction_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction") # part 5a
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(20) 
+
+######### part 2 model training #########
 def tile_model_training(tiles_df, output_dir_train, year_pairs):
     print("Starting processing of all tiles...")
 
@@ -442,44 +470,6 @@ def generate_pdp(model, X, tile_dir, pair):
     plt.close()
     print(f"  PDP plot saved for year pair: {pair}")
 
-def dask_workflow():
-    client = Client(n_workers=2, threads_per_worker=1, memory_limit="16GB")
-    print(f"Dask Dashboard: {client.dashboard_link}")
-
-    with ProgressBar():  # Enables progress bar
-        standardize_rasters()
-
-    client.close()    
-
-if __name__ == '__main__':
-    profiler = cProfile.Profile()
-    profiler.enable()
-    
-    dask_workflow()  # Executes the entire Dask workflow
-    
-    profiler.disable()
-    profiler.print_stats(sort='time')  
-
-# # Run data preprocessing
-# if __name__ == '__main__':
-#     profiler = cProfile.Profile()
-#     profiler.enable()
-#     # create_survey_end_date_tiffs() # works
-
-#     standardize_rasters() # part 2, testing
-
-#     # training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
-#     # prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
-
-#     # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=training_mask_df, output_dir=output_dir_train) # part 4a
-#     # prepare_subgrids(grid_gpkg=grid_gpkg, mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # part 4b
-
-#     # clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training") # part 5a
-#     # clip_rasters_by_tile(sub_grid_gpkg=prediction_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction") # part 5a
-#     profiler.disable()
-#     stats = pstats.Stats(profiler)
-#     stats.strip_dirs().sort_stats('cumulative').print_stats(20) 
-
 def clean_tile_folders(root_folder):
     for dirpath, dirnames, filenames in os.walk(root_folder):
         if 'Tile' in os.path.basename(dirpath):  # Check if folder name contains 'Tile'
@@ -489,12 +479,7 @@ def clean_tile_folders(root_folder):
                     os.remove(file_path)
                     print(f"Deleted: {file_path}")
 
-tiles_df = gpd.read_file(r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles\intersecting_sub_grids.gpkg")
-output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles"
-
 # if __name__ == "__main__":
-
-
     # clean_tile_folders(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles')
 
     # client = Client(n_workers=1, threads_per_worker=2, memory_limit="16GB")
@@ -504,6 +489,8 @@ output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.da
     # print("Dask Dashboard is running at http://localhost:8787")
 
     # with cProfile.Profile() as pr:
+    #     tiles_df = gpd.read_file(r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\Training.data.grid_tiles\intersecting_sub_grids.gpkg")
+
     #     delayed_task = delayed(tile_model_training)(tiles_df, output_dir_train, year_pairs)
     #     print("Dask Task Progress:")
     #     result = compute(delayed_task)  # Compute once
