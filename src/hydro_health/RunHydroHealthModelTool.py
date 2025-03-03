@@ -47,7 +47,13 @@ class RunHydroHealthModelTool(HHLayerTool):
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
         tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
         arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
-        tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText)
+
+        arcpy.AddMessage('Tile process completed')
+        for dataset in ['elevation', 'slope', 'rugosity']:
+            arcpy.AddMessage(f'Building {dataset} VRT file')
+            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset)
+
+        arcpy.AddMessage('Done')
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
         # active_captain = CreateActiveCaptainLayerEngine(param_lookup)

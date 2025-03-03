@@ -18,6 +18,20 @@ mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 class TileProcessor:
+    def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
+        """Generate a slope raster from the DEM"""
+
+        rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
+        rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
+        gdal.DEMProcessing(rugosity_file_path, tiff_file_path, 'Roughness')
+
+    def create_slope(self, tiff_file_path: pathlib.Path) -> None:
+        """Generate a slope raster from the DEM"""
+
+        slope_name = str(tiff_file_path.stem) + '_slope.tiff'
+        slope_file_path = tiff_file_path.parents[0] / slope_name
+        gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
+
     def download_nbs_tile(self, output_folder: str, tile_id: str):
         """Download all NBS files for a single tile"""
 
@@ -93,6 +107,8 @@ class TileProcessor:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
             self.multiband_to_singleband(mb_tiff_file, geometry)
             self.set_ground_to_nodata(tiff_file_path)
+            self.create_slope(tiff_file_path)
+            self.create_rugosity(tiff_file_path)
 
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         with self.get_pool() as process_pool:

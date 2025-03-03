@@ -20,12 +20,18 @@ class Param:
             return self.value
 
 
-def create_raster_vrt(output_folder: str) -> None:
+def create_raster_vrt(output_folder: str, file_type: str='elevation') -> None:
     """Create an output VRT from found .tif files"""
 
+    glob_lookup = {
+        'elevation': '*[0-9].tiff',
+        'slope': '*_slope.tiff',
+        'rugosity': '*_rugosity.tiff'
+    }
+
     outputs = pathlib.Path(output_folder) / 'BlueTopo' if output_folder else OUTPUTS / 'BlueTopo'
-    geotiffs = list(outputs.rglob('*.tiff'))
-    
+    geotiffs = list(outputs.rglob(glob_lookup[file_type]))
+
     output_geotiffs = {}
     for geotiff in geotiffs:
         # make separate VRT files for each CRS
@@ -38,10 +44,11 @@ def create_raster_vrt(output_folder: str) -> None:
             output_geotiffs[clean_crs_string] = []
         output_geotiffs[clean_crs_string].append(geotiff)
         geotiff_ds = None
-    
+
     for crs, tiles in output_geotiffs.items():
-        vrt_filename = str(outputs / f'bluetopo_mosaic_{crs}.vrt')
+        vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
         gdal.BuildVRT(vrt_filename, tiles, callback=gdal.TermProgress_nocb)
+
 
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
     """Load config and return speciific key"""
@@ -53,7 +60,7 @@ def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
             return parent_item[child]
         else:
             return parent_item
-        
+
 
 def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     """Obtain a subset of tiles based on state names"""
@@ -110,4 +117,3 @@ def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
         # notify the main caller of completion?!
     processor = TileProcessor()
     processor.process(tiles, outputs)
-    
