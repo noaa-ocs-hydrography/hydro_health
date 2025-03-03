@@ -19,7 +19,7 @@ mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 class TileProcessor:
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
-        """Generate a slope raster from the DEM"""
+        """Generate a rugosity/roughness raster from the DEM"""
 
         rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
         rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
