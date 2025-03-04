@@ -139,7 +139,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         params.append(eco_regions)
 
         tile_selector = arcpy.Parameter(
-            displayName="Draw a polygon to limit model area",
+            displayName="Draw a polygon or select a feature layer",
             name="tile_selector",
             datatype="GPFeatureRecordSetLayer",
             parameterType="Optional",
@@ -156,48 +156,48 @@ class RunHydroHealthModelTool(HHLayerTool):
         )
         params.append(drawn_polygon)
 
-        slider_id = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
-        slider_range = [1, 10]
+        # slider_id = '{C8C46E43-3D27-4485-9B38-A49F3AC588D9}'
+        # slider_range = [1, 10]
 
-        reef_slider = arcpy.Parameter(
-            displayName="Reefs - Weighting",
-            name="reefs_weighting",
-            datatype="Long",
-            parameterType="Required",
-            direction="Input"
-        )
+        # reef_slider = arcpy.Parameter(
+        #     displayName="Reefs - Weighting",
+        #     name="reefs_weighting",
+        #     datatype="Long",
+        #     parameterType="Required",
+        #     direction="Input"
+        # )
 
-        reef_slider.controlCLSID = slider_id
-        reef_slider.value = 7
-        reef_slider.filter.type = "Range"
-        reef_slider.filter.list = slider_range
-        params.append(reef_slider)
+        # reef_slider.controlCLSID = slider_id
+        # reef_slider.value = 7
+        # reef_slider.filter.type = "Range"
+        # reef_slider.filter.list = slider_range
+        # params.append(reef_slider)
 
-        active_captain_slider = arcpy.Parameter(
-            displayName="Active Captain - Weighting",
-            name="active_captain_weighting",
-            datatype="Long",
-            parameterType="Required",
-            direction="Input"
-        )
-        active_captain_slider.controlCLSID = slider_id
-        active_captain_slider.value = 5
-        active_captain_slider.filter.type = "Range"
-        active_captain_slider.filter.list = slider_range
-        params.append(active_captain_slider)
+        # active_captain_slider = arcpy.Parameter(
+        #     displayName="Active Captain - Weighting",
+        #     name="active_captain_weighting",
+        #     datatype="Long",
+        #     parameterType="Required",
+        #     direction="Input"
+        # )
+        # active_captain_slider.controlCLSID = slider_id
+        # active_captain_slider.value = 5
+        # active_captain_slider.filter.type = "Range"
+        # active_captain_slider.filter.list = slider_range
+        # params.append(active_captain_slider)
 
-        groundings_slider = arcpy.Parameter(
-            displayName="Groundings - Weighting",
-            name="groundings_weighting",
-            datatype="Long",
-            parameterType="Required",
-            direction="Input"
-        )
-        groundings_slider.controlCLSID = slider_id
-        groundings_slider.value = 5
-        groundings_slider.filter.type = "Range"
-        groundings_slider.filter.list = slider_range
-        params.append(groundings_slider)
+        # groundings_slider = arcpy.Parameter(
+        #     displayName="Groundings - Weighting",
+        #     name="groundings_weighting",
+        #     datatype="Long",
+        #     parameterType="Required",
+        #     direction="Input"
+        # )
+        # groundings_slider.controlCLSID = slider_id
+        # groundings_slider.value = 5
+        # groundings_slider.filter.type = "Range"
+        # groundings_slider.filter.list = slider_range
+        # params.append(groundings_slider)
 
         return params
 
