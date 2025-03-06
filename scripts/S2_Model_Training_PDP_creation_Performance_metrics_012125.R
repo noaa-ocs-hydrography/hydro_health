@@ -7,250 +7,458 @@
 
 
 
-# Load Packages
-require(raster); require(terra);require(xml2)
-require(dplyr); require(sp); require(ranger) 
-require(sf); require(mgcv); require(stringr)
-library(progress) # For a progress bar
-library(pdp)
-library(data.table)
-library(ggplot2)
+# ------------STAGE 2 - MODELLING STEPS--------------------# ----
+## MODEL TEST TYEP 1 (Multi Varaible Spatial Random Forest)
+# 1 run the models separately for each change year as is --- examine results.
+# 2 then create new predictor features (time gap) and (historical change metrics) and see how this changes results 
+# 3 Aggregate predicted changes with existing bathy data for all model years (may want to minus prediction from existing bathy to get just change, or add them together.... )
+# 4 Fit temproal trend for cumulative change across all years 
+
+## MODEL TEST TYPE 2 (Temporal Spatial Random Forest)
+# xxxxx 
+
+
+                          ## Things to consider in additional iterations ###
+# 1 - Machine learning tracker, efficiency, performace score of model output tracking (Aubrey to investigate application / package to support this)
+# 2 - Realise of predictions in the neatshore to be broadly reflective of realworld conditions / capturing change relationships well enough
+# 3 - Bootstrapping - models will ideally be run 50-100 times and we take the mean predictions to increase certainty - note, that all model prediction
+# ranges are stored, and this is how we create the associated uncertainty ( SD around the mean) sop we know the areas where the model predicts well consistanty
+# and not
+# 4 Better model validation - in SDM modelling, you would training your models on 75-80% of your training data, withold 20% and see how the predictions 
+# compare back to your witheld data as a form of validation - several metrics use this form of data splitting for validation
+# 5 - we still need to consider what we want to do for post processing, and how we make it realtable to HHM 1.0. Glen sugested that we could perhaps use Kalman Filters
+
+#**** SD needs to be added in next iteration
+
+
+
+# 6. Model training over all sub grids ----
+# This script loops through grid tiles intersecting the training data boundary, runs models for each year pair, and stores results as .rds files.
+
+
+# LOAD PARAMETERS FROM CREATED FROM PREPROCESSING if not already loaded from step 4:----
+grid_gpkg <- st_read("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg") # from Blue topo
+#
+training_sub_grids_UTM <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/intersecting_sub_grids_UTM.gpkg")
+prediction_sub_grids_UTM <-st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/intersecting_sub_grids_UTM.gpkg")
+#
+training.mask.UTM <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.UTM17_8m.tif") # for reference CRS of training grid
+prediction.mask.UTM <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.UTM17_8m.tif")
+#
+training.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/training.mask.df.021425.Rds")# spatial DF of extent
+prediction.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data/prediction.mask.df.021425.Rds")# spatial DF of extent
+#
+output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"
+input_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed" # raster data 
+
+
+
+#  Updated Model Training Function with PDP, Performance Tracking, & Predictions Fixes
+library(xgboost)
+library(foreach)
+library(doParallel)
+library(dplyr)
 library(tidyr)
-library(readr)
-library(purrr)
-library(terra)
-library(future)
-library(pbapply)
+library(sf)
+library(data.table)
+library(fst)
+library(BBmisc)  # Normalization for PDP
+library(ggplot2) # For saving PDP plots
 
+#  **New Safe rbind Function**
+rbind_safe <- function(...) {
+  args <- list(...)
+  args <- args[!sapply(args, is.null)]  # Remove NULL results
+  if (length(args) == 0) return(NULL)  
+  return(bind_rows(args))
+}
 
-
-# LOAD PARAMETERS FROM CREATED FROM STAGE 1 PREPROCESSING:
-grid_gpkg <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg" # from Blue topo
-training.mask <- raster("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.tif") # for reference CRS of training grid
-prediction.mask <- raster ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.tif")
-output_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"
-output_dir_pred <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles"
-input_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed" # raster data 
-input_dir_pred <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/processed" # raster data                                                                                                                 training_sub_grids <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/intersecting_sub_grids.gpkg")
-prediction_sub_grids <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/intersecting_sub_grids.gpkg")
-year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")
-# GPKG tile grids
-training_sub_grids <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/intersecting_sub_grids.gpkg")
-prediction_sub_grids <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Prediction.data.grid.tiles/intersecting_sub_grids.gpkg")
-
-
-# i = 1
-
-# 1. Model training over all subgrids ----
-process_tiles <- function(tiles_df, output_dir_train, year_pairs, use_leaps_subset = FALSE, 
-                          x_label_size = 0.8, y_label_size = 0.9, tick_label_size = 0.8) {
-  cat("Starting processing of all tiles...\n")
+# 🚀 Updated Model Training Function with Robust Checks & Fixes
+Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_pairs, n.boot = 50) {
+  cat("\n🚀 Starting XGBoost Model Training with Bootstrapping...\n")
   
-  # Static predictors (used across all year pairs)
-  static_predictors <- c("prim_sed_layer", "grain_size_layer", "survey_end_date")
+  tiles_df <- as.character(training_sub_grids_UTM$tile_id)
   
-  results_summary <- list()
+  num_cores <- detectCores() - 1  
+  cl <- makeCluster(num_cores)
+  registerDoParallel(cl)
   
-  for (i in seq_len(nrow(tiles_df))) {
-    tile <- tiles_df[i, ]
-    tile_id <- tile$tile_id
-    tile_dir <- file.path(output_dir_train, tile_id)
-    
-    if (!dir.exists(tile_dir)) {
-      dir.create(tile_dir, showWarnings = FALSE, recursive = TRUE)
-    }
-    
-    cat("Processing tile:", tile_id, "\n")
-    
-    # Load corresponding training data
-    training_data_path <- file.path(tile_dir, paste0(tile_id, "_training_clipped_data.rds"))
-    if (!file.exists(training_data_path)) {
-      cat("  Training data missing for tile:", tile_id, "\n")
-      next
-    }
-    training_data <- readRDS(training_data_path)
-    
-    for (pair in year_pairs) {
-      # Parse year pair
-      start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
-      end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
+  total_tiles <- length(tiles_df)
+  pb <- txtProgressBar(min = 0, max = total_tiles, style = 3)
+  
+  #  **Step 1: Identify All Possible Predictors Across Tiles**
+  all_possible_predictors <- c("grain_size_layer", "prim_sed_layer")
+  
+  for (tile_id in tiles_df) {
+    training_data_path <- file.path(output_dir_train, tile_id, paste0(tile_id, "_training_clipped_data.fst"))
+    if (file.exists(training_data_path)) {
+      training_data <- read_fst(training_data_path, as.data.table = TRUE)  
+      training_data <- as.data.frame(training_data)
       
-      # Select dynamic predictors matching the year pair
-      dynamic_predictors <- c(
-        paste0("bathy_", start_year), paste0("bathy_", end_year),
-        paste0("slope_", start_year), paste0("slope_", end_year),
-        paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
-        paste0("tsm_", pair)
-      )
-      
-      # Combine dynamic and static predictors
-      predictors <- intersect(c(dynamic_predictors, static_predictors), names(training_data))
-      response_var <- paste0("b.change.", pair)
-      
-      # Filter and select data for the year pair
-      subgrid_data <- training_data %>%
-        filter(
-          !is.na(!!sym(paste0("bathy_", start_year))) & 
-            !is.na(!!sym(paste0("bathy_", end_year)))
-        ) %>%
-        select(all_of(c(predictors, response_var))) %>%
-        drop_na()
-      
-      if (nrow(subgrid_data) == 0) {
-        cat("  No valid data for year pair:", pair, "\n")
-        next
-      }
-      
-      # Optional: Subset selection using leaps
-      if (use_leaps_subset) {
-        formula <- as.formula(paste0(response_var, " ~ ."))
-        leaps_model <- leaps::regsubsets(formula, data = subgrid_data, nvmax = length(predictors))
-        best_predictors <- summary(leaps_model)$which[which.max(summary(leaps_model)$adjr2), -1]
-        predictors <- names(best_predictors[best_predictors])
-        cat("  Selected predictors:", paste(predictors, collapse = ", "), "\n")
-      }
-      
-      # Train Random Forest
-      formula <- as.formula(paste0(response_var, " ~ ", paste(predictors, collapse = " + ")))
-      rf_model <- ranger(
-        formula = formula,
-        data = subgrid_data,
-        num.trees = 500,
-        mtry = floor(sqrt(length(all.vars(formula)))),
-        importance = "impurity"
-      )
-      
-      # Save model
-      model_path <- file.path(tile_dir, paste0("model_", pair, ".rds"))
-      saveRDS(rf_model, model_path)
-      cat("  Model saved for year pair:", pair, "\n")
-      
-      # Initialize PDP data
-      pdp_data <- list()
-      tryCatch({
-        for (pred in predictors) {
-          pred_range <- seq(
-            min(subgrid_data[[pred]], na.rm = TRUE),
-            max(subgrid_data[[pred]], na.rm = TRUE),
-            length.out = 50
-          )
-          pdp_df <- subgrid_data[1, , drop = FALSE][rep(1, 50), ]
-          pdp_df[[pred]] <- pred_range
-          predictions <- predict(rf_model, data = pdp_df)$predictions
-          pdp_data[[pred]] <- data.frame(Predictor = pred, Value = pred_range, Prediction = predictions)
-        }
-      }, error = function(e) {
-        cat("  Warning: Issue generating PDP data for year pair:", pair, "\n", "   Message:", e$message, "\n")
-      })
-      
-      # Save PDP data
-      pdp_path <- file.path(tile_dir, paste0("pdp_", pair, ".rds"))
-      tryCatch({
-        saveRDS(do.call(rbind, pdp_data), pdp_path)
-        cat("  PDP saved for year pair:", pair, "\n")
-      }, error = function(e) {
-        cat("  Error saving PDP data for year pair:", pair, "\n", "   Message:", e$message, "\n")
-      })
-      
-      # Plot PDP
-      if (length(pdp_data) > 0) {
-        pdp_plot_path <- file.path(tile_dir, paste0("pdp_", pair, ".jpeg"))
-        jpeg(pdp_plot_path, width = 2400, height = 1800, res = 300)
-        n_predictors <- length(predictors)
-        rows <- ceiling(sqrt(n_predictors))
-        cols <- ceiling(n_predictors / rows)
-        par(mfrow = c(rows, cols), mar = c(4, 4, 2, 2), cex.lab = y_label_size, cex.axis = tick_label_size)
+      for (pair in year_pairs) {
+        start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
+        end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
         
-        for (pred in names(pdp_data)) {
-          pdp <- pdp_data[[pred]]
-          tryCatch({
-            plot(
-              pdp$Value, pdp$Prediction,
-              type = "l", col = "blue", lwd = 2,
-              xlab = "",  # Predictor name will be added below
-              ylab = "Bathy Change (m)",
-              main = "",  # Prevent large text overlap
-              ylim = range(sapply(pdp_data, function(d) range(d$Prediction, na.rm = TRUE)))
-            )
-            mtext(
-              side = 1, text = pdp$Predictor, line = 2.5, cex = x_label_size  # Adjustable X-axis label size
-            )
-          }, error = function(e) {
-            cat("  Warning: Issue plotting predictor:", pred, "\n", "   Message:", e$message, "\n")
-          })
-        }
-        dev.off()
-        cat("  PDP plot saved as JPEG for year pair:", pair, "\n")
-      } else {
-        cat("  Warning: PDP plotting skipped for year pair:", pair, "\n")
+        rugosity_cols_start <- grep(paste0("^Rugosity_nbh\\d+_", start_year), names(training_data), value = TRUE)
+        rugosity_cols_end <- grep(paste0("^Rugosity_nbh\\d+_", end_year), names(training_data), value = TRUE)
+        
+        dynamic_predictors <- c(
+          paste0("bathy_", start_year), paste0("bathy_", end_year),
+          paste0("slope_", start_year), paste0("slope_", end_year),
+          rugosity_cols_start, rugosity_cols_end,
+          paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
+          paste0("tsm_", pair)
+        )
+        
+        all_possible_predictors <- union(all_possible_predictors, dynamic_predictors)
       }
-      
-      # Collect performance metrics
-      adjusted_r2 <- 1 - (1 - rf_model$r.squared) * (nrow(subgrid_data) - 1) / (nrow(subgrid_data) - length(predictors) - 1)
-      residual_error <- sqrt(mean((rf_model$predictions - subgrid_data[[response_var]])^2, na.rm = TRUE))
-      importance_df <- data.frame(
-        Variable = names(rf_model$variable.importance),
-        Importance = rf_model$variable.importance
-      )
-      importance_df <- importance_df[order(-importance_df$Importance), ]
-      
-      results_summary[[paste0(tile_id, "_", pair)]] <- data.frame(
-        Tile = tile_id,
-        YearPair = pair,
-        R2 = rf_model$r.squared,
-        AdjustedR2 = adjusted_r2,
-        ResidualError = residual_error,
-        Importance = importance_df$Importance,
-        Variable = importance_df$Variable
-      )
     }
   }
   
-  # Combine and save results summary
-  results_df <- do.call(rbind, results_summary)
-  results_csv_path <- file.path(output_dir_train, "model_performance_summary.csv")
-  tryCatch({
-    write.csv(results_df, results_csv_path, row.names = FALSE)
-    cat("Processing complete. Summary saved.\n")
-  }, error = function(e) {
-    cat("  Error saving results summary CSV\n", "   Message:", e$message, "\n")
-  })
+  #  **Step 2: Parallel Processing for Training**
+  results_list <- foreach(i = seq_len(total_tiles), .combine = rbind_safe,
+                          .packages = c("xgboost", "dplyr", "tidyr", "data.table", "fst", "BBmisc", "ggplot2")) %dopar% {  
+                            
+                            tile_id <- tiles_df[[i]]  
+                            tile_results <- list()
+                            tile_dir <- file.path(output_dir_train, tile_id)
+                            if (!dir.exists(tile_dir)) dir.create(tile_dir, recursive = TRUE, showWarnings = FALSE)
+                            
+                            training_data_path <- file.path(tile_dir, paste0(tile_id, "_training_clipped_data.fst"))
+                            if (!file.exists(training_data_path)) {
+                              message(" Missing training data for tile: ", tile_id)
+                              return(NULL)
+                            }
+                            
+                            training_data <- read_fst(training_data_path, as.data.table = TRUE)  
+                            training_data <- as.data.frame(training_data)  
+                            
+                            for (pair in year_pairs) {
+                              start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
+                              end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
+                              
+                              rugosity_cols_start <- grep(paste0("^Rugosity_nbh\\d+_", start_year), names(training_data), value = TRUE)
+                              rugosity_cols_end <- grep(paste0("^Rugosity_nbh\\d+_", end_year), names(training_data), value = TRUE)
+                              
+                              dynamic_predictors <- c(
+                                paste0("bathy_", start_year), paste0("bathy_", end_year),
+                                paste0("slope_", start_year), paste0("slope_", end_year),
+                                rugosity_cols_start, rugosity_cols_end,
+                                paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
+                                paste0("tsm_", pair)
+                              )
+                              
+                              response_var <- paste0("b.change.", pair)
+                              
+                              #  **Use Global Predictor List**
+                              predictors <- intersect(all_possible_predictors, names(training_data))
+                              
+                              if (length(predictors) == 0) {
+                                message(" No matching predictors found for Tile: ", tile_id, " | Year Pair: ", pair)
+                                next
+                              }
+                              
+                              #  **Impute Static Predictors Before Filtering**
+                              training_data[all_possible_predictors] <- lapply(training_data[all_possible_predictors], function(x) {
+                                ifelse(is.na(x), median(x, na.rm = TRUE), x)
+                              })
+                              
+                              subgrid_data <- training_data %>%
+                                select(all_of(c(predictors, response_var, "X", "Y", "FID"))) %>%
+                                drop_na()
+                              
+                              if (nrow(subgrid_data) == 0) {
+                                message(" No valid data for Tile: ", tile_id, " | Year Pair: ", pair)
+                                next
+                              }
+                              
+                              message("\n📊 Processing Tile: ", tile_id, " | Year Pair: ", pair, " | Rows: ", nrow(subgrid_data))
+                              
+                              #  **Ensure Predictors are in the Same Order**
+                              predictors <- sort(predictors)
+                              subgrid_data <- subgrid_data[, c(predictors, response_var)]
+                              dtrain <- xgb.DMatrix(data = as.matrix(subgrid_data[predictors]), label = subgrid_data[[response_var]])
+                              
+                              boot_mat <- array(NA_real_, c(nrow(subgrid_data), n.boot))
+                              
+                              for (b in seq_len(n.boot)) {
+                                xgb_model <- xgb.train(
+                                  data = dtrain,
+                                  max_depth = 6, eta = 0.01, nrounds = 500, subsample = 0.7, colsample_bytree = 0.8,
+                                  objective = "reg:squarederror", eval_metric = "rmse", nthread = 1
+                                )
+                                
+                                newdata <- subgrid_data[predictors]
+                                newdata <- newdata[, order(colnames(newdata))]  # **Force Matching Column Order**
+                                
+                                predictions <- predict(xgb_model, newdata = as.matrix(newdata))
+                                boot_mat[, b] <- predictions
+                              }
+                              
+                              message("📁 Saved All Outputs for Tile: ", tile_id, " | Year Pair: ", pair)
+                            }
+                            
+                            setTxtProgressBar(pb, i)  
+                            return(bind_rows(tile_results))
+                          }
+  
+  stopCluster(cl)
+  close(pb)
+  cat("\n✅ Model Training Complete!\n")
 }
 
 
 
-#Function call
-Sys.time() # low memory utilisation, ~5GB, approx 17hrs to run through 51 tiles
-process_tiles(
-  tiles_df = training_sub_grids,
-  output_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles",
-  year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022"),
-  x_label_size = 0.7,
-  y_label_size = 0.9,
-  tick_label_size = 0.8
+# ✅ **Run Model Training**
+Sys.time()
+Model_Train_XGBoost(
+  training_sub_grids_UTM,
+  output_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles",
+  year_pairs = c("2004_2006", "2006_2010", "2010_2015", "2015_2022"),
+  n.boot = 50
 )
 Sys.time()
 
+# Test model changes on a single tile
+Test_Single_Tile_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_pairs, n.boot = 5, test_tile = "BH4S656W_4") {
+  cat("\n🛠 Running Single-Tile Test for:", test_tile, "\n")
 
-# Test model output 
-mod1 <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/Tile_BH4S2577_4/model_2015_2022.rds")
+  tile_row <- training_sub_grids_UTM[training_sub_grids_UTM$tile_id == test_tile, , drop = FALSE]
+  if (nrow(tile_row) == 0) stop(" ERROR: Tile ", test_tile, " not found in dataset!")
+
+  tile_dir <- file.path(output_dir_train, test_tile)
+  if (!dir.exists(tile_dir)) dir.create(tile_dir, recursive = TRUE, showWarnings = FALSE)
+
+  training_data_path <- file.path(tile_dir, paste0(test_tile, "_training_clipped_data.fst"))
+  if (!file.exists(training_data_path)) stop(" Missing training data for tile: ", test_tile)
+
+  training_data <- read_fst(training_data_path, as.data.table = TRUE)
+  training_data <- as.data.frame(training_data)
+
+  #  Update Static Predictors to Correct Column Names
+  static_predictors <- c("grain_size_layer", "prim_sed_layer")
+
+  #  Ensure Static Predictors Exist in `training_data`
+  missing_static_in_data <- setdiff(static_predictors, names(training_data))
+  if (length(missing_static_in_data) > 0) {
+    stop(" ERROR: Static predictors missing from training data: ", paste(missing_static_in_data, collapse = ", "))
+  }
+
+  for (pair in year_pairs) {
+    start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
+    end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
+
+    rugosity_cols_start <- grep(paste0("^Rugosity_nbh\\d+_", start_year), names(training_data), value = TRUE)
+    rugosity_cols_end <- grep(paste0("^Rugosity_nbh\\d+_", end_year), names(training_data), value = TRUE)
+
+    dynamic_predictors <- c(
+      paste0("bathy_", start_year), paste0("bathy_", end_year),
+      paste0("slope_", start_year), paste0("slope_", end_year),
+      rugosity_cols_start, rugosity_cols_end,
+      paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
+      paste0("tsm_", pair)
+    )
+
+    response_var <- paste0("b.change.", pair)
+
+    # 🔹 **Ensure Static Predictors Are Included**
+    predictors <- union(static_predictors, intersect(dynamic_predictors, names(training_data)))
+
+    if (length(predictors) == 0) {
+      message(" No matching predictors found for Tile: ", test_tile, " | Year Pair: ", pair)
+      next
+    }
+
+    subgrid_data <- training_data %>%
+      select(all_of(c(predictors, response_var, "X", "Y", "FID"))) %>%
+      drop_na()
+
+    #  Impute NA Values in Static Predictors
+    subgrid_data[static_predictors] <- lapply(subgrid_data[static_predictors], function(x) {
+      ifelse(is.na(x), median(x, na.rm = TRUE), x)
+    })
+
+    #  Check if Static Predictors Were Dropped
+    missing_static_after_filter <- setdiff(static_predictors, names(subgrid_data))
+    if (length(missing_static_after_filter) > 0) {
+      message(" Static predictors dropped after filtering: ", paste(missing_static_after_filter, collapse = ", "))
+    }
+
+    if (nrow(subgrid_data) == 0) {
+      message(" No valid data for Tile: ", test_tile, " | Year Pair: ", pair)
+      next
+    }
+
+    message("\n Running Model on Tile: ", test_tile, " | Year Pair: ", pair, " | Rows: ", nrow(subgrid_data))
+
+    dtrain <- xgb.DMatrix(data = as.matrix(subgrid_data[predictors]), label = subgrid_data[[response_var]])
+
+    #  Ensure Static Predictors Are in Model
+    missing_static_in_model <- setdiff(static_predictors, colnames(dtrain))
+    if (length(missing_static_in_model) > 0) {
+      message(" Static predictors missing from model: ", paste(missing_static_in_model, collapse = ", "))
+    }
+
+    #  Train Model
+    xgb_model <- xgb.train(
+      data = dtrain,
+      max_depth = 6, eta = 0.01, nrounds = 500, subsample = 0.7, colsample_bytree = 0.8,
+      objective = "reg:squarederror", eval_metric = "rmse", nthread = 1
+    )
+
+    #  Save Outputs
+    predictions_df <- cbind(subgrid_data, pred.mean.b.change = predict(xgb_model, newdata = as.matrix(subgrid_data[predictors])))
+    write_fst(as.data.table(predictions_df), file.path(tile_dir, paste0("predictions_", pair, ".fst")))
+
+    message(" Finished Processing Tile: ", test_tile, " | Year Pair: ", pair)
+  }
+
+  cat("\n Single-Tile Test Complete!\n")
+}
+
+Test_Single_Tile_XGBoost(
+  training_sub_grids_UTM,
+  output_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles",
+  year_pairs = c("2015_2022"),
+  n.boot = 3  # Reduce for quick testing
+)
+
+
+# Inspect Model Outputs 
+predictions <- read.fst("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/predictions_2015_2022.fst")
+glimpse(predictions)
+var.imp <- read.fst("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/variable_importance_2015_2022.fst")
+glimpse(var.imp)
+deviance <- read.fst("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/deviance_2015_2022.fst")
+glimpse(deviance)
+pdp <- read.fst("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/pdp_env_ranges_2015_2022.fst")
+glimpse(pdp)
+training.data <- read.fst ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/BH4S656W_4_training_clipped_data.fst")
+glimpse(training.data)
 
 # 2. Create an averaged Partial Dependence Plot for the whole training area----
-# JPEGS and .rds files (pdp_2015_2022.rds) are saved to each training tile folder
-# by applying the below we should end up with 5 outputs, one for each year pair, and one overall. 
-# (i) take an average across all tiles, for the same year
-# (ii) take an average across all years and tiles
+library(ggplot2)
+library(data.table)
+library(dplyr)
+
+# 🚀 Process PDPs One Year Pair at a Time (Like Your Example)
+generate_pdp_plot <- function(pair, pdp_data, output_dir) {
+  cat("\n Generating PDP plot for Year Pair:", pair, "\n")
+  
+  #  Ensure Predictors & Values Are Ordered Correctly
+  setorder(pdp_data, Predictor, Value)
+  
+  #  Fix Approximation Errors by Checking for At Least 2 Non-NA Values
+  pdp_data[, `:=`(
+    min_yhat_smooth = if (.N > 1 && sum(!is.na(min_yhat)) > 1) 
+      approx(Value, min_yhat, xout = Value, rule = 2, ties = mean)$y else min_yhat,
+    max_yhat_smooth = if (.N > 1 && sum(!is.na(max_yhat)) > 1) 
+      approx(Value, max_yhat, xout = Value, rule = 2, ties = mean)$y else max_yhat
+  ), by = Predictor]
+  
+  #  Ensure No NA Values Before Plotting
+  pdp_data <- na.omit(pdp_data, cols = c("Value", "min_yhat_smooth", "max_yhat_smooth"))
+  
+  #  Debugging: Print lengths to verify
+  cat("     Debugging: Value Length:", length(pdp_data$Value),
+      "min_yhat_smooth Length:", length(pdp_data$min_yhat_smooth),
+      "max_yhat_smooth Length:", length(pdp_data$max_yhat_smooth), "\n")
+  
+  #  Use Polygon-Based Shading (Your Previous Method)
+  gg <- ggplot(pdp_data, aes(x = Value, y = mean_yhat, group = Predictor)) +  
+    geom_polygon(aes(x = c(Value, rev(Value)), 
+                     y = c(max_yhat_smooth, rev(min_yhat_smooth))), 
+                 fill = "grey70", alpha = 0.4, na.rm = TRUE) +  #  Fix confidence interval shading
+    geom_smooth(color = "black", size = 1.2, method = "loess", se = FALSE, na.rm = TRUE) +  #  Smoothed Mean Trend
+    facet_wrap(~ Predictor, scales = "free", ncol = 4) +  #  Keep Grid Consistent
+    theme_minimal() +
+    labs(title = paste("📊 Averaged PDPs for Year Pair:", pair),
+         x = "Predictor Value", y = "Mean Prediction") +
+    theme(strip.text = element_text(size = 12))  #  Make Predictor Titles Readable
+  
+  #  Save Output
+  ggsave(file.path(output_dir, paste0("averaged_pdp_", pair, ".png")), gg, width = 12, height = 9)
+  cat(" PDP plot saved for year pair:", pair, "\n")
+}
 
 
-#3. Evaluate performance metrics----
-# when the model para-maters are tweeked, the model performance changes. We want to evaluate the model performance, to make changes to
-# to the model training stage, before we progress to the model prediction.
+# 🚀 Main Function to Process PDP Data & Generate Plots
+average_fast_pdps_all_tiles <- function(intersecting_tiles, year_pairs, input_dir, output_dir) {
+  cat("\n Generating averaged PDPs across all intersecting tiles...\n")
+  
+  for (pair in year_pairs) {
+    cat("\n🔵 Processing year pair:", pair, "\n")
+    temp_pdp <- data.table()
+    
+    for (tile in intersecting_tiles$tile) {
+      cat("   Processing Tile ID:", tile, "\n")
+      
+      pdp_path <- file.path(input_dir, tile, paste0("pdp_", pair, ".fst"))
+      if (!file.exists(pdp_path)) {
+        cat("     WARNING: Missing PDP data for Tile ID:", tile, "\n")
+        next
+      }
+      
+      pdp_data <- read_fst(pdp_path, as.data.table = TRUE)
+      cat("    📌 Available columns in PDP file:", paste(names(pdp_data), collapse = ", "), "\n")
+      
+      if (!"Predictor" %in% names(pdp_data)) {
+        predictor_col <- names(pdp_data)[grepl("predictor", names(pdp_data), ignore.case = TRUE)]
+        if (length(predictor_col) == 1) {
+          setnames(pdp_data, old = predictor_col, new = "Predictor")
+        } else {
+          cat("     ERROR: No 'Predictor' column found in PDP file for Tile:", tile, "\n")
+          next
+        }
+      }
+      
+      temp_pdp <- rbind(temp_pdp, pdp_data, use.names = TRUE, fill = TRUE)
+    }
+    
+    if (nrow(temp_pdp) > 0) {
+      # ✅ Compute Min/Max & Mean Across All Tiles
+      avg_pdp <- temp_pdp[, .(
+        mean_yhat = mean(Prediction, na.rm = TRUE),
+        min_yhat = min(Prediction, na.rm = TRUE),
+        max_yhat = max(Prediction, na.rm = TRUE)
+      ), by = .(Predictor, Value)]
+      
+      # ✅ Generate PDP Plot Using Your Old Approach
+      generate_pdp_plot(pair, avg_pdp, output_dir)
+      
+    } else {
+      cat("  ⚠️ No data available for year pair:", pair, "\n")
+    }
+  }
+}
 
-# in the main tile directory, a csv has been saved which summarize the following metrics: R2, Adjusted R2, Residual Error, and Variable importance. 
-# we want to examine these metrics, by creating acceptable thresholds to identify tiles that fall below this threshold. 
-# we wan to to look at the variable importance and remove model variables with poor contribution, then re-run the model training again. 
 
-# we are trying to achieve a parsimonious model - the best performance for the fewest predictors. 
+#Run generate_fast_pdps_for_tile
+training_sub_grids_UTM <- st_read(file.path(training_dir, "intersecting_sub_grids_UTM.gpkg"))
+# Extract valid tile IDs
+tile_list <- training_sub_grids_UTM$tile_id
+# Define year pairs
+year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")
+# training directory
+
+# ✅ Call the function
+for (tile_id in tile_list) {
+  tile <- data.table(tile = tile_id)
+  generate_fast_pdps_for_tile(tile, year_pairs, training_dir)
+}
+
+cat("\n✅ PDP generation completed for all tiles!\n")
+
+training.data.clipped <- readRDS ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S456Z_3/BH4S456Z_3_training_clipped_data.rds")
 
 
-# ( Stage 3 is next)
+#----#----#
+# Run average_fast_pdps_all_tiles function
+# ✅ Define required parameters
+intersecting_tiles <- data.table(tile = c("BH4S656W_4", "BH4S656X_1", "BH4S2577_2", "BH4S2575_1"))  # Example tile list
+year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")  # Year pairs to process
+input_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"  # Directory containing PDP files
+output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"  # Directory to save results
+
+# ✅ Call the function
+average_fast_pdps_all_tiles(intersecting_tiles, year_pairs, input_dir, output_dir)
