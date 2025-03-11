@@ -11,6 +11,10 @@ from hydro_health.helpers.tools import process_tiles, get_ecoregion_tiles, Param
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
+def create_vrt_output(output_folder):
+    for dataset in ['elevation', 'slope', 'rugosity']:
+        create_raster_vrt(output_folder, dataset)
+
 
 if __name__ == '__main__':
     if os.path.exists(OUTPUTS / 'log_prints.txt'):
@@ -28,7 +32,8 @@ if __name__ == '__main__':
     print(f'Selected tiles: {tiles.shape[0]}')
     start = time.time()
     process_tiles(tiles, param_lookup['output_directory'].valueAsText)
-    create_raster_vrt(param_lookup['output_directory'].valueAsText)
+    create_vrt_output(param_lookup['output_directory'].valueAsText)
+    
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
     # takes 102 seconds to verify if already downloaded

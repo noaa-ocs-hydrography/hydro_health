@@ -1,11 +1,11 @@
 import yaml
 import pathlib
-import pandas as pd
 import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and activating cloned env in Pro
 
 from hydro_health.engines.tiling.TileProcessor import TileProcessor
 from osgeo import gdal, osr
 
+gdal.UseExceptions()
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
@@ -20,28 +20,49 @@ class Param:
             return self.value
 
 
-def create_raster_vrt(output_folder: str) -> None:
+def create_raster_vrt(output_folder: str, file_type: str='elevation') -> None:
     """Create an output VRT from found .tif files"""
 
+    glob_lookup = {
+        'elevation': '*[0-9].tiff',
+        'slope': '*_slope.tiff',
+        'rugosity': '*_rugosity.tiff'
+    }
+
     outputs = pathlib.Path(output_folder) / 'BlueTopo' if output_folder else OUTPUTS / 'BlueTopo'
-    geotiffs = list(outputs.rglob('*.tiff'))
-    
+    geotiffs = list(outputs.rglob(glob_lookup[file_type]))
+
     output_geotiffs = {}
     for geotiff in geotiffs:
-        # make separate VRT files for each CRS
         geotiff_ds = gdal.Open(geotiff)
         projection_wkt = geotiff_ds.GetProjection()
-        spatial_ref = osr.SpatialReference(wkt=projection_wkt)
-        projected_crs_string = spatial_ref.GetAttrValue('projcs')
+        spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
+        projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
+        # Store tile and CRS
         if clean_crs_string not in output_geotiffs:
-            output_geotiffs[clean_crs_string] = []
-        output_geotiffs[clean_crs_string].append(geotiff)
+            output_geotiffs[clean_crs_string] = {'crs': None, 'tiles': []}
+        output_geotiffs[clean_crs_string]['tiles'].append(geotiff)
+        if output_geotiffs[clean_crs_string]['crs'] is None:
+            output_geotiffs[clean_crs_string]['crs'] = spatial_ref
         geotiff_ds = None
-    
-    for crs, tiles in output_geotiffs.items():
-        vrt_filename = str(outputs / f'bluetopo_mosaic_{crs}.vrt')
-        gdal.BuildVRT(vrt_filename, tiles, callback=gdal.TermProgress_nocb)
+
+    for crs, tile_dict in output_geotiffs.items():
+        # Create VRT for each tile and set output CRS to fix heterogenous crs issue
+        vrt_tiles = []
+        for tile in tile_dict['tiles']:
+            output_raster_vrt = str(tile.parents[0] / f"{tile.stem}.vrt")
+            gdal.Warp(
+                output_raster_vrt, 
+                tile,
+                format="VRT",
+                dstSRS=output_geotiffs[crs]['crs']
+            )
+            vrt_tiles.append(output_raster_vrt)
+        
+        vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
+        gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
+
 
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
     """Load config and return speciific key"""
@@ -53,7 +74,7 @@ def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
             return parent_item[child]
         else:
             return parent_item
-        
+
 
 def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     """Obtain a subset of tiles based on state names"""
@@ -110,4 +131,3 @@ def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
         # notify the main caller of completion?!
     processor = TileProcessor()
     processor.process(tiles, outputs)
-    
