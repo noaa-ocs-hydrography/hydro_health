@@ -51,9 +51,7 @@ prediction.mask.df <- readRDS("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working
 output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"
 input_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Training/processed" # raster data 
 
-
-
-#  Updated Model Training Function with PDP, Performance Tracking, & Predictions Fixes
+# Load additional packages 
 library(xgboost)
 library(foreach)
 library(doParallel)
@@ -65,157 +63,268 @@ library(fst)
 library(BBmisc)  # Normalization for PDP
 library(ggplot2) # For saving PDP plots
 
-#  **New Safe rbind Function**
+# Safe rbind Function**
 rbind_safe <- function(...) {
   args <- list(...)
   args <- args[!sapply(args, is.null)]  # Remove NULL results
-  if (length(args) == 0) return(NULL)  
+  if (length(args) == 0) return(data.frame())  # Ensure it returns a dataframe
   return(bind_rows(args))
 }
 
-# 🚀 Updated Model Training Function with Robust Checks & Fixes
-Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_pairs, n.boot = 50) {
-  cat("\n🚀 Starting XGBoost Model Training with Bootstrapping...\n")
+registerDoParallel(detectCores() - 1)
+
+Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_pairs, n.boot = 2) { 
+  # -------------------------------------------------------
+  # 1. MODEL INITIALIZATION & ERROR LOGGING
+  # -------------------------------------------------------
+  cat("\n Starting XGBoost Model Training with Bootstrapping...\n")
   
   tiles_df <- as.character(training_sub_grids_UTM$tile_id)
-  
-  num_cores <- detectCores() - 1  
+  num_cores <- detectCores() - 1
   cl <- makeCluster(num_cores)
   registerDoParallel(cl)
   
   total_tiles <- length(tiles_df)
   pb <- txtProgressBar(min = 0, max = total_tiles, style = 3)
   
-  #  **Step 1: Identify All Possible Predictors Across Tiles**
-  all_possible_predictors <- c("grain_size_layer", "prim_sed_layer")
+  log_file <- file.path(output_dir_train, "error_log.txt")
+  cat("Error Log - XGBoost Training\n", Sys.time(), "\n", file = log_file, append = FALSE)  # Overwrite on new run
   
-  for (tile_id in tiles_df) {
-    training_data_path <- file.path(output_dir_train, tile_id, paste0(tile_id, "_training_clipped_data.fst"))
-    if (file.exists(training_data_path)) {
-      training_data <- read_fst(training_data_path, as.data.table = TRUE)  
-      training_data <- as.data.frame(training_data)
-      
-      for (pair in year_pairs) {
-        start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
-        end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
-        
-        rugosity_cols_start <- grep(paste0("^Rugosity_nbh\\d+_", start_year), names(training_data), value = TRUE)
-        rugosity_cols_end <- grep(paste0("^Rugosity_nbh\\d+_", end_year), names(training_data), value = TRUE)
-        
-        dynamic_predictors <- c(
-          paste0("bathy_", start_year), paste0("bathy_", end_year),
-          paste0("slope_", start_year), paste0("slope_", end_year),
-          rugosity_cols_start, rugosity_cols_end,
-          paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
-          paste0("tsm_", pair)
-        )
-        
-        all_possible_predictors <- union(all_possible_predictors, dynamic_predictors)
-      }
-    }
-  }
+  # -------------------------------------------------------
+  # 2. IDENTIFY PREDICTORS & VALIDATE TRAINING DATA
+  # -------------------------------------------------------
+  static_predictors <- c("grain_size_layer", "prim_sed_layer")  # Static predictors
   
-  #  **Step 2: Parallel Processing for Training**
-  results_list <- foreach(i = seq_len(total_tiles), .combine = rbind_safe,
-                          .packages = c("xgboost", "dplyr", "tidyr", "data.table", "fst", "BBmisc", "ggplot2")) %dopar% {  
-                            
-                            tile_id <- tiles_df[[i]]  
-                            tile_results <- list()
-                            tile_dir <- file.path(output_dir_train, tile_id)
-                            if (!dir.exists(tile_dir)) dir.create(tile_dir, recursive = TRUE, showWarnings = FALSE)
-                            
-                            training_data_path <- file.path(tile_dir, paste0(tile_id, "_training_clipped_data.fst"))
-                            if (!file.exists(training_data_path)) {
-                              message(" Missing training data for tile: ", tile_id)
-                              return(NULL)
-                            }
-                            
-                            training_data <- read_fst(training_data_path, as.data.table = TRUE)  
-                            training_data <- as.data.frame(training_data)  
-                            
-                            for (pair in year_pairs) {
-                              start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
-                              end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
+  results_list <- foreach(i = seq_len(total_tiles), .combine = rbind, 
+                          .packages = c("xgboost", "dplyr", "data.table", "fst", "foreach")) %dopar% {
+                            tryCatch({
+                              tile_id <- tiles_df[[i]]
+                              training_data_path <- file.path(output_dir_train, tile_id, paste0(tile_id, "_training_clipped_data.fst"))
                               
-                              rugosity_cols_start <- grep(paste0("^Rugosity_nbh\\d+_", start_year), names(training_data), value = TRUE)
-                              rugosity_cols_end <- grep(paste0("^Rugosity_nbh\\d+_", end_year), names(training_data), value = TRUE)
-                              
-                              dynamic_predictors <- c(
-                                paste0("bathy_", start_year), paste0("bathy_", end_year),
-                                paste0("slope_", start_year), paste0("slope_", end_year),
-                                rugosity_cols_start, rugosity_cols_end,
-                                paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
-                                paste0("tsm_", pair)
-                              )
-                              
-                              response_var <- paste0("b.change.", pair)
-                              
-                              #  **Use Global Predictor List**
-                              predictors <- intersect(all_possible_predictors, names(training_data))
-                              
-                              if (length(predictors) == 0) {
-                                message(" No matching predictors found for Tile: ", tile_id, " | Year Pair: ", pair)
-                                next
+                              if (!file.exists(training_data_path)) {
+                                cat(Sys.time(), " Missing training data for tile:", tile_id, "\n", file = log_file, append = TRUE)
+                                return(NULL)
                               }
                               
-                              #  **Impute Static Predictors Before Filtering**
-                              training_data[all_possible_predictors] <- lapply(training_data[all_possible_predictors], function(x) {
-                                ifelse(is.na(x), median(x, na.rm = TRUE), x)
-                              })
+                              training_data <- read_fst(training_data_path, as.data.table = TRUE)  
+                              training_data <- as.data.frame(training_data)
                               
-                              subgrid_data <- training_data %>%
-                                select(all_of(c(predictors, response_var, "X", "Y", "FID"))) %>%
-                                drop_na()
-                              
-                              if (nrow(subgrid_data) == 0) {
-                                message(" No valid data for Tile: ", tile_id, " | Year Pair: ", pair)
-                                next
+                              missing_static <- setdiff(static_predictors, names(training_data))
+                              if (length(missing_static) > 0) {
+                                cat(Sys.time(), " ERROR: Static predictors missing for Tile", tile_id, ":", paste(missing_static, collapse = ", "), "\n", file = log_file, append = TRUE)
+                                return(NULL)
                               }
                               
-                              message("\n📊 Processing Tile: ", tile_id, " | Year Pair: ", pair, " | Rows: ", nrow(subgrid_data))
-                              
-                              #  **Ensure Predictors are in the Same Order**
-                              predictors <- sort(predictors)
-                              subgrid_data <- subgrid_data[, c(predictors, response_var)]
-                              dtrain <- xgb.DMatrix(data = as.matrix(subgrid_data[predictors]), label = subgrid_data[[response_var]])
-                              
-                              boot_mat <- array(NA_real_, c(nrow(subgrid_data), n.boot))
-                              
-                              for (b in seq_len(n.boot)) {
-                                xgb_model <- xgb.train(
-                                  data = dtrain,
-                                  max_depth = 6, eta = 0.01, nrounds = 500, subsample = 0.7, colsample_bytree = 0.8,
-                                  objective = "reg:squarederror", eval_metric = "rmse", nthread = 1
+                              foreach(pair = year_pairs, .combine = rbind, .packages = "foreach") %dopar% {  #  open `foreach`
+                                start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
+                                end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
+                                
+                                rugosity_cols_start <- grep(paste0("^Rugosity_nbh\\d+_", start_year), names(training_data), value = TRUE)
+                                rugosity_cols_end <- grep(paste0("^Rugosity_nbh\\d+_", end_year), names(training_data), value = TRUE)
+                                
+                                dynamic_predictors <- c(
+                                  paste0("bathy_", start_year), paste0("bathy_", end_year),
+                                  paste0("slope_", start_year), paste0("slope_", end_year),
+                                  rugosity_cols_start, rugosity_cols_end,
+                                  paste0("hurr_count_", pair), paste0("hurr_strength_", pair),
+                                  paste0("tsm_", pair)
                                 )
                                 
-                                newdata <- subgrid_data[predictors]
-                                newdata <- newdata[, order(colnames(newdata))]  # **Force Matching Column Order**
+                                predictors <- dplyr::intersect(c(static_predictors, dynamic_predictors), names(training_data))
+                                response_var <- paste0("b.change.", pair)
                                 
-                                predictions <- predict(xgb_model, newdata = as.matrix(newdata))
-                                boot_mat[, b] <- predictions
-                              }
-                              
-                              message("📁 Saved All Outputs for Tile: ", tile_id, " | Year Pair: ", pair)
-                            }
-                            
-                            setTxtProgressBar(pb, i)  
-                            return(bind_rows(tile_results))
-                          }
-  
-  stopCluster(cl)
-  close(pb)
-  cat("\n✅ Model Training Complete!\n")
-}
+                                if (!response_var %in% names(training_data)) {
+                                  cat(Sys.time(), " ERROR: Response variable missing for Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
+                                  return(NULL)
+                                }
+                                
+                                if (length(predictors) == 0) {
+                                  cat(Sys.time(), " No matching predictors found for Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
+                                  return(NULL)
+                                }
+                                
+                                # -------------------------------------------------------
+                                # 3. FILTER & PREPARE TRAINING DATA
+                                # -------------------------------------------------------
+                                # Filter out NA values before training
+                                subgrid_data <- training_data %>%
+                                  dplyr::select(all_of(c(predictors, response_var, "X", "Y", "FID"))) %>%
+                                  tidyr::drop_na()
+                                
+                                # If no valid data remains, log and skip
+                                if (nrow(subgrid_data) == 0) {
+                                  cat(Sys.time(), " No valid data after filtering NA for Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
+                                  return(NULL)
+                                }
+                                
+                                # Convert to data.table and replace NA with the mean (or zero)
+                                setDT(subgrid_data)
+                                for (col in predictors) {
+                                  if (any(is.na(subgrid_data[[col]]))) {
+                                    cat(Sys.time(), " WARNING: NA values found in Predictor:", col, "| Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
+                                    subgrid_data[[col]][is.na(subgrid_data[[col]])] <- mean(subgrid_data[[col]], na.rm = TRUE)  # Replace NA with mean
+                                  }
+                                }
+                                
+                                # Ensure numeric conversion
+                                subgrid_data[, (predictors) := lapply(.SD, as.numeric), .SDcols = predictors]
+                                subgrid_data[, (response_var) := as.numeric(get(response_var))]
+                                
+                                # Final check: Stop if any predictor contains NaN or Inf
+                                if (any(!is.finite(as.matrix(subgrid_data[, ..predictors])))) {
+                                  cat(Sys.time(), " ERROR: NaN or Inf detected after conversion for Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
+                                  return(NULL)
+                                }
+                                
+                                # Check if response variable has no variability
+                                if (length(unique(subgrid_data[[response_var]])) == 1) {
+                                  cat(Sys.time(), " ERROR: Response variable has only one unique value for Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
+                                  return(NULL)
+                                }
+                                
+                                # -------------------------------------------------------
+                                # 4. FINALIZE METRIC OUTPUT STORAGE ARRAYS 
+                                # -------------------------------------------------------
+                                deviance_mat <- matrix(NA, ncol = 3, nrow = n.boot)
+                                colnames(deviance_mat) <- c("Dev.Exp", "RMSE", "R2")
+                                influence_mat <- array(NA, dim = c(length(predictors), n.boot))
+                                boot_mat <- matrix(NA, nrow = nrow(subgrid_data), ncol = n.boot)
+                                
+                                # -------------------------------------------------------
+                                # 5. MODEL TRAINING & BOOTSTRAPPING
+                                # -------------------------------------------------------
+                                dtrain <- xgb.DMatrix(
+                                  data = as.matrix(subgrid_data[, ..predictors]),  
+                                  label = subgrid_data[[response_var]]
+                                )
+                                
+                                # Model Training with Error Handling
+                                for (b in seq_len(n.boot)) {
+                                  tryCatch({
+                                    xgb_model <- xgb.train(
+                                      data = dtrain,
+                                      max_depth = 6,
+                                      eta = 0.01,
+                                      nrounds = 500,
+                                      subsample = 0.7,
+                                      colsample_bytree = 0.8,
+                                      objective = "reg:squarederror",
+                                      eval_metric = "rmse",
+                                      nthread = 1
+                                    )
+                                    
+                                    # Store predictions for bootstrapping
+                                    boot_mat[, b] <- predict(xgb_model, newdata = as.matrix(subgrid_data[, ..predictors]))
+                                  }, error = function(e) {
+                                    cat(Sys.time(), " ERROR: XGBoost training failed for Tile:", tile_id, "| Year Pair:", pair, "|", conditionMessage(e), "\n", file = log_file, append = TRUE)
+                                    return(NULL)
+                                  })
+                                }
+                                
+        # -------------------------------------------------------
+        # 6. PARTIAL DEPENDENCE PLOTS
+        # -------------------------------------------------------
+        EnvRanges <- setNames(data.frame(matrix(NA, nrow = 100, ncol = length(predictors))), predictors)
+        for (pred in predictors) {
+          EnvRanges[[pred]] <- seq(min(subgrid_data[[pred]], na.rm = TRUE), 
+                                   max(subgrid_data[[pred]], na.rm = TRUE), 
+                                   length.out = 100)
+        }
+        
+        PD <- array(NA_real_, dim = c(100, length(predictors), n.boot))
+        
+        # Compute PDP using foreach for efficiency
+        foreach(j = seq_along(predictors), .packages = "xgboost") %dopar% { 
+          tryCatch({
+            grid <- data.frame(x = EnvRanges[[predictors[j]]])
+            grid$y <- predict(xgb_model, newdata = as.matrix(grid$x))
+            
+            loess_fit <- tryCatch(stats::loess(y ~ x, data = grid, span = 0.75), error = function(e) NULL)
+            
+            for (b in seq_len(n.boot)) {
+              PD[, j, b] <- if (!is.null(loess_fit)) predict(loess_fit, newdata = grid$x) else NA_real_
+            }
+          }, error = function(e) {
+            
+            cat(Sys.time(), "ERROR in Predictor::", predictors[j], " | ", conditionMessage(e), "\n", file = log_file, append = TRUE)
+          return(NULL)
+          })
+        }
 
+        # -------------------------------------------------------
+        # 7. PREDICTIONS & VARIABLE IMPORTANCE
+        # -------------------------------------------------------
+        # VARIABLE IMPORTANCE
+        importance_matrix <- xgb.importance(model = xgb_model)
+        importance_values <- importance_matrix$Gain[match(predictors, importance_matrix$Feature)]
+        influence_mat[, b] <- ifelse(is.na(importance_values), 0, importance_values)  
+        
+        # -------------------------------------------------------
+        # 8-11. COMPUTE METRICS
+        # -------------------------------------------------------
+        # Compute bootstrapped statistics (mean, residuals, sd, cv)
+        boot_mean <- rowMeans(boot_mat, na.rm = TRUE)
+        boot_sd <- apply(boot_mat, 1, sd, na.rm = TRUE)
+        boot_cv <- boot_sd / boot_mean  # Coefficient of variation
+        residuals <- abs(subgrid_data[[response_var]] - boot_mean)
+        
+        # Store in separate matrices to avoid altering boot_mat structure
+        metrics_mat <- cbind(boot_mean, residuals, boot_sd, boot_cv)
+        colnames(metrics_mat) <- c("boot_mean", "residuals", "boot_sd", "boot_cv")
+        
+        # Compute model fit metrics (for each bootstrap iteration)
+        for (b in seq_len(n.boot)) {
+          deviance_mat[b, "Dev.Exp"] <- cor(boot_mat[, b], subgrid_data[[response_var]], use = "complete.obs")^2
+          deviance_mat[b, "RMSE"] <- sqrt(mean((boot_mat[, b] - subgrid_data[[response_var]])^2, na.rm = TRUE))
+          deviance_mat[b, "R2"] <- summary(lm(subgrid_data[[response_var]] ~ boot_mat[, b]))$r.squared
+        }
+        
+        # Mean and standard deviation of variable importance
+        preds_influences <- apply(influence_mat, 1, function(x) c(mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE)))
+        colnames(preds_influences) <- c("Mean_Influence", "SD_Influence")
+        rownames(preds_influences) <- predictors
+        
+        # -------------------------------------------------------
+        # 12. SAVE OUTPUTS
+        # -------------------------------------------------------
+        tile_dir <- file.path(output_dir_train, tile_id)
+        if (!dir.exists(tile_dir)) dir.create(tile_dir, recursive = TRUE, showWarnings = FALSE)
+        
+        # save model outputs
+        write_fst(as.data.table(metrics_mat), file.path(tile_dir, paste0("predictions_", pair, ".fst")))  
+        write_fst(as.data.table(deviance_mat), file.path(tile_dir, paste0("deviance_", pair, ".fst")))  
+        write_fst(as.data.table(influence_mat), file.path(tile_dir, paste0("importance_", pair, ".fst")))  
+        write_fst(as.data.table(preds_influences), file.path(tile_dir, "mean_var_influence.fst"))  
+        
+        # save PDP outputs
+        write_fst(as.data.table(PD), file.path(tile_dir, paste0("pdp_data_", pair, ".fst")))  
+        write_fst(as.data.table(EnvRanges), file.path(tile_dir, paste0("pdp_env_ranges_", pair, ".fst")))  
+        
+        # Save the model 
+        saveRDS(xgb_model, file.path(tile_dir, paste0("xgb_model_", pair, ".rds")))
+        
+}  
+}, error = function(e) {
+  cat(Sys.time(), "ERROR in Tile:", tile_id, "|", conditionMessage(e), "\n", file = log_file, append = TRUE)
+  return(NULL)
+})  #  
+}  #  
 
+# -------------------------------------------------------
+# 6. CLOSE PARALLEL PROCESSING
+# -------------------------------------------------------
+stopCluster(cl)
+close(pb)
+cat("\n Model Training Complete! Check `error_log.txt` for any issues.\n")
+}  #  Function  closed
 
-# ✅ **Run Model Training**
+# **Run Model Training**
 Sys.time()
 Model_Train_XGBoost(
   training_sub_grids_UTM,
   output_dir_train = "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles",
   year_pairs = c("2004_2006", "2006_2010", "2010_2015", "2015_2022"),
-  n.boot = 50
+  n.boot = 2
 )
 Sys.time()
 
