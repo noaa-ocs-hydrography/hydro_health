@@ -1,5 +1,6 @@
 import arcpy
 import os
+import geopandas as gpd
 
 from hydro_health.HHLayerTool import HHLayerTool
 from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
@@ -45,13 +46,9 @@ class RunHydroHealthModelTool(HHLayerTool):
 
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
-        tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
-        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
 
-        arcpy.AddMessage('Tile process completed')
-        for dataset in ['elevation', 'slope', 'rugosity']:
-            arcpy.AddMessage(f'Building {dataset} VRT file')
-            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset)
+        # self.download_bluetopo_tiles(tiles)
+        self.download_digital_coast_tiles(tiles)
 
         arcpy.AddMessage('Done')
         # reefs = CreateReefsLayerEngine(param_lookup)
@@ -78,6 +75,23 @@ class RunHydroHealthModelTool(HHLayerTool):
             outputToWGS84="WGS84",
         )
         param_lookup['drawn_polygon'].value = output_json
+
+    def download_bluetopo_tiles(self, tiles: gpd.GeoDataFrame) -> None:
+        """Download all bluetopo tiles"""
+
+        tools.process_bluetopo_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
+        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(self.param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
+
+        arcpy.AddMessage('Tile process completed')
+        for dataset in ['elevation', 'slope', 'rugosity']:
+            arcpy.AddMessage(f'Building {dataset} VRT file')
+            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset)
+
+    def download_digital_coast_tiles(self, tiles: gpd.GeoDataFrame) -> None:
+        """Download all digital coast tiles"""
+
+        arcpy.AddMessage('Obtaining Digital Coast data for selected area')
+        tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
         
     def get_params(self):
         """

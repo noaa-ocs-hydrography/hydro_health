@@ -2,7 +2,8 @@ import yaml
 import pathlib
 import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and activating cloned env in Pro
 
-from hydro_health.engines.tiling.TileProcessor import TileProcessor
+from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
+from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from osgeo import gdal, osr
 
 gdal.UseExceptions()
@@ -120,7 +121,9 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     return tiles
 
 
-def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+    """Entry point for parallel processing of BlueTopo tiles"""
+
     # get environment (dev, prod)
     # if dev, use multiprocessing
     # if prod, send to API endpoint of listeners in kubernetes
@@ -129,5 +132,11 @@ def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
         # call the class method with the tile argument
         # log success of each call
         # notify the main caller of completion?!
-    processor = TileProcessor()
+    processor = BlueTopoProcessor()
+    processor.process(tiles, outputs)
+
+
+def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+    """Entry point for parallel proccessing of Digital Coast data"""
+    processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)
