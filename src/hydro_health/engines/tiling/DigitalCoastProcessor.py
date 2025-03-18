@@ -3,6 +3,7 @@
 import boto3
 import json
 import os
+import re
 import requests
 import sys
 import geopandas as gpd
@@ -48,14 +49,14 @@ class DigitalCoastProcessor:
             for feature in datasets_json['features']:
                 # TODO maybe store full JSON in a text in each data folder
                 writer.write(json.dumps(feature, indent=4) + '\n\n')
-                folder_name = ''.join(char for char in feature['attributes']['Name'] if char.isalnum())  # strips out illegal characters
+                folder_name = re.sub('\W+',' ', feature['attributes']['Name']).strip().replace(' ', '_')  # remove illegal chars
                 print('folder:', folder_name)
                 external_data_json = json.loads(feature['attributes']['ExternalProviderLink'])
                 # Look for Bulk Download
                 for external_data in external_data_json['links']:
                     if external_data['label'] == 'Bulk Download':
                         download_link = external_data['link']
-                        self.download_bulk_data(download_link)
+                        # self.download_bulk_data(download_link)
                 writer.write(json.dumps(external_data_json['links'], indent=4) + '\n\n')
 
     def get_bucket(self):
