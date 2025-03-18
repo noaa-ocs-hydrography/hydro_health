@@ -47,9 +47,9 @@ class DigitalCoastProcessor:
         with open(output_json, 'a') as writer:
             for feature in datasets_json['features']:
                 # TODO maybe store full JSON in a text in each data folder
-                # folder_name = f"{feature['provider_results_name']}_{feature['DataBin']}_{feature['Year']}"
-                # print(folder_name)
                 writer.write(json.dumps(feature, indent=4) + '\n\n')
+                folder_name = ''.join(char for char in feature['attributes']['Name'] if char.isalnum())  # strips out illegal characters
+                print('folder:', folder_name)
                 external_data_json = json.loads(feature['attributes']['ExternalProviderLink'])
                 # Look for Bulk Download
                 for external_data in external_data_json['links']:
