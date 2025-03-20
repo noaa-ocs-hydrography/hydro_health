@@ -29,17 +29,25 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Modify the values and properties of parameters before internal
         validation is performed.  This method is called whenever a parameter
         has been changed."""
-        return
-
+        return 
+       
     def updateMessages(self, parameters):
         """Modify the messages created by internal validation for each tool
         parameter. This method is called after internal validation."""
-        return
+
+        eco_regions, tile_selector = parameters[2:4]
+        if not tile_selector.value and not eco_regions.value:
+            tile_selector.setErrorMessage('Select Shapefile or Draw a Polygon')
+            eco_regions.setErrorMessage('Choose Eco Region(s)')
 
     def execute(self, parameters, messages):
         """The source code of the tool."""
 
         param_lookup = self.setup_param_lookup(parameters)
+
+        if not param_lookup['tile_selector'].value and not param_lookup['eco_regions'].value:
+            # Force choice of tile_selector or eco_regions
+            return
 
         if param_lookup['tile_selector'].value:
             self.convert_tile_selector(param_lookup)
@@ -137,7 +145,7 @@ class RunHydroHealthModelTool(HHLayerTool):
             displayName="Pick eco region(s) to run model",
             name="eco_regions",
             datatype="GPString",
-            parameterType="Required",
+            parameterType="Optional",
             direction="Input",
             multiValue=True
         )

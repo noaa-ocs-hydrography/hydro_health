@@ -102,6 +102,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+    # if/else logic only allows one option of Eco Region selection or Draw Polygon
     if param_lookup['drawn_polygon'].value:
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
