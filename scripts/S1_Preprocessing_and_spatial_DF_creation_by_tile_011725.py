@@ -150,7 +150,7 @@ def process_raster(raster_path, mask_gdf, output_path, target_crs="EPSG:32617", 
                 src_crs=src.crs,
                 dst_transform=transform,  # Use new projection transform
                 dst_crs=target_crs,
-                resampling=Resampling.bilinear,
+                resampling=Resampling.nearest,
                 dst_nodata=np.nan
             )
 
