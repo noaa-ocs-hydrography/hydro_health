@@ -71,17 +71,16 @@ rbind_safe <- function(...) {
   return(bind_rows(args))
 }
 
-registerDoParallel(detectCores() - 1) 
-Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_pairs, n.boot = 20) { # change n.boot iterations as desired
+Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_pairs, n.boot = 20) { 
   # -------------------------------------------------------
   # 1. MODEL INITIALIZATION & ERROR LOGGING
   # -------------------------------------------------------
-  cat("\n Starting XGBoost Model Training with Bootstrapping...\n")
+  cat("\n🚀 Starting XGBoost Model Training with Bootstrapping...\n")
   
   tiles_df <- as.character(training_sub_grids_UTM$tile_id)
   num_cores <- detectCores() - 1
   cl <- makeCluster(num_cores)
-  registerDoParallel(cl)  #  Enable parallel processing
+  registerDoParallel(cl)  # Enable parallel processing
   # registerDoSEQ()  # Run sequentially for debugging
   on.exit({
     if (exists("cl") && inherits(cl, "cluster")) {
@@ -101,7 +100,7 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
   results_list <- foreach(i = seq_len(length(tiles_df)), .combine = rbind, 
                           .packages = c("xgboost", "dplyr", "data.table", "fst", "tidyr", "foreach")) %dopar% { 
                             
-                            tile_id <- tiles_df[[i]] # MUST START COUNTER OUTSIDE LOOP
+                            tile_id <- tiles_df[[i]] # MUST START COUNTER
                             
                             foreach(pair = year_pairs, .combine = rbind, 
                                     .packages = c("xgboost", "dplyr", "data.table", "fst", "tidyr", "foreach")) %dopar% { 
@@ -117,6 +116,14 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                         training_data <- read_fst(training_data_path, as.data.table = TRUE)  
                                         training_data <- as.data.frame(training_data)
                                         
+                                        # missing_static <- setdiff(static_predictors, names(training_data))
+                                        # if (length(missing_static) > 0) {
+                                        #   cat(Sys.time(), " ERROR: Static predictors missing for Tile", tile_id, ":", paste(missing_static, collapse = ", "), "\n", file = log_file, append = TRUE)
+                                        #   return(NULL)
+                                        # }
+                                        # 
+                                        # for (pair in year_pairs) {
+                                        #   cat(Sys.time(), "Starting Year Pair:", pair, "for Tile:", tile_id, "\n", file = log_file, append = TRUE)
                                         
                                         start_year <- as.numeric(strsplit(pair, "_")[[1]][1])
                                         end_year <- as.numeric(strsplit(pair, "_")[[1]][2])
@@ -124,7 +131,7 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                         
                                         
                                         if (!response_var %in% names(training_data)) {
-                                          cat(Sys.time(), " ERROR: Response variable missing for Tile:", tile_id, "| Year Pair:", pair, "\n", 
+                                          cat(Sys.time(), "ERROR: Response variable missing for Tile:", tile_id, "| Year Pair:", pair, "\n", 
                                               file = log_file, append = TRUE)
                                           return(NULL)
                                         }
@@ -145,6 +152,7 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                           cat(Sys.time(), " ERROR: Response variable missing for Tile:", tile_id, "| Year Pair:", pair, "\n", file = log_file, append = TRUE)
                                           next
                                         }
+                                        
                                         
                                         # -------------------------------------------------------
                                         # 3. FILTER & PREPARE TRAINING DATA
@@ -172,8 +180,8 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                               file = log_file, append = TRUE)
                                           next
                                         }
-
                                         
+
                                         # -------------------------------------------------------
                                         # 4. INITIALIZE METRIC OUTPUT STORAGE ARRAYS [outside of the boostrap loop!]
                                         # -------------------------------------------------------
@@ -196,18 +204,40 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                         PredMins <- apply(subgrid_data[, predictors, drop = FALSE], 2, min, na.rm = TRUE)
                                         PredMaxs <- apply(subgrid_data[, predictors, drop = FALSE], 2, max, na.rm = TRUE)
                                         
-                                        EnvRanges <- as.data.frame(matrix(NA, nrow = 100, ncol = length(predictors)))
-                                        colnames(EnvRanges) <- predictors
+                                        # Store Environmental Ranges in Long Format Immediately
+                                        # Update with Actual Ranges
+                                        # for (pred in predictors) {
+                                        #   EnvRanges$Env_Value[EnvRanges$Predictor == pred] <- seq(PredMins[pred], PredMaxs[pred], length.out = 100)
+                                        # }
+                                        EnvRanges <- expand.grid(
+                                          Env_Value = seq(0, 1, length.out = 100),  # Placeholder (Will be replaced)
+                                          Predictor = predictors
+                                        )
                                         
-                                        for (i in seq_along(predictors)) {
-                                          EnvRanges[, i] <- seq(PredMins[i], PredMaxs[i], length.out = 100)
+                                        for (pred in predictors) {
+                                          min_val <- PredMins[pred]
+                                          max_val <- PredMaxs[pred]
+                                        
+                                          # Ensure valid range before setting values
+                                          if (!is.finite(min_val) || !is.finite(max_val) || min_val == max_val) {
+                                            cat(Sys.time(), " Skipping predictor:", pred, "- Invalid range\n", file = log_file, append = TRUE)
+                                            next
+                                          }
+                                          
+                                          EnvRanges$Env_Value[EnvRanges$Predictor == pred] <- seq(min_val, max_val, length.out = 100)
                                         }
-
-                                        # set dimension names for the array 
+                                        
+                                        # Store X, Y, FID in EnvRanges
+                                        EnvRanges$X <- rep(subgrid_data$X[1:100], length(predictors))  # Sample 100 spatial points
+                                        EnvRanges$Y <- rep(subgrid_data$Y[1:100], length(predictors))
+                                        EnvRanges$FID <- rep(subgrid_data$FID[1:100], length(predictors))
+                                        
+                                        # Set up PDP storage: [100 (Env Values) x N Predictors x N Bootstraps]
                                         PD <- array(NA_real_, dim = c(100, length(predictors), n.boot))
                                         dimnames(PD)[[2]] <- predictors
-                                        dimnames(PD)[[3]] <- paste("Rep_", seq_len(n.boot), sep = "")
-
+                                        dimnames(PD)[[3]] <- paste0("Rep_", seq_len(n.boot))
+                                        
+                                        
                                         # -------------------------------------------------------
                                         # 6. MODEL TRAINING & BOOTSTRAPPING
                                         # -------------------------------------------------------
@@ -243,7 +273,7 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                           )
 
                                           # -------------------------------------------------------
-                                          # 7. STORE MODEL METRICS - [still in bootstep loop] 
+                                          # 6. STORE MODEL METRICS - [still in bootstep loop] 
                                           # -------------------------------------------------------
                                           # store model results in an array for each iteration 
                                           boot_mat[, b] <- predict(xgb_model, newdata = as.matrix(subgrid_data[, predictors]))
@@ -271,48 +301,70 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                           # Fill remaining NAs with 0
                                           influence_mat[is.na(influence_mat)] <- 0
                                           
-                                          
-                                          
+
                                           deviance_mat[b, "Dev.Exp"] <- cor(boot_mat[, b], subgrid_data[[response_var]], use = "complete.obs")^2
                                           deviance_mat[b, "RMSE"] <- sqrt(mean((boot_mat[, b] - subgrid_data[[response_var]])^2, na.rm = TRUE))
                                           deviance_mat[b, "R2"] <- summary(lm(subgrid_data[[response_var]] ~ boot_mat[, b]))$r.squared
 
                                           # -------------------------------------------------------
-                                          # 8. STORE PARTIAL DEPENDENCE PLOT DATA - [still in bootstrap loop] 
+                                          # 7. STORE PARTIAL DEPENDENCE PLOT DATA - [still in bootstrap loop] 
                                           # -------------------------------------------------------
                                           
+                                          # Store PDP values for each predictor
+                                          PDP_Storage <- list()  # Collect all PDP data
                                           
+                                          # for (j in seq_along(predictors)) { 
+                                          #   grid <- data.frame(Env_Value = EnvRanges$Env_Value[EnvRanges$Predictor == predictors[j]])
+                                          #   grid$PDP_Value <- predict(xgb_model, newdata = as.matrix(grid$Env_Value))
                                           for (j in seq_along(predictors)) { 
-                                            grid <- data.frame(x = EnvRanges[[predictors[j]]])
-                                            grid$y <- predict(xgb_model, newdata = as.matrix(grid$x))
+                                            grid <- data.frame(
+                                              Env_Value = EnvRanges$Env_Value[EnvRanges$Predictor == predictors[j]],
+                                              X = EnvRanges$X[EnvRanges$Predictor == predictors[j]], 
+                                              Y = EnvRanges$Y[EnvRanges$Predictor == predictors[j]], 
+                                              FID = EnvRanges$FID[EnvRanges$Predictor == predictors[j]]
+                                            )
+                                            
+                                            # Ensure correct input shape for predict()
+                                            if (nrow(grid) == 0 || !all(is.finite(grid$Env_Value))) {
+                                              cat(Sys.time(), " Skipping PDP for Predictor:", predictors[j], "- No valid values\n", file = log_file, append = TRUE)
+                                              next
+                                            }
+                                            
+                                            # Predict PDP Values (Ensure correct matrix shape)
+                                            grid$PDP_Value <- predict(xgb_model, newdata = matrix(grid$Env_Value, ncol = 1))
                                             
                                             # Remove NAs and check unique values
                                             grid <- grid[complete.cases(grid), ]
-                                            if (length(unique(grid$x)) < 5) {
+                                            if (length(unique(grid$Env_Value)) < 5) {
                                               cat(Sys.time(), " Skipping PDP for Predictor:", predictors[j], "- Too few unique values\n", file = log_file, append = TRUE)
                                               next
                                             }
                                             
-                                            # Try loess smoothing with a larger span
-                                            loess_fit <- tryCatch(stats::loess(y ~ x, data = grid, span = 1), error = function(e) NULL)
+                                            # Apply loess smoothing (fallback to raw if needed)
+                                            loess_fit <- tryCatch(loess(PDP_Value ~ Env_Value, data = grid, span = 1), error = function(e) NULL)
+                                            PD[, j, b] <- if (!is.null(loess_fit)) predict(loess_fit, newdata = grid$Env_Value) else grid$PDP_Value
                                             
-                                            # Store PDP values (fallback if loess fails)
-                                            PD[, j, b] <- if (!is.null(loess_fit)) predict(loess_fit, newdata = grid$x) else rep(NA_real_, 100)
-                                            
-                                            # stored in a conveinant format for post model plotting 
-                                            PD_long <- as.data.frame.table(PD, responseName = "PDP_Value")
-                                            colnames(PD_long) <- c("Index", "Predictor", "Replicate", "PDP_Value")  
-                                            PD_long$Index <- NULL  # Remove redundant column
-                                          } 
+                                            # Store results in long format
+                                            PDP_Storage[[j]] <- data.frame(
+                                              Predictor = predictors[j],
+                                              Env_Value = grid$Env_Value,
+                                              Replicate = paste0("Rep_", b),
+                                              PDP_Value = PD[, j, b],
+                                              X = grid$X, Y = grid$Y, FID = grid$FID  # Ensure spatial IDs are saved
+                                            )
+                                          }
                                         } #close model boostrap
-  
+                                        
+                                        # Convert to a single dataframe
+                                        PDP_Long <- bind_rows(PDP_Storage)
+                                        
                                         # -------------------------------------------------------
-                                        # 9. SAVE OUTPUTS
+                                        # 8. SAVE OUTPUTS
                                         # -------------------------------------------------------
                                         tile_dir <- file.path(output_dir_train, tile_id)
                                         if (!dir.exists(tile_dir)) dir.create(tile_dir, recursive = TRUE, showWarnings = FALSE)
                                         
-                                        cat(Sys.time(), "💾 Writing outputs for Tile:", tile_id, "| Year Pair:", pair, "\n")
+                                        cat(Sys.time(), " Writing outputs for Tile:", tile_id, "| Year Pair:", pair, "\n")
                                         
                                         # save model outputs
                                         write_fst(as.data.table(deviance_mat), file.path(tile_dir, paste0("deviance_", pair, ".fst"))) 
@@ -322,16 +374,19 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                         influence_df$Predictor <- rownames(influence_mat)
                                         influence_df <- influence_df[, c("Predictor", paste0("Rep_", seq_len(n.boot)))] # Reorder columns
                                         write_fst(as.data.table(influence_df), file.path(tile_dir, paste0("influence_", pair, ".fst")))
-
+                                        
+    
                                         # write_fst(as.data.table(boot_mat), file.path(tile_dir, paste0("bootstraps_", pair, ".fst"))) 
                                         write_fst(as.data.table(boot_df), file.path(tile_dir, paste0("bootstraps_", pair, ".fst")))
                                         saveRDS(xgb_model, file.path(tile_dir, paste0("xgb_model_", pair, ".rds")))  
                                         
-                                        # save PDP outputs
-                                        write_fst(as.data.table(PD_long), file.path(tile_dir, paste0("pdp_data_", pair, ".fst")))  
+                                        # Save PDP and Env Values Together
+                                        write_fst(as.data.table(PDP_Long), file.path(tile_dir, paste0("pdp_data_", pair, ".fst")))  
                                         write_fst(as.data.table(EnvRanges), file.path(tile_dir, paste0("pdp_env_ranges_", pair, ".fst")))  
+                                        write_fst(as.data.table(bind_rows(PDP_Storage)), file.path(tile_dir, paste0("pdp_data_raw_", pair, ".fst")))
                                         
-                                        writeLines(paste(Sys.time(), "📁 Saved Model for Tile:", tile_id, "| Year Pair:", pair), log_file, append = TRUE)
+                                        
+                                        writeLines(paste(Sys.time(), " Saved Model for Tile:", tile_id, "| Year Pair:", pair), log_file, append = TRUE)
                                         
                                         # }  # End for-loop over year_pairs
                                         
@@ -342,11 +397,11 @@ Model_Train_XGBoost <- function(training_sub_grids_UTM, output_dir_train, year_p
                                     }
                           }
   # -------------------------------------------------------
-  # 10. CLOSE PARALLEL PROCESSING
+  # 9. CLOSE PARALLEL PROCESSING
   # -------------------------------------------------------
   # stopCluster(cl)
   
-  cat("\n Model Training Complete! Check `error_log.txt` for any issues.\n")
+  cat("\n✅ Model Training Complete! Check `error_log.txt` for any issues.\n")
 }
 
 #  **Run Model Training**
@@ -358,12 +413,7 @@ Model_Train_XGBoost(
   n.boot = 20
 )
 Sys.time()
-
-
-
-
 showConnections()
-
 closeAllConnections()
 
 # Verify model outputs look good
@@ -373,129 +423,141 @@ boots <- read.fst ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_mode
 envranges <- read.fst ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/pdp_env_ranges_2004_2006.fst")
 pdp <- read.fst ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S656W_4/pdp_data_2004_2006.fst")
 
-# 2. Create an averaged Partial Dependence Plot for the whole training area----
+# 2. Create an averaged Partial Dependence Plot for the whole training area (one for each year pair)----
+# in the future we will create one pdp plot per year pair, per Eco Region Tile. 
 library(ggplot2)
 library(data.table)
 library(dplyr)
 
-# 🚀 Process PDPs One Year Pair at a Time (Like Your Example)
-generate_pdp_plot <- function(pair, pdp_data, output_dir) {
-  cat("\n Generating PDP plot for Year Pair:", pair, "\n")
-  
-  #  Ensure Predictors & Values Are Ordered Correctly
-  setorder(pdp_data, Predictor, Value)
-  
-  #  Fix Approximation Errors by Checking for At Least 2 Non-NA Values
-  pdp_data[, `:=`(
-    min_yhat_smooth = if (.N > 1 && sum(!is.na(min_yhat)) > 1) 
-      approx(Value, min_yhat, xout = Value, rule = 2, ties = mean)$y else min_yhat,
-    max_yhat_smooth = if (.N > 1 && sum(!is.na(max_yhat)) > 1) 
-      approx(Value, max_yhat, xout = Value, rule = 2, ties = mean)$y else max_yhat
-  ), by = Predictor]
-  
-  #  Ensure No NA Values Before Plotting
-  pdp_data <- na.omit(pdp_data, cols = c("Value", "min_yhat_smooth", "max_yhat_smooth"))
-  
-  #  Debugging: Print lengths to verify
-  cat("     Debugging: Value Length:", length(pdp_data$Value),
-      "min_yhat_smooth Length:", length(pdp_data$min_yhat_smooth),
-      "max_yhat_smooth Length:", length(pdp_data$max_yhat_smooth), "\n")
-  
-  #  Use Polygon-Based Shading (Your Previous Method)
-  gg <- ggplot(pdp_data, aes(x = Value, y = mean_yhat, group = Predictor)) +  
-    geom_polygon(aes(x = c(Value, rev(Value)), 
-                     y = c(max_yhat_smooth, rev(min_yhat_smooth))), 
-                 fill = "grey70", alpha = 0.4, na.rm = TRUE) +  #  Fix confidence interval shading
-    geom_smooth(color = "black", size = 1.2, method = "loess", se = FALSE, na.rm = TRUE) +  #  Smoothed Mean Trend
-    facet_wrap(~ Predictor, scales = "free", ncol = 4) +  #  Keep Grid Consistent
-    theme_minimal() +
-    labs(title = paste("📊 Averaged PDPs for Year Pair:", pair),
-         x = "Predictor Value", y = "Mean Prediction") +
-    theme(strip.text = element_text(size = 12))  #  Make Predictor Titles Readable
-  
-  #  Save Output
-  ggsave(file.path(output_dir, paste0("averaged_pdp_", pair, ".png")), gg, width = 12, height = 9)
-  cat(" PDP plot saved for year pair:", pair, "\n")
-}
+# Directories
+tiles_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"
+output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"
 
+# Year pairs
+year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")
 
-# 🚀 Main Function to Process PDP Data & Generate Plots
-average_fast_pdps_all_tiles <- function(intersecting_tiles, year_pairs, input_dir, output_dir) {
-  cat("\n Generating averaged PDPs across all intersecting tiles...\n")
+# List all tile folders
+tile_folders <- list.dirs(tiles_dir, recursive = FALSE)
+
+# Storage for overall PDPs
+all_pdp_list <- list()
+
+# Loop through each year pair
+for (pair in year_pairs) {
   
-  for (pair in year_pairs) {
-    cat("\n🔵 Processing year pair:", pair, "\n")
-    temp_pdp <- data.table()
+  pdp_all_tiles <- list()  # Store PDPs from all tiles
+  
+  # Loop through tiles
+  for (tile in tile_folders) {
     
-    for (tile in intersecting_tiles$tile) {
-      cat("   Processing Tile ID:", tile, "\n")
+    # File path
+    pdp_file <- file.path(tile, paste0("pdp_data_", pair, ".fst"))
+    
+    if (file.exists(pdp_file)) {
       
-      pdp_path <- file.path(input_dir, tile, paste0("pdp_", pair, ".fst"))
-      if (!file.exists(pdp_path)) {
-        cat("     WARNING: Missing PDP data for Tile ID:", tile, "\n")
+      #  Load PDP data
+      pdp_data <- read_fst(pdp_file)
+      
+      # 🔍 Debug: Check column names
+      if (!"Env_Value" %in% colnames(pdp_data)) {
+        cat(" ERROR: `Env_Value` is missing in:", pdp_file, "\n")
+        cat("Available columns:", paste(colnames(pdp_data), collapse = ", "), "\n")
+        next  # Skip this tile
+      }
+      
+      #  Ensure `Env_Value` is numeric
+      pdp_data <- pdp_data %>%
+        mutate(Env_Value = as.numeric(Env_Value))
+      
+      #  Skip invalid PDP files
+      if (any(is.na(pdp_data$Env_Value))) {
+        cat("🚨 Skipping invalid PDP file (contains NAs):", pdp_file, "\n")
         next
       }
       
-      pdp_data <- read_fst(pdp_path, as.data.table = TRUE)
-      cat("    📌 Available columns in PDP file:", paste(names(pdp_data), collapse = ", "), "\n")
+
+      # Aggregate PDP Data Using Its Own `Env_Value`
+      pdp_data_agg <- pdp_data %>%
+        select(Predictor, Env_Value, PDP_Value)  # ✅ Keep PDP_Value!
       
-      if (!"Predictor" %in% names(pdp_data)) {
-        predictor_col <- names(pdp_data)[grepl("predictor", names(pdp_data), ignore.case = TRUE)]
-        if (length(predictor_col) == 1) {
-          setnames(pdp_data, old = predictor_col, new = "Predictor")
-        } else {
-          cat("     ERROR: No 'Predictor' column found in PDP file for Tile:", tile, "\n")
-          next
-        }
-      }
+ 
       
-      temp_pdp <- rbind(temp_pdp, pdp_data, use.names = TRUE, fill = TRUE)
-    }
-    
-    if (nrow(temp_pdp) > 0) {
-      # ✅ Compute Min/Max & Mean Across All Tiles
-      avg_pdp <- temp_pdp[, .(
-        mean_yhat = mean(Prediction, na.rm = TRUE),
-        min_yhat = min(Prediction, na.rm = TRUE),
-        max_yhat = max(Prediction, na.rm = TRUE)
-      ), by = .(Predictor, Value)]
-      
-      # ✅ Generate PDP Plot Using Your Old Approach
-      generate_pdp_plot(pair, avg_pdp, output_dir)
-      
+      # Store aggregated data
+      pdp_all_tiles[[tile]] <- pdp_data_agg
     } else {
-      cat("  ⚠️ No data available for year pair:", pair, "\n")
+      cat("Skipping missing PDP file:", pdp_file, "\n")
     }
+  }
+  
+  # ✅ Merge all available tiles into a single dataframe
+  if (length(pdp_all_tiles) > 0) {
+    overall_pdp_data <- bind_rows(pdp_all_tiles)
+    
+    # Compute overall mean but keep min/max as actual min/max
+    pdp_summary <- overall_pdp_data %>%
+      group_by(Predictor, Env_Value) %>%
+      summarise(
+        PDP_Mean = mean(PDP_Value, na.rm = TRUE),  
+        PDP_Min = min(PDP_Value, na.rm = TRUE),
+        PDP_Max = max(PDP_Value, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    pdp_summary <- pdp_summary %>%
+      mutate(
+        PDP_Max = ifelse(PDP_Min == PDP_Max, PDP_Max + 1e-5, PDP_Max) # Add small variation
+      )
+    
+    
+    #  Print a Sample to Check for NA Issues
+    print(paste0(" Processed PDP for ", pair, ":"))
+    print(head(pdp_summary))
+    
+    #  Store for plotting
+    all_pdp_list[[pair]] <- pdp_summary
+  } else {
+    cat(" No available PDP data for", pair, "- Skipping this year pair.\n")
   }
 }
 
-
-#Run generate_fast_pdps_for_tile
-training_sub_grids_UTM <- st_read(file.path(training_dir, "intersecting_sub_grids_UTM.gpkg"))
-# Extract valid tile IDs
-tile_list <- training_sub_grids_UTM$tile_id
-# Define year pairs
-year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")
-# training directory
-
-# ✅ Call the function
-for (tile_id in tile_list) {
-  tile <- data.table(tile = tile_id)
-  generate_fast_pdps_for_tile(tile, year_pairs, training_dir)
+#  Create PDP Plots (Only for available year pairs)
+#  Create PDP Plots (Only for available year pairs)
+for (pair in names(all_pdp_list)) {
+  
+  # Ensure `PDP_Min` and `PDP_Max` are valid before plotting
+  pdp_filtered <- all_pdp_list[[pair]] %>%
+    filter(!is.na(PDP_Min), !is.na(PDP_Max))
+  
+  
+  
+  # If no valid data remains after filtering, skip
+  if (nrow(pdp_filtered) == 0) {
+    cat(" Skipping PDP plot for", pair, "as no valid data remains.\n")
+    next
+  }
+  
+  plot_pdp <- ggplot(pdp_filtered, aes(x = Env_Value, y = PDP_Mean)) +
+    # Shaded confidence region (Min to Max range)
+    geom_ribbon(aes(ymin = PDP_Min, ymax = PDP_Max), fill = "grey70") +  
+    # Mean trend line (LOESS smooth)
+    geom_smooth(method = "loess", se = FALSE, color = "black", linewidth = 1) +  
+    facet_wrap(~Predictor, scales = "free", ncol = 3) +  # Separate plots for each predictor
+    labs(
+      title = paste("Averaged PDPs for Year Pair:", pair),
+      x = "Model Predictor Value",
+      y = "Mean elevation change (m)"
+    ) +
+    theme_minimal(base_size = 14) +  
+    theme(
+      strip.background = element_rect(fill = "lightgray"),
+      strip.text = element_text(size = 12, face = "bold"),
+      panel.grid.major = element_line(linewidth = 0.2, linetype = "dotted"),
+      panel.grid.minor = element_blank(),
+      legend.position = "none"
+    )
+  
+  # Save the final PDP plot
+  ggsave(filename = file.path(output_dir, paste0("Overall_PDP_", pair, ".pdf")), 
+         plot = plot_pdp, width = 12, height = 6, dpi = 300) # saved colors in a vectorised format to store detail
+  
 }
-
-cat("\n✅ PDP generation completed for all tiles!\n")
-
-training.data.clipped <- readRDS ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles/BH4S456Z_3/BH4S456Z_3_training_clipped_data.rds")
-
-
-#----#----#
-# Run average_fast_pdps_all_tiles function
-# ✅ Define required parameters
-intersecting_tiles <- data.table(tile = c("BH4S656W_4", "BH4S656X_1", "BH4S2577_2", "BH4S2575_1"))  # Example tile list
-year_pairs <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")  # Year pairs to process
-input_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"  # Directory containing PDP files
-output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training.data.grid.tiles"  # Directory to save results
-
-# ✅ Call the function
-average_fast_pdps_all_tiles(intersecting_tiles, year_pairs, input_dir, output_dir)
