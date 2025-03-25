@@ -9,20 +9,51 @@ import requests
 import sys
 import geopandas as gpd
 import pathlib
-import multiprocessing as mp
-import numpy as np
 
 from botocore.client import Config
 from botocore import UNSIGNED
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import set_executable
 
 
-mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
 class DigitalCoastProcessor:
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def download_tile_index(self, download_link, output_folder_path) -> None:
+    def download_intersected_datasets(self, param_inputs: list[list]) -> None:
+        """Parallel process spatial filter and download of datasets"""
+
+        tile_gdf, shp_path = param_inputs
+        shp_df = gpd.read_file(shp_path).to_crs(4326)
+        shp_df.columns = shp_df.columns.str.lower()  # make url column all lowercase
+        df_joined = shp_df.sjoin(df=tile_gdf, how='left', predicate='intersects')
+        df_joined = df_joined.loc[df_joined['tile'].notnull()]
+        shp_folder = shp_path.parents[0]
+        if df_joined['url'].any():
+            # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
+            for url in df_joined['url'].unique():
+                dataset_name = url.split('/')[-1]
+                output_file = shp_folder / dataset_name
+                if os.path.exists(output_file):
+                    continue
+                intersected_response = requests.get(url)
+                if intersected_response.status_code == 200:
+                    with open(output_file, 'wb') as file:
+                        file.write(intersected_response.content)
+                else:
+                    return f'Failed to download: {url}'
+            return f'- {shp_path.stem}'
+        else:
+            return f'- No intersect: {shp_path.stem}'
+
+    def download_tile_index(self, param_inputs: list[list]) -> None:
+        """Parallel process and download tile index shapefiles"""
+
+        download_link, output_folder_path = param_inputs
+        # TODO verify if other types of datasets can be downloaded
         if 'noaa-nos-coastal-lidar-pds' in download_link:
             _, data_file = download_link.replace('/index.html', '').split('.com')
             lidar_bucket = self.get_bucket()
@@ -38,6 +69,7 @@ class DigitalCoastProcessor:
                     file_parent_folder.mkdir(parents=True, exist_ok=True) 
                     with open(output_zip_file, 'wb') as tile_index:
                         lidar_bucket.download_fileobj(obj_summary.key, tile_index)
+            return f'- {output_folder_path.parents[0]}/{data_file}'
 
     def get_available_datasets(self, geometry_coords: str, outputs) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -68,8 +100,7 @@ class DigitalCoastProcessor:
                     download_link = external_data['link']
                     tile_index_links.append({'link': download_link, 'output_path': output_folder_path})
         return tile_index_links
-            
-
+    
     def get_bucket(self):
         """Connect to anonymous OCS S3 Bucket"""
 
@@ -84,7 +115,7 @@ class DigitalCoastProcessor:
         return nbs_bucket
     
     def get_geometry_string(self, tile_gdf: gpd.GeoDataFrame) -> str:
-        """Build bbox string of tiles"""
+        """Build bbox string of tiles in web mercator projection"""
 
         tile_gdf_web_mercator = tile_gdf.to_crs(3857)
         tile_gdf_web_mercator['geom_type'] = 'Polygon'
@@ -94,21 +125,42 @@ class DigitalCoastProcessor:
         # lower-left to upper-right
         geometry_coords = f"{bbox['minx']['Polygon']},{bbox['miny']['Polygon']},{bbox['maxx']['Polygon']},{bbox['maxy']['Polygon']}"
         return geometry_coords
+    
+    def print_async_results(self, results) -> None:
+        """Consolidate result printing"""
 
-    def get_pool(self, processes=int(mp.cpu_count() / 2)):
-        """Obtain a multiprocessing Pool"""
-
-        return mp.Pool(processes=processes)
+        for result in results:
+            print(result)
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
+        """Main entry point for downloading Digital Coast data"""
+
+        digital_coast_folder = pathlib.Path(outputs) / 'DigitalCoast'
+
+        # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
+        self.process_tile_index(digital_coast_folder, tile_gdf, outputs)
+        self.process_intersected_datasets(digital_coast_folder, tile_gdf)
+
+    def process_intersected_datasets(self, digital_coast_folder, tile_gdf) -> None:
+        """Download intersected Digital Coast files"""
+
+        print('Downloading elevation datasets')
+        tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
+        param_inputs = [[tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
+        with ProcessPoolExecutor() as intersected_pool:
+            self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs))
+
+    def process_tile_index(self, digital_coast_folder, tile_gdf, outputs) -> None:
+        """Download tile_index shapefiles"""
+
+        print('Download Tile Index shapefiles')
         geometry_coords = self.get_geometry_string(tile_gdf)
         tile_index_links = self.get_available_datasets(geometry_coords, outputs)  # TODO return all object keys
-        
-        with self.get_pool() as process_pool:
-            results = [process_pool.apply_async(self.download_tile_index, [link_dict['link'], link_dict['output_path']]) for link_dict in tile_index_links]
-            for result in results:
-                result.get()
-        self.unzip_all_files(pathlib.Path(outputs) / 'DigitalCoast')
+        param_inputs = [[link_dict['link'], link_dict['output_path']] for link_dict in tile_index_links]
+        with ProcessPoolExecutor() as tile_index_pool:
+            self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs))
+        self.unzip_all_files(digital_coast_folder)
+        # TODO delete *.zip
 
     def unzip_all_files(self, output_folder) -> None:
         """Unzip all zip files in a folder"""
