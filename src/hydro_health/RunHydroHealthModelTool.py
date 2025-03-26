@@ -55,7 +55,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
 
-        # self.download_bluetopo_tiles(tiles)
+        self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
 
         arcpy.AddMessage('Done')

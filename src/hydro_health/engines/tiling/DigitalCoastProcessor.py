@@ -6,6 +6,7 @@ import os
 import re
 import zipfile
 import requests
+import shutil
 import sys
 import geopandas as gpd
 import pathlib
@@ -23,6 +24,26 @@ OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 class DigitalCoastProcessor:
     """Class for parallel processing all BlueTopo tiles for a region"""
 
+    def approved_dataset(self, feature_json: dict[dict]) -> bool:
+        """Only allow certain provider types"""
+
+        provider_list_text = ['National Coastal Mapping Program', 'USACE NCMP']
+        for text in provider_list_text:
+            if text in feature_json['attributes']['provider_details_name']:
+                return True
+        return False
+    
+    def delete_unused_folder(self, digital_coast_folder: pathlib.Path) -> None:
+        """Delete any provider folders without a subfolder"""
+
+        print('Deleting empty provider folders')
+        provider_folders = os.listdir(digital_coast_folder)
+        for provider in provider_folders:
+            provider_folder = digital_coast_folder / provider
+            if 'dem' not in os.listdir(provider_folder):
+                print(f'{provider_folder}')
+                shutil.rmtree(provider_folder)
+
     def download_intersected_datasets(self, param_inputs: list[list]) -> None:
         """Parallel process spatial filter and download of datasets"""
 
@@ -35,6 +56,11 @@ class DigitalCoastProcessor:
         if df_joined['url'].any():
             # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
             for url in df_joined['url'].unique():
+                # Only download .tif files
+                # TODO try to handle this earlier when laz or dem folder is created
+                # otherwise we need to delete the provider folders with laz only
+                if not url.endswith('.tif'):
+                    continue
                 dataset_name = url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
@@ -53,8 +79,9 @@ class DigitalCoastProcessor:
         """Parallel process and download tile index shapefiles"""
 
         download_link, output_folder_path = param_inputs
-        # TODO verify if other types of datasets can be downloaded
-        if 'noaa-nos-coastal-lidar-pds' in download_link:
+        # TODO we already only choose USACE NCMP providers, so this might always be from this s3 bucket
+        # only allow dem data type.  Others are: laz
+        if 'noaa-nos-coastal-lidar-pds' in download_link and 'dem' in download_link:
             _, data_file = download_link.replace('/index.html', '').split('.com')
             lidar_bucket = self.get_bucket()
             for obj_summary in lidar_bucket.objects.filter(Prefix=f"{data_file[1:]}"):
@@ -81,6 +108,8 @@ class DigitalCoastProcessor:
         tile_index_links = []
         for feature in datasets_json['features']:
             feature_json = json.dumps(feature, indent=4) + '\n\n'
+            if not self.approved_dataset(feature):
+                continue
             folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
             output_folder_path = pathlib.Path(outputs) / 'DigitalCoast' / folder_name
             output_folder_path.mkdir(parents=True, exist_ok=True)
@@ -130,7 +159,8 @@ class DigitalCoastProcessor:
         """Consolidate result printing"""
 
         for result in results:
-            print(result)
+            if result:
+                print(result)
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         """Main entry point for downloading Digital Coast data"""
@@ -140,6 +170,7 @@ class DigitalCoastProcessor:
         # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
         self.process_tile_index(digital_coast_folder, tile_gdf, outputs)
         self.process_intersected_datasets(digital_coast_folder, tile_gdf)
+        self.delete_unused_folder(digital_coast_folder)
 
     def process_intersected_datasets(self, digital_coast_folder, tile_gdf) -> None:
         """Download intersected Digital Coast files"""
@@ -168,6 +199,8 @@ class DigitalCoastProcessor:
         for zipped_file in pathlib.Path(output_folder).rglob('*.zip'):
             with zipfile.ZipFile(zipped_file, 'r') as zipped:
                 zipped.extractall(str(zipped_file.parents[0]))
+            # Delete zip file after extract
+            zipped_file.unlink()
 
     def write_message(self, message, output_folder):
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
