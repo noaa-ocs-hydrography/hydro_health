@@ -33,15 +33,23 @@ class DigitalCoastProcessor:
                 return True
         return False
     
+    def cleansed_url(self, url) -> str:
+        """Remove found illegal characters from URLs"""
+
+        illegal_chars = ['{', '}']
+        for char in illegal_chars:
+            url = url.replace(char, '')
+        return url
+    
     def delete_unused_folder(self, digital_coast_folder: pathlib.Path) -> None:
         """Delete any provider folders without a subfolder"""
 
-        print('Deleting empty provider folders')
+        self.write_message('Deleting empty provider folders', str(digital_coast_folder.parents[0]))
         provider_folders = os.listdir(digital_coast_folder)
         for provider in provider_folders:
             provider_folder = digital_coast_folder / provider
             if 'dem' not in os.listdir(provider_folder):
-                print(f'{provider_folder}')
+                self.write_message(f'- {provider_folder}', str(digital_coast_folder.parents[0]))
                 shutil.rmtree(provider_folder)
 
     def download_intersected_datasets(self, param_inputs: list[list]) -> None:
@@ -56,21 +64,20 @@ class DigitalCoastProcessor:
         if df_joined['url'].any():
             # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
             for url in df_joined['url'].unique():
+                cleansed_url = self.cleansed_url(url)
                 # Only download .tif files
-                # TODO try to handle this earlier when laz or dem folder is created
-                # otherwise we need to delete the provider folders with laz only
-                if not url.endswith('.tif'):
+                if not cleansed_url.endswith('.tif'):
                     continue
-                dataset_name = url.split('/')[-1]
+                dataset_name = cleansed_url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
                     continue
-                intersected_response = requests.get(url)
+                intersected_response = requests.get(cleansed_url)
                 if intersected_response.status_code == 200:
                     with open(output_file, 'wb') as file:
                         file.write(intersected_response.content)
                 else:
-                    return f'Failed to download: {url}'
+                    return f'Failed to download: {cleansed_url}'
             return f'- {shp_path.stem}'
         else:
             return f'- No intersect: {shp_path.stem}'
@@ -89,10 +96,10 @@ class DigitalCoastProcessor:
                     output_zip_file = output_folder_path / obj_summary.key
                     file_parent_folder = output_zip_file.parents[0]
                     if os.path.exists(output_zip_file):
-                        print(f'Skipping: {output_zip_file.name}', output_folder_path)
+                        self.write_message(f'Skipping: {output_zip_file.name}', output_folder_path)
                         continue
                     else:
-                        print(f'Downloading: {output_zip_file.name}', output_folder_path)
+                        self.write_message(f'Downloading: {output_zip_file.name}', output_folder_path)
                     file_parent_folder.mkdir(parents=True, exist_ok=True) 
                     with open(output_zip_file, 'wb') as tile_index:
                         lidar_bucket.download_fileobj(obj_summary.key, tile_index)
@@ -155,12 +162,12 @@ class DigitalCoastProcessor:
         geometry_coords = f"{bbox['minx']['Polygon']},{bbox['miny']['Polygon']},{bbox['maxx']['Polygon']},{bbox['maxy']['Polygon']}"
         return geometry_coords
     
-    def print_async_results(self, results) -> None:
+    def print_async_results(self, results, output_folder) -> None:
         """Consolidate result printing"""
 
         for result in results:
             if result:
-                print(result)
+                self.write_message(result, output_folder)
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
         """Main entry point for downloading Digital Coast data"""
@@ -175,21 +182,21 @@ class DigitalCoastProcessor:
     def process_intersected_datasets(self, digital_coast_folder, tile_gdf) -> None:
         """Download intersected Digital Coast files"""
 
-        print('Downloading elevation datasets')
+        self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[0]))
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
         param_inputs = [[tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
         with ProcessPoolExecutor() as intersected_pool:
-            self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs))
+            self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[0]))
 
     def process_tile_index(self, digital_coast_folder, tile_gdf, outputs) -> None:
         """Download tile_index shapefiles"""
 
-        print('Download Tile Index shapefiles')
+        self.write_message('Download Tile Index shapefiles', str(digital_coast_folder.parents[0]))
         geometry_coords = self.get_geometry_string(tile_gdf)
         tile_index_links = self.get_available_datasets(geometry_coords, outputs)  # TODO return all object keys
         param_inputs = [[link_dict['link'], link_dict['output_path']] for link_dict in tile_index_links]
         with ProcessPoolExecutor() as tile_index_pool:
-            self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs))
+            self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[0]))
         self.unzip_all_files(digital_coast_folder)
         # TODO delete *.zip
 

@@ -1,4 +1,5 @@
 import arcpy
+import asyncio
 import os
 import geopandas as gpd
 
@@ -55,6 +56,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
 
+        asyncio.run(self.stream_log(param_lookup['output_directory'].valueAsText))
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
 
