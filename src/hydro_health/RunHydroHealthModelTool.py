@@ -95,13 +95,14 @@ class RunHydroHealthModelTool(HHLayerTool):
         arcpy.AddMessage('Tile process completed')
         for dataset in ['elevation', 'slope', 'rugosity']:
             arcpy.AddMessage(f'Building {dataset} VRT file')
-            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset)
+            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, 'BlueTopo')
 
     def download_digital_coast_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all digital coast tiles"""
 
         arcpy.AddMessage('Obtaining Digital Coast data for selected area')
         tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
+        tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
         
     def get_params(self):
         """

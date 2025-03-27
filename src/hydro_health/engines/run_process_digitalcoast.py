@@ -5,7 +5,7 @@ HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
 sys.path.append(str(HH_MODEL))
-from hydro_health.helpers.tools import process_digital_coast_files, get_ecoregion_tiles, Param
+from hydro_health.helpers.tools import process_digital_coast_files, get_ecoregion_tiles, Param, create_raster_vrt
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -35,6 +35,7 @@ if __name__ == '__main__':
     print(f'Selected tiles: {tiles.shape[0]}')
     start = time.time()
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
+    create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
 
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
