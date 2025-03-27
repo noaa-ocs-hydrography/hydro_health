@@ -1,5 +1,4 @@
 import arcpy
-import asyncio
 import os
 import geopandas as gpd
 
@@ -53,13 +52,14 @@ class RunHydroHealthModelTool(HHLayerTool):
         if param_lookup['tile_selector'].value:
             self.convert_tile_selector(param_lookup)
 
+        arcpy.AddMessage(f'"""\n\nDownloading of BlueTopo tiles and Digital Coast data\nuses parallel processing for speed.\n')
+        arcpy.AddMessage(f'Additional log messages are written here: {param_lookup["output_directory"].valueAsText}/log_prints.txt\n\n"""')
+
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
-
-        asyncio.run(self.stream_log(param_lookup['output_directory'].valueAsText))
+        
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
-
         arcpy.AddMessage('Done')
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
