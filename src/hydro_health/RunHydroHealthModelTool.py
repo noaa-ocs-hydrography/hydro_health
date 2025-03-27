@@ -53,7 +53,7 @@ class RunHydroHealthModelTool(HHLayerTool):
             self.convert_tile_selector(param_lookup)
 
         arcpy.AddMessage(f'"""\n\nDownloading of BlueTopo tiles and Digital Coast data\nuses parallel processing for speed.\n')
-        arcpy.AddMessage(f'Additional log messages are written here: {param_lookup["output_directory"].valueAsText}/log_prints.txt\n\n"""')
+        arcpy.AddMessage(f'Additional log messages are written here: {param_lookup["output_directory"].valueAsText}\\log_prints.txt\n\n"""')
 
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
