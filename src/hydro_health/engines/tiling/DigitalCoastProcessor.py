@@ -27,9 +27,9 @@ class DigitalCoastProcessor:
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
 
-        provider_list_text = ['National Coastal Mapping Program', 'USACE NCMP']
+        provider_list_text = ['USACE', 'NCMP']
         for text in provider_list_text:
-            if text in feature_json['attributes']['provider_details_name']:
+            if text in feature_json['attributes']['provider_results_name']:
                 return True
         return False
     
@@ -48,7 +48,7 @@ class DigitalCoastProcessor:
         provider_folders = os.listdir(digital_coast_folder)
         for provider in provider_folders:
             provider_folder = digital_coast_folder / provider
-            if 'dem' not in os.listdir(provider_folder):
+            if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
                 self.write_message(f'- {provider_folder}', str(digital_coast_folder.parents[0]))
                 shutil.rmtree(provider_folder)
 
