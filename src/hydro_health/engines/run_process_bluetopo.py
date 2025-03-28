@@ -5,7 +5,7 @@ HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
 sys.path.append(str(HH_MODEL))
-from hydro_health.helpers.tools import process_tiles, get_ecoregion_tiles, Param, create_raster_vrt
+from hydro_health.helpers.tools import process_bluetopo_tiles, get_ecoregion_tiles, Param, create_raster_vrt
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -31,7 +31,7 @@ if __name__ == '__main__':
     tiles = get_ecoregion_tiles(param_lookup)
     print(f'Selected tiles: {tiles.shape[0]}')
     start = time.time()
-    process_tiles(tiles, param_lookup['output_directory'].valueAsText)
+    process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
     create_vrt_output(param_lookup['output_directory'].valueAsText)
     
     end = time.time()

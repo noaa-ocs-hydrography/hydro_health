@@ -2,7 +2,8 @@ import yaml
 import pathlib
 import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and activating cloned env in Pro
 
-from hydro_health.engines.tiling.TileProcessor import TileProcessor
+from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
+from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from osgeo import gdal, osr
 
 gdal.UseExceptions()
@@ -20,16 +21,17 @@ class Param:
             return self.value
 
 
-def create_raster_vrt(output_folder: str, file_type: str='elevation') -> None:
+def create_raster_vrt(output_folder: str, file_type: str, data_type: str) -> None:
     """Create an output VRT from found .tif files"""
 
     glob_lookup = {
         'elevation': '*[0-9].tiff',
         'slope': '*_slope.tiff',
-        'rugosity': '*_rugosity.tiff'
+        'rugosity': '*_rugosity.tiff',
+        'NCMP': '*.tif'
     }
 
-    outputs = pathlib.Path(output_folder) / 'BlueTopo' if output_folder else OUTPUTS / 'BlueTopo'
+    outputs = pathlib.Path(output_folder) / data_type if output_folder else OUTPUTS / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
     output_geotiffs = {}
@@ -39,12 +41,15 @@ def create_raster_vrt(output_folder: str, file_type: str='elevation') -> None:
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
         projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
+        provider_folder = geotiff.relative_to(outputs).parents[-2]
+        # Handle BlueTopo and DigitalCoast differently
+        clean_crs_key = f'{clean_crs_string}_{provider_folder}' if data_type == 'DigitalCoast' else clean_crs_string
         # Store tile and CRS
-        if clean_crs_string not in output_geotiffs:
-            output_geotiffs[clean_crs_string] = {'crs': None, 'tiles': []}
-        output_geotiffs[clean_crs_string]['tiles'].append(geotiff)
-        if output_geotiffs[clean_crs_string]['crs'] is None:
-            output_geotiffs[clean_crs_string]['crs'] = spatial_ref
+        if clean_crs_key not in output_geotiffs:
+            output_geotiffs[clean_crs_key] = {'crs': None, 'tiles': []}
+        output_geotiffs[clean_crs_key]['tiles'].append(geotiff)
+        if output_geotiffs[clean_crs_key]['crs'] is None:
+            output_geotiffs[clean_crs_key]['crs'] = spatial_ref
         geotiff_ds = None
 
     for crs, tile_dict in output_geotiffs.items():
@@ -101,6 +106,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+    # if/else logic only allows one option of Eco Region selection or Draw Polygon
     if param_lookup['drawn_polygon'].value:
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
@@ -120,7 +126,9 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     return tiles
 
 
-def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+    """Entry point for parallel processing of BlueTopo tiles"""
+
     # get environment (dev, prod)
     # if dev, use multiprocessing
     # if prod, send to API endpoint of listeners in kubernetes
@@ -129,5 +137,12 @@ def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
         # call the class method with the tile argument
         # log success of each call
         # notify the main caller of completion?!
-    processor = TileProcessor()
+    processor = BlueTopoProcessor()
+    processor.process(tiles, outputs)
+
+
+def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+    """Entry point for parallel proccessing of Digital Coast data"""
+    
+    processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)

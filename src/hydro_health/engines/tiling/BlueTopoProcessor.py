@@ -17,7 +17,9 @@ from osgeo import gdal
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class TileProcessor:
+class BlueTopoProcessor:
+    """Class for parallel processing all BlueTopo tiles for a region"""
+
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
 

@@ -1,6 +1,7 @@
 # Ignore
 outputs/*
 inputs/*
+src/hydro_health/*.xml
 *.pyc
 **/__pycache__
 
