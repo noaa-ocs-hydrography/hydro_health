@@ -34,9 +34,6 @@ def create_raster_vrt(output_folder: str, file_type: str, data_type: str) -> Non
     outputs = pathlib.Path(output_folder) / data_type if output_folder else OUTPUTS / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
-    # TODO make one VRT for each provider if DigitalCoast
-    # make separate keys in output_geotiffs for each provider
-
     output_geotiffs = {}
     for geotiff in geotiffs:
         geotiff_ds = gdal.Open(geotiff)
@@ -146,5 +143,6 @@ def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None
 
 def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
     """Entry point for parallel proccessing of Digital Coast data"""
+    
     processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)
