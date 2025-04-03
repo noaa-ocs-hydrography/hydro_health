@@ -1,5 +1,6 @@
 import arcpy
 import os
+import geopandas as gpd
 
 from hydro_health.HHLayerTool import HHLayerTool
 from hydro_health.engines.CreateReefsLayerEngine import CreateReefsLayerEngine
@@ -28,31 +29,37 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Modify the values and properties of parameters before internal
         validation is performed.  This method is called whenever a parameter
         has been changed."""
-        return
-
+        return 
+       
     def updateMessages(self, parameters):
         """Modify the messages created by internal validation for each tool
         parameter. This method is called after internal validation."""
-        return
+
+        eco_regions, tile_selector = parameters[2:4]
+        if not tile_selector.value and not eco_regions.value:
+            tile_selector.setErrorMessage('Select Shapefile or Draw a Polygon')
+            eco_regions.setErrorMessage('Choose Eco Region(s)')
 
     def execute(self, parameters, messages):
         """The source code of the tool."""
 
         param_lookup = self.setup_param_lookup(parameters)
 
+        if not param_lookup['tile_selector'].value and not param_lookup['eco_regions'].value:
+            # Force choice of tile_selector or eco_regions
+            return
+
         if param_lookup['tile_selector'].value:
             self.convert_tile_selector(param_lookup)
 
+        arcpy.AddMessage(f'"""\n\nDownloading of BlueTopo tiles and Digital Coast data\nuses parallel processing for speed.\n')
+        arcpy.AddMessage(f'Additional log messages are written here: {param_lookup["output_directory"].valueAsText}\\log_prints.txt\n\n"""')
+
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
-        tools.process_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
-        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
-
-        arcpy.AddMessage('Tile process completed')
-        for dataset in ['elevation', 'slope', 'rugosity']:
-            arcpy.AddMessage(f'Building {dataset} VRT file')
-            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset)
-
+        
+        self.download_bluetopo_tiles(tiles)
+        self.download_digital_coast_tiles(tiles)
         arcpy.AddMessage('Done')
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
@@ -78,6 +85,24 @@ class RunHydroHealthModelTool(HHLayerTool):
             outputToWGS84="WGS84",
         )
         param_lookup['drawn_polygon'].value = output_json
+
+    def download_bluetopo_tiles(self, tiles: gpd.GeoDataFrame) -> None:
+        """Download all bluetopo tiles"""
+
+        tools.process_bluetopo_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
+        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(self.param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
+
+        arcpy.AddMessage('Tile process completed')
+        for dataset in ['elevation', 'slope', 'rugosity']:
+            arcpy.AddMessage(f'Building {dataset} VRT file')
+            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, 'BlueTopo')
+
+    def download_digital_coast_tiles(self, tiles: gpd.GeoDataFrame) -> None:
+        """Download all digital coast tiles"""
+
+        arcpy.AddMessage('Obtaining Digital Coast data for selected area')
+        tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
+        tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
         
     def get_params(self):
         """
@@ -123,7 +148,7 @@ class RunHydroHealthModelTool(HHLayerTool):
             displayName="Pick eco region(s) to run model",
             name="eco_regions",
             datatype="GPString",
-            parameterType="Required",
+            parameterType="Optional",
             direction="Input",
             multiValue=True
         )
