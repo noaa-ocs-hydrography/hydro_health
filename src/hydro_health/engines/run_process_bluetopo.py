@@ -13,7 +13,7 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 def create_vrt_output(output_folder):
     for dataset in ['elevation', 'slope', 'rugosity']:
-        create_raster_vrt(output_folder, dataset)
+        create_raster_vrt(output_folder, dataset, 'BlueTopo')
 
 
 if __name__ == '__main__':

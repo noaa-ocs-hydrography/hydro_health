@@ -7,6 +7,7 @@ import pathlib
 
 
 CODE_FOLDER = pathlib.Path(r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Code\hydro_health')
+CODE_FOLDER.mkdir(parents=True, exist_ok=True)
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 HYDRO_HEALTH = pathlib.Path(__file__).parents[1] / 'src' / 'hydro_health'
 SRC_FOLDER = HYDRO_HEALTH.parents[1]
