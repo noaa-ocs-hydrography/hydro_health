@@ -366,7 +366,7 @@ def generate_cumulative_rasters(output_folder, value):
 
             cumulative_windspeed[~mask_valid] = np.NaN
             cumulative_count[~mask_valid] = np.NaN
-            cumulative_count = gaussian_filter(cumulative_count, sigma=3)
+            cumulative_count = gaussian_filter(cumulative_count, sigma=0.7)
             
             print(f"Processed raster: {raster_file} for year {year_folder}")
 
