@@ -37,6 +37,8 @@ if __name__ == '__main__':
         create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, 'BlueTopo')
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
     create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
+
+    #preprocess
     
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
