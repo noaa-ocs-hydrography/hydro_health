@@ -1,9 +1,9 @@
+import os
 import requests
 import pathlib
 import geopandas as gpd
 import pandas as pd
 import numpy as np
-import os
 from shapely.geometry import LineString, Polygon, GeometryCollection
 from shapely.ops import unary_union
 import rasterio
@@ -449,8 +449,7 @@ year_ranges = [
     (2004, 2006),
     (2006, 2010),
     (2010, 2015),
-    (2015, 2022),
-]
+    (2015, 2022)]
 
 download_hurricane_data()    
 create_line_layer()
@@ -460,13 +459,11 @@ polygons_to_raster()
 
 generate_cumulative_rasters(
     output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
-    value="cumulative_count"
-)
+    value="cumulative_count")
 
 generate_cumulative_rasters(
     output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
-    value="cumulative_windspeed"
-)
+    value="cumulative_windspeed")
 
 for start_year, end_year in year_ranges:
     average_rasters(
@@ -482,5 +479,3 @@ for start_year, end_year in year_ranges:
         end_year=end_year,
         output_name=f"hurricane_strength_mean.tif"
     )
-
-
