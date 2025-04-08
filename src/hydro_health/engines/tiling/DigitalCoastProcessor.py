@@ -44,13 +44,14 @@ class DigitalCoastProcessor:
     def delete_unused_folder(self, digital_coast_folder: pathlib.Path) -> None:
         """Delete any provider folders without a subfolder"""
 
-        self.write_message('Deleting empty provider folders', str(digital_coast_folder.parents[0]))
-        provider_folders = os.listdir(digital_coast_folder)
-        for provider in provider_folders:
-            provider_folder = digital_coast_folder / provider
-            if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
-                self.write_message(f'- {provider_folder}', str(digital_coast_folder.parents[0]))
-                shutil.rmtree(provider_folder)
+        if digital_coast_folder.exists():
+            self.write_message('Deleting empty provider folders', str(digital_coast_folder.parents[0]))
+            provider_folders = os.listdir(digital_coast_folder)
+            for provider in provider_folders:
+                provider_folder = digital_coast_folder / provider
+                if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
+                    self.write_message(f'- {provider_folder}', str(digital_coast_folder.parents[0]))
+                    shutil.rmtree(provider_folder)
 
     def download_intersected_datasets(self, param_inputs: list[list]) -> None:
         """Parallel process spatial filter and download of datasets"""
@@ -198,7 +199,6 @@ class DigitalCoastProcessor:
         with ProcessPoolExecutor() as tile_index_pool:
             self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[0]))
         self.unzip_all_files(digital_coast_folder)
-        # TODO delete *.zip
 
     def unzip_all_files(self, output_folder) -> None:
         """Unzip all zip files in a folder"""

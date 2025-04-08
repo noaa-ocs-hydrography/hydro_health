@@ -103,6 +103,15 @@ class RunHydroHealthModelTool(HHLayerTool):
         arcpy.AddMessage('Obtaining Digital Coast data for selected area')
         tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
         tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
+        digital_coast_folder = os.path.join(self.param_lookup['output_directory'].valueAsText, 'DigitalCoast')
+        if os.path.exists(digital_coast_folder):
+            files = len(next(os.walk(digital_coast_folder))[1])
+            if files > 0:
+                arcpy.AddMessage(f" - Downloaded Digital Coast files: {files}")
+            else:
+                arcpy.AddMessage(' - No Digital Coast files found')
+        else:
+            arcpy.AddMessage(' - No Digital Coast files found')
         
     def get_params(self):
         """
