@@ -18,7 +18,6 @@ OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
 folder_path = INPUTS / 'hurricane_data'
 hurricane_data_path = str(folder_path / 'hurricane_data.gpkg')
 
-#TODO combine these
 atlantic_point_layer_name = 'atlantic_hurricane_points'
 pacific_point_layer_name = 'pacific_hurricane_points'
 atlantic_line_layer_name = 'atlantic_hurricane_lines'
@@ -366,7 +365,6 @@ def generate_cumulative_rasters(output_folder, value):
 
             cumulative_windspeed[~mask_valid] = np.NaN
             cumulative_count[~mask_valid] = np.NaN
-            cumulative_count = gaussian_filter(cumulative_count, sigma=0.7)
             
             print(f"Processed raster: {raster_file} for year {year_folder}")
 
@@ -437,6 +435,9 @@ def average_rasters(input_folder, start_year, end_year, output_name):
 
     average_array[mask == 0] = np.nan
 
+    if output_name.endswith('hurricane_count_mean.tif'):
+        average_array = gaussian_filter(average_array, sigma=10)
+
     os.makedirs(output_folder, exist_ok=True)
     output_path = os.path.join(output_folder, f"{start_year}_{end_year}_{output_name}")
     with rasterio.open(output_path, "w", **meta) as dst:
@@ -451,21 +452,21 @@ year_ranges = [
     (2015, 2022),
 ]
 
-# download_hurricane_data()    
-# create_line_layer()
-# create_overlapping_buffers()
-# clip_polygons()
-# polygons_to_raster()
+download_hurricane_data()    
+create_line_layer()
+create_overlapping_buffers()
+clip_polygons()
+polygons_to_raster()
 
 generate_cumulative_rasters(
     output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
     value="cumulative_count"
 )
 
-# generate_cumulative_rasters(
-#     output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
-#     value="cumulative_windspeed"
-# )
+generate_cumulative_rasters(
+    output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
+    value="cumulative_windspeed"
+)
 
 for start_year, end_year in year_ranges:
     average_rasters(
@@ -475,11 +476,11 @@ for start_year, end_year in year_ranges:
         output_name=f"hurricane_count_mean.tif"
     )
 
-    # average_rasters(
-    #     input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
-    #     start_year=start_year,
-    #     end_year=end_year,
-    #     output_name=f"hurricane_strength_mean.tif"
-    # )
+    average_rasters(
+        input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
+        start_year=start_year,
+        end_year=end_year,
+        output_name=f"hurricane_strength_mean.tif"
+    )
 
 
