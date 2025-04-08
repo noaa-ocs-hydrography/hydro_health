@@ -159,19 +159,16 @@ def standardize_rasters(mask_pred, mask_train):
     os.makedirs(prediction_out, exist_ok=True)
 
     prediction_files = [f for f in os.listdir(prediction_dir) if f.endswith('.tif')]
-    # prediction_files = [f for f in os.listdir(prediction_dir) if f.endswith('.tif') and 'bathy_2004' in f]
 
-    # scattered_mask = Client.scatter(mask)
     tasks = []
-    # for file in prediction_files:
-    #     print(f'Processing {file}...')
-    #     input_path = os.path.join(prediction_dir, file)
-    #     output_path = os.path.join(prediction_out, file)
+    for file in prediction_files:
+        print(f'Processing {file}...')
+        input_path = os.path.join(prediction_dir, file)
+        output_path = os.path.join(prediction_out, file)
 
-    #     # Use the scattered mask instead of passing the large object directly?
-    #     tasks.append(dask.delayed(process_raster)(input_path, mask_pred, output_path))
+        tasks.append(dask.delayed(process_raster)(input_path, mask_pred, output_path))
 
-    # dask.compute(*tasks)  
+    dask.compute(*tasks)  
     
     # # ## 2 Standardize all rasters (TRAINING Extent - sub sample of prediction extent)----
     # # #- THIS IS A DIRECT SUBSET OF THE PREDICTION AREA - clipped using the training mask. 
@@ -200,15 +197,10 @@ def raster_to_spatial_df(raster_path):
     return gdf
 
 # 2. prepare_subgrids - saves intersecting sub-grids to the gpkg, filters w/ masks
-# TODO this is duplicating sub tiles, added a line to temp fix it but should review
 def prepare_subgrids(mask_gdf, output_dir):
     grid_gpkg = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Tessellation\Master_Grids.gpkg"
 
     print("Preparing grid tiles and sub-grids...")
-    
-    # # Read and transform the grid tiles to match the CRS of the mask
-    # grid_tiles = gpd.read_file(grid_gpkg)
-    # grid_tiles = grid_tiles.to_crs(mask_gdf.crs)
     
     sub_grids = gpd.read_file(grid_gpkg, layer="Model_sub_Grid_Tiles").to_crs(mask_gdf.crs)
     
@@ -216,10 +208,7 @@ def prepare_subgrids(mask_gdf, output_dir):
     intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf, how="inner", predicate='intersects')
     
     intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
-    intersecting_sub_grids.to_file(os.path.join(output_dir, "intersecting_sub_grids.gpkg"), driver="GPKG")
-    
-    # # Save the training sub-grid extents, # TODO I'm not sure if grid_tile_extents is used later
-    # intersecting_sub_grids[['tile', 'geometry']].to_file(os.path.join(output_dir, "grid_tile_extents.gpkg"), driver="GPKG")    
+    intersecting_sub_grids.to_file(os.path.join(output_dir, "intersecting_sub_grids.gpkg"), driver="GPKG") 
     
     return intersecting_sub_grids
 
@@ -263,7 +252,7 @@ def tile_process(sub_grid, raster_dir, output_dir, data_type):
 
     combined_data = pd.concat(clipped_data, axis=0, join='outer', ignore_index=True)
     combined_data_pivot = combined_data.pivot(index=['X', 'Y', 'FID'], columns='Raster', values='Value').reset_index()
-    combined_data = combined_data_pivot # TODO remove if the pivot is not needed
+    combined_data = combined_data_pivot # remove if the pivot is not needed
     nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
     print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
     
@@ -276,13 +265,9 @@ def tile_process(sub_grid, raster_dir, output_dir, data_type):
     clipped_data_path = os.path.join(tile_dir, f"{tile_name}_{data_type}_clipped_data.parquet")
     combined_data.to_parquet(clipped_data_path)
 
-    # clipped_data_path = os.path.join(tile_dir, f"{tile_name}_{data_type}_clipped_data.csv")
-    # combined_data.to_csv(clipped_data_path, index=False)
-
 # 5. process_rasters - processes raster files by clipping, extracting values, 
 # combining them, calculating depth changes, and saving the data per tile
 def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
-    # check sub_grid_gpkg path
     sub_grids = gpd.read_file(sub_grid_gpkg, layer='intersecting_sub_grids')
     
     tasks = []
@@ -295,15 +280,15 @@ def dask_workflow():
     client = Client(n_workers=1, threads_per_worker=1, memory_limit="16GB")
     print(f"Dask Dashboard: {client.dashboard_link}")
 
-    with ProgressBar():  # Enables progress bar
-        # standardize_rasters(prediction_mask_df, training_mask_df)
+    with ProgressBar():  
+        standardize_rasters(prediction_mask_df, training_mask_df)
 
         clip_rasters_by_tile(sub_grid_gpkg=prediction_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction")
         clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_train, data_type="training")
-
     
     client.close()   
 
+# TODO more work is needed on the training and prediction code
 def tile_model_training(tiles_df, output_dir_train, year_pairs):
     print("Starting model training for all tiles...")
 
@@ -426,7 +411,7 @@ def tile_model_training(tiles_df, output_dir_train, year_pairs):
 
     print("Model training complete and logged to MLflow.")
 
-def tile_model_prediction(tiles_df, output_dir_train, year_pairs):
+def tile_model_predictions(tiles_df, output_dir_train, year_pairs):
     print("Starting model prediction for all tiles...")
 
     static_predictors = ["prim_sed_layer", "grain_size_layer", "survey_end_date"]
@@ -524,7 +509,7 @@ def clean_tile_folders(root_folder):
 if __name__ == '__main__':
     profiler = cProfile.Profile()
     profiler.enable()
-    # create_survey_end_date_tiffs() # works
+    create_survey_end_date_tiffs()
 
     input_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
     output_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_tiles" 
@@ -535,16 +520,16 @@ if __name__ == '__main__':
     mask_prediction = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.UTM17_8m.tif"
     mask_training = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.UTM17_8m.tif"
 
-    # prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
-    # training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
+    prediction_mask_df = raster_to_spatial_df(mask_prediction) # part 3b, create dataframe from Prediction extent mask
+    training_mask_df = raster_to_spatial_df(mask_training) # part 3a, create dataframe from Training extent mask
 
-    # prepare_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred)
-    # prepare_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) 
+    prepare_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred)
+    prepare_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) 
 
     prediction_sub_grids = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_tiles\intersecting_sub_grids.gpkg"
     training_sub_grids = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_tiles\intersecting_sub_grids.gpkg"
 
-    # dask_workflow()  
+    dask_workflow()  
 
     tiles_training_df = gpd.read_file(training_sub_grids)
     tiles_prediction_df = gpd.read_file(prediction_sub_grids)
@@ -552,7 +537,7 @@ if __name__ == '__main__':
     year_pairs = ["2004_2006", "2006_2010", "2010_2015", "2015_2022"]
 
     tile_model_training(tiles_training_df, output_dir_train, year_pairs)
-    # tile_model_predictions(tiles_prediction_df, output_dir_train, year_pairs)
+    tile_model_predictions(tiles_prediction_df, output_dir_train, year_pairs)
 
     profiler.disable()
     stats = pstats.Stats(profiler)
