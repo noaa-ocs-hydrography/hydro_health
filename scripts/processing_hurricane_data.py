@@ -8,7 +8,6 @@ from shapely.geometry import LineString, Polygon, GeometryCollection
 from shapely.ops import unary_union
 import rasterio
 from rasterio.transform import from_bounds
-from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 from scipy.ndimage import gaussian_filter
 
@@ -439,7 +438,7 @@ def average_rasters(input_folder, start_year, end_year, output_name):
         average_array = gaussian_filter(average_array, sigma=10)
 
     os.makedirs(output_folder, exist_ok=True)
-    output_path = os.path.join(output_folder, f"{start_year}_{end_year}_{output_name}")
+    output_path = os.path.join(output_folder, f"{output_name}_{start_year}_{end_year}.tif")
     with rasterio.open(output_path, "w", **meta) as dst:
         dst.write(average_array, 1)
 
@@ -470,12 +469,12 @@ for start_year, end_year in year_ranges:
         input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters",
         start_year=start_year,
         end_year=end_year,
-        output_name=f"hurricane_count_mean.tif"
+        output_name=f"hurr_count"
     )
 
     average_rasters(
         input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
         start_year=start_year,
         end_year=end_year,
-        output_name=f"hurricane_strength_mean.tif"
+        output_name=f"hurr_strength"
     )
