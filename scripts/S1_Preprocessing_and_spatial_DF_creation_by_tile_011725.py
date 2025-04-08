@@ -69,7 +69,7 @@ def create_survey_end_date_tiffs():
                 "survey_date_end": (
                     datetime.strptime(field_values[17], "%Y-%m-%d").date() 
                     if field_values[17] != "N/A" 
-                    else None  # Use None or another placeholder for 'N/A'
+                    else None  
                 )
             }
             table_data.append(data)
@@ -92,7 +92,6 @@ def create_survey_end_date_tiffs():
 
         output_file = os.path.join(output_dir, f'{base_name}.tiff')
 
-        # 12. write out new file with processed survey information
         with rasterio.open(
         output_file, 
         'w', 
@@ -101,7 +100,7 @@ def create_survey_end_date_tiffs():
         width=width,
         height=height,
         dtype=rasterio.float32,
-        compress='lzw', #lzw
+        compress='lzw', 
         crs=src.crs, 
         transform=transform,
         nodata=nodata) as dst: dst.write(reclassified_band, 1)       
@@ -135,7 +134,6 @@ def process_raster(raster_path, mask_gdf, output_path, target_crs="EPSG:32617", 
             'compress': 'lzw'
         })
 
-        # Write the output raster
         with rasterio.open(output_path, 'w', **kwargs) as dst:
             reproject(
                 source=data,  # Use masked data
@@ -192,11 +190,10 @@ def standardize_rasters(mask_pred, mask_train):
 def raster_to_spatial_df(raster_path):
     with rasterio.open(raster_path) as src:
         mask = src.read(1)
+        valid_mask = mask == 1
 
-        # Extract geometries where mask == 1
-        shapes_gen = shapes(mask, mask=mask == 1, transform=src.transform)
+        shapes_gen = shapes(mask, valid_mask, transform=src.transform)
 
-        # Convert to GeoDataFrame
         gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, value in shapes_gen]}, crs=src.crs)
         # gdf = gdf.to_crs(epsg=32617)  # Skips if already in utm zone 17
 
@@ -213,13 +210,11 @@ def prepare_subgrids(mask_gdf, output_dir):
     # grid_tiles = gpd.read_file(grid_gpkg)
     # grid_tiles = grid_tiles.to_crs(mask_gdf.crs)
     
-    # Use the subgrids from master grids geopackage and matches the CRS of the mask
     sub_grids = gpd.read_file(grid_gpkg, layer="Model_sub_Grid_Tiles").to_crs(mask_gdf.crs)
     
     # Filter sub-grids that intersect with the mask points
     intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf, how="inner", predicate='intersects')
     
-    # Save intersecting sub-grids to a GeoPackage
     intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
     intersecting_sub_grids.to_file(os.path.join(output_dir, "intersecting_sub_grids.gpkg"), driver="GPKG")
     
@@ -231,40 +226,31 @@ def prepare_subgrids(mask_gdf, output_dir):
 def tile_process(sub_grid, raster_dir, output_dir, data_type):
     raster_files = [os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith('.tif')]
 
-    tile_name = sub_grid['Tile_ID']  # Ensure sub-grid has a `tile` column
+    tile_name = sub_grid['Tile_ID']  # Ensure sub-grid has a `Tile_ID` column
     tile_extent = sub_grid.geometry.bounds  # Get spatial extent of the tile
     
-    # Create sub-folder for the tile if it doesn't exist
     tile_dir = os.path.join(output_dir, tile_name)
     os.makedirs(tile_dir, exist_ok=True)
-    
-    # Path to save the clipped raster data
-    
+        
     print(f"Processing {data_type} tile: {tile_name}")
     
-    # Clip rasters to the tile extent and process
     clipped_data = []
     for file in raster_files:
-        # clipped_data = []
 
         with rasterio.open(file) as src:
             # Crop to tile extent
             window = src.window(tile_extent[0], tile_extent[1], tile_extent[2], tile_extent[3])
-            cropped_r = src.read(1, window=window)  # Read the data within the window
+            cropped_r = src.read(1, window=window)  
 
-            # Get the coordinates and raster values (excluding nodata)
             mask = cropped_r != src.nodata
             raster_data = np.column_stack(np.where(mask))  # Get coordinates (Y, X)
             raster_values = cropped_r[mask]  # Get raster values
 
-            # Get X and Y values (note: np.where returns indices in (row, column) order, so row = y, column = x)
             x_vals = raster_data[:, 1]  # Column indices (X values)
             y_vals = raster_data[:, 0]  # Row indices (Y values)
 
-            # Convert (y, x) indices to linear indices (FID)
             fids = np.ravel_multi_index((y_vals, x_vals), cropped_r.shape)
 
-            # Create the DataFrame with X, Y, Value, and FID
             raster_df = pd.DataFrame({
                 'X': x_vals,
                 'Y': y_vals,
@@ -273,21 +259,11 @@ def tile_process(sub_grid, raster_dir, output_dir, data_type):
                 'Raster': os.path.splitext(os.path.basename(file))[0]
             })
 
-            # print(raster_df.head(5))
-
-            # Append the DataFrame to the list
             clipped_data.append(raster_df)
 
-    # Combine all raster data into a single DataFrame
     combined_data = pd.concat(clipped_data, axis=0, join='outer', ignore_index=True)
-
-    # Pivot the combined data so each raster type (e.g., 'bathy_2004', 'bathy_2006') has its own column
     combined_data_pivot = combined_data.pivot(index=['X', 'Y', 'FID'], columns='Raster', values='Value').reset_index()
-
-    print(combined_data_pivot)
-    # print(combined_data_pivot)
     combined_data = combined_data_pivot # TODO remove if the pivot is not needed
-    # print(combined_data['bathy_2006'])
     nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
     print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
     
@@ -349,7 +325,6 @@ def tile_model_training(tiles_df, output_dir_train, year_pairs):
         mlflow.set_experiment(experiment_name)
         print(f"Processing tile: {tile_id}")
 
-        # Load corresponding training data
         training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.parquet")
         if not os.path.exists(training_data_path):
             print(f" - Training data missing for tile: {tile_id}")
@@ -407,7 +382,6 @@ def tile_model_training(tiles_df, output_dir_train, year_pairs):
                 # Train the model using xgb.train (equivalent to xgb.train in R)
                 xgb_model = xgb.train(params, dtrain, num_boost_round=nrounds)
 
-                # Log parameters to MLflow
                 mlflow.log_param("tile_id", tile_id)
                 mlflow.log_param("year_pair", pair)
                 mlflow.log_param("n_estimators", 500)
@@ -452,7 +426,6 @@ def tile_model_training(tiles_df, output_dir_train, year_pairs):
 
     print("Model training complete and logged to MLflow.")
 
-
 def tile_model_prediction(tiles_df, output_dir_train, year_pairs):
     print("Starting model prediction for all tiles...")
 
@@ -495,21 +468,17 @@ def tile_model_prediction(tiles_df, output_dir_train, year_pairs):
                 print(f"  Model missing for year pair: {pair} in {tile_id}")
                 continue
 
-            # 6. Load model
             xgb_model = xgb.XGBRegressor()
             xgb_model.load_model(model_path)
 
-            # 7. Make predictions
             predictions = xgb_model.predict(prediction_data[predictors])
 
-            # 8. Save the predictions along with the tile and year pair info
             results_summary.append({
                 "Tile": tile_id,
                 "YearPair": pair,
                 "Predictions": predictions.tolist()
             })
     
-    # Convert the results to DataFrame and save
     results_df = pd.DataFrame(results_summary)
     results_csv_path = os.path.join(output_dir_train, "model_predictions.csv")
     results_df.to_csv(results_csv_path, index=False)
@@ -575,7 +544,7 @@ if __name__ == '__main__':
     prediction_sub_grids = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_tiles\intersecting_sub_grids.gpkg"
     training_sub_grids = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_tiles\intersecting_sub_grids.gpkg"
 
-    # dask_workflow()  # Executes the entire Dask workflow to standarize rasters and clip tiles
+    # dask_workflow()  
 
     tiles_training_df = gpd.read_file(training_sub_grids)
     tiles_prediction_df = gpd.read_file(prediction_sub_grids)
