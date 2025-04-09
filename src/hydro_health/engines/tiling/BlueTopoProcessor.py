@@ -34,14 +34,16 @@ class BlueTopoProcessor:
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
 
-    def download_nbs_tile(self, output_folder: str, tile_id: str):
+    def download_nbs_tile(self, output_folder: str, tile_id: str, grandparent: str):
         """Download all NBS files for a single tile"""
 
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
         tiff_file_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
+            # TODO need to add subfolder for Eco_Region_Grid_Tile ID
             output_tile_path = output_pathlib / obj_summary.key
+            self.write_message(str(output_tile_path), output_folder)
             # Store the path to the tile, not the xml
             if output_tile_path.suffix == '.tiff':
                 tiff_file_path = output_tile_path
@@ -102,9 +104,11 @@ class BlueTopoProcessor:
     def process_tile(self, output_folder: str, row: gpd.GeoSeries):
         """Handle processing of a single tile"""
 
-        tile_id = row[0]
+        tile_id = row['tile']
         geometry = row['geometry']
-        tiff_file_path = self.download_nbs_tile(output_folder, tile_id)
+        grandparent = row['Grandparen']
+        self.write_message(str(grandparent), output_folder)
+        tiff_file_path = self.download_nbs_tile(output_folder, tile_id, grandparent)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
             self.multiband_to_singleband(mb_tiff_file, geometry)

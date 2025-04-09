@@ -119,8 +119,10 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
     mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
+    blue_topo_grid_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'MODELSUBGRIDTILES'), columns=['Grandparen'], mask=selected_sub_grids)
+    selected_sub_grids_join = mask_tiles.sjoin(df=blue_topo_grid_tiles, how='left', predicate='intersects')
     # Clip to remove extra polygons not handled by mask property
-    tiles = gpd.clip(mask_tiles, selected_sub_grids, keep_geom_type=True)
+    tiles = gpd.clip(selected_sub_grids_join, selected_sub_grids, keep_geom_type=True)
     tiles.to_file(OUTPUTS / 'selected_tiles.shp') 
 
     return tiles
