@@ -146,3 +146,7 @@ def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) ->
     
     processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)
+
+def process_model_data(): #TODO add
+    processor = ModelDataProcessor()
+    processor.process()  # TODO add
