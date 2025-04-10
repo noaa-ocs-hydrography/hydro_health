@@ -102,7 +102,7 @@ class DigitalCoastProcessor:
                     if os.path.exists(shp_path):
                         self.write_message(f' - Skipping index: {output_zip_file.name}', output_folder_path.parents[1])
                         continue
-                    else
+                    else:
                         self.write_message(f' - Downloading index: {output_zip_file.name}', output_folder_path.parents[1])
                     file_parent_folder.mkdir(parents=True, exist_ok=True) 
                     with open(output_zip_file, 'wb') as tile_index:
