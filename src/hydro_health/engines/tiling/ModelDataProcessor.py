@@ -8,6 +8,8 @@ import geopandas as gpd
 import rasterio
 import numpy as np
 import dask
+from pathlib import Path
+
 
 from lxml import etree
 from datetime import datetime
@@ -16,8 +18,6 @@ from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import shape
 from rasterio.features import shapes
 from dask.distributed import Client
-
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
 class ModelDataProcessor:
@@ -105,14 +105,14 @@ class ModelDataProcessor:
             transform=transform,
             nodata=nodata) as dst: dst.write(reclassified_band, 1)       
     
-    def parallel_processing_rasters(self, mask_pred, mask_train):
+    def parallel_processing_rasters(self, input_directory, mask_pred, mask_train):
         """Process prediction and training rasters in parallel using Dask.
         :param gdf mask_pred: Prediction mask GeoDataFrame
         :param gdf mask_train: Training mask GeoDataFrame
         :return: None
         """   
 
-        prediction_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Prediction\raw_testing'
+        prediction_dir = Path(input_directory) / 'raw' 
         prediction_out = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
         os.makedirs(prediction_out, exist_ok=True)
 
@@ -139,8 +139,8 @@ class ModelDataProcessor:
 
         dask.compute(*tasks)    
 
-    def prepare_subgrids(self, mask_gdf, output_dir):
-        """ Prepare sub-grids by filtering them based on the mask geometries and saving the results.
+    def create_subgrids(self, mask_gdf, output_dir):
+        """ Create subgrids layer by intersecting grid tiles with the mask geometries
         :param gdf mask_gdf: GeoDataFrame containing the mask geometries
         :param str output_dir: directory to save the output files
         :return: None
@@ -156,29 +156,32 @@ class ModelDataProcessor:
         intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
         intersecting_sub_grids.to_file(os.path.join(output_dir, "intersecting_sub_grids.gpkg"), driver="GPKG") 
    
-    def process(self):
+    def process(self, input_directory):
         """ Main function to process model data.
         """        
-        self.create_survey_end_date_tiffs()
+        # self.create_survey_end_date_tiffs() # TODO this will get moved
 
-        input_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
         output_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_tiles" 
-        input_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_processed"   
         output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_tiles"
 
         mask_prediction = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.UTM17_8m.tif"
         mask_training = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.UTM17_8m.tif"
 
-        prediction_mask_df = self.raster_to_spatial_df(mask_prediction) # Create dataframe from Prediction extent mask
-        training_mask_df = self.raster_to_spatial_df(mask_training) # Create dataframe from Training extent mask
+        prediction_mask_df = self.raster_to_spatial_df(mask_prediction)
+        training_mask_df = self.raster_to_spatial_df(mask_training)
 
-        self.prepare_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred)
-        self.prepare_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) 
+        self.create_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred)
+        self.create_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) 
 
         client = Client(n_workers=1, threads_per_worker=1, memory_limit="16GB")
         # print(f"Dask Dashboard: {client.dashboard_link}")
 
-        self.parallel_processing_rasters(prediction_mask_df, training_mask_df)
+        self.parallel_processing_rasters(input_directory, prediction_mask_df, training_mask_df)
+        
+        input_dir_pred = Path(input_directory) / 'raw' 
+        # input_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
+        input_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_processed"   
+        
         self.clip_rasters_by_tile(raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction")
         self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
     
@@ -205,7 +208,6 @@ class ModelDataProcessor:
             if 'bathy_' in os.path.basename(raster_path):
                 data[data > 0] = np.nan
 
-            # Compute new transform for the masked raster (not the full original raster!)
             transform, width, height = calculate_default_transform(
                 src.crs, target_crs, data.shape[-1], data.shape[-2], *mask_gdf.total_bounds, resolution=target_res
             )
@@ -224,9 +226,9 @@ class ModelDataProcessor:
                 reproject(
                     source=data,
                     destination=rasterio.band(dst, 1),
-                    src_transform=mask_transform, # Use the transform of the clipped raster
+                    src_transform=mask_transform,
                     src_crs=src.crs,
-                    dst_transform=transform, # Use new projection transform
+                    dst_transform=transform, 
                     dst_crs=target_crs,
                     resampling=Resampling.nearest,
                     dst_nodata=np.nan
@@ -248,10 +250,17 @@ class ModelDataProcessor:
         return gdf
      
     def tile_process(self, sub_grid, raster_dir, output_dir, data_type):
+        """ Process a single tile by clipping raster files and saving the data in a specified directory.
+
+        :param _type_ sub_grid: _description_
+        :param _type_ raster_dir: _description_
+        :param _type_ output_dir: _description_
+        :param _type_ data_type: _description_
+        """        
         raster_files = [os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith('.tif')]
 
-        tile_name = sub_grid['Tile_ID']  # Ensure sub-grid has a `Tile_ID` column
-        tile_extent = sub_grid.geometry.bounds  # Get spatial extent of the tile
+        tile_name = sub_grid['Tile_ID']  
+        tile_extent = sub_grid.geometry.bounds
         
         tile_dir = os.path.join(output_dir, tile_name)
         os.makedirs(tile_dir, exist_ok=True)
@@ -262,16 +271,15 @@ class ModelDataProcessor:
         for file in raster_files:
 
             with rasterio.open(file) as src:
-                # Crop to tile extent
                 window = src.window(tile_extent[0], tile_extent[1], tile_extent[2], tile_extent[3])
                 cropped_r = src.read(1, window=window)  
 
                 mask = cropped_r != src.nodata
-                raster_data = np.column_stack(np.where(mask))  # Get coordinates (Y, X)
-                raster_values = cropped_r[mask]  # Get raster values
+                raster_data = np.column_stack(np.where(mask)) 
+                raster_values = cropped_r[mask]  
 
-                x_vals = raster_data[:, 1]  # Column indices (X values)
-                y_vals = raster_data[:, 0]  # Row indices (Y values)
+                x_vals = raster_data[:, 1]  
+                y_vals = raster_data[:, 0]  
 
                 fids = np.ravel_multi_index((y_vals, x_vals), cropped_r.shape)
 
@@ -291,7 +299,6 @@ class ModelDataProcessor:
         nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
         print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
         
-        # Calculate depth change columns
         combined_data['b.change.2004_2006'] = combined_data['bathy_2006'] - combined_data['bathy_2004']
         combined_data['b.change.2006_2010'] = combined_data['bathy_2010'] - combined_data['bathy_2006']
         combined_data['b.change.2010_2015'] = combined_data['bathy_2015'] - combined_data['bathy_2010']

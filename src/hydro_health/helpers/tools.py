@@ -4,6 +4,8 @@ import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and acti
 
 from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
+from hydro_health.engines.tiling.ModelDataProcessor import ModelDataProcessor
+
 from osgeo import gdal, osr
 
 gdal.UseExceptions()
@@ -147,6 +149,6 @@ def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) ->
     processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)
 
-def process_model_data(): #TODO add
+def process_model_data(input_directory: str = False) -> None: 
     processor = ModelDataProcessor()
-    processor.process()  # TODO add
+    processor.process(input_directory)  
