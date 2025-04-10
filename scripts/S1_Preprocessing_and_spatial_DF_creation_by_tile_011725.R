@@ -20,12 +20,12 @@
     # F1 - Fill NA values in raw bathymetry data using Focal statistics iteratively 
     # F2 - Create training mask by merging all part-processed bathymetry data from F1
     # F3 - Create prediction mask from shapefile (* this will later be defined through the automated grid script as there will be multiple grid tiles for prediction)
-    # F4 - Extract Survey End dates from blue topo xml / RAT data 
-    # F5 - Function to split blue topo grid into sub grid / divide by 4 
-    # F6 - Prepares sub grid by intersecting blue topo geopackage using F5 (In WGS84)
-    # F7 - Re-projects the sub grid into UTM for model use
-    # F8 -  Standardize all model rasters for prediction and training extent ( projection, resolution [8m], extent) 
-    # F9 - Create Spatial Dataframes for prediction and training extent (also WGS and UTM copies)
+    # F4 - Create Spatial Dataframes from prediction and training extent masks (also WGS and UTM copies)
+    # F5 - Extract Survey End dates from blue topo xml / RAT data 
+    # F6 - Function to split blue topo grid into sub grid / divide by 4 
+    # F7 - Prepares sub grid by intersecting blue topo geopackage using F5 (In WGS84)
+    # F8 - Re-projects the sub grid into UTM for model use
+    # F9 -  Standardize all model rasters for prediction and training extent ( projection, resolution [8m], extent) 
     # F10 - Parallel tile chunking **(chunks out data into gridded format if starting from larger format, only required for PILOT MODEL)
 # 5. Done / Close Parallel 
 
@@ -80,6 +80,8 @@ output_mask_train_utm <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilo
 output_mask_train_wgs <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/training.mask.WGS84_8m.tif"
 output_mask_pred_utm <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.UTM17_8m.tif"
 output_mask_pred_wgs <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/prediction.mask.WGS84_8m.tif"
+# training and prediction spatial dataframes
+output_SPDF - "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Data"
 # KML / XML survey end date paths
 input_dir_survey <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Modeling/UTM17"
 kml_dir_survey   <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Modeling/RATs"
@@ -109,61 +111,89 @@ iterative_focal_fill <- function(r, max_iters = 10, w = 3) {
   }
   return(r)
 }
-
 # ──────────────
 # F1.2 LIGHTWEIGHT FOCAL FILL (REPEATED SINGLE PASS)
 # ──────────────
-repeat_single_focal_fill <- function(r, n_repeats = 5, w = 3, file_name = "unknown.tif") {
-  kernel <- matrix(1, w, w)
+repeat_disk_focal_fill <- function(input_file, output_final, output_dir, n_repeats = 5, w = 3, layer_name = "unknown") {
+  input_raster <- raster(input_file)
+  temp_file <- input_file
+  
   for (i in seq_len(n_repeats)) {
-    msg <- sprintf(" Pass %d/%d on %s (fallback fill)", i, n_repeats, file_name)
-    log_message(msg)
+    log_message(paste(" ", layer_name, "- Disk-Based Focal Fill Iteration", i, "of", n_repeats))
     
-    filled <- focal(
-      r,
-      w = kernel,
-      fun = mean,
-      na.rm = TRUE,
-      NAonly = TRUE,
-      pad = TRUE,
-      padValue = NA
-    )
+    out_path <- file.path(output_dir, paste0(tools::file_path_sans_ext(basename(input_file)), "_f", i, ".tif"))
     
-    r <- overlay(r, filled, fun = function(orig, interp) ifelse(is.na(orig), interp, orig))
+    # Prevent overwrite issues by deleting the output if it exists
+    if (file.exists(out_path)) file.remove(out_path)
+    
+    tryCatch({
+      r <- raster(temp_file)
+      filled <- focal(r, w = matrix(1, w, w), fun = mean, na.rm = TRUE, NAonly = TRUE, pad = TRUE, padValue = NA)
+      final <- overlay(r, filled, fun = function(orig, interp) ifelse(is.na(orig), interp, orig))
+      writeRaster(final, filename = out_path, format = "GTiff", overwrite = TRUE)
+      
+      # Set current output as input for next round
+      temp_file <- out_path
+      
+      # Clean up memory & temp files
+      removeTmpFiles(h = 0)
+      gc()
+    }, error = function(e) {
+      log_message(paste(" Focal failed at iteration", i, "-", e$message))
+    })
   }
-  return(r)
+  
+  # Rename final result
+  if (file.exists(temp_file)) {
+    file.rename(temp_file, output_final)
+    log_message(paste(" Final filled raster saved as:", basename(output_final)))
+  } else {
+    log_message(paste(" Final result file was not created for", layer_name))
+  }
 }
+
 
 # ──────────────
 # F1.3 FILL WITH FALLBACK STRATEGY
 # ──────────────
 fill_with_fallback <- function(input_file, output_file, max_iters = 10, fallback_repeats = 5, w = 3) {
-  file_name <- basename(input_file)
+  layer_name <- basename(input_file)
   
   tryCatch({
     r <- raster(input_file)
+    log_message(paste(" Attempting iterative fill for", layer_name))
     r_filled <- iterative_focal_fill(r, max_iters = max_iters, w = w)
     writeRaster(r_filled, filename = output_file, format = "GTiff", overwrite = TRUE)
-    log_message(paste("Iterative fill succeeded:", file_name))
+    log_message(paste(" Iterative fill succeeded:", layer_name))
   }, error = function(e) {
-    log_message(paste("️ Iterative fill failed for", file_name, "-", e$message))
+    log_message(paste(" Iterative fill failed for", layer_name, "-", e$message))
     
-    # Fallback
+    # Fallback disk-based approach
     tryCatch({
-      r <- raster(input_file)
-      r_filled <- repeat_single_focal_fill(r, n_repeats = fallback_repeats, w = w, file_name = file_name)
-      writeRaster(r_filled, filename = output_file, format = "GTiff", overwrite = TRUE)
-      log_message(paste("Fallback (repeated single-pass) fill succeeded:", file_name))
+      log_message(paste("🛠️  Fallback disk-based fill starting for", layer_name))
+      repeat_disk_focal_fill(
+        input_file = input_file,
+        output_final = output_file,
+        output_dir = dirname(output_file),
+        n_repeats = fallback_repeats,
+        w = w,
+        layer_name = layer_name
+      )
+      
     }, error = function(e2) {
-      log_message(paste(" Fallback fill also failed for", file_name, "-", e2$message))
+      log_message(paste(" Fallback fill also failed for", layer_name, "-", e2$message))
     })
   })
+  
+  removeTmpFiles(h = 0)
+  gc()
 }
 
 # ──────────────
 # F1.4 MAIN GAP FILL FUNCTION (TRY PARALLEL FIRST)
 # ──────────────
-run_gap_fill <- function(bathy_files,output_dir, cores = 4,max_iters = 10, fallback_repeats = 5, w = 3) {
+cores <- 8  # or even 1 to start safely
+run_gap_fill <- function(bathy_files,output_dir, cores = 8,max_iters = 10, fallback_repeats = 10, w = 3) {
   
   log_message(" Starting gap fill module...")
   
@@ -241,7 +271,38 @@ create_prediction_mask <- function(shapefile_path, output_mask_utm, output_mask_
   log_message("Prediction mask created (UTM & WGS)")
 }
 
-## F4 - Extract survey end dates from Blue Topo xml files
+## F4 - Create Spatial DF for Masks (UTM + WGS)
+create_spatial_mask_df <- function(mask_utm_path = NULL, mask_wgs_path = NULL, mask_type = "prediction", output_dir = ".") {
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  if (!is.null(mask_utm_path)) {
+    r <- raster::raster(mask_utm_path)
+    pts <- raster::rasterToPoints(r, spatial = TRUE)
+    df <- data.frame(pts@data, X = pts@coords[, 1], Y = pts@coords[, 2])
+    df$FID <- raster::cellFromXY(r, df[, c("X", "Y")])
+    df <- df[df[, 1] == 1, ]
+    
+    out_path_utm <- file.path(output_dir, paste0(mask_type, ".mask.df.utm.fst"))
+    write.fst(df, out_path_utm)
+    log_message(paste("Spatial UTM DF saved to", out_path_utm))
+  }
+  
+  if (!is.null(mask_wgs_path)) {
+    r <- raster::raster(mask_wgs_path)
+    pts <- raster::rasterToPoints(r, spatial = TRUE)
+    df <- data.frame(pts@data, X = pts@coords[, 1], Y = pts@coords[, 2])
+    df$FID <- raster::cellFromXY(r, df[, c("X", "Y")])
+    df <- df[df[, 1] == 1, ]
+    
+    out_path_wgs <- file.path(output_dir, paste0(mask_type, ".mask.df.wgs84.fst"))
+    write.fst(df, out_path_wgs)
+    log_message(paste("Spatial WGS84 DF saved to", out_path_wgs))
+  }
+}
+
+## F5 - Extract survey end dates from Blue Topo xml files
 extract_survey_end_dates <- function(input_dir, kml_dir, output_dir) {
   log_message(" Extracting survey end dates from TIFF + XML...")
   
@@ -297,7 +358,7 @@ extract_survey_end_dates <- function(input_dir, kml_dir, output_dir) {
   log_message(" Survey date extraction complete.")
 }
 
-## F5 - Split Blue Topo Grid into sub grid (divides grid into 4 subgrids)
+## F6 - Split Blue Topo Grid into sub grid (divides grid into 4 subgrids)
 split_tile_into_quadrants <- function(tile) {
   bbox <- st_bbox(tile)
   dx <- (bbox["xmax"] - bbox["xmin"]) / 2
@@ -321,7 +382,7 @@ split_tile_into_quadrants <- function(tile) {
   st_sf(df, geometry = st_sfc(sub_polys, crs = 4326))
 }
 
-## F6 - Intersects blue topo grid with training or prediction mask to make new Geopackage (in WGS84)
+## F7- Intersects blue topo grid with training or prediction mask to make new Geopackage (in WGS84)
 prepare_subgrids <- function(grid_tiles, mask_df, output_dir) {
   log_message(" Preparing sub-grids from tile scheme...")
   
@@ -343,9 +404,9 @@ prepare_subgrids <- function(grid_tiles, mask_df, output_dir) {
   return(intersecting)
 }
 
-## F7 - Re projects sub grid geopackage into desired projection - UTM 
+## F8 - Re projects sub grid geopackage into desired projection - UTM 
 reproject_subgrids_to_utm <- function(input_gpkg, output_gpkg, target_crs) {
-  log_message(paste("🌍 Reprojecting sub-grids to:", target_crs))
+  log_message(paste(" Reprojecting sub-grids to:", target_crs))
   
   tryCatch({
     sub_grids <- st_read(input_gpkg, quiet = TRUE)
@@ -357,7 +418,7 @@ reproject_subgrids_to_utm <- function(input_gpkg, output_gpkg, target_crs) {
   })
 }
 
-## F8 - Standardize Rasters (Parallel)
+## F9 - Standardize Rasters (Parallel)
 standardize_rasters <- function(mask_path, input_dir_raw, input_dir_partial, output_dir) {
   mask <- raster(mask_path)
   crs_mask <- crs(mask)
@@ -382,28 +443,6 @@ standardize_rasters <- function(mask_path, input_dir_raw, input_dir_partial, out
       })
     })
   })
-}
-
-## F9 - Create Spatial DF (UTM + WGS)
-create_spatial_mask_df <- function(mask_utm_path = NULL, mask_wgs_path = NULL, mask_type = "training") {
-  if (!is.null(mask_utm_path)) {
-    r <- raster(mask_utm_path)
-    pts <- rasterToPoints(r, spatial = TRUE)
-    df <- data.frame(pts@data, X = pts@coords[,1], Y = pts@coords[,2])
-    df$FID <- cellFromXY(r, df[, c("X", "Y")])
-    df <- df[df[, 1] == 1, ]
-    saveRDS(df, paste0(mask_type, ".mask.df.utm.rds"))
-    log_message(paste("Spatial UTM DF saved for", mask_type))
-  }
-  if (!is.null(mask_wgs_path)) {
-    r <- raster(mask_wgs_path)
-    pts <- rasterToPoints(r, spatial = TRUE)
-    df <- data.frame(pts@data, X = pts@coords[,1], Y = pts@coords[,2])
-    df$FID <- cellFromXY(r, df[, c("X", "Y")])
-    df <- df[df[, 1] == 1, ]
-    saveRDS(df, paste0(mask_type, ".mask.df.wgs84.rds"))
-    log_message(paste("Spatial WGS84 DF saved for", mask_type))
-  }
 }
 
 ## F10 - Parallel Tile Chunking (Spatial Dataframes)
@@ -448,7 +487,7 @@ grid_out_raster_data <- function(sub_grid_gpkg, raster_dir, output_dir, data_typ
 # ──────────────
 #initiate parallel processing 
 cl <- makeCluster(cores)
-cores <- 1  # or even 1 to start safely
+cores <- 8  # or even 1 to start safely
 handlers(global = TRUE)
 plan(multisession, workers = cores)
 registerDoParallel(cl)
@@ -459,8 +498,13 @@ log_message(" Starting preprocessing module...")
 
 # F1 - FOCAL GAP FILL (uses ~6-8GB of RAM and takes 2.5hrs per bathy tiff [pilot model extent])
 bathy_files <- list.files(input_raw_pred, pattern = "^bathy_\\d{4}\\.tif$", full.names = TRUE)
-run_gap_fill(bathy_files, output_dir = output_filled, cores = 4, max_iters = 5)
-
+run_gap_fill(bathy_files, output_dir = output_filled, cores = 8, max_iters = 5)
+log_message(" Final cleanup of temp raster files...")
+cleanup_intermediate_rasters <- function(base_name, dir) {
+  files <- list.files(dir, pattern = paste0("^", base_name, "_f\\d+\\.tif$"), full.names = TRUE)
+  file.remove(files)
+}
+gc()
 
 # F2 - TRAINING MASK
 create_training_mask(input_partial, output_mask_train_utm, output_mask_train_wgs)
@@ -468,34 +512,27 @@ create_training_mask(input_partial, output_mask_train_utm, output_mask_train_wgs
 # F3 - PREDICTION MASK
 create_prediction_mask(shapefile_path, output_mask_pred_utm, output_mask_pred_wgs)
 
-# F4 - EXTRACT SURVEY END DATES
+# F4 - SPATIAL DATAFRAMES
+create_spatial_mask_df(mask_utm_path = output_mask_pred_utm,mask_wgs_path = output_mask_pred_wgs,mask_type = "training", output_dir = output_SPDF)
 
-extract_survey_end_dates(
-  input_dir = input_dir_survey,
-  kml_dir = kml_dir_survey,
-  output_dir = output_dir_survey_dates)
+create_spatial_mask_df(mask_utm_path = output_mask_pred_utm,mask_wgs_path = output_mask_pred_wgs,mask_type = "prediction", output_dir = output_SPDF)
 
-# F5 & F6 - PREPARE SUB-GRIDS (Training & Prediction Masks)
+# F5 - EXTRACT SURVEY END DATES
+extract_survey_end_dates(input_dir = input_dir_survey, kml_dir = kml_dir_survey, output_dir = output_dir_survey_dates)
+
+# F6 & F7 - PREPARE SUB-GRIDS (Training & Prediction Masks)
 # OG Blue Topo Gpkg
 grid_tile_path <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg"
 grid_tiles <- st_read(grid_tile_path, quiet = TRUE)
 
-training_mask_df_wgs <- readRDS("training.mask.df.wgs84.rds")
-prediction_mask_df_wgs <- readRDS("prediction.mask.df.wgs84.rds")
+training_mask_df_wgs <- read.fst("training.mask.df.wgs84.rds")
+prediction_mask_df_wgs <- read.fst("prediction.mask.df.wgs84.rds")
 
-training_subgrids_wgs <- prepare_subgrids(
-  grid_tiles = grid_tiles,
-  mask_df = training_mask_df_wgs,
-  output_dir = training_subgrid_out
-)
+training_subgrids_wgs <- prepare_subgrids(grid_tiles = grid_tiles, mask_df = training_mask_df_wgs, output_dir = training_subgrid_out)
 
-prediction_subgrids_wgs <- prepare_subgrids(
-  grid_tiles = grid_tiles,
-  mask_df = prediction_mask_df_wgs,
-  output_dir = prediction_subgrid_out
-)
+prediction_subgrids_wgs <- prepare_subgrids(grid_tiles = grid_tiles, mask_df = prediction_mask_df_wgs, output_dir = prediction_subgrid_out)
 
-# F7 - REPROJECT SUB GRIDS to UTM
+# F8 - REPROJECT SUB GRIDS to UTM
 utm_crs_str <- "+proj=utm +zone=17 +datum=WGS84 +units=m +no_defs"
 
 reproject_subgrids_to_utm(
@@ -510,13 +547,9 @@ reproject_subgrids_to_utm(
   target_crs = utm_crs_str
 )
  
-# F8 -  STANDARDIZE RASTERS
+# F9 -  STANDARDIZE RASTERS
 standardize_rasters(output_mask_pred_utm, input_raw_pred, input_partial, output_proc_pred)
 standardize_rasters(output_mask_train_utm, input_raw_train, input_partial, output_proc_train)
-
-# F9 - SPATIAL DATAFRAMES
-create_spatial_mask_df(output_mask_train_utm, output_mask_train_wgs, "training")
-create_spatial_mask_df(output_mask_pred_utm, output_mask_pred_wgs, "prediction")
 
 # F10 - RASTER CHUNK TILE DATA
 grid_out_raster_data(training_grid_gpkg, output_proc_train, training_subgrid_out, "training")
