@@ -1,5 +1,6 @@
 import arcpy
 import os
+import pathlib
 import geopandas as gpd
 
 from hydro_health.HHLayerTool import HHLayerTool
@@ -90,12 +91,18 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Download all bluetopo tiles"""
 
         tools.process_bluetopo_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
-        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(self.param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
+        ecoregion_folders = pathlib.Path(self.param_lookup['output_directory'].valueAsText).glob('ER*')
+        if ecoregion_folders:
+            for folder in ecoregion_folders:
+                arcpy.AddMessage(f'Downloaded {folder.stem} tiles: {len(next(os.walk(folder))[1])}')
+        else:
+            arcpy.AddMessage('No tiles downloaded')
 
         arcpy.AddMessage('Tile process completed')
         for dataset in ['elevation', 'slope', 'rugosity']:
             arcpy.AddMessage(f'Building {dataset} VRT file')
-            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, 'BlueTopo')
+            for folder in ecoregion_folders:
+                tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, folder.stem)
 
     def download_digital_coast_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all digital coast tiles"""

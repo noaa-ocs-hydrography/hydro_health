@@ -41,9 +41,10 @@ class BlueTopoProcessor:
         output_pathlib = pathlib.Path(output_folder)
         tiff_file_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            # TODO need to add subfolder for Eco_Region_Grid_Tile ID
-            output_tile_path = output_pathlib / obj_summary.key
-            self.write_message(str(output_tile_path), output_folder)
+            file_path_parts = obj_summary.key.split('/')[1:]
+            self.write_message(f'grand: {grandparent}, {file_path_parts}', output_folder)
+            ecoregion_file_path = pathlib.Path(*[grandparent, *file_path_parts])  # replace Bluetopo folder with grandparent
+            output_tile_path = output_pathlib / ecoregion_file_path
             # Store the path to the tile, not the xml
             if output_tile_path.suffix == '.tiff':
                 tiff_file_path = output_tile_path
@@ -107,7 +108,6 @@ class BlueTopoProcessor:
         tile_id = row['tile']
         geometry = row['geometry']
         grandparent = row['Grandparen']
-        self.write_message(str(grandparent), output_folder)
         tiff_file_path = self.download_nbs_tile(output_folder, tile_id, grandparent)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)

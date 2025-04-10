@@ -1,6 +1,7 @@
 import yaml
 import pathlib
-import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and activating cloned env in Pro
+import pandas as pd
+import geopandas as gpd
 
 from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
@@ -118,11 +119,21 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
-    mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
-    blue_topo_grid_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'MODELSUBGRIDTILES'), columns=['Grandparen'], mask=selected_sub_grids)
-    selected_sub_grids_join = mask_tiles.sjoin(df=blue_topo_grid_tiles, how='left', predicate='intersects')
-    # Clip to remove extra polygons not handled by mask property
-    tiles = gpd.clip(selected_sub_grids_join, selected_sub_grids, keep_geom_type=True)
+    # Check if tile starts with BC, BF, BG, BH
+    # code only works currently with BH
+
+    
+    model_sub_grid_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'MODELSUBGRIDTILES'), columns=['Tilename', 'Grandparen'], mask=selected_sub_grids)
+    # merge in Grandparen folder
+    selected_sub_grids_join = pd.merge(selected_sub_grids, model_sub_grid_tiles[['Tilename', 'Grandparen']], left_on='tile', right_on='Tilename', how='left')
+
+    # clip out extra polygons that don't intersect the 50m isobath
+    eco_regions_50m = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS_50m'))
+    tiles_inside_50m = gpd.clip(selected_sub_grids_join, eco_regions_50m, keep_geom_type=True)
+
+    # Clip to model sub grid tile footprints to remove tiles over land
+    tiles = gpd.clip(tiles_inside_50m, model_sub_grid_tiles, keep_geom_type=True)
+    
     tiles.to_file(OUTPUTS / 'selected_tiles.shp') 
 
     return tiles
