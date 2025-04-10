@@ -37,6 +37,17 @@ if __name__ == '__main__':
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
     create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
 
+    digital_coast_data = pathlib.Path(param_lookup['output_directory'].valueAsText) / 'DigitalCoast'
+    if digital_coast_data.exists():
+        digital_coast_folders = digital_coast_data.rglob('*')
+        data_providers = []
+        for path in digital_coast_folders:
+            if path.is_dir():
+                data_providers.append(path)
+        print(f'Downloaded digital coast providers: {len(data_providers)}')
+    else:
+        print('No data downloaded')
+        
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
     print('done')
