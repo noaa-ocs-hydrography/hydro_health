@@ -1,23 +1,23 @@
-"""Class for processing and tiling model data"""
+"""Class for processing and tiling model prediction and training data."""
 
 import os
 import glob
-import pathlib
 import pandas as pd
 import geopandas as gpd
 import rasterio
 import numpy as np
 import dask
+import rioxarray
+import xarray as xr
+
 from pathlib import Path
-
-
 from lxml import etree
 from datetime import datetime
 from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import shape
 from rasterio.features import shapes
-from dask.distributed import Client
+from dask.distributed import Client, LocalCluster
 
 
 class ModelDataProcessor:
@@ -38,6 +38,7 @@ class ModelDataProcessor:
 
         dask.compute(*tasks) 
 
+    # TODO move to other processing step with slope and rugosity
     def create_survey_end_date_tiffs(self):
         """Create survey end date tiffs from contributor band values in the XML file.
         """        
@@ -112,32 +113,32 @@ class ModelDataProcessor:
         :return: None
         """   
 
-        prediction_dir = Path(input_directory) / 'raw' 
-        prediction_out = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
-        os.makedirs(prediction_out, exist_ok=True)
+        prediction_dir = Path(input_directory) / 'model_variables' / 'Prediction' / 'pre_processed' # TODO this might be preproceesed depending on the dataset
+        prediction_out =  Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
 
-        prediction_files = [f for f in os.listdir(prediction_dir) if f.endswith('.tif')]
+        prediction_files = list(Path(prediction_dir).rglob("*.tif"))
 
-        tasks = []
+        prediction_tasks = []
         for file in prediction_files:
             print(f'Processing {file}...')
             input_path = os.path.join(prediction_dir, file)
             output_path = os.path.join(prediction_out, file)
 
-            tasks.append(dask.delayed(self.process_raster)(input_path, mask_pred, output_path))
+            prediction_tasks.append(dask.delayed(self.process_raster)(input_path, mask_pred, output_path))
 
-        dask.compute(*tasks)  
+        dask.compute(*prediction_tasks)  
         
         training_files = [f for f in os.listdir(prediction_out) if f.endswith('.tif')]
-        training_out = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_processed" 
+        training_out = Path(input_directory) / 'model_variables' / 'Training' / 'processed'
 
+        training_tasks  = []
         for file in training_files:
             print(f'Processing {file}...')
             input_path = os.path.join(prediction_out, file)
             output_path = os.path.join(training_out, file)
-            tasks.append(dask.delayed(self.process_raster)(input_path, mask_train, output_path))
+            training_tasks .append(dask.delayed(self.process_raster)(input_path, mask_train, output_path))
 
-        dask.compute(*tasks)    
+        dask.compute(*training_tasks)    
 
     def create_subgrids(self, mask_gdf, output_dir):
         """ Create subgrids layer by intersecting grid tiles with the mask geometries
@@ -146,7 +147,7 @@ class ModelDataProcessor:
         :return: None
         """        
         
-        grid_gpkg = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Tessellation\Master_Grids.gpkg"
+        grid_gpkg = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Tessellation\Master_Grids.gpkg" #TODO update for new grid
 
         print("Preparing grid tiles and sub-grids...")
         
@@ -159,13 +160,12 @@ class ModelDataProcessor:
     def process(self, input_directory):
         """ Main function to process model data.
         """        
-        # self.create_survey_end_date_tiffs() # TODO this will get moved
 
-        output_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_tiles" 
-        output_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_tiles"
+        output_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'prediction_tiles'
+        output_dir_train = Path(input_directory) / 'model_variables' / 'Prediction' / 'training_tiles'
 
-        mask_prediction = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\prediction.mask.UTM17_8m.tif"
-        mask_training = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\training.mask.UTM17_8m.tif"
+        mask_prediction = Path(input_directory) / 'prediction_masks' / 'prediction.mask.UTM17_8m.tif'
+        mask_training = Path(input_directory) / 'prediction_masks' / 'training.mask.UTM17_8m.tif'
 
         prediction_mask_df = self.raster_to_spatial_df(mask_prediction)
         training_mask_df = self.raster_to_spatial_df(mask_training)
@@ -173,14 +173,14 @@ class ModelDataProcessor:
         self.create_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred)
         self.create_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) 
 
-        client = Client(n_workers=1, threads_per_worker=1, memory_limit="16GB")
+        cluster = LocalCluster(n_workers=8, threads_per_worker=1)
+        client = Client(cluster)
+        # client = Client(n_workers=1, threads_per_worker=1, memory_limit="16GB")
         # print(f"Dask Dashboard: {client.dashboard_link}")
 
         self.parallel_processing_rasters(input_directory, prediction_mask_df, training_mask_df)
-        
-        input_dir_pred = Path(input_directory) / 'raw' 
-        # input_dir_pred = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
-        input_dir_train = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\training_processed"   
+        input_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
+        input_dir_train = Path(input_directory) / 'model_variables' / 'Training' / 'processed'
         
         self.clip_rasters_by_tile(raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction")
         self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
@@ -188,51 +188,87 @@ class ModelDataProcessor:
         client.close()   
 
     def process_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
-        """Process a raster file by applying a mask and reprojecting it to a target CRS and resolution.
-        All rasters will have the same X, Y, and FID values.
-        This function uses Dask for parallel processing.
-
-        :param str raster_path: path to the raster file to be processed
+        """Process a raster file by applying a mask and reprojecting it to a target CRS and resolution,
+        then save as a compressed, tiled GeoTIFF.
+        
+        :param str raster_path: Path to the raster file to be processed
         :param gdf mask_gdf: GeoDataFrame containing the mask geometries
-        :param str output_path: path to the output raster file
-        :param str target_crs: target coordinate reference system, defaults to "EPSG:32617"
-        :param int target_res: raster resolution, defaults to 8 m
-        """        
+        :param str output_path: Path to the output raster file
+        :param str target_crs: Target coordinate reference system (default is EPSG:32617)
+        :param int target_res: Target resolution in meters (default is 8m)
+        """
+        # Read raster with rioxarray, using Dask for chunking
+        ds = rioxarray.open_rasterio(raster_path, chunks={"x": 1024, "y": 1024})
 
-        with rasterio.open(raster_path) as src:
-            mask_gdf = mask_gdf.to_crs(src.crs)
-            mask_shapes = [geom for geom in mask_gdf.geometry]
-            data, mask_transform = mask(src, mask_shapes, crop=True, nodata=np.nan) # Apply mask
+        mask_gdf = mask_gdf.to_crs(ds.rio.crs)
 
-            # Set bathymetry values > 0 to NaNs
-            if 'bathy_' in os.path.basename(raster_path):
-                data[data > 0] = np.nan
+        clipped = ds.rio.clip(mask_gdf.geometry.values, mask_gdf.crs, drop=True, invert=False)
 
-            transform, width, height = calculate_default_transform(
-                src.crs, target_crs, data.shape[-1], data.shape[-2], *mask_gdf.total_bounds, resolution=target_res
-            )
+        if 'bathy_' in os.path.basename(raster_path):
+            clipped = clipped.where(clipped <= 0)
 
-            kwargs = src.meta.copy()
-            kwargs.update({
-                'crs': target_crs,
-                'transform': transform,
-                'width': width,
-                'height': height,
-                'dtype': 'float32',
-                'compress': 'lzw'
-            })
+        clipped = clipped.rio.reproject(
+            target_crs,
+            resolution=target_res,
+            resampling=Resampling.nearest
+            source=data,
+            nodata=np.nan)
 
-            with rasterio.open(output_path, 'w', **kwargs) as dst:
-                reproject(
-                    source=data,
-                    destination=rasterio.band(dst, 1),
-                    src_transform=mask_transform,
-                    src_crs=src.crs,
-                    dst_transform=transform, 
-                    dst_crs=target_crs,
-                    resampling=Resampling.nearest,
-                    dst_nodata=np.nan
-                )
+        clipped.rio.to_raster(
+            output_path,
+            compress="LZW",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            dtype='float32'
+        )    
+
+    # def process_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
+    #     """Process a raster file by applying a mask and reprojecting it to a target CRS and resolution.
+    #     All rasters will have the same X, Y, and FID values.
+    #     This function uses Dask for chunking and parallel processing.
+
+    #     :param str raster_path: path to the raster file to be processed
+    #     :param gdf mask_gdf: GeoDataFrame containing the mask geometries
+    #     :param str output_path: path to the output raster file
+    #     :param str target_crs: target coordinate reference system, defaults to "EPSG:32617"
+    #     :param int target_res: raster resolution, defaults to 8 m
+    #     """        
+
+    #     with rasterio.open(raster_path) as src:
+    #         mask_gdf = mask_gdf.to_crs(src.crs)
+    #         mask_shapes = [geom for geom in mask_gdf.geometry]
+    #         data, mask_transform = mask(src, mask_shapes, crop=True, nodata=np.nan) # Apply mask
+
+    #         # Set bathymetry values > 0 to NaNs
+    #         if 'bathy_' in os.path.basename(raster_path):
+    #             data[data > 0] = np.nan
+
+    #         transform, width, height = calculate_default_transform(
+    #             src.crs, target_crs, data.shape[-1], data.shape[-2], *mask_gdf.total_bounds, resolution=target_res
+    #         )
+
+    #         kwargs = src.meta.copy()
+    #         kwargs.update({
+    #             'crs': target_crs,
+    #             'transform': transform,
+    #             'width': width,
+    #             'height': height,
+    #             'dtype': 'float32',
+    #             'compress': 'lzw'
+    #         })
+
+    #         with rasterio.open(output_path, 'w', **kwargs) as dst:
+    #             reproject(
+    #                 source=data,
+    #                 destination=rasterio.band(dst, 1),
+    #                 src_transform=mask_transform,
+    #                 src_crs=src.crs,
+    #                 dst_transform=transform, 
+    #                 dst_crs=target_crs,
+    #                 resampling=Resampling.nearest,
+    #                 dst_nodata=np.nan
+    #             )
 
     def raster_to_spatial_df(self, raster_path):
         """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries.
@@ -259,7 +295,7 @@ class ModelDataProcessor:
         """        
         raster_files = [os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith('.tif')]
 
-        tile_name = sub_grid['Tile_ID']  
+        tile_name = sub_grid['Tile_ID']
         tile_extent = sub_grid.geometry.bounds
         
         tile_dir = os.path.join(output_dir, tile_name)
