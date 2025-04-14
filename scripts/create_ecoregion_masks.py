@@ -9,6 +9,8 @@ OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
 
 
 def build_prediction_masks():
+    ecoregions = ['ER_3']
+    
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(gpkg)
     ecoregions_50m = gpkg_ds.GetLayerByName('EcoRegions_50m')
@@ -23,34 +25,35 @@ def build_prediction_masks():
     for feature in ecoregions_50m:
         feature_json = json.loads(feature.ExportToJson())
         ecoregion_id = feature_json['properties']['EcoRegion']
-        in_memory_ds = in_memory.CreateDataSource(str(OUTPUTS / f'output_layer_{ecoregion_id}.shp'))
-        in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=ecoregions_50m.GetSpatialRef(), geom_type=ogr.wkbPolygon)
-        mem_poly = ogr.Feature(in_memory_layer.GetLayerDefn())
-        mem_poly.SetGeometry(feature.GetGeometryRef())
-        in_memory_layer.CreateFeature(mem_poly)
+        if ecoregion_id in ecoregions:
+            in_memory_ds = in_memory.CreateDataSource(str(OUTPUTS / f'output_layer_{ecoregion_id}.shp'))
+            in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=ecoregions_50m.GetSpatialRef(), geom_type=ogr.wkbPolygon)
+            mem_poly = ogr.Feature(in_memory_layer.GetLayerDefn())
+            mem_poly.SetGeometry(feature.GetGeometryRef())
+            in_memory_layer.CreateFeature(mem_poly)
 
-        mask_path = OUTPUTS / f'ecoregions_50m_mask_{ecoregion_id}.tif'
-        with gdal.GetDriverByName("GTiff").Create(
-            str(mask_path),
-            x_res,
-            y_res,
-            1,
-            gdal.GDT_Float32,
-            options=["COMPRESS=LZW"],
-        ) as target_ds:
-            target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
-            srs = osr.SpatialReference()
-            srs.ImportFromEPSG(4326)
-            target_ds.SetProjection(srs.ExportToWkt())
-            band = target_ds.GetRasterBand(1)
-            band.SetNoDataValue(nodata)
+            mask_path = OUTPUTS / f'ecoregions_50m_mask_{ecoregion_id}.tif'
+            with gdal.GetDriverByName("GTiff").Create(
+                str(mask_path),
+                x_res,
+                y_res,
+                1,
+                gdal.GDT_Float32,
+                options=["COMPRESS=LZW"],
+            ) as target_ds:
+                target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
+                srs = osr.SpatialReference()
+                srs.ImportFromEPSG(4326)
+                target_ds.SetProjection(srs.ExportToWkt())
+                band = target_ds.GetRasterBand(1)
+                band.SetNoDataValue(nodata)
 
-            # Rasterize
-            gdal.RasterizeLayer(target_ds, [1], in_memory_layer, burn_values=[1])
-        
+                # Rasterize
+                gdal.RasterizeLayer(target_ds, [1], in_memory_layer, burn_values=[1])
+            
 
-        in_memory_layer = None
-        break
+            in_memory_layer = None
+            break
 
 
 def process():

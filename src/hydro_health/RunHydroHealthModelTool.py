@@ -58,8 +58,10 @@ class RunHydroHealthModelTool(HHLayerTool):
         tiles = tools.get_ecoregion_tiles(param_lookup)
         arcpy.AddMessage(f'Selected tiles: {tiles.shape[0]}')
         
+        self.reset_log_file(param_lookup)
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
+        self.create_masks()
         arcpy.AddMessage('Done')
         # reefs = CreateReefsLayerEngine(param_lookup)
         # reefs.start()
@@ -85,6 +87,13 @@ class RunHydroHealthModelTool(HHLayerTool):
             outputToWGS84="WGS84",
         )
         param_lookup['drawn_polygon'].value = output_json
+
+    def create_masks(self) -> None:
+        tools.create_ecoregion_rasters()
+        arcpy.AddMessage("Creating training masks")
+        tools.create_training_masks()
+        arcpy.AddMessage("Creating prediction masks")
+        tools.create_prediction_masks()
 
     def download_bluetopo_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all bluetopo tiles"""
