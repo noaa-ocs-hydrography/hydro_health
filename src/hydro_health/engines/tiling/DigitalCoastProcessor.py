@@ -63,7 +63,8 @@ class DigitalCoastProcessor:
         shp_folder = shp_path.parents[0]
         if df_joined['url'].any():
             # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
-            for url in df_joined['url'].unique():
+            urls = df_joined['url'].unique()
+            for i, url in enumerate(urls):
                 cleansed_url = self.cleansed_url(url)
                 # Only download .tif files
                 if not cleansed_url.endswith('.tif'):
@@ -71,8 +72,17 @@ class DigitalCoastProcessor:
                 dataset_name = cleansed_url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
+                    self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', shp_folder.parents[3])
                     continue
-                intersected_response = requests.get(cleansed_url)
+                else:
+                    self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', shp_folder.parents[3])
+                
+                try:
+                    intersected_response = requests.get(cleansed_url, timeout=15)
+                except requests.exceptions.Timeout:
+                    self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[3])
+                    continue
+
                 if intersected_response.status_code == 200:
                     with open(output_file, 'wb') as file:
                         file.write(intersected_response.content)
@@ -95,11 +105,12 @@ class DigitalCoastProcessor:
                 if 'tileindex' in obj_summary.key:
                     output_zip_file = output_folder_path / obj_summary.key
                     file_parent_folder = output_zip_file.parents[0]
-                    if os.path.exists(output_zip_file):
-                        self.write_message(f'Skipping: {output_zip_file.name}', output_folder_path)
+                    shp_path = output_zip_file.parents[0] / pathlib.Path(str(output_zip_file.stem) + '.shp')
+                    if os.path.exists(shp_path):
+                        self.write_message(f' - Skipping index: {output_zip_file.name}', output_folder_path.parents[1])
                         continue
                     else:
-                        self.write_message(f'Downloading: {output_zip_file.name}', output_folder_path)
+                        self.write_message(f' - Downloading index: {output_zip_file.name}', output_folder_path.parents[1])
                     file_parent_folder.mkdir(parents=True, exist_ok=True) 
                     with open(output_zip_file, 'wb') as tile_index:
                         lidar_bucket.download_fileobj(obj_summary.key, tile_index)
@@ -114,7 +125,6 @@ class DigitalCoastProcessor:
 
         tile_index_links = []
         for feature in datasets_json['features']:
-            feature_json = json.dumps(feature, indent=4) + '\n\n'
             if not self.approved_dataset(feature):
                 continue
             folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
@@ -124,14 +134,18 @@ class DigitalCoastProcessor:
             # Write out JSON
             output_json = pathlib.Path(output_folder_path) / 'feature.json'
             if os.path.exists(output_json):
-                output_json.unlink()
-            external_data_json = json.loads(feature['attributes']['ExternalProviderLink'])
-            with open(output_json, 'a') as writer:
-                writer.write(feature_json + '\n\n')
-                writer.write(json.dumps(external_data_json['links'], indent=4) + '\n\n')
-            
+                # Read the existing json
+                with open(output_json) as reader:
+                    provider_json = json.load(reader)
+                    external_provider_links = provider_json['ExternalProviderLink']
+            else:
+                external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
+                feature['attributes']['ExternalProviderLink'] = external_provider_links
+                with open(output_json, 'a') as writer:
+                    writer.write(json.dumps(feature['attributes'], indent=4))
+                
             # Look for Bulk Download
-            for external_data in external_data_json['links']:
+            for external_data in external_provider_links:
                 if external_data['label'] == 'Bulk Download':
                     download_link = external_data['link']
                     tile_index_links.append({'link': download_link, 'output_path': output_folder_path})
@@ -177,7 +191,8 @@ class DigitalCoastProcessor:
         # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
         self.process_tile_index(digital_coast_folder, tile_gdf, outputs)
         self.process_intersected_datasets(digital_coast_folder, tile_gdf)
-        self.delete_unused_folder(digital_coast_folder)
+        if digital_coast_folder.exists():
+            self.delete_unused_folder(digital_coast_folder)
 
     def process_intersected_datasets(self, digital_coast_folder, tile_gdf) -> None:
         """Download intersected Digital Coast files"""
@@ -185,7 +200,7 @@ class DigitalCoastProcessor:
         self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[0]))
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
         param_inputs = [[tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
-        with ProcessPoolExecutor() as intersected_pool:
+        with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[0]))
 
     def process_tile_index(self, digital_coast_folder, tile_gdf, outputs) -> None:
@@ -195,7 +210,7 @@ class DigitalCoastProcessor:
         geometry_coords = self.get_geometry_string(tile_gdf)
         tile_index_links = self.get_available_datasets(geometry_coords, outputs)  # TODO return all object keys
         param_inputs = [[link_dict['link'], link_dict['output_path']] for link_dict in tile_index_links]
-        with ProcessPoolExecutor() as tile_index_pool:
+        with ProcessPoolExecutor(int(os.cpu_count()/2)) as tile_index_pool:
             self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[0]))
         self.unzip_all_files(digital_coast_folder)
         # TODO delete *.zip
