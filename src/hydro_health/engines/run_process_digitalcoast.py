@@ -9,7 +9,7 @@ from hydro_health.helpers.tools import process_digital_coast_files, get_ecoregio
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs' 
 
 
 if __name__ == '__main__':

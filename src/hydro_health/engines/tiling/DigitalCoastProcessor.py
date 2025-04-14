@@ -63,7 +63,8 @@ class DigitalCoastProcessor:
         shp_folder = shp_path.parents[0]
         if df_joined['url'].any():
             # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
-            for url in df_joined['url'].unique():
+            urls = df_joined['url'].unique()
+            for i, url in enumerate(urls):
                 cleansed_url = self.cleansed_url(url)
                 # Only download .tif files
                 if not cleansed_url.endswith('.tif'):
@@ -71,11 +72,17 @@ class DigitalCoastProcessor:
                 dataset_name = cleansed_url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
-                    self.write_message(f' - Skipping data: {output_file.stem}', shp_folder.parents[3])
+                    self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', shp_folder.parents[3])
                     continue
                 else:
-                    self.write_message(f' - Downloading data: {output_file.stem}', shp_folder.parents[3])
-                intersected_response = requests.get(cleansed_url)
+                    self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', shp_folder.parents[3])
+                
+                try:
+                    intersected_response = requests.get(cleansed_url, timeout=15)
+                except requests.exceptions.Timeout:
+                    self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[3])
+                    continue
+
                 if intersected_response.status_code == 200:
                     with open(output_file, 'wb') as file:
                         file.write(intersected_response.content)
@@ -193,7 +200,7 @@ class DigitalCoastProcessor:
         self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[0]))
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
         param_inputs = [[tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
-        with ProcessPoolExecutor() as intersected_pool:
+        with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[0]))
 
     def process_tile_index(self, digital_coast_folder, tile_gdf, outputs) -> None:
@@ -203,7 +210,7 @@ class DigitalCoastProcessor:
         geometry_coords = self.get_geometry_string(tile_gdf)
         tile_index_links = self.get_available_datasets(geometry_coords, outputs)  # TODO return all object keys
         param_inputs = [[link_dict['link'], link_dict['output_path']] for link_dict in tile_index_links]
-        with ProcessPoolExecutor() as tile_index_pool:
+        with ProcessPoolExecutor(int(os.cpu_count()/2)) as tile_index_pool:
             self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[0]))
         self.unzip_all_files(digital_coast_folder)
         # TODO delete *.zip
