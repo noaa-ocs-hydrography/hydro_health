@@ -12,6 +12,7 @@ from hydro_health.helpers import hibase_logging
 from botocore.client import Config
 from botocore import UNSIGNED
 from osgeo import gdal
+from concurrent.futures import ProcessPoolExecutor
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -70,12 +71,7 @@ class BlueTopoProcessor:
         nbs_bucket = s3.Bucket(bucket)
         return nbs_bucket
 
-    def get_pool(self, processes=int(mp.cpu_count() / 2)):
-        """Obtain a multiprocessing Pool"""
-
-        return mp.Pool(processes=processes)
-
-    def multiband_to_singleband(self, tiff_file_path: pathlib.Path, geometry: str) -> None:
+    def multiband_to_singleband(self, tiff_file_path: pathlib.Path) -> None:
         """Convert multiband BlueTopo raster into a singleband file"""
 
         multiband_tile_name = tiff_file_path.parents[0] / tiff_file_path.name
@@ -99,24 +95,31 @@ class BlueTopoProcessor:
         mb_tiff_file = tiff_file_path.replace(pathlib.Path(new_name))
         return mb_tiff_file
 
-    def process_tile(self, output_folder: str, row: gpd.GeoSeries):
+    def print_async_results(self, results, output_folder) -> None:
+        """Consolidate result printing"""
+
+        for result in results:
+            if result:
+                self.write_message(result, output_folder)
+
+    def process_tile(self, param_inputs: list[list]) -> None:
         """Handle processing of a single tile"""
 
+        output_folder, row = param_inputs
         tile_id = row[0]
         geometry = row['geometry']
         tiff_file_path = self.download_nbs_tile(output_folder, tile_id)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
-            self.multiband_to_singleband(mb_tiff_file, geometry)
+            self.multiband_to_singleband(mb_tiff_file)
             self.set_ground_to_nodata(tiff_file_path)
             self.create_slope(tiff_file_path)
             self.create_rugosity(tiff_file_path)
 
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
-        with self.get_pool() as process_pool:
-            results = [process_pool.apply_async(self.process_tile, [outputs, row]) for _, row in tile_gdf.iterrows()]
-            for result in results:
-                result.get()
+        param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows()]
+        with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
+            self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)
 
         # log all tiles using tile_gdf
         tiles = list(tile_gdf['tile'])
