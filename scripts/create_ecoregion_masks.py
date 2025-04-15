@@ -68,45 +68,42 @@ def build_prediction_masks():
     for feature in output_layer:
         feature_json = json.loads(feature.ExportToJson())
         ecoregion_id = feature_json['properties']['EcoRegion']
-        
-        if ecoregion_id in ecoregions:
-            print(ecoregion_id)
-            # Create in memory layer and single polygon
-            in_memory_ds = in_memory.CreateDataSource(f'output_layer_{ecoregion_id}')
-            in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=output_layer.GetSpatialRef(), geom_type=ogr.wkbPolygon)
-            temp_feature = ogr.Feature(in_memory_layer.GetLayerDefn())
+        print(ecoregion_id)
+        # Create in memory layer and single polygon
+        in_memory_ds = in_memory.CreateDataSource(f'output_layer_{ecoregion_id}')
+        in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=output_layer.GetSpatialRef(), geom_type=ogr.wkbPolygon)
+        temp_feature = ogr.Feature(in_memory_layer.GetLayerDefn())
 
-            geometry = feature.GetGeometryRef().ExportToWkt()
-            polygon = ogr.CreateGeometryFromWkt(geometry)
-            temp_feature.SetGeometry(polygon)
-            in_memory_layer.CreateFeature(temp_feature)
+        geometry = feature.GetGeometryRef().ExportToWkt()
+        polygon = ogr.CreateGeometryFromWkt(geometry)
+        temp_feature.SetGeometry(polygon)
+        in_memory_layer.CreateFeature(temp_feature)
 
-            xmin, xmax, ymin, ymax = in_memory_layer.GetExtent()
-            x_res = int((xmax - xmin) / pixel_size)
-            y_res = int((ymax - ymin) / pixel_size)
+        xmin, xmax, ymin, ymax = in_memory_layer.GetExtent()
+        x_res = int((xmax - xmin) / pixel_size)
+        y_res = int((ymax - ymin) / pixel_size)
 
-            mask_path = OUTPUTS / f'ecoregions_50m_mask_{ecoregion_id}.tif'
-            with gdal.GetDriverByName("GTiff").Create(
-                str(mask_path),
-                x_res,
-                y_res,
-                1,
-                gdal.GDT_Byte,
-                options=["COMPRESS=LZW", f"NUM_THREADS=ALL_CPUS"],
-            ) as target_ds:
-                target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
-                srs = osr.SpatialReference()
-                srs.ImportFromEPSG(3747)
-                target_ds.SetProjection(srs.ExportToWkt())
-                band = target_ds.GetRasterBand(1)
-                band.SetNoDataValue(nodata)
+        mask_path = OUTPUTS / f'ecoregions_50m_mask_{ecoregion_id}.tif'
+        with gdal.GetDriverByName("GTiff").Create(
+            str(mask_path),
+            x_res,
+            y_res,
+            1,
+            gdal.GDT_Byte,
+            options=["COMPRESS=LZW", f"NUM_THREADS=ALL_CPUS"],
+        ) as target_ds:
+            target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
+            srs = osr.SpatialReference()
+            srs.ImportFromEPSG(3747)
+            target_ds.SetProjection(srs.ExportToWkt())
+            band = target_ds.GetRasterBand(1)
+            band.SetNoDataValue(nodata)
 
-                # Rasterize
-                gdal.RasterizeLayer(target_ds, [1], in_memory_layer, burn_values=[1])
-            in_memory_layer = None
-            in_memory_ds = None
-            print('finished rasterize')
-            break
+            # Rasterize
+            gdal.RasterizeLayer(target_ds, [1], in_memory_layer, burn_values=[1])
+        in_memory_layer = None
+        in_memory_ds = None
+        print('finished rasterize')
 
 
 
