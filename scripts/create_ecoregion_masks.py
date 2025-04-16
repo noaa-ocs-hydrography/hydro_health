@@ -1,7 +1,11 @@
 import pathlib
 import datetime
 import json
+import geopandas as gpd
+
 from osgeo import gdal, ogr, osr
+
+
 gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
 
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
@@ -19,14 +23,12 @@ def get_transformation():
 
 
 def build_prediction_masks():
-   
-
     # Project EcoRegions_50m to UTM
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(gpkg)
     ecoregions_50m = gpkg_ds.GetLayerByName('EcoRegions_50m')
-    # in_memory_driver = ogr.GetDriverByName('Memory')
-    in_memory_driver = ogr.GetDriverByName('ESRI Shapefile')
+    in_memory_driver = ogr.GetDriverByName('Memory')
+    # in_memory_driver = ogr.GetDriverByName('ESRI Shapefile')
     
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(3747)
@@ -51,18 +53,11 @@ def build_prediction_masks():
 
         output_layer.CreateFeature(output_feature)
         output_feature = None
-    
-    # TODO see if I can build the raster right after the vector transformation
-    # Rebuild the extent from the single polygon to cut down on size
+
 
     # Build output UTM raster
-    ecoregions = ['ER_3']
-    # xmin, xmax, ymin, ymax = output_layer.GetExtent()
     pixel_size = 8
     nodata = 0.0
-    # x_res = int((xmax - xmin) / pixel_size)
-    # y_res = int((ymax - ymin) / pixel_size)
-
     output_layer.ResetReading()
     in_memory = ogr.GetDriverByName('Memory')
     for feature in output_layer:
@@ -106,11 +101,30 @@ def build_prediction_masks():
         print('finished rasterize')
 
 
+def build_training_masks():
+    print('Dissolving polygons')
+    dissolve_tile_index_shapefiles()
+    # create 0 value full raster
+    # burn 1 value into zero raster where shapefiles overlap
+
+
+def dissolve_tile_index_shapefiles():
+    """Create dissolved single polygons to use as burn rasters"""
+
+    digital_coast = OUTPUTS / 'DigitalCoast'
+    tile_index_shps = digital_coast.rglob('tileindex*.shp')
+    for shp in tile_index_shps:
+        print(shp)
+        tile_index = gpd.read_file(shp).dissolve()
+        dissolved_tile_index = shp.parents[0] / pathlib.Path(shp.stem + '_dis.shp')
+        tile_index.to_file(dissolved_tile_index)
+
 
 def process():
     start = datetime.datetime.now()
     print('Starting')
-    build_prediction_masks()
+    # build_prediction_masks()
+    build_training_masks()
     print(f'Done: {datetime.datetime.now() - start}')
 
 if __name__ == '__main__':
