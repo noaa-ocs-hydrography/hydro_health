@@ -7,6 +7,9 @@ import geopandas as gpd
 import rasterio
 from rasterio.features import rasterize
 import numpy as np
+import fiona
+import patoolib
+
 
 gpkg_path = 'path/to/your/geopackage.gpkg'
 output_folder = 'path/to/output_folder'
@@ -17,7 +20,7 @@ mask_file = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\pred
 
 
 BASE_URL = 'https://marinecadastre.gov/downloads/data/ais/ais{year}/AISVesselTracks{year}.zip'
-DOWNLOAD_DIR = r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\AIS_data'
+DOWNLOAD_DIR = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\ais_data'
 
 def download_and_extract_ais_files(start_year, end_year):
     """Download and extract AIS Vessel Tracks files for the given range of years."""
@@ -28,6 +31,11 @@ def download_and_extract_ais_files(start_year, end_year):
         url = BASE_URL.format(year=year)
         zip_file_path = os.path.join(DOWNLOAD_DIR, f"AISVesselTracks{year}.zip")
         extract_dir = os.path.join(DOWNLOAD_DIR, f"AISVesselTracks{year}")
+
+        # Skip if zip already exists
+        if os.path.exists(zip_file_path):
+            print(f"Skipping {year}: zip file already downloaded at {zip_file_path}")
+            continue
 
         print(f"Downloading {url}...")
         try:
@@ -44,8 +52,7 @@ def download_and_extract_ais_files(start_year, end_year):
                 os.makedirs(extract_dir)
 
             print(f"Extracting {zip_file_path} to {extract_dir}...")
-            with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
-                zip_ref.extractall(extract_dir)
+            patoolib.extract_archive(zip_file_path, outdir=extract_dir)
 
             print(f"Successfully extracted: {zip_file_path} to {extract_dir}")
 
@@ -76,17 +83,17 @@ def combine_year_range_data(base_path, start_year, end_year):
                 if file.endswith(".gdb") or file.endswith(".gpkg"):
                     file_path = os.path.join(root, file)
                     layers = fiona.listlayers(file_path)
-                        for layer in layers:
-                                gdf = gpd.read_file(file_path, layer=layer)
-                                
-                                if 'Draft' not in gdf.columns:
-                                    print(f"Skipping layer '{layer}' in file without 'Draft' field: {file_path}")
-                                    continue
-                                
-                                gdf = gdf.dropna(subset=['Draft'])
-                                
-                                combined_gdf = pd.concat([combined_gdf, gdf], ignore_index=True)
-    
+                    for layer in layers:
+                        gdf = gpd.read_file(file_path, layer=layer)
+                        
+                        if 'Draft' not in gdf.columns:
+                            print(f"Skipping layer '{layer}' in file without 'Draft' field: {file_path}")
+                            continue
+                        
+                        gdf = gdf.dropna(subset=['Draft'])
+                        
+                        combined_gdf = pd.concat([combined_gdf, gdf], ignore_index=True)
+
     return combined_gdf
 
 
@@ -146,9 +153,9 @@ if __name__ == "__main__":
 
     start_time = time.time()
 
-    # start_year = 2011
-    # end_year = 2014
-    # download_and_extract_ais_files(start_year, end_year)
+    start_year = 2023
+    end_year = 2023
+    download_and_extract_ais_files(start_year, end_year)
 
     start_year = 2023
     end_year = 2023
