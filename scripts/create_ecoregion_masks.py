@@ -1,10 +1,12 @@
 import pathlib
 import datetime
 import json
+import pandas as pd
 import geopandas as gpd
+import shutil
 
 from osgeo import gdal, ogr, osr
-
+osr.DontUseExceptions()
 
 gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
 
@@ -57,13 +59,13 @@ def build_prediction_masks():
 
     # Build output UTM raster
     pixel_size = 8
-    nodata = 0.0
+    nodata = 0
     output_layer.ResetReading()
     in_memory = ogr.GetDriverByName('Memory')
     for feature in output_layer:
         feature_json = json.loads(feature.ExportToJson())
         ecoregion_id = feature_json['properties']['EcoRegion']
-        print(ecoregion_id)
+        print('Building prediction mask:', ecoregion_id)
         # Create in memory layer and single polygon
         in_memory_ds = in_memory.CreateDataSource(f'output_layer_{ecoregion_id}')
         in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=output_layer.GetSpatialRef(), geom_type=ogr.wkbPolygon)
@@ -78,7 +80,9 @@ def build_prediction_masks():
         x_res = int((xmax - xmin) / pixel_size)
         y_res = int((ymax - ymin) / pixel_size)
 
-        mask_path = OUTPUTS / f'ecoregions_50m_mask_{ecoregion_id}.tif'
+        ecoregion_folder = OUTPUTS / ecoregion_id
+        ecoregion_folder.mkdir(parents=True, exist_ok=True)
+        mask_path = ecoregion_folder / f'prediction_mask_{ecoregion_id}.tif'
         with gdal.GetDriverByName("GTiff").Create(
             str(mask_path),
             x_res,
@@ -93,37 +97,91 @@ def build_prediction_masks():
             target_ds.SetProjection(srs.ExportToWkt())
             band = target_ds.GetRasterBand(1)
             band.SetNoDataValue(nodata)
-
-            # Rasterize
             gdal.RasterizeLayer(target_ds, [1], in_memory_layer, burn_values=[1])
+
         in_memory_layer = None
         in_memory_ds = None
         print('finished rasterize')
 
 
 def build_training_masks():
-    print('Dissolving polygons')
-    dissolve_tile_index_shapefiles()
-    # create 0 value full raster
-    # burn 1 value into zero raster where shapefiles overlap
+    print('Building training masks')
+    ecoregion_folders = [folder for folder in OUTPUTS.glob('ER_*') if folder.is_dir()]
+    for ecoregion in ecoregion_folders:
+        prediction_file = ecoregion / f'prediction_mask_{ecoregion.stem}.tif'
+        training_data_outline = ecoregion / 'training_data_outlines.shp'
+        if prediction_file.exists() and training_data_outline.exists():
+            training_file = ecoregion / f'training_mask_{ecoregion.stem}.tif'
+            shutil.copy(prediction_file, training_file)
+            training_ds = gdal.Open(training_file, gdal.GA_Update)
+            shp_driver = ogr.GetDriverByName("ESRI Shapefile")
+            training_data_outline_ds = shp_driver.Open(training_data_outline)
+            for layer in training_data_outline_ds:
+                # TODO try to load the layer without looping in case more than 1 layer
+                # TODO verify if tile_index is used as full dataset or subset and we need to save that dataset
+                # TODO try to silence errors? or fix them?
+                gdal.PushErrorHandler('CPLQuietErrorHandler')
+                gdal.RasterizeLayer(training_ds, [1], layer, burn_values=[2])
+                break
+            training_ds = None
+            training_data_outline_ds = None
 
 
-def dissolve_tile_index_shapefiles():
+def get_approved_area_files():
+    print('Getting approved files')
+    ecoregion_folders = [folder for folder in OUTPUTS.glob('ER_*') if folder.is_dir()]
+    for ecoregion in ecoregion_folders:
+        digital_coast = ecoregion / 'DigitalCoast'
+        # digital_coast = pathlib.Path(r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast')
+        if digital_coast.is_dir():
+            json_files = digital_coast.rglob('feature.json')
+            approved_files = {}
+            for file in json_files:
+                ecoregion = file.parents[2].stem
+                if ecoregion not in approved_files:
+                    approved_files[ecoregion] = []
+                if json.load(open(file))['Shape_Area'] > 5000000:
+                    parent_project = file.parents[0]
+                    tile_index_shps = list(parent_project.rglob('tileindex*.shp'))
+                    if tile_index_shps:
+                        approved_files[ecoregion].append(tile_index_shps[0])
+    return approved_files
+
+
+def dissolve_tile_index_shapefiles(approved_files):
     """Create dissolved single polygons to use as burn rasters"""
 
-    digital_coast = OUTPUTS / 'DigitalCoast'
-    tile_index_shps = digital_coast.rglob('tileindex*.shp')
-    for shp in tile_index_shps:
-        print(shp)
-        tile_index = gpd.read_file(shp).dissolve()
-        dissolved_tile_index = shp.parents[0] / pathlib.Path(shp.stem + '_dis.shp')
-        tile_index.to_file(dissolved_tile_index)
+    print('Dissolving polygons')
+    ecoregion_folders = [folder.stem for folder in OUTPUTS.glob('ER_*') if folder.is_dir()]
+    for ecoregion in ecoregion_folders:
+        if ecoregion in approved_files:
+            for tile_index_path in approved_files[ecoregion]:
+                print(f'Dissolving {tile_index_path}')
+                tile_index = gpd.read_file(tile_index_path).dissolve()
+                dissolved_tile_index = tile_index_path.parents[0] / pathlib.Path(tile_index_path.stem + '_dis.shp')
+                tile_index.to_file(dissolved_tile_index)
+
+
+def merge_dissolved_polygons():
+    ecoregion_folders = [folder for folder in OUTPUTS.glob('ER_*') if folder.is_dir()]
+    for ecoregion in ecoregion_folders:
+        digital_coast = ecoregion / 'DigitalCoast'
+        if digital_coast.is_dir():
+            dissolved_shapefiles = digital_coast.rglob('*_dis.shp')
+            print('Merging dissolved datasets')
+            merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
+            training_datasets = ecoregion / 'training_data_outlines.shp'
+            print('Saving merged training outlines')
+            merged_training_ds.to_file(training_datasets)
 
 
 def process():
     start = datetime.datetime.now()
     print('Starting')
-    # build_prediction_masks()
+    build_prediction_masks()
+    approved_files = get_approved_area_files()
+    dissolve_tile_index_shapefiles(approved_files)
+    merge_dissolved_polygons()
     build_training_masks()
     print(f'Done: {datetime.datetime.now() - start}')
 
