@@ -61,6 +61,8 @@ class DigitalCoastProcessor:
         shp_df.columns = shp_df.columns.str.lower()  # make url column all lowercase
         df_joined = shp_df.sjoin(df=tile_gdf, how='left', predicate='intersects')
         df_joined = df_joined.loc[df_joined['tile'].notnull()]
+        # Update datset to be only intesersected features
+        df_joined.to_file(shp_path, driver='ESRI Shapefile', encoding='utf-8')
         shp_folder = shp_path.parents[0]
         if df_joined['url'].any():
             # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
