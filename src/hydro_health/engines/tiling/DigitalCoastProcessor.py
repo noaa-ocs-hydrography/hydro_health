@@ -33,7 +33,7 @@ class DigitalCoastProcessor:
                 return True
         return False
     
-    def cleansed_url(self, url) -> str:
+    def cleansed_url(self, url: str) -> str:
         """Remove found illegal characters from URLs"""
 
         illegal_chars = ['{', '}']
@@ -157,7 +157,7 @@ class DigitalCoastProcessor:
                     tile_index_links.append({'link': download_link, 'output_path': output_folder_path})
         return tile_index_links
     
-    def get_bucket(self):
+    def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
         bucket = "noaa-nos-coastal-lidar-pds"
@@ -187,14 +187,14 @@ class DigitalCoastProcessor:
             
         return geometry_coords
     
-    def print_async_results(self, results, output_folder) -> None:
+    def print_async_results(self, results: list[str], output_folder: str) -> None:
         """Consolidate result printing"""
 
         for result in results:
             if result:
                 self.write_message(f'Result: {result}', output_folder)
     
-    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
+    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         ecoregions = list(tile_gdf['EcoRegion'].unique())
@@ -208,7 +208,7 @@ class DigitalCoastProcessor:
                 if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder)
 
-    def process_intersected_datasets(self, digital_coast_folder, ecoregion_tile_gdf) -> None:
+    def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame) -> None:
         """Download intersected Digital Coast files"""
 
         self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[1]))
@@ -217,7 +217,7 @@ class DigitalCoastProcessor:
         with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[1]))
 
-    def process_tile_index(self, digital_coast_folder, tile_gdf, ecoregion, outputs) -> None:
+    def process_tile_index(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
         """Download tile_index shapefiles"""
 
         self.write_message('Download Tile Index shapefiles', str(digital_coast_folder.parents[1]))
@@ -230,7 +230,7 @@ class DigitalCoastProcessor:
                 self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[1]))
             self.unzip_all_files(digital_coast_folder)
 
-    def unzip_all_files(self, output_folder) -> None:
+    def unzip_all_files(self, output_folder: str) -> None:
         """Unzip all zip files in a folder"""
 
         for zipped_file in pathlib.Path(output_folder).rglob('*.zip'):
@@ -239,6 +239,8 @@ class DigitalCoastProcessor:
             # Delete zip file after extract
             zipped_file.unlink()
 
-    def write_message(self, message, output_folder):
+    def write_message(self, message: str, output_folder: str) -> None:
+        """Write a message to the main logfile in the output folder"""
+        
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
