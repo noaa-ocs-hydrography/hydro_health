@@ -81,7 +81,7 @@ def create_training_masks() -> None:
     return
 
 
-def create_raster_vrt(output_folder: str, file_type: str, data_type: str) -> None:
+def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
     """Create an output VRT from found .tif files"""
 
     glob_lookup = {
@@ -91,7 +91,8 @@ def create_raster_vrt(output_folder: str, file_type: str, data_type: str) -> Non
         'NCMP': '*.tif'
     }
 
-    outputs = pathlib.Path(output_folder) / data_type if output_folder else OUTPUTS / data_type
+    # TODO data_type needs to be ecoregion folder
+    outputs = pathlib.Path(output_folder) / ecoregion / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
     output_geotiffs = {}
@@ -164,26 +165,61 @@ def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     """Obtain a subset of tiles based on selected eco regions"""
 
+    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
     if param_lookup['drawn_polygon'].value:
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        make_ecoregion_folders(selected_ecoregions, output_folder)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
     else:
         # get eco region from shapefile that matches drop down choices
-        all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
         eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
         eco_regions = [region.split('-')[0] for region in eco_regions]
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        make_ecoregion_folders(selected_ecoregions, output_folder)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
     mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
     # Clip to remove extra polygons not handled by mask property
     tiles = gpd.clip(mask_tiles, selected_sub_grids, keep_geom_type=True)
-    tiles.to_file(OUTPUTS / 'selected_tiles.shp') 
+    # Store EcoRegion ID with tiles
+    tiles = tiles.sjoin(selected_ecoregions, how="left")[['tile', 'EcoRegion', 'geometry']]
+    selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
+    tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
+
+
+def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+    """Obtain the intersected EcoRegion folders"""
+
+    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
+    # get master_grid geopackage path
+    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    if param_lookup['drawn_polygon'].value:
+        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    else:
+        # get eco region from shapefile that matches drop down choices
+        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
+        eco_regions = [region.split('-')[0] for region in eco_regions]
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    return list(selected_ecoregions['EcoRegion'].unique())
+
+def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
+    """Create the main EcoRegion folders"""
+
+    for _, row in selected_ecoregions.iterrows():
+        ecoregion_folder = output_folder / row['EcoRegion']
+        ecoregion_folder.mkdir(parents=True, exist_ok=True)
 
 
 def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:

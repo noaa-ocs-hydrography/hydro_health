@@ -1,5 +1,6 @@
 import arcpy
 import os
+import pathlib
 import geopandas as gpd
 
 from hydro_health.HHLayerTool import HHLayerTool
@@ -61,14 +62,8 @@ class RunHydroHealthModelTool(HHLayerTool):
         self.reset_log_file(param_lookup)
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
-        self.create_masks()
+        # self.create_masks()
         arcpy.AddMessage('Done')
-        # reefs = CreateReefsLayerEngine(param_lookup)
-        # reefs.start()
-        # active_captain = CreateActiveCaptainLayerEngine(param_lookup)
-        # active_captain.start()
-        # groundings = CreateGroundingsLayerEngine(param_lookup)
-        # groundings.start()
 
     def postExecute(self, parameters):
         """This method takes place after outputs are processed and
@@ -99,28 +94,32 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Download all bluetopo tiles"""
 
         tools.process_bluetopo_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
-        arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(self.param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1])}")
+        for ecoregion in pathlib.Path(self.param_lookup['output_directory'].valueAsText).glob('ER_*'):
+            if pathlib.Path(ecoregion / 'BlueTopo').is_dir():
+                arcpy.AddMessage(f"Downloaded tiles: {len(next(os.walk(os.path.join(self.param_lookup['output_directory'].valueAsText, ecoregion, 'BlueTopo')))[1])}")
 
         arcpy.AddMessage('Tile process completed')
-        for dataset in ['elevation', 'slope', 'rugosity']:
-            arcpy.AddMessage(f'Building {dataset} VRT file')
-            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, 'BlueTopo')
+        for ecoregion in tools.get_ecoregion_folders(self.param_lookup):
+            for dataset in ['elevation', 'slope', 'rugosity']:
+                arcpy.AddMessage(f'Building {dataset} VRT file')
+                tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
 
     def download_digital_coast_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all digital coast tiles"""
 
         arcpy.AddMessage('Obtaining Digital Coast data for selected area')
         tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
-        tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
-        digital_coast_folder = os.path.join(self.param_lookup['output_directory'].valueAsText, 'DigitalCoast')
-        if os.path.exists(digital_coast_folder):
-            files = len(next(os.walk(digital_coast_folder))[1])
-            if files > 0:
-                arcpy.AddMessage(f" - Downloaded Digital Coast files: {files}")
+        for ecoregion in tools.get_ecoregion_folders(self.param_lookup):
+            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+            digital_coast_folder = os.path.join(self.param_lookup['output_directory'].valueAsText, ecoregion, 'DigitalCoast')
+            if os.path.exists(digital_coast_folder):
+                files = len(next(os.walk(digital_coast_folder))[1])
+                if files > 0:
+                    arcpy.AddMessage(f" - {ecoregion} Digital Coast files: {files}")
+                else:
+                    arcpy.AddMessage(' - No Digital Coast files found')
             else:
                 arcpy.AddMessage(' - No Digital Coast files found')
-        else:
-            arcpy.AddMessage(' - No Digital Coast files found')
         
     def get_params(self):
         """

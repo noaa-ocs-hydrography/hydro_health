@@ -35,14 +35,16 @@ class BlueTopoProcessor:
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
 
-    def download_nbs_tile(self, output_folder: str, tile_id: str):
+    def download_nbs_tile(self, output_folder: str, row: gpd.GeoSeries):
         """Download all NBS files for a single tile"""
 
+        tile_id = row[0]
+        ecoregion_id = row[1]
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
         tiff_file_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            output_tile_path = output_pathlib / obj_summary.key
+            output_tile_path = output_pathlib / ecoregion_id / obj_summary.key
             # Store the path to the tile, not the xml
             if output_tile_path.suffix == '.tiff':
                 tiff_file_path = output_tile_path
@@ -106,18 +108,17 @@ class BlueTopoProcessor:
         """Handle processing of a single tile"""
 
         output_folder, row = param_inputs
-        tile_id = row[0]
-        geometry = row['geometry']
-        tiff_file_path = self.download_nbs_tile(output_folder, tile_id)
+        tiff_file_path = self.download_nbs_tile(output_folder, row)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
             self.multiband_to_singleband(mb_tiff_file)
             self.set_ground_to_nodata(tiff_file_path)
             self.create_slope(tiff_file_path)
             self.create_rugosity(tiff_file_path)
+        return f'- {row["EcoRegion"]}'
 
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
-        param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows()]
+        param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)
 
