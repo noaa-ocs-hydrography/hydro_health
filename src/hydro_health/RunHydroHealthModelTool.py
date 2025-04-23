@@ -59,7 +59,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         self.reset_log_file(param_lookup)
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
-        # self.create_masks()
+        self.create_raster_masks()
         arcpy.AddMessage('Done')
 
     def postExecute(self, parameters):
@@ -80,14 +80,11 @@ class RunHydroHealthModelTool(HHLayerTool):
         )
         param_lookup['drawn_polygon'].value = output_json
 
-    def create_masks(self) -> None:
+    def create_raster_masks(self) -> None:
         """Create prediction and training masks for all ecoregions"""
 
-        tools.create_ecoregion_rasters()
-        arcpy.AddMessage("Creating training masks")
-        tools.create_training_masks()
-        arcpy.AddMessage("Creating prediction masks")
-        tools.create_prediction_masks()
+        arcpy.AddMessage(f'Creating prediction and training masks for ecoregions')
+        tools.process_create_masks(self.param_lookup['output_directory'].valueAsText)
 
     def download_bluetopo_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all bluetopo tiles"""

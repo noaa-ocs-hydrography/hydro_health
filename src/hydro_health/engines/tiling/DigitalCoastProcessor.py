@@ -18,7 +18,6 @@ from multiprocessing import set_executable
 
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
 class DigitalCoastProcessor:
