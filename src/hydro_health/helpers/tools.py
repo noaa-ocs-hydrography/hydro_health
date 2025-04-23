@@ -30,16 +30,6 @@ def process_create_masks(outputs:str) -> None:
     processor.process(outputs)
 
 
-def create_prediction_masks() -> None:
-    """Build prediction mask from all Digital Coast """
-    return
-
-
-def create_training_masks() -> None:
-    """Build training masks from Ecoregion polygons and VRT of any Digital Coast files"""
-    return
-
-
 def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
     """Create an output VRT from found .tif files"""
 
