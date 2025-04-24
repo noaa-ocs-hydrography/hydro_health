@@ -8,7 +8,7 @@ import pandas as pd
 import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -204,11 +204,11 @@ class RasterMaskProcessor:
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
 
-        with ProcessPoolExecutor(int(os.cpu_count()/2)) as pool:
+        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as pool:
             self.print_async_results(pool.map(self.create_prediction_mask, ecoregions), outputs)
 
     def process_training_masks(self, ecoregions: list[pathlib.Path], outputs: str) -> None:
         """Multiprocessing entrypoint for creating training masks"""
 
-        with ProcessPoolExecutor(int(os.cpu_count()/2)) as pool:
+        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as pool:
             self.print_async_results(pool.map(self.create_training_mask, ecoregions), outputs)

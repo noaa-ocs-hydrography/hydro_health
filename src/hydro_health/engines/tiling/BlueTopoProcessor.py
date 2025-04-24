@@ -12,7 +12,7 @@ from hydro_health.helpers import hibase_logging
 from botocore.client import Config
 from botocore import UNSIGNED
 from osgeo import gdal
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -119,7 +119,7 @@ class BlueTopoProcessor:
 
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
-        with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
+        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)
 
         # log all tiles using tile_gdf

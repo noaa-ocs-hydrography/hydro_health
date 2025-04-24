@@ -13,7 +13,7 @@ import pathlib
 
 from botocore.client import Config
 from botocore import UNSIGNED
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
 
 
@@ -84,7 +84,7 @@ class DigitalCoastProcessor:
                 
                 try:
                     intersected_response = requests.get(cleansed_url, timeout=15)
-                except requests.exceptions.Timeout:
+                except requests.exceptions.ConnectionError:
                     self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[4])
                     continue
 
@@ -213,7 +213,7 @@ class DigitalCoastProcessor:
         self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[1]))
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
         param_inputs = [[ecoregion_tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
-        with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
+        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[1]))
 
     def process_tile_index(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
@@ -225,7 +225,7 @@ class DigitalCoastProcessor:
         for geometry_coords in ecoregion_geom_strings:
             tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
             param_inputs = [[link_dict['link'], link_dict['output_path']] for link_dict in tile_index_links]
-            with ProcessPoolExecutor(int(os.cpu_count()/2)) as tile_index_pool:
+            with ThreadPoolExecutor(int(os.cpu_count() - 2)) as tile_index_pool:
                 self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[1]))
             self.unzip_all_files(digital_coast_folder)
 
