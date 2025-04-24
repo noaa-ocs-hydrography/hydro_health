@@ -8,7 +8,6 @@ import rasterio
 import numpy as np
 import dask
 import rioxarray
-import xarray as xr
 
 from pathlib import Path
 from lxml import etree
@@ -17,7 +16,7 @@ from rasterio.mask import mask
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from shapely.geometry import shape
 from rasterio.features import shapes
-from dask.distributed import Client, LocalCluster
+from dask.distributed import Client
 
 
 class ModelDataProcessor:
@@ -29,14 +28,16 @@ class ModelDataProcessor:
         :param str output_dir: directory to save the output files
         :param str data_type: Specifies the type of data being processed (e.g., "prediction" or "training").
         """        
-        sub_grid_gpkg = rf"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\{data_type}_tiles\intersecting_sub_grids.gpkg"
+        # sub_grid_gpkg = rf"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\{data_type}_tiles\intersecting_sub_grids.gpkg"
+        sub_grid_gpkg = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\intersecting_sub_grids.gpkg"
         sub_grids = gpd.read_file(sub_grid_gpkg, layer='intersecting_sub_grids')
         
         tasks = []
         for _, sub_grid in sub_grids.iterrows():
-            tasks.append(dask.delayed(self.tile_process)(sub_grid, raster_dir, output_dir, data_type))
+            # tasks.append(dask.delayed(self.tile_process)(sub_grid, raster_dir, output_dir, data_type))
+            self.tile_process(sub_grid, raster_dir, output_dir, data_type)
 
-        dask.compute(*tasks) 
+        # dask.compute(*tasks) 
 
     # TODO move to other processing step with slope and rugosity
     def create_survey_end_date_tiffs(self):
@@ -113,16 +114,20 @@ class ModelDataProcessor:
         :return: None
         """   
 
-        prediction_dir = Path(input_directory) / 'model_variables' / 'Prediction' / 'pre_processed' # TODO this might be preproceesed depending on the dataset
-        prediction_out =  Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
+        # prediction_dir = Path(input_directory) / 'model_variables' / 'Prediction' / 'preprocessed' 
+        prediction_dir  = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\sample_files" # temp for testing
+        # prediction_out =  Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
 
-        prediction_files = list(Path(prediction_dir).rglob("*.tif"))
+        prediction_out = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\outputs' # temp for testing
+        prediction_files = list(Path(prediction_dir).rglob("*.tiff"))
+        # prediction_files = list(Path(prediction_dir).rglob("*slope*.tiff")) # temp for testing
+        # prediction_files = list(Path(prediction_dir).rglob("*slope*BH4TC564*.tiff"))
 
         prediction_tasks = []
         for file in prediction_files:
             print(f'Processing {file}...')
             input_path = os.path.join(prediction_dir, file)
-            output_path = os.path.join(prediction_out, file)
+            output_path = os.path.join(prediction_out, file.name)
 
             prediction_tasks.append(dask.delayed(self.process_raster)(input_path, mask_pred, output_path))
 
@@ -147,11 +152,11 @@ class ModelDataProcessor:
         :return: None
         """        
         
-        grid_gpkg = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Now_Coast_NBS_Data\Tessellation\Master_Grids.gpkg" #TODO update for new grid
+        grid_gpkg = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\processing_grids\Prediction.subgrid.WGS84_8m.gpkg' 
 
         print("Preparing grid tiles and sub-grids...")
         
-        sub_grids = gpd.read_file(grid_gpkg, layer="Model_sub_Grid_Tiles").to_crs(mask_gdf.crs)
+        sub_grids = gpd.read_file(grid_gpkg, layer='prediction_subgrid').to_crs(mask_gdf.crs)
         
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf, how="inner", predicate='intersects')
         intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
@@ -161,29 +166,41 @@ class ModelDataProcessor:
         """ Main function to process model data.
         """        
 
-        output_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'prediction_tiles'
-        output_dir_train = Path(input_directory) / 'model_variables' / 'Prediction' / 'training_tiles'
+        output_dir_pred = Path(input_directory) / 'Outputs' / 'prediction_data_grid_tiles' 
+        output_dir_train = Path(input_directory) / 'Outputs' / 'training_data_grid_tiles' 
 
-        mask_prediction = Path(input_directory) / 'prediction_masks' / 'prediction.mask.UTM17_8m.tif'
-        mask_training = Path(input_directory) / 'prediction_masks' / 'training.mask.UTM17_8m.tif'
+        mask_prediction_path = Path(input_directory) / 'prediction_masks' / 'prediction.mask.UTM17_8m.tif'
+        # mask_training_path = Path(input_directory) / 'training_masks' / 'ER_3_mask.tif'
+        mask_prediction_path = r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\masks\prediction.mask.UTM17_8m.tif'
+        mask_training_path = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\masks\prediction.mask.UTM17_8m.tif"
 
-        prediction_mask_df = self.raster_to_spatial_df(mask_prediction)
-        training_mask_df = self.raster_to_spatial_df(mask_training)
+        print('Creating prediction mask data frame..')
+        # self.raster_to_spatial_df(mask_prediction_path)
+        # prediction_mask_df = self.raster_to_spatial_df(mask_prediction_path)
+        # prediction_mask_df = gpd.read_parquet(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\prediction_mask.parquet')
 
-        self.create_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred)
-        self.create_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) 
+        print('Creating training mask data frame..')
+        # training_mask_df = self.raster_to_spatial_df(mask_training_path)
+        # training_mask_df = prediction_mask_df
 
-        cluster = LocalCluster(n_workers=8, threads_per_worker=1)
-        client = Client(cluster)
-        # client = Client(n_workers=1, threads_per_worker=1, memory_limit="16GB")
-        # print(f"Dask Dashboard: {client.dashboard_link}")
+        # self.create_subgrids(mask_gdf=prediction_mask_df, output_dir=output_dir_pred) # TODO may not need to do this at the ER scale # 210 seconds
+        # self.create_subgrids(mask_gdf=training_mask_df, output_dir=output_dir_train) # 254 seconds
 
-        self.parallel_processing_rasters(input_directory, prediction_mask_df, training_mask_df)
-        input_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
-        input_dir_train = Path(input_directory) / 'model_variables' / 'Training' / 'processed'
+        # cluster = LocalCluster(n_workers=8, threads_per_worker=1)
+        # client = Client(cluster)
+        client = Client(n_workers=4, threads_per_worker=2, memory_limit="16GB")
+        # client = Client(memory_limit="16GB")
+        print(f"Dask Dashboard: {client.dashboard_link}")
+
+        # self.parallel_processing_rasters(input_directory, prediction_mask_df, training_mask_df)
+        # input_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
+        # input_dir_train = Path(input_directory) / 'model_variables' / 'Training' / 'processed'
+        input_dir_pred = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\outputs' # temp
+        output_dir_pred = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\outputs' # temp
         
+        # TODO need to have these use corresponding parent tile
         self.clip_rasters_by_tile(raster_dir=input_dir_pred, output_dir=output_dir_pred, data_type="prediction")
-        self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
+        # self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
     
         client.close()   
 
@@ -197,32 +214,35 @@ class ModelDataProcessor:
         :param str target_crs: Target coordinate reference system (default is EPSG:32617)
         :param int target_res: Target resolution in meters (default is 8m)
         """
+
         # Read raster with rioxarray, using Dask for chunking
-        ds = rioxarray.open_rasterio(raster_path, chunks={"x": 1024, "y": 1024})
-
-        mask_gdf = mask_gdf.to_crs(ds.rio.crs)
-
-        clipped = ds.rio.clip(mask_gdf.geometry.values, mask_gdf.crs, drop=True, invert=False)
+        with rioxarray.open_rasterio(raster_path, chunks={"x": 1024, "y": 1024}) as ds:            
+            mask_gdf = mask_gdf.to_crs(ds.rio.crs)
+            clipped = ds.rio.clip(mask_gdf.geometry.values, mask_gdf.crs, drop=True, invert=False)
 
         if 'bathy_' in os.path.basename(raster_path):
-            clipped = clipped.where(clipped <= 0)
+            clipped = clipped.where(clipped <= 0) # sets values > 0 to NaN
 
         clipped = clipped.rio.reproject(
             target_crs,
             resolution=target_res,
-            resampling=Resampling.nearest
-            source=data,
+            resampling=Resampling.bilinear,
             nodata=np.nan)
+
 
         clipped.rio.to_raster(
             output_path,
             compress="LZW",
             tiled=True,
-            blockxsize=512,
-            blockysize=512,
+            blockxsize=1024,
+            blockysize=1024,
             dtype='float32'
         )    
 
+        zarr_path = os.path.splitext(output_path)[0] + ".zarr"
+        clipped.to_zarr(os.path.join(zarr_path, '.zarr'), mode="w", consolidated=True)
+
+    
     # def process_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
     #     """Process a raster file by applying a mask and reprojecting it to a target CRS and resolution.
     #     All rasters will have the same X, Y, and FID values.
@@ -277,13 +297,14 @@ class ModelDataProcessor:
         :return gdf: GeoDataFrame containing the mask shapes and geometries
         """        
         with rasterio.open(raster_path) as src:
-            mask = src.read(1)
+            mask = src.read(1, out_dtype='uint8')
             valid_mask = mask == 1
             shapes_gen = shapes(mask, valid_mask, transform=src.transform)
 
             gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
+            gdf.to_parquet(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\prediction_mask.parquet')
 
-        return gdf
+        # return gdf
      
     def tile_process(self, sub_grid, raster_dir, output_dir, data_type):
         """ Process a single tile by clipping raster files and saving the data in a specified directory.
@@ -293,15 +314,29 @@ class ModelDataProcessor:
         :param _type_ output_dir: _description_
         :param _type_ data_type: _description_
         """        
-        raster_files = [os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith('.tif')]
-
-        tile_name = sub_grid['Tile_ID']
-        tile_extent = sub_grid.geometry.bounds
         
-        tile_dir = os.path.join(output_dir, tile_name)
+        sub_tile_name = sub_grid['tile_id']
+        original_tile = sub_grid['original_tile']  
+
+        raster_files = [
+            os.path.join(raster_dir, f)
+            for f in os.listdir(raster_dir)
+            if f.endswith('.tiff') and original_tile in f
+        ]
+
+        if not raster_files:
+            print(f"No matching raster files found for tile {sub_tile_name}, skipping...")
+
+            return
+
+        tile_extent = sub_grid.geometry.bounds
+
+        print(raster_files)
+        
+        tile_dir = os.path.join(output_dir, sub_tile_name)
         os.makedirs(tile_dir, exist_ok=True)
             
-        print(f"Processing {data_type} tile: {tile_name}")
+        print(f"Processing {data_type} tile: {sub_tile_name}")
         
         clipped_data = []
         for file in raster_files:
@@ -332,6 +367,7 @@ class ModelDataProcessor:
         combined_data = pd.concat(clipped_data, axis=0, join='outer', ignore_index=True)
         combined_data_pivot = combined_data.pivot(index=['X', 'Y', 'FID'], columns='Raster', values='Value').reset_index()
         combined_data = combined_data_pivot # remove if the pivot is not needed
+        print(combined_data.head(5))
         nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
         print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
         
@@ -340,5 +376,5 @@ class ModelDataProcessor:
         combined_data['b.change.2010_2015'] = combined_data['bathy_2015'] - combined_data['bathy_2010']
         combined_data['b.change.2015_2022'] = combined_data['bathy_2022'] - combined_data['bathy_2015']
         
-        clipped_data_path = os.path.join(tile_dir, f"{tile_name}_{data_type}_clipped_data.parquet")
+        clipped_data_path = os.path.join(tile_dir, f"{sub_tile_name}_{data_type}_clipped_data.parquet")
         combined_data.to_parquet(clipped_data_path)
