@@ -20,8 +20,8 @@ if __name__ == '__main__':
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
         'eco_regions': Param('ER_3-Florida-West;'),
-        'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
-        # 'drawn_polygon': Param('')
+        # 'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
+        'drawn_polygon': Param('')
     }
 
     log_file_path = pathlib.Path(param_lookup['output_directory'].valueAsText) / 'log_prints.txt'
@@ -39,9 +39,8 @@ if __name__ == '__main__':
 
     digital_coast_data = pathlib.Path(param_lookup['output_directory'].valueAsText) / 'DigitalCoast'
     if digital_coast_data.exists():
-        digital_coast_folders = digital_coast_data.rglob('*')
         data_providers = []
-        for path in digital_coast_folders:
+        for path in digital_coast_data.iterdir():
             if path.is_dir():
                 data_providers.append(path)
         print(f'Downloaded digital coast providers: {len(data_providers)}')

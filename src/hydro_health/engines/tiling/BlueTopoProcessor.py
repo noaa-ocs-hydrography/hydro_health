@@ -12,7 +12,7 @@ from hydro_health.helpers import hibase_logging
 from botocore.client import Config
 from botocore import UNSIGNED
 from osgeo import gdal
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -35,14 +35,16 @@ class BlueTopoProcessor:
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
 
-    def download_nbs_tile(self, output_folder: str, tile_id: str):
+    def download_nbs_tile(self, output_folder: str, row: gpd.GeoSeries) -> pathlib.Path:
         """Download all NBS files for a single tile"""
 
+        tile_id = row[0]
+        ecoregion_id = row[1]
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
         tiff_file_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            output_tile_path = output_pathlib / obj_summary.key
+            output_tile_path = output_pathlib / ecoregion_id / obj_summary.key
             # Store the path to the tile, not the xml
             if output_tile_path.suffix == '.tiff':
                 tiff_file_path = output_tile_path
@@ -58,7 +60,7 @@ class BlueTopoProcessor:
 
         return tiff_file_path
 
-    def get_bucket(self):
+    def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
         bucket = "noaa-ocs-nationalbathymetry-pds"
@@ -88,14 +90,14 @@ class BlueTopoProcessor:
         )
         multiband_tile_name.unlink()
 
-    def rename_multiband(self, tiff_file_path) -> pathlib.Path:
+    def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
         """Update file name for singleband conversion"""
 
         new_name = str(tiff_file_path).replace('.tiff', '_mb.tiff')
         mb_tiff_file = tiff_file_path.replace(pathlib.Path(new_name))
         return mb_tiff_file
 
-    def print_async_results(self, results, output_folder) -> None:
+    def print_async_results(self, results: list[str], output_folder: str) -> None:
         """Consolidate result printing"""
 
         for result in results:
@@ -106,29 +108,24 @@ class BlueTopoProcessor:
         """Handle processing of a single tile"""
 
         output_folder, row = param_inputs
-        tile_id = row[0]
-        geometry = row['geometry']
-        tiff_file_path = self.download_nbs_tile(output_folder, tile_id)
+        tiff_file_path = self.download_nbs_tile(output_folder, row)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
             self.multiband_to_singleband(mb_tiff_file)
             self.set_ground_to_nodata(tiff_file_path)
             self.create_slope(tiff_file_path)
             self.create_rugosity(tiff_file_path)
+        return f'- {row["EcoRegion"]}'
 
-    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
-        param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows()]
-        with ProcessPoolExecutor(int(os.cpu_count()/2)) as intersected_pool:
+    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+        param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)
 
         # log all tiles using tile_gdf
         tiles = list(tile_gdf['tile'])
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}
         hibase_logging.send_record(record, table='bluetopo_test')  # TODO update to prod hibase
-
-    def write_message(self, message, output_folder):
-        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
-            writer.write(message + '\n')
 
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
         """Set positive elevation to no data value"""
@@ -140,3 +137,11 @@ class BlueTopoProcessor:
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
+        
+    def write_message(self, message: str, output_folder: str|pathlib.Path) -> None:
+        """Write a message to the main logfile in the output folder"""
+
+        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
+            writer.write(message + '\n')
+
+
