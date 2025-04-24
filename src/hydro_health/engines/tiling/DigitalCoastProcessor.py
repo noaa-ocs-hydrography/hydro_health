@@ -55,20 +55,18 @@ class DigitalCoastProcessor:
         shp_folder, cleansed_url, current_index, total_urls = param_inputs
         # Only download .tif files
         if not cleansed_url.endswith('.tif'):
-            return
+            return f' - not an image file: {cleansed_url}'
         dataset_name = cleansed_url.split('/')[-1]
         output_file = shp_folder / dataset_name
         if os.path.exists(output_file):
-            self.write_message(f' - ({current_index} of {total_urls}) Skipping data: {output_file.stem}', shp_folder.parents[4])
-            return
+            return f'({current_index} of {total_urls}) Found: {output_file.stem}'
         else:
-            self.write_message(f' - ({current_index} of {total_urls}) Downloading data: {output_file.stem}', shp_folder.parents[4])
+            self.write_message(f'({current_index} of {total_urls}) Downloading: {output_file.stem}', shp_folder.parents[4])
         
         try:
             intersected_response = requests.get(cleansed_url, timeout=15)
         except requests.exceptions.ConnectionError:
-            self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[4])
-            return
+            return f'#####################\nTimeout error: {cleansed_url}'
 
         if intersected_response.status_code == 200:
             with open(output_file, 'wb') as file:
@@ -96,11 +94,12 @@ class DigitalCoastProcessor:
             urls = df_joined['url'].unique()
             total_urls = len(urls)
  
-            param_inputs = [[shp_folder, self.cleansed_url(url), i, total_urls] for i, url in enumerate(urls)]
+            self.write_message(f'- Starting: {shp_path.stem}', shp_folder.parents[4])
+            param_inputs = [[shp_folder, self.cleansed_url(url), i + 1, total_urls] for i, url in enumerate(urls)]
             with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
                 results = intersected_pool.map(self.download_digitalcoast_file, param_inputs)
             for result in results:
-                self.write_message(f'Result: {result}', shp_folder.parents[4])
+                self.write_message(f' - {result}', shp_folder.parents[4])
 
             # for i, url in enumerate(urls):
                 # cleansed_url = self.cleansed_url(url)
@@ -126,7 +125,6 @@ class DigitalCoastProcessor:
                 #         file.write(intersected_response.content)
                 # else:
                 #     return f'Failed to download: {cleansed_url}'
-            return f'- {shp_path.stem}'
         else:
             return f'- No intersect: {shp_path.stem}'
 
@@ -145,14 +143,13 @@ class DigitalCoastProcessor:
                     file_parent_folder = output_zip_file.parents[0]
                     shp_path = output_zip_file.parents[0] / pathlib.Path(str(output_zip_file.stem) + '.shp')
                     if os.path.exists(shp_path):
-                        self.write_message(f' - Skipping index: {output_zip_file.name}', output_folder_path.parents[2])
+                        self.write_message(f' - Found: {output_zip_file.name}', output_folder_path.parents[2])
                         continue
                     else:
-                        self.write_message(f' - Downloading index: {output_zip_file.name}', output_folder_path.parents[2])
+                        self.write_message(f' - Downloading: {output_zip_file.name}', output_folder_path.parents[2])
                     file_parent_folder.mkdir(parents=True, exist_ok=True) 
                     with open(output_zip_file, 'wb') as tile_index:
                         lidar_bucket.download_fileobj(obj_summary.key, tile_index)
-            return f'- {output_folder_path.parents[0]}/{data_file}'
 
     def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -224,7 +221,7 @@ class DigitalCoastProcessor:
 
         for result in results:
             if result:
-                self.write_message(f'Result: {result}', output_folder)
+                self.write_message(f'{result}', output_folder)
     
     def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
@@ -246,7 +243,7 @@ class DigitalCoastProcessor:
         self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[1]))
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
         param_inputs = [[ecoregion_tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
-        with ProcessPoolExecutor(int(os.cpu_count() / 3)) as intersected_pool:
+        with ProcessPoolExecutor(int(os.cpu_count() / 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[1]))
 
     def process_tile_index(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
