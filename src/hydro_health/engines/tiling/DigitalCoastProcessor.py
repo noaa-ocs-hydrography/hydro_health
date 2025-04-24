@@ -13,7 +13,7 @@ import pathlib
 
 from botocore.client import Config
 from botocore import UNSIGNED
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from multiprocessing import set_executable
 
 
@@ -51,6 +51,31 @@ class DigitalCoastProcessor:
                 if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
                     shutil.rmtree(provider_folder)
 
+    def download_digitalcoast_file(self, param_inputs) -> None:
+        shp_folder, cleansed_url, current_index, total_urls = param_inputs
+        # Only download .tif files
+        if not cleansed_url.endswith('.tif'):
+            return
+        dataset_name = cleansed_url.split('/')[-1]
+        output_file = shp_folder / dataset_name
+        if os.path.exists(output_file):
+            self.write_message(f' - ({current_index} of {total_urls}) Skipping data: {output_file.stem}', shp_folder.parents[4])
+            return
+        else:
+            self.write_message(f' - ({current_index} of {total_urls}) Downloading data: {output_file.stem}', shp_folder.parents[4])
+        
+        try:
+            intersected_response = requests.get(cleansed_url, timeout=15)
+        except requests.exceptions.ConnectionError:
+            self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[4])
+            return
+
+        if intersected_response.status_code == 200:
+            with open(output_file, 'wb') as file:
+                file.write(intersected_response.content)
+        else:
+            return f'Failed to download: {cleansed_url}'
+    
     def download_intersected_datasets(self, param_inputs: list[list]) -> None:
         """Parallel process spatial filter and download of datasets"""
 
@@ -69,30 +94,38 @@ class DigitalCoastProcessor:
             shp_folder = shp_path.parents[0]
             # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
             urls = df_joined['url'].unique()
-            for i, url in enumerate(urls):
-                cleansed_url = self.cleansed_url(url)
-                # Only download .tif files
-                if not cleansed_url.endswith('.tif'):
-                    continue
-                dataset_name = cleansed_url.split('/')[-1]
-                output_file = shp_folder / dataset_name
-                if os.path.exists(output_file):
-                    self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', shp_folder.parents[4])
-                    continue
-                else:
-                    self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', shp_folder.parents[4])
-                
-                try:
-                    intersected_response = requests.get(cleansed_url, timeout=15)
-                except requests.exceptions.ConnectionError:
-                    self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[4])
-                    continue
+            total_urls = len(urls)
+ 
+            param_inputs = [[shp_folder, self.cleansed_url(url), i, total_urls] for i, url in enumerate(urls)]
+            with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
+                results = intersected_pool.map(self.download_digitalcoast_file, param_inputs)
+            for result in results:
+                self.write_message(f'Result: {result}', shp_folder.parents[4])
 
-                if intersected_response.status_code == 200:
-                    with open(output_file, 'wb') as file:
-                        file.write(intersected_response.content)
-                else:
-                    return f'Failed to download: {cleansed_url}'
+            # for i, url in enumerate(urls):
+                # cleansed_url = self.cleansed_url(url)
+                # # Only download .tif files
+                # if not cleansed_url.endswith('.tif'):
+                #     continue
+                # dataset_name = cleansed_url.split('/')[-1]
+                # output_file = shp_folder / dataset_name
+                # if os.path.exists(output_file):
+                #     self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', shp_folder.parents[4])
+                #     continue
+                # else:
+                #     self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', shp_folder.parents[4])
+                
+                # try:
+                #     intersected_response = requests.get(cleansed_url, timeout=15)
+                # except requests.exceptions.ConnectionError:
+                #     self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[4])
+                #     continue
+
+                # if intersected_response.status_code == 200:
+                #     with open(output_file, 'wb') as file:
+                #         file.write(intersected_response.content)
+                # else:
+                #     return f'Failed to download: {cleansed_url}'
             return f'- {shp_path.stem}'
         else:
             return f'- No intersect: {shp_path.stem}'
@@ -213,7 +246,7 @@ class DigitalCoastProcessor:
         self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[1]))
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
         param_inputs = [[ecoregion_tile_gdf, shp_path] for shp_path in tile_index_shapefiles]
-        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
+        with ProcessPoolExecutor(int(os.cpu_count() / 3)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), str(digital_coast_folder.parents[1]))
 
     def process_tile_index(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:

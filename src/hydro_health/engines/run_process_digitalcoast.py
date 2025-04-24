@@ -19,9 +19,9 @@ if __name__ == '__main__':
     param_lookup = {
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
-        'eco_regions': Param('ER_3-Florida-West;'),
-        # 'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
-        'drawn_polygon': Param('')
+        'eco_regions': Param(''),
+        'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
+        # 'drawn_polygon': Param('')
     }
 
     log_file_path = pathlib.Path(param_lookup['output_directory'].valueAsText) / 'log_prints.txt'
@@ -35,7 +35,7 @@ if __name__ == '__main__':
     print(f'Selected tiles: {tiles.shape[0]}')
     start = time.time()
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
-    create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
+    # create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', 'DigitalCoast')
 
     digital_coast_data = pathlib.Path(param_lookup['output_directory'].valueAsText) / 'DigitalCoast'
     if digital_coast_data.exists():
