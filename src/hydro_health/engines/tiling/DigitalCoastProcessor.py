@@ -100,31 +100,6 @@ class DigitalCoastProcessor:
                 results = intersected_pool.map(self.download_digitalcoast_file, param_inputs)
             for result in results:
                 self.write_message(f' - {result}', shp_folder.parents[4])
-
-            # for i, url in enumerate(urls):
-                # cleansed_url = self.cleansed_url(url)
-                # # Only download .tif files
-                # if not cleansed_url.endswith('.tif'):
-                #     continue
-                # dataset_name = cleansed_url.split('/')[-1]
-                # output_file = shp_folder / dataset_name
-                # if os.path.exists(output_file):
-                #     self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', shp_folder.parents[4])
-                #     continue
-                # else:
-                #     self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', shp_folder.parents[4])
-                
-                # try:
-                #     intersected_response = requests.get(cleansed_url, timeout=15)
-                # except requests.exceptions.ConnectionError:
-                #     self.write_message(f'#####################\nTimeout error: {cleansed_url}', shp_folder.parents[4])
-                #     continue
-
-                # if intersected_response.status_code == 200:
-                #     with open(output_file, 'wb') as file:
-                #         file.write(intersected_response.content)
-                # else:
-                #     return f'Failed to download: {cleansed_url}'
         else:
             return f'- No intersect: {shp_path.stem}'
 
