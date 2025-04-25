@@ -60,6 +60,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
         self.create_raster_masks()
+        self.grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
         arcpy.AddMessage('Done')
 
     def postExecute(self, parameters):
@@ -251,6 +252,11 @@ class RunHydroHealthModelTool(HHLayerTool):
 
         parameter = self.parameter_lookup.get(param)
         return parameter
+    
+    def grid_vrt_files(self):
+        """Clip DigitalCoast VRT files to BlueTopo grid"""
+
+        tools.grid_vrt_files(self.param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
     def setup_param_lookup(self, params: list[str]):
         """Build key/value lookup for parameters"""
