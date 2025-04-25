@@ -12,6 +12,7 @@ from hydro_health.helpers.tools import (
     get_ecoregion_folders,
     Param,
     create_raster_vrt,
+    process_create_masks,
     grid_vrt_files
 )
 
@@ -46,6 +47,7 @@ if __name__ == '__main__':
             print(f'Building {ecoregion} - {dataset} VRT file')
             create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
         create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+    process_create_masks(param_lookup['output_directory'].valueAsText)
     grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
     end = time.time()
