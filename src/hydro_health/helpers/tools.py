@@ -206,15 +206,20 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                         with tempfile.TemporaryDirectory() as temp:
                             gdal.SetConfigOption('CPL_TMPDIR', temp)
                             print(f'Clipping: {output_clipped_vrt.name}')
-                            gdal.Warp(
-                                output_clipped_vrt,
-                                vrt,
-                                format='GTiff',
-                                cutlineDSName=polygon,
-                                cropToCutline=True,
-                                dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
-                                cutlineSRS=vrt_ds.GetProjection()
-                            )
+                            try:
+                                gdal.Warp(
+                                    output_clipped_vrt,
+                                    vrt,
+                                    format='GTiff',
+                                    cutlineDSName=polygon,
+                                    cropToCutline=True,
+                                    dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
+                                    cutlineSRS=vrt_ds.GetProjection()
+                                )
+                            except RuntimeError as e:
+                                print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+                                print(f'RuntimeError Error: {output_clipped_vrt} - {e}')
+                                continue
 
             raster_geom = None
             vrt_ds = None
