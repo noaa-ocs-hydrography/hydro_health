@@ -175,6 +175,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
         vrt_files = data_folder.glob('*.vrt')
         for vrt in vrt_files:
             vrt_ds = gdal.Open(vrt)
+            projection = vrt_ds.GetProjection()
+            no_data = vrt_ds.GetRasterBand(1).GetNoDataValue()
             gpkg_ds = ogr.Open(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
             blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
 
@@ -213,8 +215,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                                     format='GTiff',
                                     cutlineDSName=polygon,
                                     cropToCutline=True,
-                                    dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
-                                    cutlineSRS=vrt_ds.GetProjection()
+                                    dstNodata=no_data,
+                                    cutlineSRS=projection
                                 )
                             except RuntimeError as e:
                                 print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
