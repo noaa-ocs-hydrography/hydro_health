@@ -1,6 +1,6 @@
 import yaml
 import pathlib
-import json
+import tempfile
 import geopandas as gpd
 
 from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
@@ -164,35 +164,6 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
         make_ecoregion_folders(selected_ecoregions, output_folder)
     return list(selected_ecoregions['EcoRegion'].unique())
 
-def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
-    """Create the main EcoRegion folders"""
-
-    for _, row in selected_ecoregions.iterrows():
-        ecoregion_folder = output_folder / row['EcoRegion']
-        ecoregion_folder.mkdir(parents=True, exist_ok=True)
-
-
-def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
-
-    # get environment (dev, prod)
-    # if dev, use multiprocessing
-    # if prod, send to API endpoint of listeners in kubernetes
-        # pickle each tuple of engine and tile
-        # unpickle the object
-        # call the class method with the tile argument
-        # log success of each call
-        # notify the main caller of completion?!
-    processor = BlueTopoProcessor()
-    processor.process(tiles, outputs)
-
-
-def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
-    """Entry point for parallel proccessing of Digital Coast data"""
-    
-    processor = DigitalCoastProcessor()
-    processor.process(tiles, outputs)
-
 
 def grid_vrt_files(outputs: str, data_type: str) -> None:
     """Clip VRT files to BlueTopo grid"""
@@ -223,22 +194,60 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                 # Clip VRT by current polygon
                 polygon = feature.GetGeometryRef()
                 folder_name = feature.GetField('tile')
+                output_path = ecoregion / data_type / 'tiled' / folder_name
+                output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
+                if output_clipped_vrt.exists():
+                    print(f'Skipping {output_clipped_vrt.name}')
+                    continue
                 if folder_name in bluetopo_grids:
                     if polygon.Intersects(raster_geom):
-                        output_path = ecoregion / data_type / 'tiled' / folder_name 
                         output_path.mkdir(parents=True, exist_ok=True)
-                        # TODO set polygon SRS or silence somehow
-                        gdal.Warp(
-                            output_path / f'{vrt.stem}_{folder_name}.tiff',
-                            vrt,
-                            format='GTiff',
-                            cutlineDSName=polygon,
-                            cropToCutline=True,
-                            dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
-                            cutlineSRS=vrt_ds.GetProjection()
-                        )
+                        # Try to force clear temp directory to conserve space
+                        with tempfile.TemporaryDirectory() as temp:
+                            gdal.SetConfigOption('CPL_TMPDIR', temp)
+                            print(f'Clipping: {output_clipped_vrt.name}')
+                            gdal.Warp(
+                                output_clipped_vrt,
+                                vrt,
+                                format='GTiff',
+                                cutlineDSName=polygon,
+                                cropToCutline=True,
+                                dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
+                                cutlineSRS=vrt_ds.GetProjection()
+                            )
 
             raster_geom = None
             vrt_ds = None
             gpkg_ds = None
             blue_topo_layer = None
+
+
+def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
+    """Create the main EcoRegion folders"""
+
+    for _, row in selected_ecoregions.iterrows():
+        ecoregion_folder = output_folder / row['EcoRegion']
+        ecoregion_folder.mkdir(parents=True, exist_ok=True)
+
+
+def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+    """Entry point for parallel processing of BlueTopo tiles"""
+
+    # get environment (dev, prod)
+    # if dev, use multiprocessing
+    # if prod, send to API endpoint of listeners in kubernetes
+        # pickle each tuple of engine and tile
+        # unpickle the object
+        # call the class method with the tile argument
+        # log success of each call
+        # notify the main caller of completion?!
+    processor = BlueTopoProcessor()
+    processor.process(tiles, outputs)
+
+
+def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+    """Entry point for parallel proccessing of Digital Coast data"""
+    
+    processor = DigitalCoastProcessor()
+    processor.process(tiles, outputs)
+
