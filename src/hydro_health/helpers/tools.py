@@ -8,7 +8,6 @@ from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProces
 from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
 from osgeo import gdal, osr, ogr
 
-gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
 gdal.UseExceptions()
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -168,6 +167,10 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 def grid_vrt_files(outputs: str, data_type: str) -> None:
     """Clip VRT files to BlueTopo grid"""
 
+    gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
+    gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
+    gdal.SetCacheMax(28000)
+
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
     for ecoregion in ecoregions:
         bluetopo_grids = [folder.stem for folder in pathlib.Path(ecoregion / 'BlueTopo').iterdir() if folder.is_dir()]
@@ -175,8 +178,6 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
         vrt_files = data_folder.glob('*.vrt')
         for vrt in vrt_files:
             vrt_ds = gdal.Open(vrt)
-            projection = vrt_ds.GetProjection()
-            no_data = vrt_ds.GetRasterBand(1).GetNoDataValue()
             gpkg_ds = ogr.Open(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
             blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
 
@@ -199,29 +200,45 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                 output_path = ecoregion / data_type / 'tiled' / folder_name
                 output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
                 if output_clipped_vrt.exists():
-                    print(f'Skipping {output_clipped_vrt.name}')
-                    continue
-                if folder_name in bluetopo_grids:
+                    if output_clipped_vrt.stat().st_size == 0:
+                        try:
+                            print(f're-warp empty raster: {output_clipped_vrt.name}')
+                            gdal.Warp(
+                                output_clipped_vrt,
+                                vrt,
+                                format='GTiff',
+                                cutlineDSName=polygon,
+                                cropToCutline=True,
+                                dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
+                                cutlineSRS=vrt_ds.GetProjection()
+                            )
+                        except RuntimeError as e:
+                            print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+                            print(f'Rerun-Error: {output_clipped_vrt} - {e}')
+                            continue
+                    else:
+                        print(f'Skipping {output_clipped_vrt.name}')
+                        continue
+                elif folder_name in bluetopo_grids:
                     if polygon.Intersects(raster_geom):
                         output_path.mkdir(parents=True, exist_ok=True)
                         # Try to force clear temp directory to conserve space
-                        with tempfile.TemporaryDirectory() as temp:
-                            gdal.SetConfigOption('CPL_TMPDIR', temp)
-                            print(f'Clipping: {output_clipped_vrt.name}')
-                            try:
-                                gdal.Warp(
-                                    output_clipped_vrt,
-                                    vrt,
-                                    format='GTiff',
-                                    cutlineDSName=polygon,
-                                    cropToCutline=True,
-                                    dstNodata=no_data,
-                                    cutlineSRS=projection
-                                )
-                            except RuntimeError as e:
-                                print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
-                                print(f'RuntimeError Error: {output_clipped_vrt} - {e}')
-                                continue
+                        # with tempfile.TemporaryDirectory() as temp:
+                        #     gdal.SetConfigOption('CPL_TMPDIR', temp)
+                        try:
+                            gdal.Warp(
+                                output_clipped_vrt,
+                                vrt,
+                                format='GTiff',
+                                cutlineDSName=polygon,
+                                cropToCutline=True,
+                                dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
+                                cutlineSRS=vrt_ds.GetProjection()
+                            )
+                        except RuntimeError as e:
+                            print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+                            print(f'Error: {output_clipped_vrt} - {e}')
+                            continue
 
             raster_geom = None
             vrt_ds = None
