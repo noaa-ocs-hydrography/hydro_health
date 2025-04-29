@@ -5,7 +5,16 @@ HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
 sys.path.append(str(HH_MODEL))
-from hydro_health.helpers.tools import process_bluetopo_tiles, process_digital_coast_files, get_ecoregion_tiles, get_ecoregion_folders, Param, create_raster_vrt
+from hydro_health.helpers.tools import (
+    process_bluetopo_tiles,
+    process_digital_coast_files,
+    get_ecoregion_tiles,
+    get_ecoregion_folders,
+    Param,
+    create_raster_vrt,
+    process_create_masks,
+    grid_vrt_files
+)
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -38,7 +47,8 @@ if __name__ == '__main__':
             print(f'Building {ecoregion} - {dataset} VRT file')
             create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
         create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
-
+    process_create_masks(param_lookup['output_directory'].valueAsText)
+    grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
