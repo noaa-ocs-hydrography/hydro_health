@@ -7,6 +7,8 @@ import numpy as np
 import rasterio
 from rasterio.features import rasterize
 from rasterio.transform import from_bounds
+from rasterio.windows import from_bounds as window_from_bounds
+from rasterio.windows import transform as window_transform
 from rasterio.warp import reproject
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
@@ -14,6 +16,8 @@ import rioxarray
 import xarray as xr
 import dask.array as da
 from dask.distributed import Client
+import gc
+
 
 
 
@@ -173,68 +177,77 @@ class CreateTSMLayerEngine(Engine):
 
     def create_rasters(self):
         """Create annual mean TSM rasters clipped to the extent of a raster mask."""
-        
+
         folder_path = pathlib.Path(DATA_PATH)
-        output_folder = pathlib.Path(DATA_PATH) / 'tsm_rasters' / 'mean_rasters'
+        output_folder = folder_path / 'tsm_rasters' / 'mean_rasters'
         output_folder.mkdir(parents=True, exist_ok=True)
 
-        grid_shape = (4320, 8640)  # (height, width)
+        grid_shape = (4320, 8640)
         transform = from_bounds(-180, -90, 180, 90, grid_shape[1], grid_shape[0])
         crs = "EPSG:4326"
 
-        # Get bounds of the raster mask for clipping
+        # Get clipping bounds from the mask
         with rasterio.open(self.mask_path) as mask_src:
             mask_bounds = mask_src.bounds
 
         for year in range(2004, 2025):
-            print(f'Creating raster for {year}...')
-            files = [f for f in os.listdir(folder_path) if f"L3m_{year}" in f]
-            if not files:
-                print(f"  No files found for {year}")
+            print(f'Processing year: {year}')
+            nc_files = [f for f in os.listdir(folder_path) if f"L3m_{year}" in f and f.endswith('.nc')]
+            if not nc_files:
+                print(f"  No NetCDF files found for {year}")
                 continue
 
-            # Stack TSM rasters
-            datasets = np.full((len(files), *grid_shape), np.nan)
+            tsm_stack = []
 
-            for i, file in enumerate(files):
-                print(f"  Processing {file}")
-                ds = xr.open_dataset(folder_path / file)
-                tsm = ds['TSM_mean'].values.squeeze()
-                datasets[i] = tsm
+            for fname in nc_files:
+                path = folder_path / fname
+                try:
+                    ds = xr.open_dataset(path)
+                    arr = ds['TSM_mean'].values.squeeze().astype(np.float32)
+                    arr[arr == 0] = np.nan  # replace 0 with nan
+                    tsm_stack.append(arr)
+                    ds.close()
+                except Exception as e:
+                    print(f"  Failed to process {fname}: {e}")
 
-            # Compute annual mean and clean up
-            annual_mean = np.nanmean(datasets, axis=0)
-            annual_mean[annual_mean == 0] = np.nan
+            if not tsm_stack:
+                print(f"  No valid rasters for {year}")
+                continue
 
-            # Clip to mask extent using raster window
-            window = rasterio.windows.from_bounds(*mask_bounds, transform=transform)
+            # Compute the mean
+            print("  Computing mean...")
+            annual_mean = np.nanmean(np.stack(tsm_stack, axis=0), axis=0)
+            del tsm_stack
+            gc.collect()
+
+            # Clip to bounds
+            print("  Clipping to mask...")
+            window = window_from_bounds(*mask_bounds, transform=transform)
             window = window.round_offsets().round_lengths()
             row_off, col_off = int(window.row_off), int(window.col_off)
             height, width = int(window.height), int(window.width)
-            clipped_array = annual_mean[row_off:row_off + height, col_off:col_off + width]
+            clipped_array = annual_mean[row_off:row_off+height, col_off:col_off+width]
+            clipped_transform = window_transform(window, transform)
 
-            # Adjust transform for clipped window
-            clipped_transform = rasterio.windows.transform(window, transform)
-
-            # Save output raster
-            output_raster_path = pathlib.Path(self.output_directory) / f"clipped_{year}.tif"
+            # Save
+            print("  Saving clipped raster...")
+            out_path = output_folder / f"TSM_mean_{year}.tif"
             with rasterio.open(
-                output_raster_path,
-                "w",
-                driver="GTiff",
+                out_path,
+                'w',
+                driver='GTiff',
                 height=height,
                 width=width,
                 count=1,
-                dtype="float32",
+                dtype='float32',
                 crs=crs,
                 transform=clipped_transform,
                 nodata=np.nan,
-                compress="lzw",
+                compress='lzw',
             ) as dst:
                 dst.write(clipped_array, 1)
 
-            print(f"  Saved to {output_raster_path}")
-
+            print(f"  Done: {out_path}")
 
     def clip_raster_to_match(self, raster_path, clip_raster_path, output_raster_path):
         
