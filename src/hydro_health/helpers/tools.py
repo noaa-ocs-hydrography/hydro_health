@@ -35,17 +35,21 @@ def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_t
 
     glob_lookup = {
         'elevation': '*[0-9].tiff',
+        'uncertainty': '*_unc.tiff',
         'slope': '*_slope.tiff',
         'rugosity': '*_rugosity.tiff',
         'NCMP': '*.tif'
     }
 
-    # TODO data_type needs to be ecoregion folder
     outputs = pathlib.Path(output_folder) / ecoregion / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
     output_geotiffs = {}
     for geotiff in geotiffs:
+        output_vrt = geotiff.parents[0] / f'{geotiff.stem}.vrt'
+        if output_vrt.exists():
+            print(f'Skipping VRT: {output_vrt.name}')
+            continue
         geotiff_ds = gdal.Open(geotiff)
         projection_wkt = geotiff_ds.GetProjection()
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  

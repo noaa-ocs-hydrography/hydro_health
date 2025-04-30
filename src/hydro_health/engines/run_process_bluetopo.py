@@ -5,15 +5,11 @@ HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
 sys.path.append(str(HH_MODEL))
-from hydro_health.helpers.tools import process_bluetopo_tiles, get_ecoregion_tiles, Param, create_raster_vrt
+from hydro_health.helpers.tools import process_bluetopo_tiles, get_ecoregion_tiles, Param, create_raster_vrt, get_ecoregion_folders
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
-
-def create_vrt_output(output_folder):
-    for dataset in ['elevation', 'slope', 'rugosity']:
-        create_raster_vrt(output_folder, dataset, 'BlueTopo')
 
 
 if __name__ == '__main__':
@@ -32,13 +28,15 @@ if __name__ == '__main__':
     print(f'Selected tiles: {tiles.shape[0]}')
     start = time.time()
     process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
-    create_vrt_output(param_lookup['output_directory'].valueAsText)
+    for ecoregion in get_ecoregion_folders(param_lookup):
+        for dataset in ['elevation', 'uncertainty', 'slope', 'rugosity']:
+            create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
     
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
-    # takes 102 seconds to verify if already downloaded
-    if os.path.isdir(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')):
-        print('Downloaded tiles:', len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, 'BlueTopo')))[1]))
-    else:
-        print('No tiles downloaded')
+    for ecoregion in pathlib.Path(param_lookup['output_directory'].valueAsText).glob('ER_*'):
+        if pathlib.Path(ecoregion / 'BlueTopo').is_dir():
+            print(f'{ecoregion.stem} BlueTopo tiles:', len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, ecoregion, 'BlueTopo')))[1]))
+        else:
+            print('No tiles downloaded')
     print('done')

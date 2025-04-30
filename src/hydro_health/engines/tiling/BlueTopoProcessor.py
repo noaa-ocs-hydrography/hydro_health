@@ -42,23 +42,20 @@ class BlueTopoProcessor:
         ecoregion_id = row[1]
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
-        tiff_file_path = False
+        output_tile_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            output_tile_path = output_pathlib / ecoregion_id / obj_summary.key
+            current_file = output_pathlib / ecoregion_id / obj_summary.key
             # Store the path to the tile, not the xml
-            if output_tile_path.suffix == '.tiff':
-                tiff_file_path = output_tile_path
-
-            tile_folder = output_tile_path.parents[0]
-            if os.path.exists(output_tile_path):
-                self.write_message(f'Skipping: {output_tile_path.name}', output_folder)
-                continue
-            else:
-                self.write_message(f'Downloading: {output_tile_path.name}', output_folder)
+            if current_file.suffix == '.tiff':
+                if current_file.exists():
+                    self.write_message(f'Skipping: {current_file.name}', output_folder)
+                    return output_tile_path
+                output_tile_path = current_file
+            tile_folder = current_file.parents[0]
+            self.write_message(f'Downloading: {current_file.name}', output_folder)
             tile_folder.mkdir(parents=True, exist_ok=True)   
-            nbs_bucket.download_file(obj_summary.key, output_tile_path)
-
-        return tiff_file_path
+            nbs_bucket.download_file(obj_summary.key, current_file)
+        return output_tile_path
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -73,22 +70,24 @@ class BlueTopoProcessor:
         nbs_bucket = s3.Bucket(bucket)
         return nbs_bucket
 
-    def multiband_to_singleband(self, tiff_file_path: pathlib.Path) -> None:
+    def multiband_to_singleband(self, tiff_file_path: pathlib.Path, band: int) -> None:
         """Convert multiband BlueTopo raster into a singleband file"""
 
-        multiband_tile_name = tiff_file_path.parents[0] / tiff_file_path.name
+        band_name_lookup = {
+            1: '',
+            2: '_unc'
+        }
         # temporarily rename file to output singleband with original name
-        output_name = str(tiff_file_path.name).replace('_mb', '')
+        output_name = str(tiff_file_path.name).replace('_mb', band_name_lookup[band])
         singleband_tile_name = tiff_file_path.parents[0] / output_name
 
         gdal.Translate(
             singleband_tile_name,
-            multiband_tile_name,
-            bandList=[1],
+            tiff_file_path,
+            bandList=[band],
             creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
             callback=gdal.TermProgress_nocb
         )
-        multiband_tile_name.unlink()
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
         """Update file name for singleband conversion"""
@@ -111,7 +110,9 @@ class BlueTopoProcessor:
         tiff_file_path = self.download_nbs_tile(output_folder, row)
         if tiff_file_path:
             mb_tiff_file = self.rename_multiband(tiff_file_path)
-            self.multiband_to_singleband(mb_tiff_file)
+            self.multiband_to_singleband(mb_tiff_file, band=1)
+            self.multiband_to_singleband(mb_tiff_file, band=2)
+            mb_tiff_file.unlink() # delete the original multiband file
             self.set_ground_to_nodata(tiff_file_path)
             self.create_slope(tiff_file_path)
             self.create_rugosity(tiff_file_path)

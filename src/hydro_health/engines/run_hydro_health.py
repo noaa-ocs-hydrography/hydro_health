@@ -20,10 +20,6 @@ from hydro_health.helpers.tools import (
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
-def create_vrt_output(output_folder):
-    for dataset in ['elevation', 'slope', 'rugosity']:
-        create_raster_vrt(output_folder, dataset, 'BlueTopo')
-
 
 if __name__ == '__main__':
     if os.path.exists(OUTPUTS / 'log_prints.txt'):
@@ -43,7 +39,7 @@ if __name__ == '__main__':
     process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
     for ecoregion in get_ecoregion_folders(param_lookup):
-        for dataset in ['elevation', 'slope', 'rugosity']:
+        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
             create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
         create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
