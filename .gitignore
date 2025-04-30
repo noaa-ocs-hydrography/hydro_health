@@ -9,3 +9,4 @@ src/hydro_health/*.xml
 !inputs/*wgs84*
 !inputs/lookups/
 !inputs/Master_grids.gpkg
+!inputs/drawn_polygons.geojson

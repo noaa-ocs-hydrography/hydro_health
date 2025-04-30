@@ -97,7 +97,7 @@ class RunHydroHealthModelTool(HHLayerTool):
 
         arcpy.AddMessage('Tile process completed')
         for ecoregion in ecoregions:
-            for dataset in ['elevation', 'slope', 'rugosity']:
+            for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
                 arcpy.AddMessage(f'Building {ecoregion} - {dataset} VRT file')
                 tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
 
