@@ -20,7 +20,7 @@ if __name__ == '__main__':
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
         'eco_regions': Param('ER_3-Florida-West;'),
-        'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
+        'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson'))
         # 'drawn_polygon': Param('')
     }
     
