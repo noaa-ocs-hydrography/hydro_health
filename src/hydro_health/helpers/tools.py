@@ -6,6 +6,7 @@ import geopandas as gpd
 from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
+from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideForecastProcessor
 from osgeo import gdal, osr, ogr
 
 gdal.UseExceptions()
@@ -254,7 +255,7 @@ def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder:
         ecoregion_folder.mkdir(parents=True, exist_ok=True)
 
 
-def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     # get environment (dev, prod)
@@ -269,9 +270,15 @@ def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None
     processor.process(tiles, outputs)
 
 
-def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
+def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
     """Entry point for parallel proccessing of Digital Coast data"""
     
     processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)
 
+
+def process_stofs_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
+    """Entry point for parallel processing of STOFS data"""
+
+    processor = SurgeTideForecastProcessor()
+    processor.process(tiles, outputs)
