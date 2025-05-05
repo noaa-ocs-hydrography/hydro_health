@@ -112,7 +112,6 @@ def get_groundings_csv() -> None:
 if __name__ == '__main__':
     get_reef_5k_json(True)
     convert_json_to_shp()
-    get_sediment_data()
     get_reef_1km_data()
     get_active_captain()
     get_groundings_csv()

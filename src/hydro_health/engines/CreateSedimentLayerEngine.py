@@ -13,12 +13,7 @@ from rasterio.transform import from_origin
 import fiona
 
 from hydro_health.engines.Engine import Engine
-
-
-DATA_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data"
-GPKG_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg"
-MASK_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif"
-RASTER_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\sediment_rasters"
+from hydro_health.helpers.tools import get_config_item
 
 
 class CreateSedimentLayerEngine(Engine):
@@ -54,7 +49,7 @@ class CreateSedimentLayerEngine(Engine):
 
         print(f"Creating raster for {field_name} at {resolution} m resolution...")
 
-        with rasterio.open(MASK_PATH) as mask_src:
+        with rasterio.open(get_config_item('SEDIMENT', 'MASK_PATH')) as mask_src:
             bounds = mask_src.bounds
             crs = mask_src.crs
 
@@ -63,7 +58,7 @@ class CreateSedimentLayerEngine(Engine):
         height = int((bounds.top - bounds.bottom) / yres)
         transform = from_origin(bounds.left, bounds.top, xres, yres)
 
-        with fiona.open(GPKG_PATH, layer='sediment_polygons') as src:
+        with fiona.open(get_config_item('SEDIMENT', 'GPKG_PATH'), layer='sediment_polygons') as src:
             assert src.crs == crs.to_dict(), "CRS mismatch between mask and vector layer"
 
             shapes = (
@@ -81,7 +76,7 @@ class CreateSedimentLayerEngine(Engine):
                 all_touched=False
             )
 
-        with rasterio.open(MASK_PATH) as mask_src:
+        with rasterio.open(get_config_item('SEDIMENT', 'MASK_PATH')) as mask_src:
             mask_reproj = np.empty((height, width), dtype='float32')
             rasterio.warp.reproject(
                 source=rasterio.band(mask_src, 1),
@@ -95,7 +90,7 @@ class CreateSedimentLayerEngine(Engine):
 
         rasterized[mask_reproj == 0] = nodata_val
 
-        file_path = pathlib.Path(RASTER_PATH) / f"{field_name}_raster_{resolution}m.tif"
+        file_path = pathlib.Path(get_config_item('SEDIMENT', 'RASTER_PATH')) / f"{field_name}_raster_{resolution}m.tif"
         with rasterio.open(
             file_path,
             'w',
@@ -141,7 +136,7 @@ class CreateSedimentLayerEngine(Engine):
         gdf.set_crs(crs="EPSG:4326", inplace=True)
         gdf_reprojected = gdf.to_crs("EPSG:32617")
         
-        gdf_reprojected.to_file(GPKG_PATH, layer='sediment_points', driver = 'GPKG', overwrite=True)
+        gdf_reprojected.to_file(get_config_item('SEDIMENT', 'GPKG_PATH'), layer='sediment_points', driver = 'GPKG', overwrite=True)
         self.message('Created sediment point layer.') 
 
     def determine_sed_types(self):
@@ -169,13 +164,13 @@ class CreateSedimentLayerEngine(Engine):
         Downloads the USGS sediment dataset. 
         :param list csv_columns: Columns required from the CSV file
         """     
-        data_url = 'https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv'
-        csv_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data\US9_ONE.csv'
+
+        csv_path = pathlib.Path(get_config_item('SEDIMENT', 'DATA_PATH')) / 'US9_ONE.csv'
 
         # Only download if file doesn't exist
         if not os.path.exists(csv_path):
             print("Downloading sediment data...")
-            response = requests.get(data_url)
+            response = requests.get(get_config_item('SEDIMENT', 'DATA_URL'))
             if response.status_code == 200:
                 with open(csv_path, "wb") as f:
                     f.write(response.content)
@@ -191,7 +186,7 @@ class CreateSedimentLayerEngine(Engine):
         """Reads and stores the data from the USGS sediment dataset CSV"""      
 
         csv_columns = ['Latitude', 'Longitude', 'Gravel', 'Sand', 'Mud', 'Clay', 'Grainsze']
-        sediment_data_path = pathlib.Path(DATA_PATH) / 'US9_ONE.csv'
+        sediment_data_path = pathlib.Path(get_config_item('SEDIMENT', 'DATA_PATH')) / 'US9_ONE.csv'
         self.sediment_data = pd.read_csv(sediment_data_path, usecols=csv_columns)
 
         self.message('Filtering out rows with missing data') 
@@ -204,7 +199,7 @@ class CreateSedimentLayerEngine(Engine):
         """Polygonize the sediment points"""       
 
         print("Transforming sediment points to polygons...")
-        gdf = gpd.read_file(GPKG_PATH, layer='sediment_points')
+        gdf = gpd.read_file(get_config_item('SEDIMENT', 'GPKG_PATH'), layer='sediment_points')
         coordinates_df = gdf.geometry.apply(lambda geom: geom.centroid.coords[0]).apply(pd.Series)
         coordinates_df.columns = ['Longitude', 'Latitude']
         sed_type_values = gdf['sed_int'].tolist()
@@ -226,7 +221,7 @@ class CreateSedimentLayerEngine(Engine):
             })
 
         gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:32617')
-        gdf_voronoi.to_file(GPKG_PATH, layer='sediment_polygons', driver = 'GPKG', overwrite=True)   
+        gdf_voronoi.to_file(get_config_item('SEDIMENT', 'GPKG_PATH'), layer='sediment_polygons', driver = 'GPKG', overwrite=True)   
 
     def start(self):
         """Entrypoint for processing the Sediment layer"""
