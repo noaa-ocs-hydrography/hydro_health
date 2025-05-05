@@ -1,18 +1,20 @@
 import os
 import pathlib
-import geopandas as gpd
-import pandas as pd
 import requests
-from osgeo import ogr, osr, gdal
+import pandas as pd
+import geopandas as gpd
+import numpy as np
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
+import rasterio
+from rasterio.features import rasterize
+from rasterio.enums import Resampling
+from rasterio.transform import from_origin
+import fiona
+
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
 
 
-osr.DontUseExceptions()
-INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 DATA_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data"
 GPKG_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg"
 MASK_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif"
@@ -22,19 +24,10 @@ RASTER_PATH = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\m
 class CreateSedimentLayerEngine(Engine):
     """Class to hold the logic for processing the Sediment layer"""
 
-    def __init__(self, 
-                 param_lookup:dict=None):
+    def __init__(self):
         super().__init__()
         self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay'] 
         self.sediment_data = None
-        if param_lookup:
-            self.param_lookup = param_lookup
-            if self.param_lookup['input_directory'].valueAsText:
-                global INPUTS
-                INPUTS = pathlib.Path(self.param_lookup['input_directory'].valueAsText)
-            if self.param_lookup['output_directory'].valueAsText:
-                global OUTPUTS
-                OUTPUTS = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
 
     def add_sed_size_column(self):
         """
@@ -42,7 +35,7 @@ class CreateSedimentLayerEngine(Engine):
         Renames Grainsze column to Size_phi to clarify size is in phi units
         """      
 
-        self.sediment_data['Size_mm'] = 2 ** -(self.sediment_data['Grainsze'])
+        self.sediment_data['sed_size'] = 2 ** -(self.sediment_data['Grainsze'])
         self.sediment_data = self.sediment_data.rename(columns={'Grainsze': 'Size_phi'})
 
     def add_sediment_mapping_column(self):   
@@ -54,57 +47,72 @@ class CreateSedimentLayerEngine(Engine):
             'Mud': 3,
             'Clay': 4
         }
-        self.sediment_data['sed_int'] = self.sediment_data['prim_sed'].map(sediment_mapping)
+        self.sediment_data['sed_int'] = self.sediment_data['sed_type'].map(sediment_mapping)  
 
-    # def clip_polygons_with_mask(self):
-    #     """Clips the polygon layer to match the tile mask extent"""  
-              
-    #     data_gdf = gpd.read_file(GPKG_PATH, layer='sediment_polygons')
-    #     mask_gdf = gpd.read_file(MASK_PATH)
+    def convert_polys_to_raster(self, field_name, resolution=100):
+        """Rasterize polygons using a field, clip with mask, and set custom resolution (e.g., 100m)."""
 
-    #     mask_gdf = mask_gdf[mask_gdf["Value"] == 1]
+        print(f"Creating raster for {field_name} at {resolution} m resolution...")
 
-    #     clipped_gdf = gpd.clip(data_gdf, mask_gdf)
-    #     clipped_gdf.to_file(GPKG_PATH, layer='sediment_polys_clipped', driver="GPKG", overwrite=True)   
+        with rasterio.open(MASK_PATH) as mask_src:
+            bounds = mask_src.bounds
+            crs = mask_src.crs
 
-    # def clip_sediment_points(self):
-    #     """
-    #     Clip the sediment point layer before converting to polygons to reduce polygon layer size.
-    #     """        
+        xres, yres = resolution, resolution
+        width = int((bounds.right - bounds.left) / xres)
+        height = int((bounds.top - bounds.bottom) / yres)
+        transform = from_origin(bounds.left, bounds.top, xres, yres)
 
-    #     mask = gpd.read_file(MASK_PATH)
-    #     sed_point_shapefile = gpd.read_file(GPKG_PATH, layer='sediment_points')
+        with fiona.open(GPKG_PATH, layer='sediment_polygons') as src:
+            assert src.crs == crs.to_dict(), "CRS mismatch between mask and vector layer"
 
-    #     points = sed_point_shapefile.to_crs(mask.crs)
+            shapes = (
+                (feature["geometry"], feature["properties"][field_name])
+                for feature in src if feature["properties"][field_name] is not None
+            )
 
-    #     clipped = gpd.sjoin(points, mask, how='inner', predicate='within')
-    #     clipped.to_file(GPKG_PATH, layer='sediment_points_clipped', driver="GPKG", overwrite=True) 
+            nodata_val = -9999.0
+            rasterized = rasterize(
+                shapes=shapes,
+                out_shape=(height, width),
+                transform=transform,
+                fill=nodata_val,
+                dtype='float32',
+                all_touched=False
+            )
 
-    def convert_polys_to_raster(self, field_name):
-        """Rasterize the polygons with selected column as pixel value"""        
+        with rasterio.open(MASK_PATH) as mask_src:
+            mask_reproj = np.empty((height, width), dtype='float32')
+            rasterio.warp.reproject(
+                source=rasterio.band(mask_src, 1),
+                destination=mask_reproj,
+                src_transform=mask_src.transform,
+                src_crs=mask_src.crs,
+                dst_transform=transform,
+                dst_crs=crs,
+                resampling=Resampling.nearest
+            )
 
-        gpkg = ogr.Open(GPKG_PATH, 1)
-        layer = gpkg.GetLayerByName('sediment_polygons')
+        rasterized[mask_reproj == 0] = nodata_val
 
-        tiff = gdal.Open(MASK_PATH)
-        geotransform = tiff.GetGeoTransform()
-        proj = tiff.GetProjection()
-        cols = tiff.RasterXSize
-        rows = tiff.RasterYSize
+        file_path = pathlib.Path(RASTER_PATH) / f"{field_name}_raster_{resolution}m.tif"
+        with rasterio.open(
+            file_path,
+            'w',
+            driver='GTiff',
+            height=height,
+            width=width,
+            count=1,
+            dtype='float32',
+            crs=crs,
+            transform=transform,
+            nodata=nodata_val,
+            compress='lzw'
+        ) as dst:
+            dst.write(rasterized, 1)
 
-        driver = gdal.GetDriverByName('GTIFF')
-        file_path = pathlib.Path(RASTER_PATH) / f"{field_name}_raster.tif"
-        out_raster = driver.Create(file_path, cols, rows, 1, gdal.GDT_Float32, options=["COMPRESS=LZW"])
-        out_raster.SetGeoTransform(geotransform)
-        out_raster.SetProjection(proj)
+        print(f"Raster saved to {file_path}")
 
-        gdal.RasterizeLayer(out_raster, [1], layer, options=['ALL_TOUCHED=FALSE', 'ATTRIBUTE={field_name}'])
-
-        band = out_raster.GetRasterBand(1)
-        band.SetNoDataValue(0) 
-        out_raster = None
-        gpkg = None
-        tiff = None      
 
     def correct_sed_type(self, row):
         """
@@ -114,16 +122,16 @@ class CreateSedimentLayerEngine(Engine):
         """        
 
         # These size classification ranges are based on the Udden-Wentworth grain size chart
-        if 0 < row['Size_mm'] < 0.0039:
+        if 0 < row['sed_size'] < 0.0039:
             return 'Clay'
-        elif 0.0039 <= row['Size_mm'] < 0.0625:
+        elif 0.0039 <= row['sed_size'] < 0.0625:
             return 'Mud'
-        elif 0.0625 <= row['Size_mm'] < 2:
+        elif 0.0625 <= row['sed_size'] < 2:
             return 'Sand'
-        elif 2 <= row['Size_mm']: 
+        elif 2 <= row['sed_size']: 
             return 'Gravel'
         else:
-            return row['prim_sed']    
+            return row['sed_type']    
 
     def create_point_layer(self):
         """Creates a point shapefile from the sediment GeoDataFrame"""    
@@ -131,7 +139,7 @@ class CreateSedimentLayerEngine(Engine):
         gdf = gpd.GeoDataFrame(self.sediment_data, 
                                geometry=gpd.points_from_xy(self.sediment_data['Longitude'], self.sediment_data['Latitude']))  
         gdf.set_crs(crs="EPSG:4326", inplace=True)
-        gdf_reprojected = gdf.to_crs("EPSG:26917")
+        gdf_reprojected = gdf.to_crs("EPSG:32617")
         
         gdf_reprojected.to_file(GPKG_PATH, layer='sediment_points', driver = 'GPKG', overwrite=True)
         self.message('Created sediment point layer.') 
@@ -151,10 +159,10 @@ class CreateSedimentLayerEngine(Engine):
             secondary_sed = sorted_sediments[1]
             prim_values.append(primary_sed)
             sec_values.append(secondary_sed)
-        self.sediment_data['prim_sed'] = prim_values  
+        self.sediment_data['sed_type'] = prim_values  
         self.sediment_data['sec_sed'] = sec_values    
 
-        self.sediment_data['prim_sed'] = self.sediment_data.apply(self.correct_sed_type, axis=1)      
+        self.sediment_data['sed_type'] = self.sediment_data.apply(self.correct_sed_type, axis=1)      
 
     def download_sediment_data(self, csv_columns=['Latitude', 'Longitude', 'Gravel', 'Sand', 'Mud', 'Clay', 'Grainsze']):
         """
@@ -162,24 +170,28 @@ class CreateSedimentLayerEngine(Engine):
         :param list csv_columns: Columns required from the CSV file
         """     
         data_url = 'https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv'
-        response = requests.get(data_url)
+        csv_path = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data\US9_ONE.csv'
 
-        if response.status_code == 200:
-            with open('US9_ONE.csv', "wb") as f:
-                f.write(response.content)
-                print("Sediment data downloaded successfully")
-        else:
-            print("Failed to download CSV file. Status code:", response.status_code)
+        # Only download if file doesn't exist
+        if not os.path.exists(csv_path):
+            print("Downloading sediment data...")
+            response = requests.get(data_url)
+            if response.status_code == 200:
+                with open(csv_path, "wb") as f:
+                    f.write(response.content)
+                    print("Sediment data downloaded successfully to:", csv_path)
+            else:
+                print("Failed to download CSV file. Status code:", response.status_code)
+                return
 
-        csv_path = pathlib.Path(DATA_PATH) / 'US9_ONE.csv'
-        self.sediment_data = pd.read_csv(csv_path, usecols=csv_columns)   
+        sediment_data = pd.read_csv(csv_path, usecols=csv_columns)
+        return sediment_data  
 
     def read_sediment_data(self):   
         """Reads and stores the data from the USGS sediment dataset CSV"""      
 
         csv_columns = ['Latitude', 'Longitude', 'Gravel', 'Sand', 'Mud', 'Clay', 'Grainsze']
-        sediment_data_path = str('N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Grid_Development\Data_Sourced\usSEABED_EEZ'
-                                  / 'US9_ONE.csv')
+        sediment_data_path = pathlib.Path(DATA_PATH) / 'US9_ONE.csv'
         self.sediment_data = pd.read_csv(sediment_data_path, usecols=csv_columns)
 
         self.message('Filtering out rows with missing data') 
@@ -191,11 +203,12 @@ class CreateSedimentLayerEngine(Engine):
     def transform_points_to_polygons(self):
         """Polygonize the sediment points"""       
 
+        print("Transforming sediment points to polygons...")
         gdf = gpd.read_file(GPKG_PATH, layer='sediment_points')
         coordinates_df = gdf.geometry.apply(lambda geom: geom.centroid.coords[0]).apply(pd.Series)
         coordinates_df.columns = ['Longitude', 'Latitude']
-        prim_sed_values = gdf['prim_sed'].tolist()
-        grain_size_values = gdf['Size_mm'].tolist()
+        sed_type_values = gdf['sed_int'].tolist()
+        grain_size_values = gdf['sed_size'].tolist()
         
         vor = Voronoi(coordinates_df[['Longitude', 'Latitude']].values)
         polygons = []
@@ -208,23 +221,21 @@ class CreateSedimentLayerEngine(Engine):
 
             polygons.append({
                 'geometry': polygon,
-                'prim_sed': prim_sed_values[point_idx],
-                'Size_mm': grain_size_values[point_idx]
+                'sed_type': sed_type_values[point_idx],
+                'sed_size': grain_size_values[point_idx]
             })
 
-        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:26917')
+        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:32617')
         gdf_voronoi.to_file(GPKG_PATH, layer='sediment_polygons', driver = 'GPKG', overwrite=True)   
 
     def start(self):
         """Entrypoint for processing the Sediment layer"""
-        self.download_sediment_data()
+        # self.download_sediment_data()
         self.read_sediment_data()
         self.add_sed_size_column()
-        self.add_sediment_mapping_column()
         self.determine_sed_types()
+        self.add_sediment_mapping_column()
         self.create_point_layer()
-        # self.clip_sediment_points()
         self.transform_points_to_polygons()
-        # self.clip_polygons_with_mask()
-        self.convert_polys_to_raster('sed_int')
-        self.convert_polys_to_raster('Size_mm')
+        self.convert_polys_to_raster('sed_type')
+        self.convert_polys_to_raster('sed_size')
