@@ -29,6 +29,13 @@ class SurgeTideForecastProcessor:
             if start == 10:
                 break
 
+        # TODO cleaner to use s3fs library? 
+        # Sample code uses xarray to directly load 5GB .nc file from s3
+        # need to test how slow that is compared to downloading
+        # s3 = s3fs.S3FileSystem(anon=True)  # Enable anonymous access to the S3 bucket
+        # url = f"s3://{bucket_name}/{key}"
+        # ds = xr.open_dataset(s3.open(url, 'rb'), drop_variables=['nvel'])
+
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
