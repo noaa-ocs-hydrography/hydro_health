@@ -20,6 +20,10 @@ REEF:
     - 9260
     - 18520
     - 37040
+TSM:
+  # DATA_PATH: "N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data"
+  DATA_PATH: 'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\tsm_data'
+
 SEDIMENT:
   USSEABED: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/
 SHARED:
