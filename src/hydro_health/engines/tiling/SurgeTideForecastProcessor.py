@@ -16,21 +16,24 @@ OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 class SurgeTideForecastProcessor:
     """Download and convert any STOFS data"""
+    
+    def __init__(self) -> None:
+        self.weeks = None
 
-    def average_datasets(self, outputs) -> None:
+    def build_weeks_lookup(self, outputs) -> None:
         """Compute weekly, monthly, and yearly averages"""
 
         stofs_folder = outputs / 'STOFS-3D-Atl'
         daily_folders = [path for path in stofs_folder.glob('stofs_3d_atl.*') if path.is_dir()]
-        weeks = {}
+        self.weeks = {}
         for folder in daily_folders:
             folder_name = folder.name
             folder_date = datetime.strptime(folder_name[-8:], '%Y%m%d')
             calendar = folder_date.isocalendar()
             week_key = f'Y:{calendar.year}_M:{folder_date.month}_W:{calendar.week}'
-            if week_key not in weeks:
-                weeks[week_key] = []
-            weeks[week_key].append(folder)
+            if week_key not in self.weeks:
+                self.weeks[week_key] = []
+            self.weeks[week_key].append(folder)
 
     def download_s3_file(self, param_inputs) -> None:
         stofs_bucket, outputs, obj_summary = param_inputs
@@ -102,7 +105,7 @@ class SurgeTideForecastProcessor:
 
 
         self.download_water_velocity_netcdf(outputs)
-        self.average_datasets(outputs)
+        self.build_weeks_lookup(outputs)
         # Access S3
         # determine years for year pairs we care about(ex: 23-24)
             # folders are for each day starting 1/12/2023
