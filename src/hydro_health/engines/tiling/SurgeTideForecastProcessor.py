@@ -86,6 +86,16 @@ class SurgeTideForecastProcessor:
         # https://stackoverflow.com/questions/29135885/netcdf4-extract-for-subset-of-lat-lon
         # https://github.com/Deltares/xugrid/issues/107
 
+    def get_averages(self) -> None:
+        # get all year keys
+        # for each year
+        #   get all monthly keys for year
+        #   for each month
+        #       get weekly averages for weeks in month
+        #     get monthly average from weekly averages in current month
+        #     store monthly average
+        #   compute annual average
+        pass
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -106,6 +116,8 @@ class SurgeTideForecastProcessor:
 
         self.download_water_velocity_netcdf(outputs)
         self.build_weeks_lookup(outputs)
+        self.get_averages()
+
         # Access S3
         # determine years for year pairs we care about(ex: 23-24)
             # folders are for each day starting 1/12/2023
