@@ -103,10 +103,13 @@ class SurgeTideForecastProcessor:
         
         # first 4 files for testing
         first_week = {"Y:2023_M:1_W:2": [
-            "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.n001_024.field2d.nc",
-            "STOFS-3D-Atl/stofs_3d_atl.20230113/stofs_3d_atl.t12z.n001_024.field2d.nc",
-            "STOFS-3D-Atl/stofs_3d_atl.20230114/stofs_3d_atl.t12z.n001_024.field2d.nc",
-            "STOFS-3D-Atl/stofs_3d_atl.20230115/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc",
+            "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.horizontalVelY_nowcast.nc",
+            
+            # "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            # "STOFS-3D-Atl/stofs_3d_atl.20230113/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            # "STOFS-3D-Atl/stofs_3d_atl.20230114/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            # "STOFS-3D-Atl/stofs_3d_atl.20230115/stofs_3d_atl.t12z.n001_024.field2d.nc",
         ]}
         # for week, files in self.weeks.items():
         for week, files in first_week.items():
@@ -114,6 +117,10 @@ class SurgeTideForecastProcessor:
                 url = f"s3://{self.bucket}/{file}"
                 with xr.open_dataset(s3.open(url, model='rb')) as ds: #, drop_variables=['nvel'])
                     print(week)
+                    print(ds.variables)
+                    print(ds['zCoordinates'].values)
+                    print(ds['zCoordinates'].isel(time=0))
+                    # print(ds.variables.keys())
                     # SCHISM_hgrid_node_x      (nSCHISM_hgrid_node) float64 ...
                     # SCHISM_hgrid_node_y      (nSCHISM_hgrid_node) float64 ...
                     # SCHISM_hgrid_face_nodes  (nSCHISM_hgrid_face, nMaxSCHISM_hgrid_face_nodes) int32 ...

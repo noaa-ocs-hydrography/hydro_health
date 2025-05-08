@@ -235,7 +235,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                                 cutlineDSName=polygon,
                                 cropToCutline=True,
                                 dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
-                                cutlineSRS=vrt_ds.GetProjection()
+                                cutlineSRS=vrt_ds.GetProjection(),
+                                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
                             )
                         except RuntimeError as e:
                             print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
