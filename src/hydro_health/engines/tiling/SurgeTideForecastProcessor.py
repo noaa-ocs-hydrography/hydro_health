@@ -4,6 +4,10 @@ import pathlib
 import boto3
 import xarray as xr  # pip install cfgrib required for cfgrib engine
 import geopandas as gpd
+import s3fs  # require conda install h5netcdf
+import shapely
+import thalassa
+import numpy as np
 
 from datetime import datetime
 from botocore.client import Config
@@ -18,22 +22,22 @@ class SurgeTideForecastProcessor:
     """Download and convert any STOFS data"""
     
     def __init__(self) -> None:
-        self.weeks = None
-
-    def build_weeks_lookup(self, outputs) -> None:
-        """Compute weekly, monthly, and yearly averages"""
-
-        stofs_folder = outputs / 'STOFS-3D-Atl'
-        daily_folders = [path for path in stofs_folder.glob('stofs_3d_atl.*') if path.is_dir()]
+        self.bucket = 'noaa-nos-stofs3d-pds'
         self.weeks = {}
-        for folder in daily_folders:
-            folder_name = folder.name
-            folder_date = datetime.strptime(folder_name[-8:], '%Y%m%d')
-            calendar = folder_date.isocalendar()
-            week_key = f'Y:{calendar.year}_M:{folder_date.month}_W:{calendar.week}'
-            if week_key not in self.weeks:
-                self.weeks[week_key] = []
-            self.weeks[week_key].append(folder)
+
+    def build_bucket_lookup(self) -> None:
+        """Create lookup dictionary of netcdf files by calendar week"""
+
+        stofs_bucket = self.get_bucket()
+        for obj_summary in stofs_bucket.objects.filter(Prefix=f"STOFS-3D-Atl/stofs_3d_atl."):
+            if 'n001_024.field2d' in obj_summary.key:
+                folder_name = pathlib.Path(obj_summary.key).parents[0].name
+                folder_date = datetime.strptime(folder_name[-8:], '%Y%m%d')
+                calendar = folder_date.isocalendar()
+                week_key = f'Y:{calendar.year}_M:{folder_date.month}_W:{calendar.week}'
+                if week_key not in self.weeks:
+                    self.weeks[week_key] = []
+                self.weeks[week_key].append(obj_summary.key)
 
     def download_s3_file(self, param_inputs) -> None:
         stofs_bucket, outputs, obj_summary = param_inputs
@@ -95,7 +99,43 @@ class SurgeTideForecastProcessor:
         #     get monthly average from weekly averages in current month
         #     store monthly average
         #   compute annual average
-        pass
+        s3 = self.get_s3_object()
+        
+        # first 4 files for testing
+        first_week = {"Y:2023_M:1_W:2": [
+            "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            "STOFS-3D-Atl/stofs_3d_atl.20230113/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            "STOFS-3D-Atl/stofs_3d_atl.20230114/stofs_3d_atl.t12z.n001_024.field2d.nc",
+            "STOFS-3D-Atl/stofs_3d_atl.20230115/stofs_3d_atl.t12z.n001_024.field2d.nc",
+        ]}
+        # for week, files in self.weeks.items():
+        for week, files in first_week.items():
+            for file in files:
+                url = f"s3://{self.bucket}/{file}"
+                with xr.open_dataset(s3.open(url, model='rb')) as ds: #, drop_variables=['nvel'])
+                    print(week)
+                    # SCHISM_hgrid_node_x      (nSCHISM_hgrid_node) float64 ...
+                    # SCHISM_hgrid_node_y      (nSCHISM_hgrid_node) float64 ...
+                    # SCHISM_hgrid_face_nodes  (nSCHISM_hgrid_face, nMaxSCHISM_hgrid_face_nodes) int32 ...
+                    # depth                    (nSCHISM_hgrid_node) float32 ...
+                    # elev                     (time, nSCHISM_hgrid_node) float64 ...
+                    # temp_surface             (time, nSCHISM_hgrid_node) float64 ...
+                    # temp_bottom              (time, nSCHISM_hgrid_node) float64 ...
+                    # salt_surface             (time, nSCHISM_hgrid_node) float64 ...
+                    # salt_bottom              (time, nSCHISM_hgrid_node) float64 ...
+                    # uvel_surface             (time, nSCHISM_hgrid_node) float64 ...
+                    # vvel_surface             (time, nSCHISM_hgrid_node) float64 ...
+                    # uvel_bottom              (time, nSCHISM_hgrid_node) float64 ...
+                    # vvel_bottom              (time, nSCHISM_hgrid_node) float64 ...
+                    # uvel4.5                  (time, nSCHISM_hgrid_node) float64 ...
+                    # vvel4.5
+
+                    normalized_ds = thalassa.normalize(ds)  # TODO this updates STOFS to expected variables
+                    box = shapely.box(-86.775, -86.7, 30.3750000000001, 30.45)
+                    subset = thalassa.crop(normalized_ds, box)
+                    print(subset)
+                    break
+
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -110,45 +150,17 @@ class SurgeTideForecastProcessor:
         nbs_bucket = s3.Bucket(bucket)
         return nbs_bucket
     
+    def get_s3_object(self) -> s3fs.S3FileSystem:
+        s3 = s3fs.S3FileSystem(anon=True)
+        return s3
+    
     def process(self, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
+        # self.build_bucket_lookup()  # store s3 objects instead of folders
+        self.get_averages()  # load each s3 object while looping, store weekly, monthly, and annual results on class
+        # self.average_datasets()  # get_averages() could build lists as inputs to this function.  just average a list of inputs
 
-        self.download_water_velocity_netcdf(outputs)
-        self.build_weeks_lookup(outputs)
-        self.get_averages()
-
-        # Access S3
-        # determine years for year pairs we care about(ex: 23-24)
-            # folders are for each day starting 1/12/2023
-        # download main 12z file for each day
-            # loop through folders starting with stofs_3d_atl.YYYYMMDD
-            # download base model grib2 files: stofs_3d_atl.t12z.conus.east.cwl.grib2, t12z, no fXXX, starts wiith stofs_3d_atl, has east in it
-            # Convert grib2 files to 24 rasters for each day found, this will be alot of files, single grib2 current size is 58mb
-            # build daily mean raster from 24 files
-            # build monthly mean raster from all daily mean rasters 
-            # build annual mean raster from all monthly rasters
-
-    def export_hourly_rasters(self, daily_netcdf: pathlib.Path) -> None:
-        # open daily_netcdf
-        with xr.open_dataset(daily_netcdf, engine='netcdf4') as file:
-            # dimensions = dict(file.dims) 
-            # {'time': 24, 'nSCHISM_hgrid_node': 2654153, 'nSCHISM_hgrid_face': 5039151, 'nMaxSCHISM_hgrid_face_nodes': 3}
-            # variables = file.variables  # forecast hour timestamp
-            # for variable in variables:
-            #     print(variable, '---\n', variables[variable])
-            # attributes = file.attrs
-            # {'title': 'SCHISM Model output', 'source': 'SCHISM model output version v10', 'references': 'http://ccrm.vims.edu/schismweb/'} 
-
-            # variables we care about
-            values = ['depth', 'elev', 'temp_surface', 'temp_bottom', 'salt_surface', 'salt_bottom', 
-                    'uvel_surface', 'vvel_surface', 'uvel_bottom', 'vvel_bottom']
-            # for value in values:
-            #     print(file[value])
-            print(file.depth)
-            print(file.temp_surface)
-            fh_1_temp_surface = file.temp_surface.isel(time=0)
-            print(fh_1_temp_surface.values)
 
 if __name__ == "__main__":
     start = time.time()

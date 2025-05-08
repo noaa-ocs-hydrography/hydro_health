@@ -223,6 +223,7 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                 elif folder_name in bluetopo_grids:
                     if polygon.Intersects(raster_geom):
                         output_path.mkdir(parents=True, exist_ok=True)
+                        print(f'Creating {output_clipped_vrt.name}')
                         # Try to force clear temp directory to conserve space
                         # with tempfile.TemporaryDirectory() as temp:
                         #     gdal.SetConfigOption('CPL_TMPDIR', temp)
