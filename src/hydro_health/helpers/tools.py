@@ -172,6 +172,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
     gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
     gdal.SetCacheMax(28000)
 
+    gpkg_ds = ogr.Open(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
+    blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
     for ecoregion in ecoregions:
         bluetopo_grids = [folder.stem for folder in pathlib.Path(ecoregion / 'BlueTopo').iterdir() if folder.is_dir()]
@@ -179,9 +181,7 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
         vrt_files = data_folder.glob('*.vrt')
         for vrt in vrt_files:
             vrt_ds = gdal.Open(vrt)
-            gpkg_ds = ogr.Open(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
-            blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
-
+            
             # create extent polygon of raster
             gt = vrt_ds.GetGeoTransform()
             raster_extent = (gt[0], gt[3], gt[0] + gt[1] * vrt_ds.RasterXSize, gt[3] + gt[5] * vrt_ds.RasterYSize)
@@ -245,8 +245,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
 
             raster_geom = None
             vrt_ds = None
-            gpkg_ds = None
-            blue_topo_layer = None
+    gpkg_ds = None
+    blue_topo_layer = None
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):

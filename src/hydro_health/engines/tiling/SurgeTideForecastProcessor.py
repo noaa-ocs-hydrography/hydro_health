@@ -99,7 +99,7 @@ class SurgeTideForecastProcessor:
         #     get monthly average from weekly averages in current month
         #     store monthly average
         #   compute annual average
-        s3 = self.get_s3_object()
+        s3 = self.get_s3_filesystem()
         
         # first 4 files for testing
         first_week = {"Y:2023_M:1_W:2": [
@@ -157,7 +157,7 @@ class SurgeTideForecastProcessor:
         nbs_bucket = s3.Bucket(bucket)
         return nbs_bucket
     
-    def get_s3_object(self) -> s3fs.S3FileSystem:
+    def get_s3_filesystem(self) -> s3fs.S3FileSystem:
         s3 = s3fs.S3FileSystem(anon=True)
         return s3
     
