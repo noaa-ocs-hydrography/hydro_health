@@ -26,7 +26,7 @@ class DigitalCoastProcessor:
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
 
-        provider_list_text = ['USACE', 'NCMP']
+        provider_list_text = ['USACE', 'NCMP', 'NGS']
         for text in provider_list_text:
             if text in feature_json['attributes']['provider_results_name']:
                 return True
