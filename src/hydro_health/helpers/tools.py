@@ -1,8 +1,10 @@
 import yaml
+import time
 import pathlib
-import tempfile
 import geopandas as gpd
+import rioxarray as rxr
 
+from rasterio.crs import CRS
 from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
@@ -10,6 +12,9 @@ from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideFore
 from osgeo import gdal, osr, ogr
 
 gdal.UseExceptions()
+gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
+# gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
+gdal.SetCacheMax(2684354560)  # 20gb RAM
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
@@ -52,11 +57,37 @@ def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_t
             print(f'Skipping VRT: {output_vrt.name}')
             continue
         geotiff_ds = gdal.Open(geotiff)
+        wgs84_srs = osr.SpatialReference()
+        wgs84_srs.ImportFromEPSG(4326)
+        geotiff_srs = geotiff_ds.GetSpatialRef()
+        # Project all geotiff to match BlueTopo tiles WGS84
+        if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
+            geotiff_ds = None  # close dataset
+            old_geotiff = geotiff.rename(geotiff.parents[0] / f'{geotiff.stem}_old.tif')  # rename to old
+            raster_wgs84 = geotiff.parents[0] / f'{geotiff.stem}_wgs84.tif'
+            rasterio_wgs84 = CRS.from_epsg(4326)
+            geotiff_raster = rxr.open_rasterio(old_geotiff)
+            wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
+            wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
+            wgs84_ds = gdal.Open(raster_wgs84)
+            gdal.Warp(
+                geotiff,
+                wgs84_ds,
+                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
+            )
+
+            wgs84_ds = None
+            raster_wgs84 = None
+            wgs84_geotiff_raster = None
+            geotiff_raster = None
+            old_geotiff = None
+
+        geotiff_ds = gdal.Open(geotiff)  # reopen new projected geotiff path
         projection_wkt = geotiff_ds.GetProjection()
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
         projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
-        provider_folder = geotiff.relative_to(outputs).parents[-2]
+        provider_folder = geotiff.parents[2].name
         # Handle BlueTopo and DigitalCoast differently
         clean_crs_key = f'{clean_crs_string}_{provider_folder}' if data_type == 'DigitalCoast' else clean_crs_string
         # Store tile and CRS
@@ -65,8 +96,14 @@ def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_t
         output_geotiffs[clean_crs_key]['tiles'].append(geotiff)
         if output_geotiffs[clean_crs_key]['crs'] is None:
             output_geotiffs[clean_crs_key]['crs'] = spatial_ref
+        
+        projected_crs_string = None
+        projection_wkt = None
+        wgs84_srs = None
+        geotiff_srs = None
+        spatial_ref = None
         geotiff_ds = None
-
+    
     for crs, tile_dict in output_geotiffs.items():
         # Create VRT for each tile and set output CRS to fix heterogenous crs issue
         vrt_tiles = []
@@ -82,6 +119,33 @@ def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_t
         
         vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
         gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
+
+
+def delete_intermediate_digitalcoast(output_folder, ecoregion) -> None:
+    """Separate step for deleting old and wgs84 uneeded files"""
+
+    print(f'Removing intermediate files')
+    old_files = pathlib.Path(output_folder).rglob('*_old.tif')
+    wgs_files = pathlib.Path(output_folder).rglob('*_wgs84.tif')
+    
+    for file in old_files:
+        deleted = False
+        while not deleted:
+            try:
+                file.unlink()
+                deleted = True
+            except Exception as e:
+                print(f'file error: {e}')
+    for file in wgs_files:
+        deleted = False
+        while not deleted:
+            try:
+                file.unlink()
+                deleted = True
+            except Exception as e:
+                print(f'file error: {e}')
+
+
 
 
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
@@ -172,10 +236,6 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 def grid_vrt_files(outputs: str, data_type: str) -> None:
     """Clip VRT files to BlueTopo grid"""
 
-    gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
-    gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
-    gdal.SetCacheMax(28000)
-
     gpkg_ds = ogr.Open(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
     blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
@@ -215,7 +275,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                                 cutlineDSName=polygon,
                                 cropToCutline=True,
                                 dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
-                                cutlineSRS=vrt_ds.GetProjection()
+                                cutlineSRS=vrt_ds.GetProjection(),
+                                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
                             )
                         except RuntimeError as e:
                             print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
@@ -246,8 +307,10 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                             print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
                             print(f'Error: {output_clipped_vrt} - {e}')
                             continue
-
+                polygon = None
+            gt = None
             raster_geom = None
+            ring = None
             vrt_ds = None
     gpkg_ds = None
     blue_topo_layer = None
@@ -288,3 +351,15 @@ def process_stofs_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
 
     processor = SurgeTideForecastProcessor()
     processor.process(tiles, outputs)
+
+
+def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs84_srs: osr.SpatialReference) -> pathlib.Path:
+    """Project a raster/geotiff to WGS84 spatial reference for tiling"""
+
+    raster_wgs84 = raster_path.parents[0] / f'{raster_path.stem}_wgs84.tif'
+    gdal.Warp(
+        raster_wgs84,
+        raster_ds,
+        dstSRS=wgs84_srs
+    )
+    return raster_wgs84

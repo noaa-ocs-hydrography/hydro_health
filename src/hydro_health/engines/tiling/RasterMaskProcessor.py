@@ -197,7 +197,7 @@ class RasterMaskProcessor:
         self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
         print('Merging all dissolved tile index shapfiles')
         self.merge_dissolved_polygons(ecoregions)
-        print('Creaing training masks')
+        print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.delete_intermediate_files(outputs)
 

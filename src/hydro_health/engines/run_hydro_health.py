@@ -1,6 +1,7 @@
 import pathlib
 import time
 import os
+from osgeo import gdal, osr, ogr
 HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
@@ -13,7 +14,8 @@ from hydro_health.helpers.tools import (
     Param,
     create_raster_vrt,
     process_create_masks,
-    grid_vrt_files
+    grid_vrt_files,
+    delete_intermediate_digitalcoast
 )
 
 
@@ -38,11 +40,15 @@ if __name__ == '__main__':
     start = time.time()
     process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
+    
     for ecoregion in get_ecoregion_folders(param_lookup):
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
             create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
         create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+        # delete_intermediate_digitalcoast(param_lookup['output_directory'].valueAsText, ecoregion)
+        # TODO two "old.tif" files stay up no matter what?!
+        
     process_create_masks(param_lookup['output_directory'].valueAsText)
     grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 

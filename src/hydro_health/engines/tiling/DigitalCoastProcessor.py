@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
 
 
-set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+# set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 class DigitalCoastProcessor:
