@@ -29,13 +29,6 @@ class Engine:
     def check_logging(self) -> None:
         if self.logged:
             self.message(f'Check log: {self.log_path}')
-        
-    def get_config_item(item:str) -> str:
-        """Load config and return speciific key"""
-
-        with open(str(INPUTS / 'config.yaml'), 'r') as lookup:
-            config = yaml.safe_load(lookup)
-        return config[item]
     
     def log_error(self) -> None:
         self.logger.error(gdal.GetLastErrorMsg())
