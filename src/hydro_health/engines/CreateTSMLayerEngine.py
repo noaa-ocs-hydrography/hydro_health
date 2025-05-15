@@ -1,5 +1,8 @@
 import os
+import re
 import pathlib
+import fnmatch
+import datetime
 from ftplib import FTP
 import xarray as xr
 import numpy as np
@@ -23,53 +26,83 @@ class CreateTSMLayerEngine(Engine):
         self.username = 'ftp_gc_AMcCutchan'
         self.password = 'AMcCutchan_4915'
         self.server = 'ftp.hermes.acri.fr'
-        # self.pattern = 'L3m_'  # You can refine this later with fnmatch if needed    
+        self.downloaded_files = []
 
     def download_tsm_data(self):
-        print('Downloading data...')
+        print('Connecting to FTP server...')
         ftp = FTP(self.server)
         ftp.login(user=self.username, passwd=self.password)
 
-        ftp.cwd('globcolour/GLOB')
+        root_dir = '/GLOB'
+        print(f"Starting recursive download from: {root_dir}")
 
-        sensors = ftp.nlst()  # List all sensors: merged, seawifs, meris, modis, etc.
-
-        for sensor in sensors:
-            if sensor == 'merged':
-                continue  # Skip 'merged' sensor
-
-            base_dir = f'/globcolour/GLOB/{sensor}/8-day'
-            print(f"Starting download for sensor: {sensor}")
-
-            try:
-                self.download_recursive(ftp, base_dir)
-            except Exception as e:
-                print(f"Skipping sensor {sensor} due to error: {e}")
+        try:
+            self.download_recursive(ftp, root_dir)
+        except Exception as e:
+            print(f"Error during download: {e}")
 
         ftp.quit()
+        self.write_download_log()
 
+    def write_download_log(self):
+        def extract_start_date(filename):
+            match = re.search(r'(\d{8})-\d{8}', filename)
+            return match.group(1) if match else '99999999'
+
+        sorted_files = sorted(self.downloaded_files, key=extract_start_date)
+        log_path = pathlib.Path(get_config_item('TSM', 'DATA_PATH')) / 'downloaded_files.txt'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(log_path, 'w') as f:
+            for name in sorted_files:
+                f.write(name + '\n')
+
+        print(f"\nDownload log written to: {log_path}")
+    
     def download_recursive(self, ftp, current_dir):
         try:
             ftp.cwd(current_dir)
-            items = ftp.nlst()  # List everything in current folder
+            normalized = current_dir.lower().strip('/')
 
-            for item in items:
-                path = f'{current_dir}/{item}'
-                print(path)
-                try:
-                    ftp.cwd(path)  # Try to move into it
-                    # If success, it was a folder: recurse inside
-                    self.download_recursive(ftp, path)
-                    ftp.cwd('..')  # Move back up after recursion
-                except Exception:
-                    # If cannot move into it, it's a file
-                    if item.endswith('.nc') and 'TSM_8D' in item:
-                        local_path = pathlib.Path(get_config_item('TSM', 'DATA_PATH')) / 'nc_files' / item
-                        print(local_path)
-                        if not local_path.exists():
-                            print(f'Downloading {item} from {path}')
-                            with open(local_path, 'wb') as f:
-                                ftp.retrbinary(f'RETR {item}', f.write)
+            skip_patterns = (
+                '*meris/*', '*viirsn*', '*seawifs*', '*modis*',
+                '*viirsj1*', '*meris4rp*', '*olcib*',
+                '*/1998/*', '*/1999/*', '*/2000/*', '*/2001/*', '*/2002/*', '*/2003/*',
+                '*/month/*', '*/day/*', '*/track/*',
+                '*/olcia/*/2019/*', '*/olcia/*/2020/*', '*/olcia/*/2021/*',
+                '*/olcia/*/2022/*', '*/olcia/*/2023/*', '*/olcia/*/2024/*', '*/olcia/*/2025/*'
+            )
+
+            if any(fnmatch.fnmatch(normalized, pattern.strip('/')) for pattern in skip_patterns):
+                return
+
+            items = list(ftp.mlsd())
+            print(f"Found {len(items)} items in {current_dir}")
+
+            for name, facts in items:
+                item_path = f"{current_dir}/{name}"
+                if facts.get("type") == "dir":
+                    self.download_recursive(ftp, item_path)
+                elif name.endswith('.nc') and 'TSM_8D' in name and '_4' in name and 'L3m' in name:
+                    # Skip OLCIA files after 20180501 bc merged files for A/B satellites exist after this data
+                    if 'AV-OLA' in name:
+                        match = re.search(r'L3m_(\d{8})-', name)
+                        if match:
+                            file_date = datetime.datetime.strptime(match.group(1), "%Y%m%d")
+                            if file_date > datetime.datetime(2018, 5, 1):
+                                print(f"Skipping late OLCIA file: {name}")
+                                continue  
+
+                    local_dir = pathlib.Path('TSM_download/nc_files')
+                    local_path = local_dir / name
+                    local_dir.mkdir(parents=True, exist_ok=True)
+
+                    if not local_path.exists():
+                        print(f"Downloading {name} from {item_path}")
+                        with open(local_path, 'wb') as f:
+                            ftp.retrbinary(f'RETR {name}', f.write)
+                        self.downloaded_files.append(name)
+
         except Exception as e:
             print(f"Error accessing {current_dir}: {e}")
 
@@ -77,7 +110,7 @@ class CreateTSMLayerEngine(Engine):
         """Create annual mean TSM rasters and write full-resolution GeoTIFFs"""
         
         folder_path = pathlib.Path(get_config_item('TSM', 'DATA_PATH'))
-        output_folder = pathlib.Path(get_config_item('TSM', 'DATA_PATH')) / 'tsm_rasters' / 'mean_rasters'
+        output_folder = pathlib.Path(get_config_item('TSM', 'MEAN_RASTER_PATH')) 
 
         grid_shape = (4320, 8640)  # (height, width)
         transform = from_bounds(-180, -90, 180, 90, grid_shape[1], grid_shape[0])
@@ -99,10 +132,10 @@ class CreateTSMLayerEngine(Engine):
                 try:
                     ds = xr.open_dataset(path)
                     arr = ds['TSM_mean'].values.squeeze().astype(np.float32)
-                    arr[arr == 0] = np.nan  # treat 0s as invalid, # TODO double check
+                    arr[arr == 0] = np.nan 
                     ds.close()
 
-                    if running_sum is None: # TODO double check the mean and count
+                    if running_sum is None:
                         running_sum = np.zeros_like(arr, dtype=np.float32)
                         valid_count = np.zeros_like(arr, dtype=np.uint16)
 
@@ -117,7 +150,7 @@ class CreateTSMLayerEngine(Engine):
                 print(f"  No valid rasters for {year}")
                 continue
 
-            with np.errstate(invalid='ignore'):  # suppress warnings from divide-by-zero
+            with np.errstate(invalid='ignore'):
                 annual_mean = running_sum / valid_count
             annual_mean[valid_count == 0] = nodata_val
 
@@ -148,8 +181,8 @@ class CreateTSMLayerEngine(Engine):
         :param _type_ end_year: last year in the range
         """        
 
-        input_folder = pathlib.Path(get_config_item('TSM', 'DATA_PATH')) / 'tsm_rasters' / 'mean_rasters'
-        output_folder = pathlib.Path(get_config_item('TSM', 'DATA_PATH')) / 'tsm_rasters' / 'year_pair_rasters'
+        input_folder = pathlib.Path(get_config_item('TSM', 'MEAN_RASTER_PATH')) 
+        output_folder = pathlib.Path(get_config_item('TSM', 'YEAR_PAIR_RASTER_PATH'))
         output_name=f"tsm_mean.tif"
 
         raster_files = [
@@ -186,7 +219,7 @@ class CreateTSMLayerEngine(Engine):
     def start(self):
         """Entrypoint for processing the TSM layer"""
   
-        # self.download_tsm_data()
+        self.download_tsm_data()
         self.create_rasters()
 
         for start_year, end_year in self.year_ranges:    
