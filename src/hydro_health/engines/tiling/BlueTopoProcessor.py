@@ -15,7 +15,7 @@ from osgeo import gdal
 from concurrent.futures import ThreadPoolExecutor
 
 
-# mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 class BlueTopoProcessor:
