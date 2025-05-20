@@ -12,6 +12,39 @@ from rasterio.transform import from_bounds
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+
+class HydroHealthCredentialsError(Exception):
+    pass
+
+class HydroHealthConfig:
+    def __init__(self):
+        self.config_path = INPUTS / 'lookups' / 'hydro_health.config'
+        self.username = None
+        self.password = None
+        self._load_credentials()
+
+    def _load_credentials(self)-> None:
+        """Load FTP credentials from the config file"""
+
+        if not self.config_path.exists():
+            raise HydroHealthCredentialsError(f"Config file not found: {self.config_path}")
+
+        creds = {}
+        with open(self.config_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if '=' in line:
+                    key, value = line.split("=", 1)
+                    creds[key.strip()] = value.strip()
+
+        try:
+            self.username = creds["username"]
+            self.password = creds["password"]
+        except KeyError as e:
+            raise HydroHealthCredentialsError(f"Missing value in config: {e}")
 
 class CreateTSMLayerEngine(Engine):
     """Class to hold the logic for processing the TSM layer"""
@@ -23,8 +56,9 @@ class CreateTSMLayerEngine(Engine):
             (2006, 2010),
             (2010, 2015),
             (2015, 2022)]
-        self.username = 'ftp_gc_AMcCutchan'
-        self.password = 'AMcCutchan_4915'
+        creds = HydroHealthConfig()
+        self.username = creds.username
+        self.password = creds.password
         self.server = 'ftp.hermes.acri.fr'
         self.downloaded_files = []
 
@@ -178,7 +212,7 @@ class CreateTSMLayerEngine(Engine):
         return match.group(1) if match else '99999999'    
 
     def write_download_log(self)-> None:
-        """Write a log of downloaded files to a text file"""
+        """Write a log of downloaded files to a text file in chronological order"""
 
         print("Writing download log...")
 
@@ -237,9 +271,13 @@ class CreateTSMLayerEngine(Engine):
     def start(self)-> None:
         """Entrypoint for processing the TSM layer"""
   
-        self.download_tsm_data()
+        try:
+            self.download_tsm_data()
+        except HydroHealthCredentialsError as e:
+            print(f"Failed to start engine: {e}")
+            return
+
         self.create_rasters()
 
         for start_year, end_year in self.year_ranges:    
             self.year_pair_rasters(start_year=start_year, end_year=end_year)   
-
