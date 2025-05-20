@@ -1,5 +1,4 @@
 import yaml
-import time
 import pathlib
 import geopandas as gpd
 import rioxarray as rxr
@@ -11,9 +10,10 @@ from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
 from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideForecastProcessor
 from osgeo import gdal, osr, ogr
 
+
 gdal.UseExceptions()
 gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
-# gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
+gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
 gdal.SetCacheMax(2684354560)  # 20gb RAM
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -36,7 +36,7 @@ def process_create_masks(outputs:str) -> None:
     processor.process(outputs)
 
 
-def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
+def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
     """Create an output VRT from found .tif files"""
 
     glob_lookup = {
@@ -63,24 +63,27 @@ def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_t
         # Project all geotiff to match BlueTopo tiles WGS84
         if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
             geotiff_ds = None  # close dataset
-            old_geotiff = geotiff.rename(geotiff.parents[0] / f'{geotiff.stem}_old.tif')  # rename to old
+
+            old_geotiff = geotiff.parents[0] / f'{geotiff.stem}_old.tif'
+            geotiff.rename(old_geotiff)
             raster_wgs84 = geotiff.parents[0] / f'{geotiff.stem}_wgs84.tif'
             rasterio_wgs84 = CRS.from_epsg(4326)
-            geotiff_raster = rxr.open_rasterio(old_geotiff)
-            wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
-            wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
+            with rxr.open_rasterio(old_geotiff) as geotiff_raster:
+                wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
+                wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
+
             wgs84_ds = gdal.Open(raster_wgs84)
+            # Compress and overwrite original geotiff path
             gdal.Warp(
                 geotiff,
                 wgs84_ds,
                 creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
             )
-
             wgs84_ds = None
-            raster_wgs84 = None
-            wgs84_geotiff_raster = None
-            geotiff_raster = None
-            old_geotiff = None
+            
+            # Delete intermediate files
+            old_geotiff.unlink()
+            raster_wgs84.unlink()
 
         geotiff_ds = gdal.Open(geotiff)  # reopen new projected geotiff path
         projection_wkt = geotiff_ds.GetProjection()
@@ -119,33 +122,6 @@ def create_raster_vrt(output_folder: str, file_type: str, ecoregion: str, data_t
         
         vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
         gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
-
-
-def delete_intermediate_digitalcoast(output_folder, ecoregion) -> None:
-    """Separate step for deleting old and wgs84 uneeded files"""
-
-    print(f'Removing intermediate files')
-    old_files = pathlib.Path(output_folder).rglob('*_old.tif')
-    wgs_files = pathlib.Path(output_folder).rglob('*_wgs84.tif')
-    
-    for file in old_files:
-        deleted = False
-        while not deleted:
-            try:
-                file.unlink()
-                deleted = True
-            except Exception as e:
-                print(f'file error: {e}')
-    for file in wgs_files:
-        deleted = False
-        while not deleted:
-            try:
-                file.unlink()
-                deleted = True
-            except Exception as e:
-                print(f'file error: {e}')
-
-
 
 
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
@@ -247,16 +223,29 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
             vrt_ds = gdal.Open(vrt)
             
             # create extent polygon of raster
-            gt = vrt_ds.GetGeoTransform()
-            raster_extent = (gt[0], gt[3], gt[0] + gt[1] * vrt_ds.RasterXSize, gt[3] + gt[5] * vrt_ds.RasterYSize)
-            ring = ogr.Geometry(ogr.wkbLinearRing)
-            ring.AddPoint(raster_extent[0], raster_extent[1])
-            ring.AddPoint(raster_extent[2], raster_extent[1])
-            ring.AddPoint(raster_extent[2], raster_extent[3])
-            ring.AddPoint(raster_extent[0], raster_extent[3])
-            ring.AddPoint(raster_extent[0], raster_extent[1])
-            raster_geom = ogr.Geometry(ogr.wkbPolygon)
-            raster_geom.AddGeometry(ring)
+            # gt = vrt_ds.GetGeoTransform()
+            # raster_extent = (gt[0], gt[3], gt[0] + gt[1] * vrt_ds.RasterXSize, gt[3] + gt[5] * vrt_ds.RasterYSize)
+            # ring = ogr.Geometry(ogr.wkbLinearRing)
+            # ring.AddPoint(raster_extent[0], raster_extent[1])
+            # ring.AddPoint(raster_extent[2], raster_extent[1])
+            # ring.AddPoint(raster_extent[2], raster_extent[3])
+            # ring.AddPoint(raster_extent[0], raster_extent[3])
+            # ring.AddPoint(raster_extent[0], raster_extent[1])
+            # raster_geom = ogr.Geometry(ogr.wkbPolygon)
+            # raster_geom.AddGeometry(ring)
+
+            # Read tile_index shapefile instead
+            # TODO this still seemed to create empty rasters, but fewer intersections found
+            vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[3:])
+            vrt_tile_index = list(vrt_data_folder.rglob('*_dis.shp'))[0]
+            shp_driver = ogr.GetDriverByName('ESRI Shapefile')
+            vrt_tile_index_shp = shp_driver.Open(vrt_tile_index, 0)
+            # get geometry of single feature
+            dissolve_layer = vrt_tile_index_shp.GetLayer(0)
+            raster_geom = None
+            for dis_feature in dissolve_layer:
+                raster_geom = dis_feature.GetGeometryRef()
+                break
 
             for feature in blue_topo_layer:
                 # Clip VRT by current polygon

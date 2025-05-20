@@ -60,7 +60,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         self.download_bluetopo_tiles(tiles)
         self.download_digital_coast_tiles(tiles)
         self.create_raster_masks()
-        self.grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
+        self.grid_vrt_files()
         arcpy.AddMessage('Done')
 
     def postExecute(self, parameters):
@@ -99,7 +99,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         for ecoregion in ecoregions:
             for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
                 arcpy.AddMessage(f'Building {ecoregion} - {dataset} VRT file')
-                tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+                tools.create_raster_vrts(self.param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
 
     def download_digital_coast_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all digital coast tiles"""
@@ -108,7 +108,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
         for ecoregion in tools.get_ecoregion_folders(self.param_lookup):
             arcpy.AddMessage(f'Building {ecoregion} - Digital Coast VRT file')
-            tools.create_raster_vrt(self.param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+            tools.create_raster_vrts(self.param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
             digital_coast_folder = os.path.join(self.param_lookup['output_directory'].valueAsText, ecoregion, 'DigitalCoast')
             if os.path.exists(digital_coast_folder):
                 files = len(next(os.walk(digital_coast_folder))[1])
@@ -256,6 +256,7 @@ class RunHydroHealthModelTool(HHLayerTool):
     def grid_vrt_files(self):
         """Clip DigitalCoast VRT files to BlueTopo grid"""
 
+        arcpy.AddMessage('Gridding VRT file to Blue Topo tiles')
         tools.grid_vrt_files(self.param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
     def setup_param_lookup(self, params: list[str]):

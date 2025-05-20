@@ -12,10 +12,9 @@ from hydro_health.helpers.tools import (
     get_ecoregion_tiles,
     get_ecoregion_folders,
     Param,
-    create_raster_vrt,
+    create_raster_vrts,
     process_create_masks,
-    grid_vrt_files,
-    delete_intermediate_digitalcoast
+    grid_vrt_files
 )
 
 
@@ -31,7 +30,7 @@ if __name__ == '__main__':
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
         'eco_regions': Param(''),
-        'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson'))
+        'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
         # 'drawn_polygon': Param('')
     }
     
@@ -44,11 +43,9 @@ if __name__ == '__main__':
     for ecoregion in get_ecoregion_folders(param_lookup):
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
-        create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
-        # delete_intermediate_digitalcoast(param_lookup['output_directory'].valueAsText, ecoregion)
-        # TODO two "old.tif" files stay up no matter what?!
-        
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+    
     process_create_masks(param_lookup['output_directory'].valueAsText)
     grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
