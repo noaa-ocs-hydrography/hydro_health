@@ -123,9 +123,10 @@ class RasterMaskProcessor:
     def delete_intermediate_files(self, outputs) -> None:
         """Delete any intermediate shapefiles"""
 
-        dissolved_shapefiles = pathlib.Path(outputs).rglob('*_dis.*')
-        for file in dissolved_shapefiles:
-            file.unlink()
+        # keep dissolved files for gridding VRT
+        # dissolved_shapefiles = pathlib.Path(outputs).rglob('*_dis.*')
+        # for file in dissolved_shapefiles:
+        #     file.unlink()
 
         merged_shapefiles = pathlib.Path(outputs).rglob('training_data*')
         for file in merged_shapefiles:
@@ -197,7 +198,7 @@ class RasterMaskProcessor:
         self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
         print('Merging all dissolved tile index shapfiles')
         self.merge_dissolved_polygons(ecoregions)
-        print('Creaing training masks')
+        print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.delete_intermediate_files(outputs)
 

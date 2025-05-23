@@ -1,6 +1,7 @@
 import pathlib
 import time
 import os
+from osgeo import gdal, osr, ogr
 HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
@@ -11,7 +12,7 @@ from hydro_health.helpers.tools import (
     get_ecoregion_tiles,
     get_ecoregion_folders,
     Param,
-    create_raster_vrt,
+    create_raster_vrts,
     process_create_masks,
     grid_vrt_files
 )
@@ -29,7 +30,7 @@ if __name__ == '__main__':
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
         'eco_regions': Param(''),
-        'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson'))
+        'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
         # 'drawn_polygon': Param('')
     }
     
@@ -38,11 +39,13 @@ if __name__ == '__main__':
     start = time.time()
     process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
+    
     for ecoregion in get_ecoregion_folders(param_lookup):
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            create_raster_vrt(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
-        create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+    
     process_create_masks(param_lookup['output_directory'].valueAsText)
     grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
