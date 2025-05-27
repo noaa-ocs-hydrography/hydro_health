@@ -3,6 +3,7 @@ ACTIVECAPTAIN:
   JSON: active_captain_points.json
 DIGITALCOAST:
   API: https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry=
+  TILED_DATA: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\raw\ER_3\DigitalCoast\tiled'
 GROUNDINGS:
   INCIDENTS: https://incidentnews.noaa.gov/raw/incidents.csv
   SERVICE: https://services8.arcgis.com/6ldl6K67FkYzPtEE/ArcGIS/rest/services/Significant_Maritime_Incidents__REG_Parameters__WFL1/FeatureServer/0/query?where=Incident_Type='GROUNDING'&outFields=*&units=esriSRUnit_Meter&returnGeometry=true&featureEncoding=esriDefault&returnQueryGeometry=true&returnExceededLimitFeatures=true&orderByFields='Year'&f=pgeojson
