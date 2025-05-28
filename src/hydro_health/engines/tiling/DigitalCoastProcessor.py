@@ -64,10 +64,7 @@ class DigitalCoastProcessor:
         df_joined.to_file(shp_path, driver='ESRI Shapefile', encoding='utf-8')
         if df_joined['url'].any():
             df_joined = df_joined.loc[df_joined['tile'].notnull()]
-            # Update datset to be only intesersected features
-            # df_joined.to_file(shp_path, driver='ESRI Shapefile', encoding='utf-8')
             shp_folder = shp_path.parents[0]
-            # df_joined.to_file(fr'{OUTPUTS}\{shp_path.stem}', driver='ESRI Shapefile')
             urls = df_joined['url'].unique()
             for i, url in enumerate(urls):
                 cleansed_url = self.cleansed_url(url)
