@@ -1,9 +1,11 @@
 import yaml
 import pathlib
+import tempfile
+import json
 import geopandas as gpd
 import rioxarray as rxr
+import rasterio
 
-from rasterio.crs import CRS
 from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
@@ -12,7 +14,7 @@ from osgeo import gdal, osr, ogr
 
 
 gdal.UseExceptions()
-gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
+# gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
 gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
 gdal.SetCacheMax(2684354560)  # 20gb RAM
 
@@ -51,8 +53,9 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
     output_geotiffs = {}
-    for geotiff in geotiffs:
-        output_vrt = geotiff.parents[0] / f'{geotiff.stem}.vrt'
+    for geotiff_path in geotiffs:
+        geotiff = str(geotiff_path)
+        output_vrt = geotiff_path.parents[0] / f'{geotiff_path.stem}.vrt'
         if output_vrt.exists():
             print(f'Skipping VRT: {output_vrt.name}')
             continue
@@ -64,15 +67,15 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
             geotiff_ds = None  # close dataset
 
-            old_geotiff = geotiff.parents[0] / f'{geotiff.stem}_old.tif'
-            geotiff.rename(old_geotiff)
-            raster_wgs84 = geotiff.parents[0] / f'{geotiff.stem}_wgs84.tif'
-            rasterio_wgs84 = CRS.from_epsg(4326)
+            old_geotiff = geotiff_path.parents[0] / f'{geotiff_path.stem}_old.tif'
+            geotiff_path.rename(old_geotiff)
+            raster_wgs84 = geotiff_path.parents[0] / f'{geotiff_path.stem}_wgs84.tif'
+            rasterio_wgs84 = rasterio.crs.CRS.from_epsg(4326)
             with rxr.open_rasterio(old_geotiff) as geotiff_raster:
                 wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
                 wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
 
-            wgs84_ds = gdal.Open(raster_wgs84)
+            wgs84_ds = gdal.Open(str(raster_wgs84))
             # Compress and overwrite original geotiff path
             gdal.Warp(
                 geotiff,
@@ -90,13 +93,13 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
         projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
-        provider_folder = geotiff.parents[2].name
+        provider_folder = geotiff_path.parents[2].name
         # Handle BlueTopo and DigitalCoast differently
         clean_crs_key = f'{clean_crs_string}_{provider_folder}' if data_type == 'DigitalCoast' else clean_crs_string
         # Store tile and CRS
         if clean_crs_key not in output_geotiffs:
             output_geotiffs[clean_crs_key] = {'crs': None, 'tiles': []}
-        output_geotiffs[clean_crs_key]['tiles'].append(geotiff)
+        output_geotiffs[clean_crs_key]['tiles'].append(geotiff_path)
         if output_geotiffs[clean_crs_key]['crs'] is None:
             output_geotiffs[clean_crs_key]['crs'] = spatial_ref
         
@@ -114,7 +117,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
             output_raster_vrt = str(tile.parents[0] / f"{tile.stem}.vrt")
             gdal.Warp(
                 output_raster_vrt, 
-                tile,
+                str(tile),
                 format="VRT",
                 dstSRS=output_geotiffs[crs]['crs']
             )
@@ -122,6 +125,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         
         vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
         gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
+    print('finished create_raster_vrts')
 
 
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
@@ -212,30 +216,18 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 def grid_vrt_files(outputs: str, data_type: str) -> None:
     """Clip VRT files to BlueTopo grid"""
 
-    gpkg_ds = ogr.Open(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
+    gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
     blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
     for ecoregion in ecoregions:
-        bluetopo_grids = [folder.stem for folder in pathlib.Path(ecoregion / 'BlueTopo').iterdir() if folder.is_dir()]
+        blue_topo_folder = ecoregion / 'BlueTopo'
+        bluetopo_grids = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
         data_folder = ecoregion / data_type
         vrt_files = data_folder.glob('*.vrt')
         for vrt in vrt_files:
-            vrt_ds = gdal.Open(vrt)
-            
-            # create extent polygon of raster
-            # gt = vrt_ds.GetGeoTransform()
-            # raster_extent = (gt[0], gt[3], gt[0] + gt[1] * vrt_ds.RasterXSize, gt[3] + gt[5] * vrt_ds.RasterYSize)
-            # ring = ogr.Geometry(ogr.wkbLinearRing)
-            # ring.AddPoint(raster_extent[0], raster_extent[1])
-            # ring.AddPoint(raster_extent[2], raster_extent[1])
-            # ring.AddPoint(raster_extent[2], raster_extent[3])
-            # ring.AddPoint(raster_extent[0], raster_extent[3])
-            # ring.AddPoint(raster_extent[0], raster_extent[1])
-            # raster_geom = ogr.Geometry(ogr.wkbPolygon)
-            # raster_geom.AddGeometry(ring)
+            print(vrt)
+            vrt_ds = gdal.Open(str(vrt))
 
-            # Read tile_index shapefile instead
-            # TODO this still seemed to create empty rasters, but fewer intersections found
             vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[3:])
             vrt_tile_index = list(vrt_data_folder.rglob('*_dis.shp'))[0]
             shp_driver = ogr.GetDriverByName('ESRI Shapefile')
@@ -246,7 +238,8 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
             for dis_feature in dissolve_layer:
                 raster_geom = dis_feature.GetGeometryRef()
                 break
-
+            dissolve_layer = None
+            blue_topo_layer.ResetReading()
             for feature in blue_topo_layer:
                 # Clip VRT by current polygon
                 polygon = feature.GetGeometryRef()
@@ -255,36 +248,28 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                 output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
                 if output_clipped_vrt.exists():
                     if output_clipped_vrt.stat().st_size == 0:
-                        try:
-                            print(f're-warp empty raster: {output_clipped_vrt.name}')
-                            gdal.Warp(
-                                output_clipped_vrt,
-                                vrt,
-                                format='GTiff',
-                                cutlineDSName=polygon,
-                                cropToCutline=True,
-                                dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
-                                cutlineSRS=vrt_ds.GetProjection(),
-                                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
-                            )
-                        except RuntimeError as e:
-                            print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
-                            print(f'Rerun-Error: {output_clipped_vrt} - {e}')
-                            continue
-                    else:
-                        print(f'Skipping {output_clipped_vrt.name}')
-                        continue
+                        print(f're-warp empty raster: {output_clipped_vrt.name}')
+                        gdal.Warp(
+                            str(output_clipped_vrt),
+                            str(vrt),
+                            format='GTiff',
+                            cutlineDSName=polygon,
+                            cropToCutline=True,
+                            dstNodata=vrt_ds.GetRasterBand(1).GetNoDataValue(),
+                            cutlineSRS=vrt_ds.GetProjection(),
+                            creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
+                        )
                 elif folder_name in bluetopo_grids:
-                    if polygon.Intersects(raster_geom):
-                        output_path.mkdir(parents=True, exist_ok=True)
-                        print(f'Creating {output_clipped_vrt.name}')
-                        # Try to force clear temp directory to conserve space
-                        # with tempfile.TemporaryDirectory() as temp:
-                        #     gdal.SetConfigOption('CPL_TMPDIR', temp)
-                        try:
+                    try:
+                        if polygon.Intersects(raster_geom):
+                            output_path.mkdir(parents=True, exist_ok=True)
+                            print(f'Creating {output_clipped_vrt.name}')
+                            # Try to force clear temp directory to conserve space
+                            with tempfile.TemporaryDirectory() as temp:
+                                gdal.SetConfigOption('CPL_TMPDIR', temp)
                             gdal.Warp(
-                                output_clipped_vrt,
-                                vrt,
+                                str(output_clipped_vrt),
+                                str(vrt),
                                 format='GTiff',
                                 cutlineDSName=polygon,
                                 cropToCutline=True,
@@ -292,17 +277,15 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                                 cutlineSRS=vrt_ds.GetProjection(),
                                 creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
                             )
-                        except RuntimeError as e:
-                            print('XXXXXXXXXXXXXXXXXXXXXXXXXXXX')
-                            print(f'Error: {output_clipped_vrt} - {e}')
-                            continue
+                    except Exception as e:
+                        print('failed:', e)
                 polygon = None
-            gt = None
             raster_geom = None
-            ring = None
             vrt_ds = None
     gpkg_ds = None
     blue_topo_layer = None
+    print('finished')
+    return
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
