@@ -123,10 +123,6 @@ class RasterMaskProcessor:
     def delete_intermediate_files(self, outputs) -> None:
         """Delete any intermediate shapefiles"""
 
-        dissolved_shapefiles = pathlib.Path(outputs).rglob('*_dis.*')
-        for file in dissolved_shapefiles:
-            file.unlink()
-
         merged_shapefiles = pathlib.Path(outputs).rglob('training_data*')
         for file in merged_shapefiles:
             file.unlink()
@@ -152,11 +148,21 @@ class RasterMaskProcessor:
                 for file in json_files:
                     if ecoregion.stem not in approved_files:
                         approved_files[ecoregion.stem] = []
+                    # Disregard small area tile index
+                    parent_project = file.parents[0]
                     if json.load(open(file))['Shape_Area'] > 5000000:
-                        parent_project = file.parents[0]
                         tile_index_shps = list(parent_project.rglob('tileindex*.shp'))
                         if tile_index_shps:
                             approved_files[ecoregion.stem].append(tile_index_shps[0])
+                    else:
+                        # delete digital coast folder if small area
+                        print(f' - Deleting small area: {parent_project.stem}')
+                        if parent_project.exists():
+                            shutil.rmtree(parent_project)
+                            # TODO will all ecoregions have 'mosaic_NCMP_6326' ? 
+                            vrt_file = parent_project.parents[0] / f'mosaic_NCMP_6326_{parent_project.stem}.vrt'
+                            if vrt_file.exists():
+                                vrt_file.unlink()
         return approved_files
 
     def get_transformation(self) -> osr.CoordinateTransformation:
@@ -197,7 +203,7 @@ class RasterMaskProcessor:
         self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
         print('Merging all dissolved tile index shapfiles')
         self.merge_dissolved_polygons(ecoregions)
-        print('Creaing training masks')
+        print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.delete_intermediate_files(outputs)
 
