@@ -2,15 +2,19 @@
 
 import boto3
 import os
+import rasterio
 import sys
 import geopandas as gpd
+import pandas as pd
 import pathlib
 import multiprocessing as mp
 import numpy as np
 
 from hydro_health.helpers import hibase_logging
+from datetime import datetime
 from botocore.client import Config
 from botocore import UNSIGNED
+from lxml import etree
 from osgeo import gdal
 from concurrent.futures import ThreadPoolExecutor
 
@@ -34,6 +38,64 @@ class BlueTopoProcessor:
         slope_name = str(tiff_file_path.stem) + '_slope.tiff'
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
+
+    def create_survey_end_date_tiff(self, tiff_file_path: pathlib.Path) -> None:
+        """Create survey end date tiffs from contributor band values in the XML file."""        
+        
+        with rasterio.open(tiff_file_path) as src:
+            contributor_band_values = src.read(3)
+            transform = src.transform
+            nodata = src.nodata 
+            width, height = src.width, src.height  
+
+        xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
+        tree = etree.parse(xml_file_path)
+        root = tree.getroot()
+
+        contributor_band_xml = root.xpath("//PAMRasterBand[Description='Contributor']")
+        rows = contributor_band_xml[0].xpath(".//GDALRasterAttributeTable/Row")
+
+        table_data = []
+        for row in rows:
+            fields = row.xpath(".//F")
+            field_values = [field.text for field in fields]
+
+            data = {
+                "value": float(field_values[0]),
+                "survey_date_end": (
+                    datetime.strptime(field_values[17], "%Y-%m-%d").date() 
+                    if field_values[17] != "N/A" 
+                    else None  
+                )
+            }
+            table_data.append(data)
+        attribute_table_df = pd.DataFrame(table_data)
+
+        attribute_table_df['survey_year_end'] = attribute_table_df['survey_date_end'].apply(lambda x: x.year if pd.notna(x) else 0)
+        attribute_table_df['survey_year_end'] = attribute_table_df['survey_year_end'].round(2)
+
+        date_mapping = attribute_table_df[['value', 'survey_year_end']].drop_duplicates()
+        reclass_matrix = date_mapping.to_numpy()
+        reclass_dict = {row[0]: row[1] for row in reclass_matrix}
+
+        reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
+        reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
+
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_survey_end_date.tiff'
+        with rasterio.open(
+            survey_date_file_path,
+            "w",
+            driver="GTiff",
+            count=1,
+            width=width,
+            height=height,
+            dtype=rasterio.float32,
+            compress="lzw",
+            crs=src.crs,
+            transform=transform,
+            nodata=nodata,
+        ) as dst:
+            dst.write(reclassified_band, 1)
 
     def download_nbs_tile(self, output_folder: str, row: gpd.GeoSeries) -> pathlib.Path:
         """Download all NBS files for a single tile"""
@@ -109,6 +171,7 @@ class BlueTopoProcessor:
         output_folder, row = param_inputs
         tiff_file_path = self.download_nbs_tile(output_folder, row)
         if tiff_file_path:
+            self.create_survey_end_date_tiff(tiff_file_path)
             mb_tiff_file = self.rename_multiband(tiff_file_path)
             self.multiband_to_singleband(mb_tiff_file, band=1)
             self.multiband_to_singleband(mb_tiff_file, band=2)
@@ -138,11 +201,9 @@ class BlueTopoProcessor:
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
-        
+
     def write_message(self, message: str, output_folder: str|pathlib.Path) -> None:
         """Write a message to the main logfile in the output folder"""
 
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
-
-
