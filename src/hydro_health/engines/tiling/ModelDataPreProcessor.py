@@ -1,30 +1,34 @@
-"""Class for parallel preprocessing all model data"""
+"""Class for data acquisition and preprocessing of model data"""
 
+import dask
 import os
-import geopandas as gpd
-import pathlib
 import numpy as np
 import rasterio
-import shutil
 import rioxarray
-import xarray as xr
+import shutil
 from scipy.ndimage import uniform_filter
-from dask import array as da
-
 from scipy.ndimage import generic_filter
-import dask
+import xarray as xr
+
+
 dask.config.set(scheduler='threads', num_workers=2)
-
-
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
-from hydro_health.helpers.tools import get_config_item
-
 
 class ModelDataPreProcessor:
     """Class for parallel preprocessing all model data"""
 
-    def focal_fill_block(self, block, w=3):
+    def __init__(self):
+        self.engines = []
+
+    def add_engine(self, engine) -> None:
+        """Add an engine to the list of engines to run"""
+
+        if not callable(getattr(engine, "run", None)):
+            raise ValueError("Engine must have a 'run()' method.")
+        self.engines.append(engine)
+
+    def focal_fill_block(self, block, w=3) -> np.ndarray:
         """Efficient nan-aware focal mean using uniform_filter."""
+
         block = block.astype(np.float32)
         nan_mask = np.isnan(block)
 
@@ -85,18 +89,9 @@ class ModelDataPreProcessor:
         da.rio.to_raster(output_file)
         print(f"Filled raster written to: {output_file}")
 
-    def iterative_focal_fill(self, r, max_iters=10, w=3):
-        """
-        Iteratively fills NaN values in a 2D NumPy array using a focal mean filter.
-        
-        Parameters:
-        - r: 2D NumPy array with NaNs representing missing data
-        - max_iters: maximum number of focal iterations to run
-        - w: window size for the focal kernel (must be odd)
-        
-        Returns:
-        - A NumPy array with missing values filled
-        """
+    def iterative_focal_fill(self, r, max_iters=10, w=3) -> np.ndarray:
+        """Iteratively fills NaN values in a 2D NumPy array using a focal mean filter."""
+
         footprint = np.ones((w, w))
         
         for _ in range(max_iters):
@@ -112,36 +107,15 @@ class ModelDataPreProcessor:
             r = np.where(np.isnan(r), filled, r)
         
         return r
-    
-    # def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
-    #     """Main entry point for downloading Digital Coast data"""
 
-    #     digital_coast_folder = pathlib.Path(outputs) / 'DigitalCoast'
+    def repeat_disk_focal_fill(self, input_file, output_final, output_dir, n_repeats=5, w=3) -> None:
+        """Repeatedly fills NaN values in a raster by applying focal mean filtering"""
 
-    #     # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
-    #     self.process_tile_index(digital_coast_folder, tile_gdf, outputs)
-    #     self.process_intersected_datasets(digital_coast_folder, tile_gdf)
-    #     if digital_coast_folder.exists():
-    #         self.delete_unused_folder(digital_coast_folder)
-
-    def repeat_disk_focal_fill(self, input_file, output_final, output_dir, n_repeats=5, w=3, layer_name="unknown"):
-        """
-        Repeatedly fills NaN values in a raster by applying focal mean filtering
-        and writing intermediate results to disk. Uses disk I/O for each pass.
-        
-        Parameters:
-        - input_file: path to input raster
-        - output_final: path to final output raster
-        - output_dir: directory to store intermediate outputs
-        - n_repeats: number of focal passes
-        - w: window size for focal mean (must be odd)
-        - layer_name: optional name for logging
-        """
         temp_file = input_file
         kernel = np.ones((w, w))
 
         for i in range(1, n_repeats + 1):
-            print(f" {layer_name} - Disk-Based Focal Fill Iteration {i} of {n_repeats}")
+            print(f" - Focal Fill Iteration {i} of {n_repeats}")
             
             out_path = os.path.join(output_dir, f"{os.path.splitext(os.path.basename(input_file))[0]}_f{i}.tif")
 
@@ -175,20 +149,10 @@ class ModelDataPreProcessor:
         if os.path.exists(temp_file):
             shutil.move(temp_file, output_final)
             print(f" Final filled raster saved as: {os.path.basename(output_final)}")
-        else:
-            print(f" Final result file was not created for {layer_name}")
 
-    def run_gap_fill(self, output_dir, max_iters=10, fallback_repeats=10, w=3):
-        """
-        Sequentially fills gaps in raster files using iterative focal fill with fallback strategy.
-        
-        Parameters:
-        - bathy_files: list of input raster file paths
-        - output_dir: directory to save filled raster files
-        - max_iters: max iterations for the iterative fill method
-        - fallback_repeats: how many fallback passes to try
-        - w: kernel/window size
-        """
+    def run_gap_fill(self, output_dir, max_iters=10, fallback_repeats=10, w=3) -> None:
+        """Sequentially fills gaps in raster files using iterative focal fill with fallback strategy."""
+
         print("Starting gap fill module...")
 
         # bathy_files = get_config_item('DIGITALCOAST', 'TILED_DATA')
@@ -207,3 +171,10 @@ class ModelDataPreProcessor:
         )
 
         print("Gap fill process complete.")
+
+    def run_all(self) -> list:
+        """Run all creation engines
+
+        return list: list of the engines to run"""        
+
+        return [engine.run() for engine in self.engines]

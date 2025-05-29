@@ -170,7 +170,7 @@ class CreateTSMLayerEngine(Engine):
                                 print(f"Skipping late OLCIA file: {name}")
                                 continue  
 
-                    local_dir = pathlib.Path('TSM_download/nc_files')
+                    local_dir = pathlib.Path(get_config_item('TSM', 'DATA_PATH'))
                     local_path = local_dir / name
                     local_dir.mkdir(parents=True, exist_ok=True)
 
@@ -268,7 +268,7 @@ class CreateTSMLayerEngine(Engine):
 
         print(f"Averaged raster saved to {output_path}.")
 
-    def start(self)-> None:
+    def run(self)-> None:
         """Entrypoint for processing the TSM layer"""
   
         try:
