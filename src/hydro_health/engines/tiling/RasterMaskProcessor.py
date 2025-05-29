@@ -158,11 +158,11 @@ class RasterMaskProcessor:
                         # delete digital coast folder if small area
                         print(f' - Deleting small area: {parent_project.stem}')
                         if parent_project.exists():
-                            shutil.rmtree(parent_project)
                             # TODO will all ecoregions have 'mosaic_NCMP_6326' ? 
                             vrt_file = parent_project.parents[0] / f'mosaic_NCMP_6326_{parent_project.stem}.vrt'
                             if vrt_file.exists():
                                 vrt_file.unlink()
+                            shutil.rmtree(parent_project)
         return approved_files
 
     def get_transformation(self) -> osr.CoordinateTransformation:
