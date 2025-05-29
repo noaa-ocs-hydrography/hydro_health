@@ -14,7 +14,7 @@ if __name__ == '__main__':
     profiler.enable()
 
     engine = CreateSedimentLayerEngine()
-    engine.start()
+    engine.run()
 
     profiler.disable()
     stats = pstats.Stats(profiler)

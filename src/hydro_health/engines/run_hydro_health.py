@@ -17,12 +17,24 @@ from hydro_health.helpers.tools import (
     grid_vrt_files
 )
 
+from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
+from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
+from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
+
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 if __name__ == '__main__':
+
+    # Data aquisition processes for the TSM, Sediment, and Hurricane tiffs
+    processor = ModelDataPreProcessor()
+    processor.add_engine(CreateTSMLayerEngine())
+    processor.add_engine(CreateSedimentLayerEngine()) 
+    # processor.add_engine(CreateHurricaneLayerEngine()) 
+    processor.run_all()
+
     if os.path.exists(OUTPUTS / 'log_prints.txt'):
         now = time.time()
         os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
