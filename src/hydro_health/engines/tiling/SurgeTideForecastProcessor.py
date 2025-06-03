@@ -161,12 +161,38 @@ class SurgeTideForecastProcessor:
         s3 = s3fs.S3FileSystem(anon=True)
         return s3
     
+    def get_z_grid(self) -> None:
+        """Read values from first week Z Coordinates file"""
+
+        s3 = self.get_s3_filesystem()
+
+        first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc"
+        url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
+
+        z_ds = xr.open_dataset(s3.open(url, 'rb'))
+        # print(z_ds)
+        z = z_ds.zCoordinates[1, 1,:].values
+        print(z)
+        # [        nan         nan         nan         nan         nan         nan
+        #  nan         nan         nan         nan         nan         nan
+        #  nan         nan         nan         nan         nan         nan
+        #  nan         nan         nan         nan         nan         nan
+        #  nan         nan         nan         nan         nan         nan
+        #  nan         nan         nan         nan         nan         nan
+        # -10.507717   -9.402967   -8.298236   -6.6675515  -5.036886   -3.406221
+        # -1.7755556  -0.1448718   1.4857936   3.0507264   4.4841757   6.2463245
+        # 8.008473 ]
+        # Finished: 129.79620122909546
+
+    
     def process(self, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         # self.build_bucket_lookup()  # store s3 objects instead of folders
-        self.get_averages()  # load each s3 object while looping, store weekly, monthly, and annual results on class
+        # self.get_averages()  # load each s3 object while looping, store weekly, monthly, and annual results on class
         # self.average_datasets()  # get_averages() could build lists as inputs to this function.  just average a list of inputs
+
+        self.get_z_grid()
 
 
 if __name__ == "__main__":

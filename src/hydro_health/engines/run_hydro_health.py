@@ -34,9 +34,9 @@ if __name__ == '__main__':
         # 'drawn_polygon': Param('')
     }
     
+    start = time.time()
     tiles = get_ecoregion_tiles(param_lookup)
     print(f'Selected tiles: {tiles.shape[0]}')
-    start = time.time()
     process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
     
