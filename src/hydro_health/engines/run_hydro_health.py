@@ -26,6 +26,9 @@ if __name__ == '__main__':
     if os.path.exists(OUTPUTS / 'log_prints.txt'):
         now = time.time()
         os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
+    if os.path.exists(OUTPUTS / 'log_grid_tiling.txt'):
+        now = time.time()
+        os.rename(OUTPUTS / 'log_grid_tiling.txt', OUTPUTS / f'log_grid_tiling_{now}.txt')
     param_lookup = {
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),

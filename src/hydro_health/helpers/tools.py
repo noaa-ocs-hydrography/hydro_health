@@ -259,7 +259,7 @@ def grid_digitalcoast_files(outputs: str) -> None:
                         else:
                             good_files.append(image)
                     if bad_files:
-                        with open(data_folder / 'log_grid_tiling.txt', 'a') as writer:
+                        with open(ecoregion.parents[0] / 'log_grid_tiling.txt', 'a') as writer:
                             print(f'bad files: {bad_files}')
                             for bad_file in bad_files:
                                 writer.write(bad_file + '\n')
