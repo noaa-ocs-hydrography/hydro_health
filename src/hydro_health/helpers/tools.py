@@ -1,9 +1,6 @@
 import yaml
 import pathlib
-import tempfile
-import arcpy
 import geopandas as gpd
-import numpy as np
 import rioxarray as rxr
 import rasterio
 
@@ -12,7 +9,7 @@ from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
 from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideForecastProcessor
-from osgeo import gdal, osr, ogr
+from osgeo import gdal, osr
 
 
 gdal.UseExceptions()
@@ -233,7 +230,7 @@ def get_digitalcoast_folders(data_folder) -> list[pathlib.Path]:
     return digitalcoast_file_folders
 
 
-def grid_vrt_files(outputs: str, data_type: str) -> None:
+def grid_digitalcoast_files(outputs: str) -> None:
     """Clip VRT files to BlueTopo grid"""
 
     blue_topo_layer = gpd.read_file(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')), layer=get_config_item('SHARED', 'TILES'))
@@ -242,7 +239,7 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
         blue_topo_folder = ecoregion / 'BlueTopo'
         bluetopo_folders = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
 
-        data_folder = ecoregion / data_type
+        data_folder = ecoregion / 'DigitalCoast'
         digitalcoast_file_folders = get_digitalcoast_folders(data_folder)
 
         for file_folder in digitalcoast_file_folders:
@@ -254,26 +251,39 @@ def grid_vrt_files(outputs: str, data_type: str) -> None:
                 polygon_wkt = bluetopo_data['geometry'].iloc[0]
                 tile_bluetopo_intersect = tileindex_gdf[tileindex_gdf.intersects(bluetopo_data.unary_union)]
                 if len(tile_bluetopo_intersect) > 0:
-                    intersected_images = [str(file_folder / image) for image in tile_bluetopo_intersect['location']]
-                    output_path = tiled_folder / bluetopo_folder
-                    output_path.mkdir(parents=True, exist_ok=True)
-                    project_name = pathlib.Path(tileindex_shp_path).parents[2]
-                    clipped_vrt = output_path / f'{project_name.stem}_{bluetopo_folder}.tif'
-                    if clipped_vrt.exists():
-                        continue
-                    print(f'Creating {clipped_vrt.name}')
-                    in_memory_vrt = gdal.BuildVRT('', intersected_images, callback=gdal.TermProgress_nocb)
-                    gdal.Warp(
-                        clipped_vrt,
-                        in_memory_vrt,
-                        format='GTiff',
-                        cutlineDSName=polygon_wkt,
-                        cropToCutline=True,
-                        warpMemoryLimit=2684354560,
-                        dstNodata=in_memory_vrt.GetRasterBand(1).GetNoDataValue(),
-                        cutlineSRS=in_memory_vrt.GetProjection(),
-                        creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
-                    )
+                    intersected_images = [str(file_folder / pathlib.Path(image).name) for image in tile_bluetopo_intersect['location']]
+                    bad_files, good_files = [], []
+                    for image in intersected_images:
+                        if not pathlib.Path(image).exists():
+                            bad_files.append(image)
+                        else:
+                            good_files.append(image)
+                    if bad_files:
+                        with open(data_folder / 'log_grid_tiling.txt', 'a') as writer:
+                            print(f'bad files: {bad_files}')
+                            for bad_file in bad_files:
+                                writer.write(bad_file + '\n')
+                            writer.write('\n')
+                    if good_files:
+                        output_path = tiled_folder / bluetopo_folder
+                        output_path.mkdir(parents=True, exist_ok=True)
+                        project_name = pathlib.Path(tileindex_shp_path).parents[2]
+                        clipped_vrt = output_path / f'{project_name.stem}_{bluetopo_folder}.tif'
+                        if clipped_vrt.exists():
+                            continue
+                        print(f'Creating {clipped_vrt.name}')
+                        in_memory_vrt = gdal.BuildVRT('', good_files, callback=gdal.TermProgress_nocb)
+                        gdal.Warp(
+                            clipped_vrt,
+                            in_memory_vrt,
+                            format='GTiff',
+                            cutlineDSName=polygon_wkt,
+                            cropToCutline=True,
+                            warpMemoryLimit=2684354560,
+                            dstNodata=in_memory_vrt.GetRasterBand(1).GetNoDataValue(),
+                            cutlineSRS=in_memory_vrt.GetProjection(),
+                            creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
+                        )
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):

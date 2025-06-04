@@ -257,7 +257,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Clip DigitalCoast VRT files to BlueTopo grid"""
 
         arcpy.AddMessage('Gridding VRT file to Blue Topo tiles')
-        tools.grid_vrt_files(self.param_lookup['output_directory'].valueAsText, 'DigitalCoast')
+        tools.grid_digitalcoast_files(self.param_lookup['output_directory'].valueAsText, 'DigitalCoast')
 
     def setup_param_lookup(self, params: list[str]):
         """Build key/value lookup for parameters"""

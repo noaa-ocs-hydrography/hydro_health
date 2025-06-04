@@ -14,7 +14,7 @@ from hydro_health.helpers.tools import (
     Param,
     create_raster_vrts,
     process_create_masks,
-    grid_vrt_files
+    grid_digitalcoast_files
 )
 
 
@@ -47,7 +47,7 @@ if __name__ == '__main__':
         create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
     
     process_create_masks(param_lookup['output_directory'].valueAsText)
-    grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
+    grid_digitalcoast_files(param_lookup['output_directory'].valueAsText)
 
     end = time.time()
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
