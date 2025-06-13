@@ -161,42 +161,66 @@ class SurgeTideForecastProcessor:
         s3 = s3fs.S3FileSystem(anon=True)
         return s3
     
-    def get_z_grid(self) -> None:
-        """Read values from first week Z Coordinates file"""
+    def get_zcoord_third_index(self, grid_dataset: xr.Dataset) -> int|None:
+        """Read third non-nan index from first week Z Coordinates file"""
 
-        s3 = self.get_s3_filesystem()
+        grid_array = grid_dataset.zCoordinates[1, 1,:].values
+        # print(grid_array)
+        non_nan_indices = np.where(np.isfinite(grid_array))[0]
+        if non_nan_indices.size > 0:
+            return non_nan_indices[0] + 2
+        else:
+            return None
+    
+    def get_dataset_third_value(self, grid_dataset: xr.Dataset, grid_index: int) -> int|None:
+        """Read third non-nan value from first week Z Coordinates file"""
 
-        first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc"
-        url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
+        grid_array = grid_dataset.horizontalVelX[1, 1,:].values
+        # print(grid_array)
+        if np.isnan(grid_array).all():
+            return None
+        else:
+            return grid_array[grid_index]
+        
+    def load_zcord_dataset(self, local=False) -> xr.Dataset:
+        """Get the z-coordinate dataset"""
 
-        z_ds = xr.open_dataset(s3.open(url, 'rb'))
-        # print(z_ds)
-        z = z_ds.zCoordinates[1, 1,:].values
-        print(z)
-        # [        nan         nan         nan         nan         nan         nan
-        #  nan         nan         nan         nan         nan         nan
-        #  nan         nan         nan         nan         nan         nan
-        #  nan         nan         nan         nan         nan         nan
-        #  nan         nan         nan         nan         nan         nan
-        #  nan         nan         nan         nan         nan         nan
-        # -10.507717   -9.402967   -8.298236   -6.6675515  -5.036886   -3.406221
-        # -1.7755556  -0.1448718   1.4857936   3.0507264   4.4841757   6.2463245
-        # 8.008473 ]
-        # Finished: 129.79620122909546
+        if local:
+            z_ds = xr.open_dataset(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc')
+        else:
+            s3 = self.get_s3_filesystem()
+            first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc"
+            url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
+            z_ds = xr.open_dataset(s3.open(url, 'rb'))
+        return z_ds
+    
+    def load_x_vel_dataset(self, local=False) -> xr.Dataset:
+        "Get the x-velocity dataset"
 
+        if local:
+            ds = xr.open_dataset(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl.t12z.fields.horizontalVelX_nowcast.nc')
+        else:
+            s3 = self.get_s3_filesystem()
+            first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.horizontalVelX_nowcast.nc"
+            url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
+            ds = xr.open_dataset(s3.open(url, 'rb'))
+        return ds
     
     def process(self, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
-        # self.build_bucket_lookup()  # store s3 objects instead of folders
-        # self.get_averages()  # load each s3 object while looping, store weekly, monthly, and annual results on class
-        # self.average_datasets()  # get_averages() could build lists as inputs to this function.  just average a list of inputs
+        z_coord_ds = self.load_zcord_dataset(local=True)
+        z_coord_index = self.get_zcoord_third_index(z_coord_ds)
+        print('index:', z_coord_index)
 
-        self.get_z_grid()
-
+        x_velocity_ds = self.load_x_vel_dataset(local=True)
+        x_velocity_value = self.get_dataset_third_value(x_velocity_ds, z_coord_index)
+        print('value:', x_velocity_value)
+        
 
 if __name__ == "__main__":
     start = time.time()
+    # files stored: C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data
     processor = SurgeTideForecastProcessor()
     processor.process(OUTPUTS)
     print(f'Finished: {time.time() - start}')
