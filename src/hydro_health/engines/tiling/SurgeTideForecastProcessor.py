@@ -8,19 +8,22 @@ import s3fs  # require conda install h5netcdf
 import shapely
 import thalassa
 import numpy as np
+import geopandas as gpd
 
+from shapely.geometry import Point
 from datetime import datetime
 from botocore.client import Config
 from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 
 
+INPUTS = pathlib.Path(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data')
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
 class SurgeTideForecastProcessor:
     """Download and convert any STOFS data"""
-    
+
     def __init__(self) -> None:
         self.bucket = 'noaa-nos-stofs3d-pds'
         self.weeks = {}
@@ -55,7 +58,7 @@ class SurgeTideForecastProcessor:
         velocity_files = []
         for obj_summary in stofs_bucket.objects.filter(Prefix=f"STOFS-3D-Atl/stofs_3d_atl."):
             # This gets us into the main folder
-            # TODO need to secondary filter obj_summary for 
+            # TODO need to secondary filter obj_summary for
             if 'horizontalVelX_nowcast' in obj_summary.key or 'horizontalVelY_nowcast' in obj_summary.key:
                 print('vel:', obj_summary.key)
                 # ds = xr.open_dataset(obj_summary.get()['Body'].read())
@@ -67,12 +70,12 @@ class SurgeTideForecastProcessor:
         param_inputs = [[stofs_bucket, outputs, file] for file in velocity_files]  # rows out of ER will be nan
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as pool:
             pool.map(self.download_s3_file, param_inputs)
-            
+
             # ds = xr.open_dataset(output_tile_path)
             # variable - horizontalVelX
             # print(ds)
 
-        # TODO cleaner to use s3fs library? 
+        # TODO cleaner to use s3fs library?
         # Sample code uses xarray to directly load 5GB .nc file from s3
         # need to test how slow that is compared to downloading
         # s3 = s3fs.S3FileSystem(anon=True)  # Enable anonymous access to the S3 bucket
@@ -100,7 +103,7 @@ class SurgeTideForecastProcessor:
         #     store monthly average
         #   compute annual average
         s3 = self.get_s3_filesystem()
-        
+
         # first 4 files for testing
         first_week = {"Y:2023_M:1_W:2": [
             "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc",
@@ -143,6 +146,20 @@ class SurgeTideForecastProcessor:
                     print(subset)
                     break
 
+    def get_all_datasets(self, local=False):
+        if local:
+            # TODO mimic gettting days
+            day_folders = [folder for folder in INPUTS.glob('*') if folder.is_dir()]
+            # TODO mimic getting weeks
+            weeks = {}
+            for day in day-day_folders:
+                pass
+            # return dictionary
+            return
+        else:
+            # TODO get list of days needed from bucket
+            # TODO put days into weekly buckets, use months if further
+            return
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -156,67 +173,125 @@ class SurgeTideForecastProcessor:
         s3 = boto3.resource('s3', **creds)
         nbs_bucket = s3.Bucket(bucket)
         return nbs_bucket
-    
+
     def get_s3_filesystem(self) -> s3fs.S3FileSystem:
         s3 = s3fs.S3FileSystem(anon=True)
         return s3
-    
-    def get_zcoord_third_index(self, grid_dataset: xr.Dataset) -> int|None:
+
+    def get_zcoord_third_index(self, tile_indices: dict[list[int|float]]) -> int|None:
         """Read third non-nan index from first week Z Coordinates file"""
 
-        grid_array = grid_dataset.zCoordinates[1, 1,:].values
-        # print(grid_array)
+        grid_dataset = self.load_zcord_dataset()
+
+        # TODO update code to pull all zCoordinate values by index provided and return whatever for next call
+        # index first number is the layer in the vgrid layer
+        grid_array = grid_dataset.zCoordinates[1, 1,:].values  # TODO does the index change by hour?
+        # print('\n\n', grid_array)
         non_nan_indices = np.where(np.isfinite(grid_array))[0]
         if non_nan_indices.size > 0:
             return non_nan_indices[0] + 2
         else:
             return None
-    
+
     def get_dataset_third_value(self, grid_dataset: xr.Dataset, grid_index: int) -> int|None:
         """Read third non-nan value from first week Z Coordinates file"""
 
         grid_array = grid_dataset.horizontalVelX[1, 1,:].values
-        # print(grid_array)
+        print(grid_array)
         if np.isnan(grid_array).all():
             return None
         else:
             return grid_array[grid_index]
-        
+
+    def load_fields_dataset(self, local=False) -> xr.Dataset:
+        if local:
+            fields_ds = xr.open_dataset(r"C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl_20230112\stofs_3d_atl.t12z.n001_024.field2d.nc")
+        else:
+            s3 = self.get_s3_filesystem()
+            first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.n001_024.field2d.nc"
+            url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
+            fields_ds = xr.open_dataset(s3.open(url, 'rb'))
+        return fields_ds
+
     def load_zcord_dataset(self, local=False) -> xr.Dataset:
         """Get the z-coordinate dataset"""
 
         if local:
-            z_ds = xr.open_dataset(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc')
+            z_ds = xr.open_dataset(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl_20230112\stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc')
         else:
             s3 = self.get_s3_filesystem()
             first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.zCoordinates_nowcast.nc"
             url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
             z_ds = xr.open_dataset(s3.open(url, 'rb'))
         return z_ds
-    
+
     def load_x_vel_dataset(self, local=False) -> xr.Dataset:
         "Get the x-velocity dataset"
 
         if local:
-            ds = xr.open_dataset(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl.t12z.fields.horizontalVelX_nowcast.nc')
+            ds = xr.open_dataset(r'C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl_20230112\stofs_3d_atl.t12z.fields.horizontalVelX_nowcast.nc')
         else:
             s3 = self.get_s3_filesystem()
             first_week_z_coords_dataset = "STOFS-3D-Atl/stofs_3d_atl.20230112/stofs_3d_atl.t12z.fields.horizontalVelX_nowcast.nc"
             url = f"s3://{self.bucket}/{first_week_z_coords_dataset}"
             ds = xr.open_dataset(s3.open(url, 'rb'))
         return ds
-    
-    def process(self, outputs: str = False) -> None:
+
+    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
-        z_coord_ds = self.load_zcord_dataset(local=True)
-        z_coord_index = self.get_zcoord_third_index(z_coord_ds)
-        print('index:', z_coord_index)
+        # self.get_all_datasets()
+        # z_coord_ds = self.load_zcord_dataset(local=True)
+        # z_coord_index = self.get_zcoord_third_index(z_coord_ds)
+        # print('index:', z_coord_index)
 
-        x_velocity_ds = self.load_x_vel_dataset(local=True)
-        x_velocity_value = self.get_dataset_third_value(x_velocity_ds, z_coord_index)
-        print('value:', x_velocity_value)
-        
+        # x_velocity_ds = self.load_x_vel_dataset(local=True)
+        # x_velocity_value = self.get_dataset_third_value(x_velocity_ds, z_coord_index)
+        # print('value:', x_velocity_value)
+
+        # TODO get the ecoregion/polygon bounding box
+        # self.test_netcdf_file()
+        tile_indices = self.get_tile_indices(tile_gdf)
+        z_coord_indices = self.get_zcoord_third_index(tile_indices)
+        velocity_values = self.get_dataset_third_value(z_coord_indices)
+
+    
+    def test_netcdf_file(self):
+        ds = xr.open_dataset(r"C:\Users\Stephen.Patterson\Data\Projects\HydroHealth\STOFS_data\stofs_3d_atl_20230112\stofs_3d_atl.t12z.fields.out2d_nowcast.nc")
+        print(ds)
+        print(ds.SCHISM_hgrid_node_x[:5].values)
+
+        grid_dataset = self.load_fields_dataset(local=True)
+        print(grid_dataset)
+        print(grid_dataset.SCHISM_hgrid_node_x[:5].values)
+
+
+    def get_tile_indices(self, tile_gdf: gpd.GeoDataFrame):
+        grid_dataset = self.load_fields_dataset(local=True)
+        lons = grid_dataset.SCHISM_hgrid_node_x.values   # 2d array of lons, min to max
+        lats = grid_dataset.SCHISM_hgrid_node_y.values
+        tile_indices = {}
+        for _, row in tile_gdf.iterrows():
+            indices = []
+            if isinstance(row[1], str):
+                print(row.tile)
+                for i, (lon, lat) in enumerate(zip(lons, lats)):
+                    if row.geometry.contains(Point(lon, lat)):
+                        indices.append(i)
+                tile_indices[row.tile] = {
+                    "latitudes": {
+                        "indices": indices,
+                        "values": [lats[index] for index in indices],
+                    },
+                    "longitudes": {
+                        "indices": indices,
+                        "values": [lons[index] for index in indices],
+                    },
+                }
+                print(tile_indices)
+            break
+        return tile_indices
+
 
 if __name__ == "__main__":
     start = time.time()
