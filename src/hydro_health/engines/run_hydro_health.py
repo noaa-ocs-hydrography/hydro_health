@@ -1,11 +1,12 @@
 import pathlib
 import time
 import os
-from osgeo import gdal, osr, ogr
-HH_MODEL = pathlib.Path(__file__).parents[2]
-
 import sys
+from osgeo import gdal, osr, ogr
+
+HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
+
 from hydro_health.helpers.tools import (
     process_bluetopo_tiles,
     process_digital_coast_files,
@@ -35,8 +36,8 @@ if __name__ == '__main__':
         'output_directory': Param(str(OUTPUTS)),
         'eco_regions': Param('ER_3'),
         # 'eco_regions': Param(''),
-        'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
-        # 'drawn_polygon': Param('')
+        # 'drawn_polygon': Param(str(OUTPUTS / 'drawn_polygons.geojson'))
+        'drawn_polygon': Param('')
     }
     
     start = time.time()
