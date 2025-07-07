@@ -3,6 +3,7 @@ ACTIVECAPTAIN:
   JSON: active_captain_points.json
 DIGITALCOAST:
   API: https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry=
+  TILED_DATA: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\raw\ER_3\DigitalCoast\tiled'
 GROUNDINGS:
   INCIDENTS: https://incidentnews.noaa.gov/raw/incidents.csv
   SERVICE: https://services8.arcgis.com/6ldl6K67FkYzPtEE/ArcGIS/rest/services/Significant_Maritime_Incidents__REG_Parameters__WFL1/FeatureServer/0/query?where=Incident_Type='GROUNDING'&outFields=*&units=esriSRUnit_Meter&returnGeometry=true&featureEncoding=esriDefault&returnQueryGeometry=true&returnExceededLimitFeatures=true&orderByFields='Year'&f=pgeojson
@@ -21,16 +22,16 @@ REEF:
     - 18520
     - 37040
 TSM:
-  DATA_PATH: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files'
-  MEAN_RASTER_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters"
-  YEAR_PAIR_RASTER_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\year_averages"
+  DATA_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files'
+  MEAN_RASTER_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters'
+  YEAR_PAIR_RASTER_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\year_averages'
 
 SEDIMENT:
-  DATA_URL: r'https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv'
-  DATA_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data"
-  GPKG_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg"
-  MASK_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif"
-  RASTER_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\sediment_rasters"
+  DATA_URL: 'https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv'
+  DATA_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data'
+  GPKG_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg'
+  MASK_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif'
+  RASTER_PATH: 'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\sediment_rasters'
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg

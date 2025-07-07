@@ -15,7 +15,7 @@ if __name__ == '__main__':
     profiler.enable()
 
     engine = CreateTSMLayerEngine()
-    engine.start()
+    engine.run()
 
     profiler.disable()
     stats = pstats.Stats(profiler)
