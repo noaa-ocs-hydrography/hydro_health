@@ -6,6 +6,21 @@ DIGITALCOAST:
 GROUNDINGS:
   INCIDENTS: https://incidentnews.noaa.gov/raw/incidents.csv
   SERVICE: https://services8.arcgis.com/6ldl6K67FkYzPtEE/ArcGIS/rest/services/Significant_Maritime_Incidents__REG_Parameters__WFL1/FeatureServer/0/query?where=Incident_Type='GROUNDING'&outFields=*&units=esriSRUnit_Meter&returnGeometry=true&featureEncoding=esriDefault&returnQueryGeometry=true&returnExceededLimitFeatures=true&orderByFields='Year'&f=pgeojson
+MODEL:
+  MODEL_SUBGRIDS: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids'
+  # TODO change once initial testing is done
+  PREPROCESSED_DIR: 'C:\Users\aubrey.mccutchan\Desktop\sediment_rasters'
+  PREDICTION_MASK: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif'
+  MASKS_DIR: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\'
+  PREDICTION_MASK_PQ: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask.parquet'
+  TRAINING_MASK_PQ: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\training_mask.parquet'
+  PREDICTION_OUTPUT_DIR: 'C:\Users\aubrey.mccutchan\Desktop\sediment_rasters_processed'
+  # PREDICTION_OUTPUT_DIR: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed'
+  PREDICTION_TILES_DIR: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles'
+  SUBGRIDS: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids\Prediction.subgrid.WGS84_8m.gpkg'
+  PREDICTION_SUB_GRIDS: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids\prediction_intersecting_subgrids.gpkg'
+  TRAINING_MASK: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\training_mask_ER_3.tif'
+  TRAINING_OUTPUT_DIR: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\processed'
 REEF:
   5KM: https://coralreefwatch.noaa.gov/product/vs/vs_polygons.json 
   1KM: https://datadownload-production.s3.us-east-1.amazonaws.com/WCMC008_CoralReefs2021_v4_1.zip
