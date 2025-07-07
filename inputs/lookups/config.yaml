@@ -21,9 +21,9 @@ REEF:
     - 18520
     - 37040
 TSM:
-  DATA_PATH: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files'
-  MEAN_RASTER_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters"
-  YEAR_PAIR_RASTER_PATH: r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\year_averages"
+  DATA_PATH: r'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files'
+  MEAN_RASTER_PATH: r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters"
+  YEAR_PAIR_RASTER_PATH: r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters"
 
 SEDIMENT:
   DATA_URL: r'https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv'
