@@ -175,6 +175,7 @@ class CreateTSMLayerEngine(Engine):
                     local_dir.mkdir(parents=True, exist_ok=True)
 
                     if not local_path.exists():
+                        print(local_path)
                         print(f"Downloading {name} from {item_path}")
                         with open(local_path, 'wb') as f:
                             ftp.retrbinary(f'RETR {name}', f.write)
@@ -245,7 +246,7 @@ class CreateTSMLayerEngine(Engine):
 
         with rasterio.open(raster_files[0]) as src:
             meta = src.meta.copy()
-            meta.update(dtype="float32", nodata=np.nan, compress="lzw")
+            meta.update(dtype="float32", nodata=np.nan, compress="deflate", predictor=3)
             raster_shape = src.shape
 
         sum_array = np.zeros(raster_shape, dtype=np.float32)
