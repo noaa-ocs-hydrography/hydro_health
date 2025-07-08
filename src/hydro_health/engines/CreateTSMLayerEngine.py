@@ -269,7 +269,7 @@ class CreateTSMLayerEngine(Engine):
 
         print(f"Averaged raster saved to {output_path}.")
 
-    def start(self)-> None:
+    def run(self)-> None:
         """Entrypoint for processing the TSM layer"""
   
         try:

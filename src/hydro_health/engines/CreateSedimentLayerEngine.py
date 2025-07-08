@@ -108,7 +108,6 @@ class CreateSedimentLayerEngine(Engine):
 
         print(f"Raster saved to {file_path}")
 
-
     def correct_sed_type(self, row):
         """
         Corrects primary sediment type if sediment percerntages do not match grain size.
@@ -223,9 +222,9 @@ class CreateSedimentLayerEngine(Engine):
         gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:32617')
         gdf_voronoi.to_file(get_config_item('SEDIMENT', 'GPKG_PATH'), layer='sediment_polygons', driver = 'GPKG', overwrite=True)   
 
-    def start(self):
+    def run(self):
         """Entrypoint for processing the Sediment layer"""
-        # self.download_sediment_data()
+        self.download_sediment_data()
         self.read_sediment_data()
         self.add_sed_size_column()
         self.determine_sed_types()
