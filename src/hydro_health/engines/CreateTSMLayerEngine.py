@@ -170,11 +170,12 @@ class CreateTSMLayerEngine(Engine):
                                 print(f"Skipping late OLCIA file: {name}")
                                 continue  
 
-                    local_dir = pathlib.Path('TSM_download/nc_files')
+                    local_dir = pathlib.Path(get_config_item('TSM', 'DATA_PATH'))
                     local_path = local_dir / name
                     local_dir.mkdir(parents=True, exist_ok=True)
 
                     if not local_path.exists():
+                        print(local_path)
                         print(f"Downloading {name} from {item_path}")
                         with open(local_path, 'wb') as f:
                             ftp.retrbinary(f'RETR {name}', f.write)
@@ -245,7 +246,7 @@ class CreateTSMLayerEngine(Engine):
 
         with rasterio.open(raster_files[0]) as src:
             meta = src.meta.copy()
-            meta.update(dtype="float32", nodata=np.nan, compress="lzw")
+            meta.update(dtype="float32", nodata=np.nan, compress="deflate", predictor=3)
             raster_shape = src.shape
 
         sum_array = np.zeros(raster_shape, dtype=np.float32)
