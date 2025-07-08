@@ -1,6 +1,7 @@
 import pathlib
 import time
 import os
+import yaml
 from osgeo import gdal, osr, ogr
 HH_MODEL = pathlib.Path(__file__).parents[2]
 
@@ -27,6 +28,12 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 if __name__ == '__main__':
+    config_file = INPUTS / 'lookups' / 'run_configs' / 'hydro_health_07082025.yaml'
+    with open(config_file, 'r') as lookup:
+        config = yaml.safe_load(lookup)
+        parent_item = config[parent]
+
+    # read engines
 
     # Data aquisition processes for the TSM, Sediment, and Hurricane tiffs
     processor = ModelDataPreProcessor()
@@ -52,11 +59,11 @@ if __name__ == '__main__':
     process_bluetopo_tiles(tiles, param_lookup['output_directory'].valueAsText)
     process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
     
-    for ecoregion in get_ecoregion_folders(param_lookup):
-        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
-            print(f'Building {ecoregion} - {dataset} VRT file')
-            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
-        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+    # for ecoregion in get_ecoregion_folders(param_lookup):
+    #     for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
+    #         print(f'Building {ecoregion} - {dataset} VRT file')
+    #         create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+    #     create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
     
     process_create_masks(param_lookup['output_directory'].valueAsText)
     grid_vrt_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
