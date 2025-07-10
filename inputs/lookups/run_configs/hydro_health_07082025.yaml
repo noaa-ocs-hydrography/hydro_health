@@ -1,13 +1,5 @@
-RUN:
-  STEPS:
-    - BlueTopoProcessor
-    - DigitalCoastProcessor
-    - ModelDataPreProcessor
-      - CreateTSMLayerEngine
-      - CreateSedimentLayerEngine
-    - RasterMaskProcessor
-  PARAM_LOOKUP:
-    input_directory: None
-    output_directory: outputs
-    eco_regions: None
-    drawn_polygons: outputs/drawn_polygons.geojson
+STEPS:
+  - {tool: BlueTopoProcessor, run: True}
+  - {tool: DigitalCoastProcessor, run: True}
+  - {tool: ModelDataPreProcessor, run: True}
+  - {tool: RasterMaskProcessor, run: True}
