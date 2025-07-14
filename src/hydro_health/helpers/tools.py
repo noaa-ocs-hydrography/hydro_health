@@ -1,7 +1,7 @@
 import yaml
 import pathlib
 import tempfile
-import json
+import os
 import geopandas as gpd
 import rioxarray as rxr
 import rasterio
@@ -10,6 +10,9 @@ from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
 from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
 from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
 from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideForecastProcessor
+from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
+from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
+from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from osgeo import gdal, osr, ogr
 
 
@@ -29,13 +32,6 @@ class Param:
         @property
         def valueAsText(self):
             return self.value
-
-
-def process_create_masks(outputs:str) -> None:
-    """Create prediction and training masks for found ecoregions"""
-
-    processor = RasterMaskProcessor()
-    processor.process(outputs)
 
 
 def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
@@ -128,10 +124,24 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
     print('finished create_raster_vrts')
 
 
+def get_environment() -> str:
+    """Get the current environment"""
+
+    hostname = os.system('hostname')
+    if 'L' in hostname:
+        return 'local'
+    elif 'VS' in hostname:
+        return 'prod'
+    # checking if somewhere else
+
+
 def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
     """Load config and return speciific key"""
 
-    with open(str(INPUTS / 'lookups' / 'config.yaml'), 'r') as lookup:
+    # TODO add sample data and folders to input folder
+    # load current environment config and try to run full process
+
+    with open(str(INPUTS / 'lookups' / f'{get_environment()}_config.yaml'), 'r') as lookup:
         config = yaml.safe_load(lookup)
         parent_item = config[parent]
         if child:
@@ -213,8 +223,8 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     return list(selected_ecoregions['EcoRegion'].unique())
 
 
-def grid_vrt_files(outputs: str, data_type: str) -> None:
-    """Clip VRT files to BlueTopo grid"""
+def grid_digital_coast_files(outputs: str, data_type: str) -> None:
+    """Process for gridding Digital Coast files to BlueTopo grid"""
 
     gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
     blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
@@ -311,11 +321,39 @@ def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str) -> None:
     processor.process(tiles, outputs)
 
 
+def process_create_masks(outputs:str) -> None:
+    """Create prediction and training masks for found ecoregions"""
+
+    processor = RasterMaskProcessor()
+    processor.process(outputs)
+
+
 def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
     """Entry point for parallel proccessing of Digital Coast data"""
     
     processor = DigitalCoastProcessor()
     processor.process(tiles, outputs)
+
+
+def process_model_data() -> None:
+    """Entry point for parallel processing of TSM and Sediment model data"""
+
+    # TODO need to set up a local run option
+    processor = ModelDataPreProcessor()
+    processor.add_engine(CreateTSMLayerEngine())
+    processor.add_engine(CreateSedimentLayerEngine()) 
+    # processor.add_engine(CreateHurricaneLayerEngine(outputs)) 
+    processor.run_all()
+
+
+def process_raster_vrts(param_lookup: dict[str]) -> None:
+    """Entry point for building VRT files for BlueTopo and Digital Coast data"""
+
+    for ecoregion in get_ecoregion_folders(param_lookup):
+        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
+            print(f'Building {ecoregion} - {dataset} VRT file')
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
 
 
 def process_stofs_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:

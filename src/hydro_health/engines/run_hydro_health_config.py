@@ -1,11 +1,9 @@
 import pathlib
 import time
-import os
-import yaml
-from osgeo import gdal, osr, ogr
-HH_MODEL = pathlib.Path(__file__).parents[2]
-
 import sys
+import yaml
+
+HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
 
 from hydro_health.helpers import tools
@@ -21,16 +19,18 @@ def run_hydro_health(config_name) -> None:
     with open(config_path, 'r') as lookup:
         config = yaml.safe_load(lookup)
         for step in config['steps']:
-            if step['tool'] == 'ModelDataPreProcessor' and step['run']:
-                 tools.run_model_data_processor()
-            elif step['tool'] == 'BlueTopoProcessor' and step['run']:
+            if step['tool'] == 'process_model_data' and step['run']:
+                 tools.process_model_data()
+            elif step['tool'] == 'process_bluetopo_tiles' and step['run']:
                  tools.process_bluetopo_tiles()
-            elif step['tool'] == 'DigitalCoastProcessor' and step['run']:
+            elif step['tool'] == 'process_digital_coast_files' and step['run']:
                  tools.process_digital_coast_files()
-            elif step['tool'] == 'RasterMaskProcessor' and step['run']:
+            elif step['tool'] == 'process_raster_vrts' and step['run']:
+                 tools.process_raster_vrts()
+            elif step['tool'] == 'process_create_masks' and step['run']:
                  tools.process_create_masks()
-            elif step['tool'] == 'GridDigitalCoastProcessor' and step['run']:
-                 tools.grid_vrt_files()
+            elif step['tool'] == 'grid_digital_coast_files' and step['run']:
+                 tools.grid_digital_coast_files()
                  
     end = time.time()
     print(f'Total Runtime: {end - start}')
