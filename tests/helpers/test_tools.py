@@ -38,3 +38,14 @@ def test_get_ecoregion_tiles(victim):
     param_lookup={"eco_regions": Param('ER_1-Texas;')}
     result = victim.get_ecoregion_tiles(param_lookup)
     assert result.shape[0] == 246
+
+
+def test_get_config_item(victim):
+    result = victim.get_config_item('SHARED', 'ECOREGIONS')
+    assert result == 'EcoRegions_50m'
+
+    result = victim.get_config_item('TSM', 'DATA_PATH')
+    assert result == r'HHM_Run\ER_3\original_data_files\tsm_data\nc_files'
+
+    result = victim.get_config_item('TSM', 'DATA_PATH', 'remote')
+    assert result == r'\\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files'

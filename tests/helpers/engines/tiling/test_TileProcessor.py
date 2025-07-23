@@ -8,12 +8,12 @@ import sys
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 
-from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
+from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 
 
 @pytest.fixture
 def victim():
-    return BlueTopoProcessor()
+    return BlueTopoEngine()
 
 
 @pytest.mark.skip(reason="Don't want to download a tile")

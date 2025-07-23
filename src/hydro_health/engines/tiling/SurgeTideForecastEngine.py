@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
-class SurgeTideForecastProcessor:
+class SurgeTideForecastEngine:
     """Download and convert any STOFS data"""
     
     def __init__(self) -> None:
@@ -161,7 +161,7 @@ class SurgeTideForecastProcessor:
         s3 = s3fs.S3FileSystem(anon=True)
         return s3
     
-    def process(self, outputs: str = False) -> None:
+    def run(self, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         # self.build_bucket_lookup()  # store s3 objects instead of folders
@@ -171,6 +171,6 @@ class SurgeTideForecastProcessor:
 
 if __name__ == "__main__":
     start = time.time()
-    processor = SurgeTideForecastProcessor()
-    processor.process(OUTPUTS)
+    engine = SurgeTideForecastEngine()
+    engine.run(OUTPUTS)
     print(f'Finished: {time.time() - start}')

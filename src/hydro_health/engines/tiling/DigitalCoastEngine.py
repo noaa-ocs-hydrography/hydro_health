@@ -20,7 +20,7 @@ from multiprocessing import set_executable
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class DigitalCoastProcessor:
+class DigitalCoastEngine:
     """Class for parallel processing all BlueTopo tiles for a region"""
 
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
@@ -190,7 +190,7 @@ class DigitalCoastProcessor:
             if result:
                 self.write_message(f'Result: {result}', output_folder)
     
-    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         ecoregions = list(tile_gdf['EcoRegion'].unique())

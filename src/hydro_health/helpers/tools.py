@@ -6,13 +6,7 @@ import geopandas as gpd
 import rioxarray as rxr
 import rasterio
 
-from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
-from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
-from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
-from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideForecastProcessor
-from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
-from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
-from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
+from socket import gethostname
 from osgeo import gdal, osr, ogr
 
 
@@ -125,23 +119,33 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
 
 
 def get_environment() -> str:
-    """Get the current environment"""
+    """Determine current environment running code"""
 
-    hostname = os.system('hostname')
+    hostname = gethostname()
     if 'L' in hostname:
-        return 'local'
+        return  'local'
     elif 'VS' in hostname:
-        return 'prod'
-    # checking if somewhere else
+        return 'remote'
+    else:
+        return 'remote'
 
 
-def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
-    """Load config and return speciific key"""
+def get_config_item(parent: str, child: str=False, env_string: str=False) -> str:
+    """
+    Load config and return speciific key
+    :param str parent: Primary key in config
+    :param str child: Secondary key in config
+    :param str env_string: Optional explicit value of "local" or "remote"
+    :returns str: Value from local or remote YAML config
+    """
 
     # TODO add sample data and folders to input folder
-    # load current environment config and try to run full process
 
-    with open(str(INPUTS / 'lookups' / f'{get_environment()}_config.yaml'), 'r') as lookup:
+    env = env_string if env_string else None
+    if env is None:
+        env = get_environment()
+    
+    with open(str(INPUTS / 'lookups' / f'{env}_path_config.yaml'), 'r') as lookup:
         config = yaml.safe_load(lookup)
         parent_item = config[parent]
         if child:
@@ -150,24 +154,25 @@ def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
             return parent_item
 
 
-def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
-    """Obtain a subset of tiles based on state names"""
+def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+    """Obtain the intersected EcoRegion folders"""
 
-    geopackage = INPUTS / get_config_item('SHARED', 'DATABASE')
+    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
+    # get master_grid geopackage path
+    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    if param_lookup['drawn_polygon'].value:
+        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    else:
+        # get eco region from shapefile that matches drop down choices
+        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
+        eco_regions = [region.split('-')[0] for region in eco_regions]
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    return list(selected_ecoregions['EcoRegion'].unique())
 
-    all_states = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'STATES'), columns=['STATE_NAME'])
-    coastal_states = param_lookup['coastal_states'].valueAsText.replace("'", "").split(';')
-    selected_states = all_states[all_states['STATE_NAME'].isin(coastal_states)]
-
-    all_tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=[get_config_item('SHARED', 'TILENAME')], mask=selected_states)
-    state_tiles = all_tiles.sjoin(selected_states)  # needed to keep STATE_NAME
-    state_tiles = state_tiles.drop(['index_right'], axis=1)
-
-    coastal_boundary = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'BOUNDARY'))
-    tiles = state_tiles.sjoin(coastal_boundary)
-    # tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
-
-    return tiles
 
 
 def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
@@ -201,26 +206,6 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
-
-
-def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
-    """Obtain the intersected EcoRegion folders"""
-
-    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
-    # get master_grid geopackage path
-    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
-        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
-        make_ecoregion_folders(selected_ecoregions, output_folder)
-    else:
-        # get eco region from shapefile that matches drop down choices
-        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
-        eco_regions = [region.split('-')[0] for region in eco_regions]
-        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
-        make_ecoregion_folders(selected_ecoregions, output_folder)
-    return list(selected_ecoregions['EcoRegion'].unique())
 
 
 def grid_digital_coast_files(outputs: str, data_type: str) -> None:
@@ -306,63 +291,6 @@ def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder:
         ecoregion_folder.mkdir(parents=True, exist_ok=True)
 
 
-def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
-
-    # get environment (dev, prod)
-    # if dev, use multiprocessing
-    # if prod, send to API endpoint of listeners in kubernetes
-        # pickle each tuple of engine and tile
-        # unpickle the object
-        # call the class method with the tile argument
-        # log success of each call
-        # notify the main caller of completion?!
-    processor = BlueTopoProcessor()
-    processor.process(tiles, outputs)
-
-
-def process_create_masks(outputs:str) -> None:
-    """Create prediction and training masks for found ecoregions"""
-
-    processor = RasterMaskProcessor()
-    processor.process(outputs)
-
-
-def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
-    """Entry point for parallel proccessing of Digital Coast data"""
-    
-    processor = DigitalCoastProcessor()
-    processor.process(tiles, outputs)
-
-
-def process_model_data() -> None:
-    """Entry point for parallel processing of TSM and Sediment model data"""
-
-    # TODO need to set up a local run option
-    processor = ModelDataPreProcessor()
-    processor.add_engine(CreateTSMLayerEngine())
-    processor.add_engine(CreateSedimentLayerEngine()) 
-    # processor.add_engine(CreateHurricaneLayerEngine(outputs)) 
-    processor.run_all()
-
-
-def process_raster_vrts(param_lookup: dict[str]) -> None:
-    """Entry point for building VRT files for BlueTopo and Digital Coast data"""
-
-    for ecoregion in get_ecoregion_folders(param_lookup):
-        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
-            print(f'Building {ecoregion} - {dataset} VRT file')
-            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
-        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
-
-
-def process_stofs_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
-    """Entry point for parallel processing of STOFS data"""
-
-    processor = SurgeTideForecastProcessor()
-    processor.process(tiles, outputs)
-
-
 def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs84_srs: osr.SpatialReference) -> pathlib.Path:
     """Project a raster/geotiff to WGS84 spatial reference for tiling"""
 
@@ -373,3 +301,14 @@ def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs
         dstSRS=wgs84_srs
     )
     return raster_wgs84
+
+
+def run_vrt_creation(param_lookup: dict[str]) -> None:
+    """Entry point for building VRT files for BlueTopo and Digital Coast data"""
+
+    for ecoregion in get_ecoregion_folders(param_lookup):
+        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
+            print(f'Building {ecoregion} - {dataset} VRT file')
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+

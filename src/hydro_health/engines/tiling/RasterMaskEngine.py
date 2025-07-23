@@ -15,7 +15,7 @@ mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
-class RasterMaskProcessor:
+class RasterMaskEngine:
     def create_training_mask(self, ecoregion):
         """Create training mask for current ecoregion"""
 
@@ -193,7 +193,7 @@ class RasterMaskProcessor:
             if result:
                 self.write_message(f'Result: {result}', output_folder)
 
-    def process(self, outputs: str) -> None:
+    def run(self, outputs: str) -> None:
         ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
         print('Creating prediction masks')
         self.process_prediction_masks(ecoregions, outputs)

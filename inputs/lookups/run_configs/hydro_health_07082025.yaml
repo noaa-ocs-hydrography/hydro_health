@@ -1,7 +1,0 @@
-STEPS:
-  - {tool: process_model_data, run: True}
-  - {tool: process_bluetopo_tiles, run: True}
-  - {tool: process_digital_coast_files, run: True}
-  - {tool: process_raster_vrts, run: True}
-  - {tool: process_create_masks, run: True}
-  - {tool: grid_digital_coast_files, run: True}
