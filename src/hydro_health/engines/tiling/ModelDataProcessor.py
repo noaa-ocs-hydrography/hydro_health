@@ -2,42 +2,21 @@
 
 import os
 import pathlib
-from datetime import datetime
+import re
 from pathlib import Path
-import geopandas as gpd
-from shapely.geometry import Point
-
-
-import numpy as np
-import pandas as pd
-import xarray as xr
 
 import dask
-from dask import compute, delayed
-from dask.distributed import Client
-
+from dask.distributed import Client, print
 import geopandas as gpd
-import rioxarray
-from shapely.geometry import box, shape
-
+import numpy as np
+import pandas as pd
 import rasterio
-from rasterio.enums import Resampling
-from rasterio import windows
-from rasterio.features import rasterize, shapes
-from rasterio.mask import mask
-from rasterio.warp import calculate_default_transform, reproject
-from rasterio.windows import Window
-from rasterio.features import rasterize
-from rasterio.warp import calculate_default_transform, reproject, Resampling
-from rasterio.windows import from_bounds, transform as window_transform
-# import logging
+from rasterio.features import shapes
+from shapely.geometry import Point, box, shape
+from osgeo import gdal
 
-# logging.basicConfig(level=logging.INFO)
-# logger = logging.getLogger(__name__)
-
+os.environ["GDAL_CACHEMAX"] = "64" 
 from hydro_health.helpers.tools import get_config_item
-
-INPUTS = pathlib.Path(r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3')
 
 class ModelDataProcessor:
     """Class for parallel processing all model data"""
@@ -46,15 +25,16 @@ class ModelDataProcessor:
         """ Clip raster files by tile and save the data in a specified directory.
         :param str raster_dir: directory containing the raster files to be processed
         :param str output_dir: directory to save the output files
-        :param str data_type: Specifies the type of data being processed (e.g., "prediction" or "training").
+        :param str data_type: Specifies the type of data being processed either "prediction" or "training"
         """        
-        # sub_grid_gpkg = rf"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\{data_type}_tiles\intersecting_sub_grids.gpkg"
 
-        sub_grid_gpkg = pathlib.Path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'))
-        sub_grids = gpd.read_file(sub_grid_gpkg, layer=f'{data_type}_intersecting_subgrids')
+        sub_grid_gpkg = pathlib.Path(get_config_item('MODEL', f'{data_type.upper()}_SUB_GRIDS'))
+        sub_grids = gpd.read_file(sub_grid_gpkg)
         
-
         tasks = []
+
+        num_tiles = sub_grids.shape[0]
+        print(f"Number of tiles: {num_tiles}")
 
         for _, sub_grid in sub_grids.iterrows():
             tile_name = sub_grid['tile_id'] 
@@ -71,50 +51,6 @@ class ModelDataProcessor:
 
         dask.compute(*tasks) 
 
-    @dask.delayed
-    def save_combined_data(self, gridded_df, ungridded_df, output_path):
-        # logger.info(f"Started processing tile: ")
-        combined = pd.concat([gridded_df, ungridded_df], ignore_index=True)
-        combined.to_parquet(output_path, engine="pyarrow", index=False)   
-
-    def parallel_processing_rasters(self, input_directory, mask_pred, mask_train):
-        """Process prediction and training rasters in parallel using Dask.
-        :param gdf mask_pred: Prediction mask GeoDataFrame
-        :param gdf mask_train: Training mask GeoDataFrame
-        :return: None
-        """   
-
-        input_directory = Path(input_directory)
-        prediction_files = [
-            f for f in input_directory.iterdir()
-            if f.is_file() and f.suffix == '.tif' and 'sed' in f.stem
-        ]
-        # prediction_files = list(Path(input_directory).rglob("*.tif"))
-        prediction_out = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
-
-        prediction_tasks = []
-        for file in prediction_files:
-            print(f'Processing {file}...')
-            input_path = os.path.join(input_directory, file)
-            output_path = os.path.join(prediction_out, file.name)
-            print(output_path)
-
-            prediction_tasks.append(dask.delayed(self.process_raster)(input_path, mask_pred, output_path))
-
-        dask.compute(*prediction_tasks)  
-        
-        training_files = [f for f in os.listdir(prediction_out) if f.endswith('.tif')]
-        training_out = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
-
-        training_tasks  = []
-        for file in training_files:
-            print(f'Processing {file}...')
-            input_path = os.path.join(prediction_out, file)
-            output_path = os.path.join(training_out, file)
-            training_tasks .append(dask.delayed(self.process_raster)(input_path, mask_train, output_path))
-
-        dask.compute(*training_tasks)    
-
     def create_subgrids(self, mask_gdf, output_dir, process_type):
         """ Create subgrids layer by intersecting grid tiles with the mask geometries
         :param gdf mask_gdf: GeoDataFrame containing the mask geometries
@@ -125,115 +61,202 @@ class ModelDataProcessor:
         grid_gpkg = get_config_item('MODEL', 'SUBGRIDS')
 
         print(f"Preparing {process_type} sub-grids...")
+
+        mask_gdf = gpd.read_parquet(mask_gdf)
+        combined_geometry = mask_gdf.unary_union
+        mask_gdf = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf.crs)
         
         sub_grids = gpd.read_file(grid_gpkg, layer='prediction_subgrid').to_crs(mask_gdf.crs)
         
-        # TODO will need to change which valid value it looks for in the mask
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf, how="inner", predicate='intersects')
         intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
         intersecting_sub_grids.to_file(os.path.join(output_dir, f"{process_type}_intersecting_subgrids.gpkg"), driver="GPKG") 
-   
+
+    def parallel_processing_rasters(self, input_directory, mask_pred, mask_train):
+        """Process prediction and training rasters in parallel using Dask.
+        :param gdf mask_pred: Prediction mask GeoDataFrame
+        :param gdf mask_train: Training mask GeoDataFrame
+        :return: None
+        """   
+
+        input_directory = Path(input_directory)
+        prediction_out = Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
+        existing_outputs = {f.name for f in prediction_out.glob("*") if f.suffix.lower() in ['.tif', '.tiff']}
+
+        prediction_files = [
+            f for f in input_directory.rglob("*")
+            if (
+                f.suffix.lower() in ['.tif', '.tiff'] and
+                f.name not in existing_outputs
+            )
+        ]
+
+        print(f"Total prediction files found (excluding already processed): {len(prediction_files)}")
+
+        mask_gdf = gpd.read_parquet(mask_pred)
+        combined_geometry = mask_gdf.unary_union
+        mask_gdf = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf.crs)
+
+        prediction_tasks = []
+        for file in prediction_files:
+            input_path = os.path.join(input_directory, file)
+            output_path = os.path.join(prediction_out, file.name)
+            prediction_tasks.append(dask.delayed(self.process_prediction_raster)(input_path, mask_gdf, output_path))
+
+        dask.compute(*prediction_tasks)  
+        
+        training_out = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
+        existing_outputs = {f.name for f in training_out.glob("*") if f.suffix.lower() in ['.tif', '.tiff']}
+
+        training_files = [
+            f for f in prediction_out.rglob("*")
+            if f.suffix.lower() in ['.tif', '.tiff'] and f.name not in existing_outputs
+        ]
+
+        print(f"Total training files found (excluding already processed): {len(training_files)}")
+
+        mask_gdf = gpd.read_parquet(mask_train)
+        combined_geometry = mask_gdf.unary_union
+        mask_gdf = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf.crs)
+
+        training_tasks  = []
+        for file in training_files:
+            input_path = os.path.join(prediction_out, file)
+            output_path = os.path.join(training_out, file.name)
+            training_tasks.append(dask.delayed(self.process_training_raster)(input_path, mask_gdf, output_path))
+
+        dask.compute(*training_tasks)    
+
     def process(self):
         """ Main function to process model data.
         """        
 
         subgrids_output_dir = pathlib.Path(get_config_item('MODEL', 'MODEL_SUBGRIDS'))
 
-
         # prediction_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK')), process_type='prediction')
-        mask_prediction_pq = pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK_PQ'))
-        prediction_mask_df = gpd.read_parquet(mask_prediction_pq)
-        # training_mask_df = prediction_mask_df
         # training_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK')), process_type='training')
+
+        mask_prediction_pq = pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK_PQ'))
         mask_training_pq = pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK_PQ'))
-        training_mask_df = gpd.read_parquet(mask_training_pq)
 
-        # self.create_subgrids(mask_gdf=prediction_mask_df, output_dir=subgrids_output_dir, process_type = 'prediction')
-        # self.create_subgrids(mask_gdf=training_mask_df, output_dir=subgrids_output_dir, process_type = 'training') # 254 seconds
+        # self.create_subgrids(mask_gdf=mask_prediction_pq, output_dir=subgrids_output_dir, process_type = 'prediction')
+        # self.create_subgrids(mask_gdf=mask_training_pq, output_dir=subgrids_output_dir, process_type = 'training') 
 
-        # cluster = LocalCluster(n_workers=8, threads_per_worker=1)
-        # client = Client(cluster)
-        client = Client(n_workers=4, threads_per_worker=2, memory_limit="16GB")
-        # client = Client(memory_limit="16GB")
+        client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
 
         preprocessed_dir = pathlib.Path(get_config_item('MODEL', 'PREPROCESSED_DIR'))
         processed_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
-        output_dir_pred = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
 
-        self.parallel_processing_rasters(preprocessed_dir, prediction_mask_df, training_mask_df)
-        # input_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'processed'
-        # input_dir_train = Path(input_directory) / 'model_variables' / 'Training' / 'processed'
-        # output_dir_pred = Path(input_directory) / 'model_variables' / 'Prediction' / 'prediction_tiles'
-        # output_dir_train = Path(input_directory) / 'model_variables' / 'Training' / 'training_tiles'
+        # self.parallel_processing_rasters(preprocessed_dir, mask_prediction_pq, mask_training_pq)
+
+        input_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
+        output_dir_pred = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
+        output_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
+
 
         print(" - Clipping prediction rasters by tile...")
         # self.clip_rasters_by_tile(raster_dir=processed_dir, output_dir=output_dir_pred, data_type="prediction")
         print(" - Clipping training rasters by tile...")
-        # self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
+        self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
     
         client.close()
 
-    def process_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
-            with rasterio.open(raster_path) as src:
-                mask_gdf = mask_gdf.to_crs(src.crs)
+    def process_prediction_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
+        """ Reprojects, resamples, and crops a raster to a target CRS, resolution, and extent
+        :param str raster_path: path to the raster file
+        :param gdf mask_gdf: GeoDataFrame containing the mask geometries
+        :param str output_path: path to save the processed raster
+        :param str target_crs: target coordinate reference system (default is "EPSG:32617")
+        :param int target_res: target resolution in meters (default is 8)
+        :return: None
+        """  
 
-                # --- 1. Crop raster to bounding box of mask ---
-                bounds = mask_gdf.total_bounds  # [minx, miny, maxx, maxy]
-                window = rasterio.windows.from_bounds(*bounds, transform=src.transform)
-                data = src.read(1, window=window)
-                transform = src.window_transform(window)
+        with rasterio.open(raster_path) as src:
+            src_nodata = src.nodata
 
-                # --- 2. Create a rasterized mask array where inside = 1, outside = 0 ---
-                mask_array = rasterize(
-                    [(geom, 1) for geom in mask_gdf.geometry],
-                    out_shape=data.shape,
-                    transform=transform,
-                    fill=0,
-                    dtype='uint8',
-                    nodata=0
-                )
+        keywords = ["tsm", "sed", "hurricane"] 
+        raster_name = os.path.basename(str(raster_path)).lower()
+        print(f'Processing prediction file {raster_name}...')
 
-                # --- 3. Set values outside geometry to NaN ---
-                data = np.where(mask_array == 1, data, np.nan)
+        should_crop = any(keyword in raster_name.lower() for keyword in keywords)
 
-                # --- 4. Apply bathymetry filter if needed ---
-                if 'bathy_' in os.path.basename(raster_path):
-                    data = np.where(data <= 0, data, np.nan)
+        in_memory_cutline = f'/vsimem/cutline_{raster_name}.geojson'   
 
-                # --- 5. Reproject ---
-                dst_transform, dst_width, dst_height = calculate_default_transform(
-                    src.crs, target_crs, data.shape[1], data.shape[0],
-                    *bounds, resolution=target_res
-                )
+        mask_gdf.to_file(in_memory_cutline, driver='GeoJSON')
 
-                kwargs = src.meta.copy()
-                kwargs.update({
-                    'crs': target_crs,
-                    'transform': dst_transform,
-                    'width': dst_width,
-                    'height': dst_height,
-                    'compress': 'LZW',
-                    'tiled': True,
-                    'blockxsize': 1024,
-                    'blockysize': 1024,
-                    'dtype': 'float32',
-                    'count': 1,
-                    'nodata': -9999
-                })
+        gdal.Warp(
+            output_path,
+            str(raster_path),
+            dstSRS=target_crs,
+            xRes=target_res,
+            yRes=target_res,
+            cutlineDSName=in_memory_cutline,
+            cropToCutline=should_crop, 
+            resampleAlg='bilinear',
+            srcNodata=src_nodata,
+            dstNodata=np.nan,
+            creationOptions=['TILED=YES', 'COMPRESS=LZW', 'BIGTIFF=YES'],
+            multithread=True,
+            warpMemoryLimit=2048,
+            warpOptions=['CUTLINE_ALL_TOUCHED=TRUE']
+        )
 
-                with rasterio.open(output_path, 'w', **kwargs) as dst:
-                    reproject(
-                        source=data,
-                        destination=rasterio.band(dst, 1),
-                        src_transform=transform,
-                        src_crs=src.crs,
-                        dst_transform=dst_transform,
-                        dst_crs=target_crs,
-                        resampling=Resampling.bilinear,
-                        src_nodata=-9999,
-                        dst_nodata=np.nan
-                    )
+        src = None
+
+        if os.path.exists(in_memory_cutline):
+            gdal.Unlink(in_memory_cutline)
+
+    def process_training_raster(self, raster_path, mask_gdf, output_path):
+        """ Process a training raster by clipping it with a mask GeoDataFrame and saving the output.
+        :param str raster_path: path to the raster file
+        :param gdf mask_gdf: GeoDataFrame containing the mask geometries
+        :param str output_path: path to save the processed raster
+        :return: None
+        """
+
+        with rasterio.open(raster_path) as src:
+            src_nodata = src.nodata
+            raster_bounds = box(*src.bounds)
+
+        raster_name = os.path.basename(str(raster_path)).lower()
+
+        if not mask_gdf.unary_union.intersects(raster_bounds):
+            print(f"Mask does not intersect raster {raster_name}. Skipping output.")
+            return
+        
+        print(f'Processing training file {raster_name}...')
+
+        in_memory_cutline = f'/vsimem/cutline_{raster_name}.geojson'   
+
+        mask_gdf.to_file(in_memory_cutline, driver='GeoJSON')
+
+        try:
+            result = gdal.Warp(
+                output_path,
+                str(raster_path),
+                cutlineDSName=in_memory_cutline,
+                srcNodata=src_nodata,
+                dstNodata=np.nan, 
+                warpOptions=['CUTLINE_ALL_TOUCHED=TRUE'],
+                creationOptions=['TILED=YES', 'COMPRESS=LZW', 'BIGTIFF=YES']
+            )
+
+            if result is None:
+                raise RuntimeError("gdal.Warp failed and returned None")
+
+        except Exception as e: # Delete output file if it was partially written
+            print(f"Error during gdal.Warp: {e}")
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                    print(f"Removed partial output: {output_path}")
+                except Exception as rm_error:
+                    print(f"Failed to remove partial output: {rm_error}")
+            return  # Exit task early
+        finally:
+            if gdal.VSIStatL(in_memory_cutline) == 0:
+                gdal.Unlink(in_memory_cutline)  
 
     def raster_to_spatial_df(self, raster_path, process_type):
         """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries.
@@ -264,9 +287,21 @@ class ModelDataProcessor:
             gdf.to_parquet(mask_path)
 
         return gdf
-     
-    def subtile_process_gridded(self, sub_grid, raster_dir, output_dir):
-        """ Process a single tile by clipping gridded Bluetopo and Digital raster data and saving the data in a specified directory.
+
+    @dask.delayed
+    def save_combined_data(self, gridded_df, ungridded_df, output_path):
+        """ Combine gridded and ungridded dataframes and save to a parquet file.
+        :param gridded_df: delayed gridded data DataFrame
+        :param ungridded_df: delayed ungridded data DataFrame
+        :param output_path: path to save the combined DataFrame
+        :return: None
+        """
+
+        combined = pd.concat([gridded_df, ungridded_df], ignore_index=True)
+        combined.to_parquet(output_path, engine="pyarrow", index=False)   
+
+    def subtile_process_gridded(self, sub_grid, raster_dir):
+        """ Process a single tile by clipping gridded raster data and saving the data in a specified directory.
 
         :param _type_ sub_grid: sub-grid information containing tile_id and geometry
         :param _type_ raster_dir: input directory containing the raster files to be processed
@@ -277,29 +312,21 @@ class ModelDataProcessor:
         sub_tile_name = sub_grid['tile_id']
         print(f"Processing tile: {sub_tile_name}")
         original_tile = sub_grid['original_tile']  
-        print(f"Original tile: {original_tile}")
 
         raster_files = [
             os.path.join(raster_dir, f)
             for f in os.listdir(raster_dir)
-            if f.endswith('.tif') and original_tile in f
+            if (f.endswith('.tif') or f.endswith('.tiff')) and original_tile in f
         ]
 
         if not raster_files:
             print(f"No matching raster files found for tile {sub_tile_name}, skipping...")
-
             return
 
         tile_extent = sub_grid.geometry.bounds
-        
-        tile_dir = os.path.join(output_dir, sub_tile_name)
-        os.makedirs(tile_dir, exist_ok=True)
-            
-        # print(f"Processing {data_type} tile: {sub_tile_name}")
-        
+                    
         clipped_data = []
         for file in raster_files:
-
             with rasterio.open(file) as src:
                 window = src.window(tile_extent[0], tile_extent[1], tile_extent[2], tile_extent[3])
                 cropped_r = src.read(1, window=window)  
@@ -332,31 +359,73 @@ class ModelDataProcessor:
         combined_data['geometry'] = [Point(x, y) for x, y in zip(combined_data['X'], combined_data['Y'])]
         combined_data = gpd.GeoDataFrame(combined_data, geometry='geometry', crs='EPSG:32617') 
 
-        # TODO I need a way to deal with the different years that might exist in a raster file and also get corresponding nonstatic ungridded data
+        # nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
+        # print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
 
-        nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
-        print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
-        
-        combined_data['b.change.2004_2006'] = combined_data['bathy_2006'] - combined_data['bathy_2004']
-        combined_data['b.change.2006_2010'] = combined_data['bathy_2010'] - combined_data['bathy_2006']
-        combined_data['b.change.2010_2015'] = combined_data['bathy_2015'] - combined_data['bathy_2010']
-        combined_data['b.change.2015_2022'] = combined_data['bathy_2022'] - combined_data['bathy_2015']
+        exclude_keywords = ['rugosity', 'slope', 'survey_end_date', 'unc']
+        keep_unchanged = ['X', 'Y', 'FID', 'geometry']
+
+        new_columns = {}
+
+        for col in combined_data.columns:
+            if col in keep_unchanged:
+                new_columns[col] = col  # leave unchanged
+            else:
+                year_match = re.search(r'(19|20)\d{2}', col)
+                if year_match:
+                    year = year_match.group()
+                    matched_keyword = None
+                    for keyword in exclude_keywords:
+                        if keyword in col:
+                            matched_keyword = keyword
+                            break
+                    if matched_keyword:
+                        new_columns[col] = f"{matched_keyword}_{year}"
+                    elif 'bluetopo' in col.lower():
+                        new_columns[col] = f"bt_bathy_{year}"
+                    else:
+                        new_columns[col] = f"bathy_{year}"
+
+        combined_data = combined_data.rename(columns=new_columns)
+
+        combined_data = combined_data.loc[:, list(new_columns.values())]
+
+        bathy_cols = [
+            col for col in combined_data.columns
+            if col.startswith("bathy_") and re.fullmatch(r'.*_(\d{4})', col)
+        ]
+
+        if len(bathy_cols) > 1:
+            bathy_cols_sorted = sorted(bathy_cols, key=lambda x: int(re.search(r'\d{4}', x).group()))
+
+            for i in range(len(bathy_cols_sorted) - 1):
+                col1 = bathy_cols_sorted[i]
+                col2 = bathy_cols_sorted[i + 1]
+
+                year1 = re.search(r'\d{4}', col1).group()
+                year2 = re.search(r'\d{4}', col2).group()
+
+                new_col_name = f'b.change.{year1}_{year2}'
+                combined_data[new_col_name] = combined_data[col2] - combined_data[col1]
+
+            print(combined_data.columns)
+
+        else:
+            print(f"Only {len(bathy_cols)} year of bathy data found for tile {sub_tile_name}, skipping bathy change calculations.")
+            return combined_data    
 
         return combined_data
 
-    def subtile_process_ungridded(self, sub_grid, raster_dir, output_dir):
-        """ Process a single tile by clipping non Bluetopo raster data and saving the data in a specified directory.
-       
-        :param _type_ sub_grid: sub-grid information containing tile_id and geometry
-        :param _type_ raster_dir: input directory containing the raster files to be processed
-        :param _type_ output_dir: output directory to save the processed data
-        :param _type_ data_type: predicts or training data
-        """      
+    def subtile_process_ungridded(self, sub_grid, raster_dir):
+        """ Process a single tile by clipping ungridded raster data and saving the data in a specified directory.
+
+        :param gpkg sub_grid: sub-grid information containing tile_id and geometry
+        :param str raster_dir: input directory containing the raster files to be processed
+        :return: GeoDataFrame containing the clipped raster data
+        """
         
         sub_tile_name = sub_grid['tile_id']
-        print(f"Processing tile: {sub_tile_name}")
-
-        static_data = ['sed_size_raster', 'sed_type_raster']
+        static_data = ['sed_size_raster', 'sed_type_raster', 'tsm_mean', 'hurricane']
         clipped_data = []
 
         for data in static_data:
@@ -368,13 +437,9 @@ class ModelDataProcessor:
 
             if not raster_files:
                 print(f"No matching raster files found for tile {sub_tile_name}, skipping...")
-
                 return
 
-            tile_extent = sub_grid.geometry.bounds
-            
-            tile_dir = os.path.join(output_dir, sub_tile_name)
-            os.makedirs(tile_dir, exist_ok=True)            
+            tile_extent = sub_grid.geometry.bounds        
 
             for file in raster_files:
 
@@ -413,4 +478,3 @@ class ModelDataProcessor:
         raster_gdf = gpd.GeoDataFrame(combined_data, geometry='geometry', crs='EPSG:32617') 
 
         return raster_gdf
-
