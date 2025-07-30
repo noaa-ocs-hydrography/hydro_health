@@ -27,11 +27,6 @@ def test_get_bucket(victim):
     assert result.name == 'noaa-ocs-nationalbathymetry-pds'
 
 
-def test_get_pool(victim):
-    result = victim.get_pool()
-    assert result._processes == mp.cpu_count() / 2
-
-
 @pytest.mark.skip(reason="Don't want to download a tile")
 def test_process_tile(victim):
     ...

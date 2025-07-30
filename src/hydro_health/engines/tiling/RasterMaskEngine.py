@@ -49,7 +49,7 @@ class RasterMaskEngine:
         # in_memory_driver = ogr.GetDriverByName('ESRI Shapefile')
         
         output_srs = osr.SpatialReference()
-        output_srs.ImportFromEPSG(3747)
+        output_srs.ImportFromEPSG(32617)
         output_ds = in_memory_driver.CreateDataSource('output_ecoregion')
         output_layer = output_ds.CreateLayer(f'ecoregions', geom_type=ogr.wkbPolygon, srs=output_srs)
 
@@ -109,7 +109,7 @@ class RasterMaskEngine:
             ) as target_ds:
                 target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
                 srs = osr.SpatialReference()
-                srs.ImportFromEPSG(3747)
+                srs.ImportFromEPSG(32617)
                 target_ds.SetProjection(srs.ExportToWkt())
                 band = target_ds.GetRasterBand(1)
                 band.SetNoDataValue(nodata)
@@ -169,7 +169,7 @@ class RasterMaskEngine:
         """Transformation object for WGS84 to UTM17"""
 
         utm17_gdal = osr.SpatialReference()
-        utm17_gdal.ImportFromEPSG(3747)
+        utm17_gdal.ImportFromEPSG(32617)
         wgs84_gdal = osr.SpatialReference()
         wgs84_gdal.ImportFromEPSG(4326)
         wgs84_to_utm17_transform = osr.CoordinateTransformation(wgs84_gdal, utm17_gdal)
