@@ -7,6 +7,7 @@ from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
+from hydro_health.engines.ValidateExtentsEngine import ValidateExtentsEngine
 from hydro_health.helpers.tools import Param, get_ecoregion_tiles, get_environment
 
 
@@ -55,3 +56,10 @@ def run_stofs_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
 
     engine = SurgeTideForecastEngine()
     engine.run(tiles, outputs)
+
+
+def run_validate_extents_engine() -> None:
+    """Entry point for validating year-pairs"""
+
+    engine = ValidateExtentsEngine()
+    engine.run()
