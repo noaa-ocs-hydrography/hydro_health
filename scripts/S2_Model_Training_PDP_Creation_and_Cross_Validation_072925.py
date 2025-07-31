@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # update to ER3 directories
 output_dir <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training_data_grid_tiles"
 years <- c("2004_2006", "2006_2010", "2010_2015", "2015_2022")
-block_size <- 200 # The 200m block size that worked well for the scale of our sub-grid tile size
+block_size <- 200 # The 200m block size that worked well for the scale of our sub-grid tile size - to support cross validation and k folds 
 grid_gpkg <- st_read("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg") # from Blue topo
 #
 training_sub_grids_UTM <- st_read ("N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Coding_Outputs/Training_data_grid_tiles/intersecting_sub_grids_UTM.gpkg")
@@ -67,24 +67,42 @@ output_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_mod
 # 1. BORUTA PREDICTOR SELECTION
 # ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
 def select_predictors_boruta_py(training_sub_grids_utm_path, output_dir_train, year_pairs, max_runs=100):
     """
-    Performs predictor selection using the Boruta algorithm in parallel.
-    This function identifies important predictors for a given response variable.
+    Perform Predictor Selection before we run the model using Boruta.
+    
+    This function takes training data and uses the Boruta algorithm to identify
+    important predictors for a given response variable. It saves the results,
+    including a list of confirmed predictors and performance metrics, to be used
+    in downstream modeling.
+
+    Args:
+        training_sub_grids_utm_path (str): Path to the GeoPackage/Shapefile of training grid tiles.
+        output_dir_train (str): The base directory where training data is stored and results will be saved.
+        year_pairs (list): A list of year pairs to process (e.g., "2004_2006").
+        max_runs (int): The maximum number of iterations for the Boruta algorithm.
     """
+    # -------------------------------------------------------
+    # 1. INITIALIZATION & PARALLEL SETUP----
+    # -------------------------------------------------------
     print("\n🚀 Starting Predictor Selection with Boruta...\n")
     
     log_file = os.path.join(output_dir_train, "predictor_selection_log.txt")
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename=log_file, filemode='w')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', filename=log_file, filemode='w')
+    logging.info("Log - Boruta Predictor Selection")
 
     training_sub_grids_utm = gpd.read_file(training_sub_grids_utm_path)
     tile_ids = list(training_sub_grids_utm['tile_id'])
     
-    num_cores = joblib.cpu_count() - 1
+    num_cores = joblib.cpu_count() - 1 # maximum number of cores detected and then leaves one open for GUI/IDE
     if num_cores < 1: num_cores = 1
 
     print(f"Running Boruta on {num_cores} cores for {len(tile_ids)} tiles...")
 
+    # -------------------------------------------------------
+    # 2. ITERATE THROUGH TILES AND YEAR PAIRS----
+    # -------------------------------------------------------
     Parallel(n_jobs=num_cores, verbose=10)(
         delayed(_worker_boruta_tile)(tile_id, output_dir_train, year_pairs, max_runs)
         for tile_id in tile_ids
@@ -96,18 +114,20 @@ def _worker_boruta_tile(tile_id, output_dir_train, year_pairs, max_runs):
     """Helper worker function for running Boruta on a single tile."""
     for pair in year_pairs:
         try:
+            # --- Data Loading ---
             training_data_path = os.path.join(output_dir_train, tile_id, f"{tile_id}_training_clipped_data.geoparquet")
             if not os.path.exists(training_data_path):
-                logging.warning(f"Missing training data for tile: {tile_id}, skipping.")
+                logging.warning(f"⚠️ Missing training data for tile: {tile_id}, skipping.")
                 continue
 
             training_data = pd.read_parquet(training_data_path)
             
+            # --- Define Predictors and Response ---
             start_year, end_year = pair.split('_')
-            response_var = f"b.change.{pair}"
+            response_var = f"b.change.{pair}".strip() # Use strip() as a safeguard
 
             if response_var not in training_data.columns:
-                logging.error(f"Response variable '{response_var}' missing for Tile: {tile_id}, skipping.")
+                logging.error(f"🚨 ERROR: Response variable '{response_var}' missing for Tile: {tile_id}, skipping.")
                 continue
 
             static_predictors = ["grain_size_layer", "prim_sed_layer"]
@@ -124,9 +144,10 @@ def _worker_boruta_tile(tile_id, output_dir_train, year_pairs, max_runs):
             sub_data = training_data[all_predictors + [response_var]].dropna().reset_index(drop=True)
 
             if len(sub_data) < 50 or sub_data[response_var].nunique() <= 1:
-                logging.warning(f"Skipping Boruta for Tile: {tile_id} | Pair: {pair} - Insufficient data.")
+                logging.warning(f"⚠️ Skipping Boruta for Tile: {tile_id} | Pair: {pair} - Insufficient data.")
                 continue
             
+            # --- Run Boruta ---
             logging.info(f"🏃 Running Boruta for Tile: {tile_id} | Pair: {pair}")
             
             rf = RandomForestRegressor(n_jobs=1, max_depth=5, random_state=1)
@@ -137,6 +158,7 @@ def _worker_boruta_tile(tile_id, output_dir_train, year_pairs, max_runs):
             
             feat_selector.fit(X, y)
             
+            # --- Store Results ---
             confirmed_preds = list(np.array(all_predictors)[feat_selector.support_])
             
             decision_map = {True: 'Confirmed', False: 'Rejected'}
@@ -159,12 +181,13 @@ def _worker_boruta_tile(tile_id, output_dir_train, year_pairs, max_runs):
             
             tile_dir = os.path.join(output_dir_train, tile_id)
             os.makedirs(tile_dir, exist_ok=True)
+            # Use pickle for complex list/dict objects. This is the right tool for the job.
             save_path = os.path.join(tile_dir, f"boruta_selection_{pair}.pkl")
             with open(save_path, 'wb') as f:
                 pickle.dump(output_list, f)
 
         except Exception as e:
-            logging.error(f"❌ ERROR in Boruta for Tile: {tile_id} | Pair: {pair} | {e}", exc_info=True)
+            logging.error(f"❌ ERROR in Boruta selection for Tile: {tile_id} | Pair: {pair} | {e}", exc_info=True)
 
 
 #BORUTA PREDICTOR SELECTION SUMMARY REPORT (before running model examine) ----
@@ -187,7 +210,23 @@ def _worker_boruta_tile(tile_id, output_dir_train, year_pairs, max_runs):
 # 2. BORUTA SUMMARY REPORT
 # ------------------------------------------------------------------------------
 def create_boruta_summary_report(output_dir_train, overall_report_filename="boruta_summary_report.png", by_year_report_filename="boruta_importance_by_year.png", top_n=10):
-    """Creates visual reports summarizing Boruta predictor selection results."""
+    """
+    Create Visual Reports for Boruta Predictor Selection.
+    
+    This function scans a directory for Boruta selection results (`.pkl` files),
+    aggregates them, and generates two separate summary plots:
+    1. An overall summary of predictor confirmation, rejection, and importance.
+    2. A breakdown of the most important predictors for each year-pair.
+    
+    Args:
+        output_dir_train (str): The base directory where the tile folders are located.
+        overall_report_filename (str): The name of the output PNG for the overall summary.
+        by_year_report_filename (str): The name of the output PNG for the year-pair breakdown.
+        top_n (int): The number of top predictors to display in the plots.
+    """
+    # -------------------------------------------------------
+    # 1. FIND FILES
+    # -------------------------------------------------------
     print("📊 Starting Boruta summary report generation...")
     
     selection_files = [os.path.join(root, name)
@@ -195,9 +234,13 @@ def create_boruta_summary_report(output_dir_train, overall_report_filename="boru
                        for name in files if name.startswith("boruta_selection_") and name.endswith(".pkl")]
 
     if not selection_files:
-        print("No 'boruta_selection_*.pkl' files found. Please run selection first.")
+        print("No 'boruta_selection_*.pkl' files found. Please run the selection script first.")
         return
+    print(f"Found {len(selection_files)} Boruta result files.")
 
+    # -------------------------------------------------------
+    # 2. LOAD and PROCESS ALL RESULTS
+    # -------------------------------------------------------
     all_results = []
     for fp in selection_files:
         try:
@@ -217,37 +260,63 @@ def create_boruta_summary_report(output_dir_train, overall_report_filename="boru
         return
         
     combined_df = pd.concat(all_results, ignore_index=True)
+    print("Successfully processed all result files.")
     
+    # -------------------------------------------------------
+    # 3. PREPARE DATA FOR PLOTTING (OVERALL SUMMARY)
+    # -------------------------------------------------------
+    confirmed_counts = combined_df[combined_df['decision'] == 'Confirmed']['predictor'].value_counts().nlargest(top_n)
+    rejected_counts = combined_df[combined_df['decision'] == 'Rejected']['predictor'].value_counts().nlargest(top_n)
+    decision_summary = combined_df['decision'].value_counts()
+    importance_summary = combined_df.groupby('predictor')['meanImp'].mean().nlargest(top_n)
+
+    # -------------------------------------------------------
+    # 4. GENERATE OVERALL 4-PANEL PLOT
+    # -------------------------------------------------------
+    print("Generating overall summary plot...")
     fig, axes = plt.subplots(2, 2, figsize=(14, 12))
     fig.suptitle("Boruta Predictor Selection Overall Summary", fontsize=16)
 
-    confirmed_counts = combined_df[combined_df['decision'] == 'Confirmed']['predictor'].value_counts().nlargest(top_n)
+    # --- PLOT 1: Most Confirmed ---
     sns.barplot(x=confirmed_counts.values, y=confirmed_counts.index, ax=axes[0, 0], color='darkgreen', orient='h')
     axes[0, 0].set_title(f"Top {top_n} Most Confirmed Predictors")
+    axes[0, 0].set_xlabel("Times Confirmed")
 
-    rejected_counts = combined_df[combined_df['decision'] == 'Rejected']['predictor'].value_counts().nlargest(top_n)
+    # --- PLOT 2: Most Rejected ---
     sns.barplot(x=rejected_counts.values, y=rejected_counts.index, ax=axes[0, 1], color='firebrick', orient='h')
     axes[0, 1].set_title(f"Top {top_n} Most Rejected Predictors")
+    axes[0, 1].set_xlabel("Times Rejected")
 
-    decision_summary = combined_df['decision'].value_counts()
+    # --- PLOT 3: Overall Decisions ---
     sns.barplot(x=decision_summary.index, y=decision_summary.values, ax=axes[1, 0], palette={"Confirmed": "darkgreen", "Tentative": "darkorange", "Rejected": "firebrick"})
     axes[1, 0].set_title("Overall Decision Frequency")
+    axes[1, 0].set_ylabel("Total Count")
 
-    importance_summary = combined_df.groupby('predictor')['meanImp'].mean().nlargest(top_n)
+    # --- PLOT 4: Top Importance Score ---
     sns.barplot(x=importance_summary.values, y=importance_summary.index, ax=axes[1, 1], color='steelblue', orient='h')
     axes[1, 1].set_title(f"Top {top_n} Predictors by Avg. Importance")
+    axes[1, 1].set_xlabel("Mean Importance (Gain)")
     
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(os.path.join(output_dir_train, overall_report_filename), dpi=100)
     plt.close()
-    print(f"Saved overall report to: {overall_report_filename}")
+    print(f"Report saved to: {os.path.join(output_dir_train, overall_report_filename)}")
 
+    # -------------------------------------------------------
+    # 5. PREPARE DATA FOR YEAR-PAIR SPECIFIC PLOT
+    # -------------------------------------------------------
+    print("Preparing data for year-pair specific importance plot...")
     year_pairs = sorted(combined_df['year_pair'].unique())
+    
+    # -------------------------------------------------------
+    # 6. GENERATE YEAR-PAIR SPECIFIC IMPORTANCE PLOT
+    # -------------------------------------------------------
+    print("Generating year-pair specific importance plot...")
     n_pairs = len(year_pairs)
     n_cols = 2
     n_rows = (n_pairs + n_cols - 1) // n_cols
     fig, axes = plt.subplots(n_rows, n_cols, figsize=(8 * n_cols, 7 * n_rows), squeeze=False)
-    fig.suptitle("Top Predictor Importance by Year Pair", fontsize=16)
+    fig.suptitle("Top Predictor Importance by Year Pair", fontsize=16, y=0.98)
     
     for i, pair in enumerate(year_pairs):
         ax = axes.flatten()[i]
@@ -255,11 +324,13 @@ def create_boruta_summary_report(output_dir_train, overall_report_filename="boru
         if not plot_data.empty:
             sns.barplot(x=plot_data.values, y=plot_data.index, ax=ax, color='darkcyan', orient='h')
             ax.set_title(f"Year Pair: {pair}")
+            ax.set_xlabel("Mean Importance (Gain)")
     
     plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.savefig(os.path.join(output_dir_train, by_year_report_filename), dpi=100)
     plt.close()
-    print(f"Saved by-year report to: {by_year_report_filename}")
+    print(f"Year-pair report saved to: {os.path.join(output_dir_train, by_year_report_filename)}")
+    print("Process complete.")
 
 
 # ==============================================================================
@@ -283,10 +354,18 @@ def create_boruta_summary_report(output_dir_train, overall_report_filename="boru
 
 # ==============================================================================
 # ==============================================================================
-
+# Helper Function 
 def generate_cv_diagnostic_plot(sf_data, block_geom, max_k, tile_id, pair, output_dir_train):
     """
     Creates a plot to visualize the training data and the spatial blocks.
+    
+    Args:
+        sf_data (gpd.GeoDataFrame): The GeoDataFrame containing the training data points.
+        block_geom (gpd.GeoDataFrame): The GeoDataFrame of the grid blocks created for probing.
+        max_k (int): The maximum number of folds possible for the geometry.
+        tile_id (str): The character ID of the current tile.
+        pair (str): The character ID of the current year pair.
+        output_dir_train (str): The main output directory.
     """
     try:
         fig, ax = plt.subplots(1, 1, figsize=(8, 7))
@@ -299,7 +378,6 @@ def generate_cv_diagnostic_plot(sf_data, block_geom, max_k, tile_id, pair, outpu
         
         # Get block size from grid for subtitle
         if not block_geom.empty:
-            # Estimate an approximate side length for the subtitle
             block_width_est = np.sqrt(block_geom.geometry.area.mean())
             subtitle = f"Approx. Block Size: {block_width_est:.0f}m | Max Possible Folds (k): {max_k}"
             fig.suptitle(subtitle, y=0.92, fontsize=10)
@@ -332,29 +410,65 @@ def generate_cv_diagnostic_plot(sf_data, block_geom, max_k, tile_id, pair, outpu
 #      - Raster outputs for the Mean Bootstrap Prediction and its uncertainty (SD).
 
 def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=20, n_folds=5):
-    """Main function to run the XGBoost model training with parallel spatial CV."""
+    """
+    This script contains a complete, refactored set of functions to train
+    the XGBoost models. It is designed to:
+       1. Run a robust, parallelized spatial cross-validation to find the optimal model parameters.
+       2. Train a final model and run multiple bootstrap replicates to capture uncertainty.
+       3. Save all necessary outputs for the prediction workflow, including:
+          - The final trained model object.
+          - Raw, unsmoothed Partial Dependence Plot (PDP) data.
+          - A complete bootstrap prediction file with Mean and Standard Deviation calculated.
+          - Raster outputs for the Mean Bootstrap Prediction and its uncertainty (SD).
+    """
+    # -------------------------------------------------------
+    # 1. MODEL INITIALIZATION & ERROR LOGGING
+    # -------------------------------------------------------
     print("\n🚀 Starting Full XGBoost Model Training with Robust Parallel Spatial CV...\n")
     
     master_log_file = os.path.join(output_dir_train, "training_log_final.txt")
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename=master_log_file, filemode='w')
+    logging.info(f"Error Log - XGBoost Full Training (run started at {pd.Timestamp.now()})")
 
+    # --- Setup Parallel Processing ---
     training_sub_grids_utm = gpd.read_file(training_sub_grids_utm_path)
     tile_ids = list(training_sub_grids_utm['tile_id'])
-    grid_crs = training_sub_grids_utm.crs
+    grid_crs = training_sub_grids_utm.crs # Extract CRS for raster saving
     
     num_cores = joblib.cpu_count() - 1
-    if num_cores < 1: num_cores = 1
+    if num_cores < 1: num_cores = 1 # Ensure at least one core is used
     print(f"Executing training on {num_cores} cores for {len(tile_ids)} tiles...")
 
+    # -------------------------------------------------------
+    # 2. MAIN PARALLEL PROCESSING LOOP
+    # -------------------------------------------------------
+    # Outer Loop - Using joblib.Parallel to run the outer loop (over tiles) in parallel
     Parallel(n_jobs=num_cores, verbose=10)(
         delayed(_worker_train_tile)(tile_id, output_dir_train, year_pairs, block_size_m, n_boot, n_folds, grid_crs)
         for tile_id in tile_ids
     )
     
-    print("\n✅ Model Training Complete! Check `training_log_final.txt` for details.\n")
+    # -------------------------------------------------------
+    # 10. CONSOLIDATE LOGS
+    # -------------------------------------------------------
+    print("\nParallel processing complete. Consolidating logs...")
+    with open(master_log_file, 'a') as master:
+        for tile_id in tile_ids:
+            worker_log_path = os.path.join(output_dir_train, tile_id, f"log_worker_train_{tile_id}.txt")
+            if os.path.exists(worker_log_path):
+                try:
+                    with open(worker_log_path, 'r') as worker_log:
+                        master.write(f"\n--- Log for Tile: {tile_id} ---\n")
+                        master.write(worker_log.read())
+                    os.remove(worker_log_path) # Clean up individual worker logs
+                except IOError as e:
+                    print(f"Could not read or remove worker log {worker_log_path}: {e}")
+
+    print(f"\n✅ Model Training Complete! Check `{master_log_file}` for details.\n")
 
 def _worker_train_tile(tile_id, output_dir_train, year_pairs, block_size_m, n_boot, n_folds, grid_crs):
     """Helper worker function for training on a single tile."""
+    # Inner Loop - over year pairs runs sequentially
     tile_dir = os.path.join(output_dir_train, tile_id)
     worker_log_file = os.path.join(tile_dir, f"log_worker_train_{tile_id}.txt")
     log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
@@ -365,14 +479,17 @@ def _worker_train_tile(tile_id, output_dir_train, year_pairs, block_size_m, n_bo
     if not logger.handlers:
         logger.addHandler(file_handler)
     
+    logger.info(f"Worker log for tile: {tile_id} started at {pd.Timestamp.now()}")
+    
     for pair in year_pairs:
         try:
-            logger.info(f"Processing Tile: {tile_id} | Year Pair: {pair}")
+            # --- a. Load Data---
+            logger.info(f"\nProcessing Tile: {tile_id} | Year Pair: {pair}")
             training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.geoparquet")
             boruta_results_path = os.path.join(tile_dir, f"boruta_selection_{pair}.pkl")
 
             if not os.path.exists(training_data_path) or not os.path.exists(boruta_results_path):
-                logger.warning("Data or Boruta file missing. Skipping.")
+                logger.warning("DIAGNOSTIC: Missing input file(s). Skipping.")
                 continue
 
             full_training_gdf = gpd.read_parquet(training_data_path)
@@ -382,9 +499,18 @@ def _worker_train_tile(tile_id, output_dir_train, year_pairs, block_size_m, n_bo
             response_var = f"b.change.{pair}"
 
             if not predictors or response_var not in full_training_gdf.columns:
-                logger.warning("No predictors or response var found. Skipping.")
+                logger.warning("DIAGNOSTIC: No predictors or response variable found. Skipping.")
                 continue
+            logger.info(f"DIAGNOSTIC: Loaded {len(full_training_gdf)} total rows from input data.")
+            
+            # --- b. Define CRS ---
+            # CRS is now passed in, but you could hardcode a specific one like this:
+            # grid_crs_epsg = 32617 # Hardcoded UTM Zone 17N - FOR NOW, WILL NEED TO ADAPT SPATIALLY PER REGION
 
+            # -------------------------------------------------------
+            # 3. FILTER & PREPARE TRAINING DATA----
+            # -------------------------------------------------------
+            # This uses XGBoost's native NA handling by only filtering NAs in the response variable.
             cols_to_keep = predictors + [response_var, "X", "Y", "FID", "geometry"]
             subgrid_gdf = full_training_gdf[list(set(cols_to_keep) & set(full_training_gdf.columns))].copy()
             for col in predictors + [response_var]:
@@ -392,33 +518,73 @@ def _worker_train_tile(tile_id, output_dir_train, year_pairs, block_size_m, n_bo
             subgrid_gdf.dropna(subset=(predictors + [response_var]), inplace=True)
             subgrid_gdf.reset_index(drop=True, inplace=True)
 
+            logger.info(f"DIAGNOSTIC: Filtered data to {len(subgrid_gdf)} rows with finite values for training.")
             if len(subgrid_gdf) < 100:
-                logger.warning("Insufficient data. Skipping.")
+                logger.warning("DIAGNOSTIC: Insufficient data (<100 rows) after filtering. Skipping.")
                 continue
             
             subgrid_data = pd.DataFrame(subgrid_gdf.drop(columns='geometry'))
+            
+            # Modification: Create predictor ranges table
+            predictor_ranges = pd.DataFrame({
+                'Predictor': predictors,
+                'Min_Value': [subgrid_data[p].min() for p in predictors],
+                'Max_Value': [subgrid_data[p].max() for p in predictors]
+            })
+            predictor_ranges['Range_Width'] = predictor_ranges['Max_Value'] - predictor_ranges['Min_Value']
 
+            # -------------------------------------------------------
+            # 4. INITIALIZE METRIC OUTPUT STORAGE ARRAYS----
+            # -------------------------------------------------------
             deviance_mat = np.full((n_boot, 3), np.nan, dtype=float)
             influence_mat = np.full((len(predictors), n_boot), np.nan, dtype=float)
-            boot_mat = np.full((len(subgrid_data), n_boot), np.nan, dtype=float)
+            # MODIFICATION: Use a 3D array for bootstrap predictions [rows, 1, bootstraps]
+            boot_array = np.full((len(subgrid_data), 1, n_boot), np.nan, dtype=float)
 
-            pdp_env_ranges_list = [pd.DataFrame({'Env_Value': np.linspace(subgrid_data[pred].min(), subgrid_data[pred].max(), 100) if subgrid_data[pred].nunique() > 1 else np.repeat(subgrid_data[pred].min(), 100), 'Predictor': pred}) for pred in predictors]
+            # -------------------------------------------------------
+            # 5. SETUP for PARTIAL DEPENDENCE PLOT (PDP) DATA----
+            # -------------------------------------------------------
+            pred_mins = subgrid_data[predictors].min().to_dict()
+            pred_maxs = subgrid_data[predictors].max().to_dict()
+            
+            pdp_env_ranges_list = []
+            for pred in predictors:
+                min_val, max_val = pred_mins.get(pred), pred_maxs.get(pred)
+                vals = np.linspace(min_val, max_val, 100) if pd.notna(min_val) and pd.notna(max_val) and min_val < max_val else np.repeat(min_val, 100)
+                pdp_env_ranges_list.append(pd.DataFrame({'Env_Value': vals, 'Predictor': pred}))
             pdp_env_ranges_df = pd.concat(pdp_env_ranges_list, ignore_index=True)
-            if len(subgrid_data) >= 100:
+            
+            # Store X, Y, FID in EnvRanges (good to save in every output dataset)
+            if len(subgrid_data) >= 100: # Sample 100 spatial points
                 sampled_coords = subgrid_data[['X', 'Y', 'FID']].head(100)
                 pdp_env_ranges_df['X'] = np.tile(sampled_coords['X'], len(predictors))
                 pdp_env_ranges_df['Y'] = np.tile(sampled_coords['Y'], len(predictors))
                 pdp_env_ranges_df['FID'] = np.tile(sampled_coords['FID'], len(predictors))
+            
+            # Set up PDP storage: [100 (Env Values) x N Predictors x N Bootstraps]
+            pd_array = np.full((100, len(predictors), n_boot), np.nan, dtype=float)
+            all_pdp_long_list = [] # Initialize the master storage list here (outside of the bootstrap loop)
 
-            best_iteration = 100
+            # -------------------------------------------------------
+            # 6. SETUP ADAPTIVE SPATIAL CROSS VALIDATION & MODEL TRAINING
+            # -------------------------------------------------------
+            # ADAPTIVE SPATIAL BLOCK CV SETUP ---
+            best_iteration = 100 # Default fallback value
+            cv_results_df = None # Initialize as None
+            
+            # CV Probe for max spatial blocks within tile and generate plot
             bounds = subgrid_gdf.total_bounds
             grid_cells = [box(x0, y0, x0 + block_size_m, y0 + block_size_m) for x0 in np.arange(bounds[0], bounds[2], block_size_m) for y0 in np.arange(bounds[1], bounds[3], block_size_m)]
             grid_gdf = gpd.GeoDataFrame({'geometry': grid_cells}, crs=grid_crs)
             points_in_blocks = gpd.sjoin(subgrid_gdf, grid_gdf, how="inner", predicate="within")
             active_blocks_gdf = grid_gdf.iloc[points_in_blocks['index_right'].unique()]
             max_k = len(active_blocks_gdf)
+            
+            generate_cv_diagnostic_plot(subgrid_gdf, active_blocks_gdf, max_k, tile_id, pair, output_dir_train)
+            
             k_final = min(n_folds, max_k)
 
+            # MANUAL CROSS-VALIDATION LOOP SETUP ---
             try:
                 if k_final < 2: raise ValueError(f"CV not possible. Only {max_k} spatial block(s) found.")
                 subgrid_gdf['block_id'] = gpd.sjoin(subgrid_gdf, active_blocks_gdf, how='left', predicate='within')['index_right'].fillna(-1)
@@ -426,16 +592,23 @@ def _worker_train_tile(tile_id, output_dir_train, year_pairs, block_size_m, n_bo
                 fold_splits = gkf.split(subgrid_gdf, groups=subgrid_gdf['block_id'])
                 best_nrounds_per_fold, rmse_per_fold, mae_per_fold = [], [], []
                 
-                for train_idx, test_idx in fold_splits:
+                for k, (train_idx, test_idx) in enumerate(fold_splits):
                     train_set, test_set = subgrid_data.iloc[train_idx], subgrid_data.iloc[test_idx]
-                    if test_set[response_var].nunique() < 2: continue
+                    if test_set[response_var].nunique() < 2: 
+                        logger.info(f"INFO: Skipping fold {k+1} due to zero variance in the test set response.")
+                        continue
+                    
+                    # SEPERATE MODEL TRAINING & TESTING DATA FOR CV
                     dtrain_fold = xgb.DMatrix(train_set[predictors], label=train_set[response_var])
                     dtest_fold = xgb.DMatrix(test_set[predictors], label=test_set[response_var])
+                    watchlist_fold = [(dtest_fold, 'test')]
                     evals_result = {}
+                    
+                    # CV/ Fold model
                     fold_model = xgb.train(
                         params={'max_depth': 4, 'eta': 0.01, 'gamma': 1, 'objective': 'reg:squarederror', 'eval_metric': ['rmse', 'mae']},
                         dtrain=dtrain_fold, num_boost_round=1000,
-                        evals=[(dtest_fold, 'test')], early_stopping_rounds=10,
+                        evals=watchlist_fold, early_stopping_rounds=10,
                         evals_result=evals_result, verbose_eval=False
                     )
                     if fold_model.best_iteration > 0:
@@ -446,64 +619,159 @@ def _worker_train_tile(tile_id, output_dir_train, year_pairs, block_size_m, n_bo
                 if best_nrounds_per_fold:
                     best_iteration = int(np.mean(best_nrounds_per_fold))
                     cv_results_df = pd.DataFrame({'tile_id': [tile_id], 'year_pair': [pair], 'best_iteration': [best_iteration], 'test_rmse_mean': [np.mean(rmse_per_fold)], 'test_rmse_std': [np.std(rmse_per_fold)], 'test_mae_mean': [np.mean(mae_per_fold)], 'test_mae_std': [np.std(mae_per_fold)]})
-                    logger.info(f"CV successful. Optimal iteration: {best_iteration}")
+                    logger.info(f"DIAGNOSTIC: CV successful. Optimal iteration: {best_iteration}")
                 else: raise ValueError("Manual CV loop failed to find any best iterations.")
             except Exception as e:
-                logger.warning(f"CV SKIPPED for Tile: {tile_id} | Pair: {pair} | Error: {e}. Using default {best_iteration} rounds.")
+                logger.warning(f"WARNING: CV SKIPPED for Tile: {tile_id} | Pair: {pair} with error: {e}. Using default {best_iteration} rounds.")
                 cv_results_df = pd.DataFrame({'tile_id': [tile_id], 'year_pair': [pair], 'best_iteration': [best_iteration], 'test_rmse_mean': [np.nan], 'test_rmse_std': [np.nan], 'test_mae_mean': [np.nan], 'test_mae_std': [np.nan]})
 
+            # FINAL TRAINING MODEL
             dtrain_full = xgb.DMatrix(subgrid_data[predictors], label=subgrid_data[response_var])
-            xgb_params = {'max_depth': 4, 'eta': 0.01, 'gamma': 1, 'subsample': 0.7, 'colsample_bytree': 0.8, 'objective': 'reg:squarederror', 'nthread': 1}
-            all_pdp_long_list = []
+            xgb_params = {
+                'max_depth': 4,         # Controls tree depth (higher values capture more interactions but risk overfitting). Common range: 3-10
+                'eta': 0.01,            # Learning rate (lower values prevent overfitting, but require more trees). Common range: 0.001 - 0.3
+                'gamma': 1,             # Minimum loss reduction required to make a further partition.
+                'subsample': 0.7,       # Fraction of data used per boosting round (lower values prevent overfitting). Common range: 0.5-1
+                'colsample_bytree': 0.8,# Fraction of predictors used per tree (lower values prevent overfitting). Common range: 0.5-1
+                'objective': 'reg:squarederror' # Specifies regression with squared error loss as the objective function.
+            }
+            
+            logger.info(f"DIAGNOSTIC: Starting bootstrap loop for {n_boot} iterations...")
+            
+            # --- Bootstrap Loop = repeats the above over a number of desired iteration---
             for b in range(n_boot):
-                xgb_model = xgb.train(params=xgb_params, dtrain=dtrain_full, num_boost_round=best_iteration)
-                preds = xgb_model.predict(dtrain_full)
-                boot_mat[:, b] = preds
-                r2 = r2_score(subgrid_data[response_var], preds)
-                deviance_mat[b, 0], deviance_mat[b, 2] = r2, r2
-                deviance_mat[b, 1] = np.sqrt(mean_squared_error(subgrid_data[response_var], preds))
-                importance = xgb_model.get_score(importance_type='gain')
-                for i, pred_name in enumerate(predictors): influence_mat[i, b] = importance.get(pred_name, 0)
+                # Use all data for bootstrap model, but train to best # of rounds from CV
+                xgb_model = xgb.train(
+                    params=xgb_params,
+                    dtrain=dtrain_full,
+                    num_boost_round=best_iteration,
+                    nthreads=1 # Number of CPU threads (set based on available computing resources)
+                )
                 
-                predictor_means = subgrid_data[predictors].mean().to_dict()
+                ## ----NOTATION ON HOW CROSS VALIDATION SUPPORTS BETTER MODEL PERFORMANCE---##
+                # The Cross-Validation (CV) step runs a preliminary version of the model to find the optimal number of training rounds before the model begins to overfit.
+                # It repeatedly trains on subsets of the data (folds) and evaluates on a hold-out set (witheld from training),
+                # tracking the performance at each iteration. We then identify the single best iteration number (`best_iteration`) where the error was lowest. 
+                # This optimal number is then used to train the final model on all the data, ensuring it is powerful but not overfit.
+                
+                # -------------------------------------------------------
+                # 7. STORE MODEL METRICS ----
+                # -------------------------------------------------------
+                predictions = xgb_model.predict(dtrain_full)
+                # store model prediction for every iteration
+                boot_array[:, 0, b] = predictions
+                
+                importance_matrix = xgb_model.get_score(importance_type='gain')
+                if importance_matrix:
+                    for i, pred in enumerate(predictors):
+                        influence_mat[i, b] = importance_matrix.get(pred, 0)
+                
+                r2 = r2_score(subgrid_data[response_var], predictions)
+                deviance_mat[b, 0] = r2 # Dev.Exp
+                deviance_mat[b, 1] = np.sqrt(mean_squared_error(subgrid_data[response_var], predictions)) # RMSE
+                deviance_mat[b, 2] = r2 # R2
+                
+                # -------------------------------------------------------
+                # 8. STORE PARTIAL DEPENDENCE PLOT DATA ----
+                # -------------------------------------------------------
+                # This section correctly isolates the effect of each predictor by holding all other predictors at their mean value during prediction
                 pdp_storage_boot = []
-                for pred_name in predictors:
+                predictor_means = subgrid_data[predictors].mean().to_dict()
+                
+                for j, pred_name in enumerate(predictors):
                     pdp_grid = pd.DataFrame([predictor_means] * 100)
                     pdp_grid[pred_name] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Env_Value'].values
                     pdp_predictions = xgb_model.predict(xgb.DMatrix(pdp_grid[predictors]))
-                    pdp_storage_boot.append(pd.DataFrame({'Predictor': pred_name, 'Env_Value': pdp_grid[pred_name], 'Replicate': f"Rep_{b+1}", 'PDP_Value': pdp_predictions}))
+                    
+                    # **MODIFICATION 1: Store RAW, unsmoothed PDP values**
+                    pd_array[:, j, b] = pdp_predictions
+                    
+                    pdp_df = pd.DataFrame({
+                        'Predictor': pred_name,
+                        'Env_Value': pdp_grid[pred_name],
+                        'Replicate': f"Rep_{b+1}",
+                        'PDP_Value': pdp_predictions
+                    })
+                    if 'X' in pdp_env_ranges_df.columns:
+                        pdp_df['X'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['X'].values
+                        pdp_df['Y'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Y'].values
+                        pdp_df['FID'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['FID'].values
+                    pdp_storage_boot.append(pdp_df)
+                
                 all_pdp_long_list.append(pd.concat(pdp_storage_boot, ignore_index=True))
             
+            logger.info("DIAGNOSTIC: Bootstrap loop finished.")
+            # Convert all PDP lists from the bootstraps into a single long format dataframe for plotting
             pdp_long_df = pd.concat(all_pdp_long_list, ignore_index=True)
-            logger.info("Writing outputs...")
+            
+            # -------------------------------------------------------
+            # 8.5. PROCESS BOOTSTRAP PREDICTIONS & CALCULATE STATISTICS
+            # -------------------------------------------------------
+            logger.info(f"DIAGNOSTIC: Processing bootstrap results. Array dimensions: {boot_array.shape}")
+            
+            # Calculate Mean and SD directly from the 3D array across the 3rd dimension (bootstraps)
+            mean_prediction = np.mean(boot_array, axis=2).flatten()
+            uncertainty_sd = np.std(boot_array, axis=2).flatten()
+            if n_boot == 1: uncertainty_sd = np.zeros_like(uncertainty_sd)
+            
+            # Create the final, simplified data frame
+            boot_df = pd.DataFrame({
+                'FID': subgrid_data['FID'],
+                'X': subgrid_data['X'],
+                'Y': subgrid_data['Y'],
+                'b.change_actual': subgrid_data[response_var],
+                'Mean_Prediction': mean_prediction,
+                'Uncertainty_SD': uncertainty_sd
+            })
+            logger.info(f"DIAGNOSTIC: Created final bootstrap data frame with {len(boot_df)} rows.")
+            
+            # -------------------------------------------------------
+            # 9. SAVE OUTPUTS----
+            # -------------------------------------------------------
+            os.makedirs(tile_dir, exist_ok=True)
+            logger.info(f"DIAGNOSTIC: Writing outputs to {tile_dir}")
+            
             cv_results_df.to_parquet(os.path.join(tile_dir, f"cv_results_{pair}.parquet"))
             pd.DataFrame(deviance_mat, columns=["Dev.Exp", "RMSE", "R2"]).to_parquet(os.path.join(tile_dir, f"deviance_{pair}.parquet"))
             pd.DataFrame(influence_mat, index=predictors, columns=[f"Rep_{i+1}" for i in range(n_boot)]).reset_index().rename(columns={'index': 'Predictor'}).to_parquet(os.path.join(tile_dir, f"influence_{pair}.parquet"), index=False)
-            pdp_long_df.to_parquet(os.path.join(tile_dir, f"pdp_data_{pair}.parquet"))
+            predictor_ranges.to_parquet(os.path.join(tile_dir, f"predictor_ranges_{pair}.parquet"))
+            boot_df.to_parquet(os.path.join(tile_dir, f"bootstraps_{pair}.parquet"))
+            pdp_long_df.to_parquet(os.path.join(tile_dir, f"pdp_data_long_{pair}.parquet"))
             pdp_env_ranges_df.to_parquet(os.path.join(tile_dir, f"pdp_env_ranges_{pair}.parquet"))
-            
-            boot_df = pd.DataFrame(boot_mat, columns=[f"Boot_{i+1}" for i in range(n_boot)])
-            boot_df['FID'] = subgrid_data['FID']
-            full_boot_df = pd.merge(full_training_gdf[['X', 'Y', 'FID']], boot_df, on='FID', how='left')
-            boot_cols = [f"Boot_{i+1}" for i in range(n_boot)]
-            full_boot_df['Mean_Boots_Prediction'] = full_boot_df[boot_cols].mean(axis=1)
-            full_boot_df['Uncertainty_SD'] = full_boot_df[boot_cols].std(axis=1)
-            gpd.GeoDataFrame(full_boot_df, geometry=gpd.points_from_xy(full_boot_df.X, full_boot_df.Y), crs=grid_crs).to_parquet(os.path.join(tile_dir, f"bootstraps_{pair}.geoparquet"))
-            
-            final_model = xgb.train(params=xgb_params, dtrain=dtrain_full, num_boost_round=best_iteration)
-            final_model.save_model(os.path.join(tile_dir, f"xgb_model_{pair}.json"))
-            
-            res = 10
-            min_x, min_y, max_x, max_y = full_training_gdf.total_bounds
+
+            # Save Rasters
+            res = 10 # Assuming 10m resolution, adjust if needed
+            min_x, min_y, max_x, max_y = subgrid_gdf.total_bounds
             out_shape = (int(np.ceil((max_y - min_y) / res)), int(np.ceil((max_x - min_x) / res)))
             transform = from_origin(min_x, max_y, res, res)
-            for col, filename in [('Mean_Boots_Prediction', f"Mean_Boots_Prediction_{pair}.tif"), ('Uncertainty_SD', f"Uncertainty_SD_{pair}.tif")]:
+            for col, filename in [('Mean_Prediction', f"Mean_Boots_Prediction_{pair}.tif"), ('Uncertainty_SD', f"Uncertainty_SD_{pair}.tif")]:
                 raster_data = np.full(out_shape, np.nan, dtype=np.float32)
-                for _, row in full_boot_df.dropna(subset=[col]).iterrows():
+                for _, row in boot_df.dropna(subset=[col]).iterrows():
                     r, c = rasterio.transform.rowcol(transform, row['X'], row['Y'])
                     if 0 <= r < out_shape[0] and 0 <= c < out_shape[1]: raster_data[r, c] = row[col]
                 with rasterio.open(os.path.join(tile_dir, filename), 'w', driver='GTiff', height=out_shape[0], width=out_shape[1], count=1, dtype=raster_data.dtype, crs=grid_crs, transform=transform, nodata=np.nan) as dst:
                     dst.write(raster_data, 1)
+            
+            # Save model trained on full data with best # of rounds
+            final_model = xgb.train(params=xgb_params, dtrain=dtrain_full, num_boost_round=best_iteration)
+            final_model.save_model(os.path.join(tile_dir, f"xgb_model_{pair}.json"))
+            
+            # GENERATE DIAGNOSTIC PLOT OF MODEL FIT ---
+            plot_data = boot_df.dropna(subset=['Mean_Prediction'])
+            fig, ax = plt.subplots(figsize=(7, 7))
+            sns.scatterplot(data=plot_data, x='b.change_actual', y='Mean_Prediction', alpha=0.3, color="darkblue", ax=ax)
+            ax.axline((0, 0), slope=1, color="red", linestyle="--", linewidth=1)
+            ax.set_title(f"Model Fit for Tile: {tile_id} | Pair: {pair}")
+            ax.set_xlabel("Actual Change (m)")
+            ax.set_ylabel("Mean Predicted Change (m)")
+            subtitle = f"Mean R-squared = {np.nanmean(deviance_mat[:, 2]):.3f} | Mean RMSE = {np.nanmean(deviance_mat[:, 1]):.3f}"
+            fig.suptitle(subtitle, y=0.92, fontsize=10)
+            plot_dir = os.path.join(output_dir_train, tile_id, "diagnostic_plots")
+            os.makedirs(plot_dir, exist_ok=True)
+            plt.savefig(os.path.join(plot_dir, f"model_fit_{pair}.png"), dpi=150)
+            plt.close()
+            logger.info("DIAGNOSTIC: All outputs saved successfully.")
+
         except Exception as e:
             logger.critical(f"FATAL ERROR in training for Tile: {tile_id} | Pair: {pair} | {e}", exc_info=True)
 
