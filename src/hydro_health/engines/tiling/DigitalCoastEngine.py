@@ -124,6 +124,8 @@ class DigitalCoastEngine:
         base_url = 'https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry='
         elevation_footprints_url = base_url + geometry_coords
         datasets_json = requests.get(elevation_footprints_url).json()
+        if datasets_json['error']['code'] == 404:
+            raise Exception(f"Digital Coast Error: {datasets_json['error']['message']}")
 
         tile_index_links = []
         for feature in datasets_json['features']:

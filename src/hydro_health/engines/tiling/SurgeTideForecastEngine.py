@@ -6,7 +6,6 @@ import xarray as xr  # pip install cfgrib required for cfgrib engine
 import geopandas as gpd
 import s3fs  # require conda install h5netcdf
 import shapely
-import thalassa
 import numpy as np
 
 from datetime import datetime
@@ -79,13 +78,6 @@ class SurgeTideForecastEngine:
         # url = f"s3://{bucket_name}/{key}"
         # ds = xr.open_dataset(s3.open(url, 'rb'), drop_variables=['nvel'])
 
-        # TODO thalassa can spatial filter based on shapely bbox
-        # import thalassa
-        # import shapely
-        # ds = thalassa.open_dataset("some_netcdf.nc")
-        # bbox = shapely.box(0, 0, 1, 1)
-        # ds = thalassa.crop(ds, bbox)
-
         # TODO other open-source options for spatial filter netcdf using numpy or xarray
         # https://stackoverflow.com/questions/29135885/netcdf4-extract-for-subset-of-lat-lon
         # https://github.com/Deltares/xugrid/issues/107
@@ -136,11 +128,6 @@ class SurgeTideForecastEngine:
                     # vvel_bottom              (time, nSCHISM_hgrid_node) float64 ...
                     # uvel4.5                  (time, nSCHISM_hgrid_node) float64 ...
                     # vvel4.5
-
-                    normalized_ds = thalassa.normalize(ds)  # TODO this updates STOFS to expected variables
-                    box = shapely.box(-86.775, -86.7, 30.3750000000001, 30.45)
-                    subset = thalassa.crop(normalized_ds, box)
-                    print(subset)
                     break
 
 
