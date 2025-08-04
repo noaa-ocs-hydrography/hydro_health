@@ -38,6 +38,9 @@ def get_env_param_lookup(env: str) -> dict[str]:
 
 def run_hydro_health(config_name: str) -> None:
     start = time.time()
+    if os.path.exists(OUTPUTS / 'log_prints.txt'):
+        now = time.time()
+        os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
     env = tools.get_environment()
     print('Environment:', env)
     param_lookup = get_env_param_lookup(env)
@@ -81,7 +84,7 @@ def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None
     with open(config_path, "w") as config_file:
         current_day = datetime.now()
         timestamp = current_day.strftime("%m%d%Y")
-        config['runtimes'].append(timestamp)
+        config['runtimes'].append(str(timestamp))
         print(f'Updating config runtimes for date: {timestamp}')
         yaml.safe_dump(config, config_file, sort_keys=False)
 

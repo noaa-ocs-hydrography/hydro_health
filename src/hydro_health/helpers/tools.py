@@ -220,11 +220,13 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
         data_folder = ecoregion / data_type
         vrt_files = data_folder.glob('*.vrt')
         for vrt in vrt_files:
-            print(vrt)
             vrt_ds = gdal.Open(str(vrt))
-
             vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[3:])
-            vrt_tile_index = list(vrt_data_folder.rglob('*_dis.shp'))[0]
+            vrt_tile_index_list = list(vrt_data_folder.rglob('*_dis.shp'))
+            if vrt_tile_index_list:
+                vrt_tile_index = vrt_tile_index_list[0]
+            else:
+                continue
             shp_driver = ogr.GetDriverByName('ESRI Shapefile')
             vrt_tile_index_shp = shp_driver.Open(vrt_tile_index, 0)
             # get geometry of single feature
