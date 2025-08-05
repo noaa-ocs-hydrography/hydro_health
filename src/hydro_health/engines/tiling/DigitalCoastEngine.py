@@ -46,7 +46,7 @@ class DigitalCoastEngine:
             shp_df['area'] = shp_df['geometry'].area
             total_area = shp_df["area"].sum()
             self.write_message(f' - Small area: {total_area} - {shp_path}', outputs)
-            if total_area > self.approved_size:
+            if total_area < self.approved_size:
                 self.write_message(f' - provider too small: {total_area} - {shp_path}', outputs)
                 move_providers.append(shp_path.parents[2])
         for provider in move_providers:
