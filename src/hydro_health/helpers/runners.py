@@ -39,7 +39,6 @@ def run_tsm_layer_engine() -> None:
     """Entry point for parallel processing of TSM model data"""
 
     engine = CreateTSMLayerEngine()
-    print(engine.output_folder)
     engine.run()
 
 
