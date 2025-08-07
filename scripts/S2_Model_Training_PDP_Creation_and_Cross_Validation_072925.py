@@ -45,6 +45,9 @@ output_dir_train <- "N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_mod
 # ==============================================================================
 #
 #                            PRE-TRAINING FUNCTIONS
+# --- note - the current boruta predictor selection method is tile by tile approach, but for the pilot model it takes about 48 hrs to run. This is 
+# not feasable for the ER size model. So we need to modify the methodlogy to work on a global scale by selecting a 'representative' sub sample of tiles 
+# for the boruta predictor selection to run on - which will then be applied generally accross all tiles. ---
 #
 # ==============================================================================
 
