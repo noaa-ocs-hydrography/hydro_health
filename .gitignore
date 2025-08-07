@@ -9,5 +9,6 @@ inputs/lookups/hydro_health.config
 # Allow
 !inputs/*wgs84*
 !inputs/lookups/
+!inputs/run_configs/
 !inputs/Master_grids.gpkg
 !inputs/drawn_polygons.geojson

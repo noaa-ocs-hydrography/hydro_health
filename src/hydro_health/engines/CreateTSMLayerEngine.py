@@ -10,12 +10,16 @@ import rasterio
 from rasterio.transform import from_bounds
 
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_environment
+
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 class HydroHealthCredentialsError(Exception):
     pass
+
 
 class HydroHealthConfig:
     def __init__(self):
@@ -61,12 +65,24 @@ class CreateTSMLayerEngine(Engine):
         self.password = creds.password
         self.server = 'ftp.hermes.acri.fr'
         self.downloaded_files = []
+        self.output_folder = (
+            OUTPUTS / pathlib.Path(get_config_item("TSM", "DATA_PATH"))
+            if get_environment() == "local"
+            else pathlib.Path(get_config_item("TSM", "DATA_PATH"))
+        )
+        self.raster_path = (
+            OUTPUTS / pathlib.Path(get_config_item("TSM", "MEAN_RASTER_PATH"))
+            if get_environment() == "local"
+            else pathlib.Path(get_config_item("TSM", "MEAN_RASTER_PATH"))
+        )
+        self.year_pair_path = (
+            OUTPUTS / pathlib.Path(get_config_item("TSM", "YEAR_PAIR_RASTER_PATH"))
+            if get_environment() == "local"
+            else pathlib.Path(get_config_item("TSM", "YEAR_PAIR_RASTER_PATH"))
+        )
 
     def create_rasters(self)-> None:
         """Create annual mean TSM rasters and write full-resolution GeoTIFFs"""
-        
-        folder_path = pathlib.Path(get_config_item('TSM', 'DATA_PATH'))
-        output_folder = pathlib.Path(get_config_item('TSM', 'MEAN_RASTER_PATH')) 
 
         grid_shape = (4320, 8640)  # (height, width)
         transform = from_bounds(-180, -90, 180, 90, grid_shape[1], grid_shape[0])
@@ -75,7 +91,7 @@ class CreateTSMLayerEngine(Engine):
 
         for year in range(2004, 2025):
             print(f'Processing year: {year}')
-            nc_files = [f for f in os.listdir(folder_path) if f"L3m_{year}" in f and f.endswith('.nc')]
+            nc_files = [f for f in os.listdir(self.output_folder) if f"L3m_{year}" in f and f.endswith('.nc')]
             if not nc_files:
                 print(f"  No NetCDF files found for {year}")
                 continue
@@ -84,7 +100,7 @@ class CreateTSMLayerEngine(Engine):
             valid_count = None
 
             for fname in nc_files:
-                path = folder_path / fname
+                path = self.output_folder / fname
                 try:
                     ds = xr.open_dataset(path)
                     arr = ds['TSM_mean'].values.squeeze().astype(np.float32)
@@ -110,7 +126,7 @@ class CreateTSMLayerEngine(Engine):
                 annual_mean = running_sum / valid_count
             annual_mean[valid_count == 0] = nodata_val
 
-            out_path = output_folder / f"TSM_mean_{year}.tif"
+            out_path = self.raster_path / f"TSM_mean_{year}.tif"
             with rasterio.open(
                 out_path,
                 'w',
@@ -170,10 +186,8 @@ class CreateTSMLayerEngine(Engine):
                                 print(f"Skipping late OLCIA file: {name}")
                                 continue  
 
-                    local_dir = pathlib.Path(get_config_item('TSM', 'DATA_PATH'))
-                    local_path = local_dir / name
-                    local_dir.mkdir(parents=True, exist_ok=True)
-
+                    local_path = self.output_folder / name
+                    self.output_folder.mkdir(parents=True, exist_ok=True)
                     if not local_path.exists():
                         print(local_path)
                         print(f"Downloading {name} from {item_path}")
@@ -186,7 +200,7 @@ class CreateTSMLayerEngine(Engine):
 
     def download_tsm_data(self)-> None:
         """Download TSM data from the FTP server and save it to local storage"""
-              
+
         print('Connecting to FTP server...')
         ftp = FTP(self.server)
         ftp.login(user=self.username, passwd=self.password)
@@ -218,7 +232,7 @@ class CreateTSMLayerEngine(Engine):
         print("Writing download log...")
 
         sorted_files = sorted(self.downloaded_files, key=self.extract_start_date)
-        log_path = pathlib.Path(get_config_item('TSM', 'DATA_PATH')) / 'downloaded_files.txt'
+        log_path = self.output_folder / 'downloaded_files.txt'
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         with open(log_path, 'w') as f:
@@ -226,7 +240,7 @@ class CreateTSMLayerEngine(Engine):
                 f.write(name + '\n')
 
         print(f"\nDownload log written to: {log_path}")
-    
+
     def year_pair_rasters(self, start_year, end_year)-> None:
         """ Create a raster average for years in the range of start_year and end_year
 
@@ -234,13 +248,9 @@ class CreateTSMLayerEngine(Engine):
         :param int end_year: last year in the range
         """        
 
-        input_folder = pathlib.Path(get_config_item('TSM', 'MEAN_RASTER_PATH')) 
-        output_folder = pathlib.Path(get_config_item('TSM', 'YEAR_PAIR_RASTER_PATH'))
-        output_name=f"tsm_mean.tif"
-
         raster_files = [
-            os.path.join(input_folder, f)
-            for f in os.listdir(input_folder)
+            os.path.join(self.raster_path, f)
+            for f in os.listdir(self.raster_path)
             if f.endswith(".tif") and any(str(year) in f for year in range(start_year, end_year + 1))
         ]
 
@@ -263,7 +273,7 @@ class CreateTSMLayerEngine(Engine):
         with np.errstate(divide='ignore', invalid='ignore'):
             average_array = np.where(count_array > 0, sum_array / count_array, np.nan) 
 
-        output_path = os.path.join(output_folder, f'{start_year}_{end_year}_{output_name}')
+        output_path = os.path.join(self.year_pair_path, f'{start_year}_{end_year}_tsm_mean.tif')
         with rasterio.open(output_path, "w", **meta) as dst:
             dst.write(average_array, 1)
 
@@ -271,7 +281,7 @@ class CreateTSMLayerEngine(Engine):
 
     def run(self)-> None:
         """Entrypoint for processing the TSM layer"""
-  
+
         try:
             self.download_tsm_data()
         except HydroHealthCredentialsError as e:
