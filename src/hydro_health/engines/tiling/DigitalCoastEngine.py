@@ -20,7 +20,7 @@ from multiprocessing import set_executable
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class DigitalCoastProcessor:
+class DigitalCoastEngine:
     """Class for parallel processing all BlueTopo tiles for a region"""
 
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
@@ -124,6 +124,8 @@ class DigitalCoastProcessor:
         base_url = 'https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry='
         elevation_footprints_url = base_url + geometry_coords
         datasets_json = requests.get(elevation_footprints_url).json()
+        if datasets_json['error']['code'] == 404:
+            raise Exception(f"Digital Coast Error: {datasets_json['error']['message']}")
 
         tile_index_links = []
         for feature in datasets_json['features']:
@@ -190,7 +192,7 @@ class DigitalCoastProcessor:
             if result:
                 self.write_message(f'Result: {result}', output_folder)
     
-    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         ecoregions = list(tile_gdf['EcoRegion'].unique())
