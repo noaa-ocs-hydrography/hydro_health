@@ -1,6 +1,13 @@
 DIGITALCOAST:
   API: https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry=
   TILED_DATA: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\raw\ER_3\DigitalCoast\tiled'
+HURRICANE:
+  DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data
+  GPKG_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_data.gpkg
+  RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_rasters
+  YEAR_PAIR_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
+MASK:
+  MASK_PRED_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif
 TSM:
   DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
   MEAN_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
