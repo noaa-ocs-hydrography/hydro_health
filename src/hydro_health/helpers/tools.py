@@ -117,7 +117,6 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         
         vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
         gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
-    print('finished create_raster_vrts')
 
 
 def get_environment() -> str:
@@ -213,6 +212,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 def grid_digital_coast_files(outputs: str, data_type: str) -> None:
     """Process for gridding Digital Coast files to BlueTopo grid"""
 
+    print('Gridding Digital Coast files to BlueTopo grids')
     gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
     blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
@@ -240,7 +240,7 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
                         output_path = ecoregion / data_type / 'tiled' / folder_name
                         output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
                         output_path.mkdir(parents=True, exist_ok=True)
-                        print(f'Creating {output_clipped_vrt.name}')
+                        print(f' - Creating {output_clipped_vrt.name}')
                         try:
                             polygon = current_tile_geom.ExportToWkt()
                             gdal.Warp(
@@ -261,6 +261,7 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
             vrt_ds = None
     gpkg_ds = None
     blue_topo_layer = None
+    print('Finished Gridding Digital Coast')
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
