@@ -73,7 +73,6 @@ class DigitalCoastEngine:
             provider_folders = os.listdir(digital_coast_folder)
             provider_folders = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
             for provider in provider_folders:
-                print(provider)
                 if 'unused_providers' != provider.stem:
                     provider_folder = digital_coast_folder / provider
                     if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
@@ -210,7 +209,7 @@ class DigitalCoastEngine:
         ecoregion_groups = tile_gdf.groupby('EcoRegion')
         for er_id, ecoregion_group in ecoregion_groups:
             if er_id == ecoregion:
-                ecoregion_group_web_mercator = ecoregion_group.to_crs(4269)
+                ecoregion_group_web_mercator = ecoregion_group.to_crs(4269)  # POST request only allows this EPSG
                 ecoregion_group_web_mercator['geom_type'] = 'Polygon'
                 tile_geometries = ecoregion_group_web_mercator[['geom_type', 'geometry']]
                 tile_boundary = tile_geometries.dissolve(by='geom_type')
