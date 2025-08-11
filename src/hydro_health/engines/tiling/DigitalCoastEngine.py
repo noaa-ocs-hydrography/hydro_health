@@ -15,6 +15,7 @@ from botocore.client import Config
 from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
+from hydro_health.helpers.tools import get_config_item
 
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -127,7 +128,7 @@ class DigitalCoastEngine:
         download_link, output_folder_path = param_inputs
         # TODO we already only choose USACE NCMP providers, so this might always be from this s3 bucket
         # only allow dem data type.  Others are: laz
-        if 'noaa-nos-coastal-lidar-pds' in download_link and 'dem' in download_link:
+        if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and 'dem' in download_link:
             _, data_file = download_link.replace('/index.html', '').split('.com')
             lidar_bucket = self.get_bucket()
             for obj_summary in lidar_bucket.objects.filter(Prefix=f"{data_file[1:]}"):
@@ -148,14 +149,13 @@ class DigitalCoastEngine:
     def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
         """Query NOWCoast REST API for available datasets"""
 
-        base_url = 'https://coast.noaa.gov/dataviewer/api/v1/search/missions'
         payload = {
             "aoi": f"SRID=4269;{geometry_coords}",
             "published": "true",
             "dataTypes": ["Lidar", "DEM"],
             "dialect": "arcgis",
         }
-        response = requests.post(base_url, data=payload)
+        response = requests.post(get_config_item('DIGITALCOAST', 'API'), data=payload)
         datasets_json = response.json()
 
         if response.status_code == 404:
@@ -192,14 +192,13 @@ class DigitalCoastEngine:
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
-        bucket = "noaa-nos-coastal-lidar-pds"
         creds = {
             "aws_access_key_id": "",
             "aws_secret_access_key": "",
             "config": Config(signature_version=UNSIGNED),
         }
         s3 = boto3.resource('s3', **creds)
-        nbs_bucket = s3.Bucket(bucket)
+        nbs_bucket = s3.Bucket(get_config_item('DIGITALCOAST', 'BUCKET'))
         return nbs_bucket
 
     def get_ecoregion_geometry_strings(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str) -> str:

@@ -1,5 +1,6 @@
 DIGITALCOAST:
-  API: https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry=
+  API: https://coast.noaa.gov/dataviewer/api/v1/search/missions
+  BUCKET: noaa-nos-coastal-lidar-pds
   TILED_DATA: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\raw\ER_3\DigitalCoast\tiled'
 TSM:
   DATA_PATH: ER_3\original_data_files\tsm_data\nc_files
