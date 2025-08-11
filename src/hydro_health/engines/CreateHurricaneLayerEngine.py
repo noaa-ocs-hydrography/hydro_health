@@ -97,7 +97,7 @@ class CreateHurricaneLayerEngine(Engine):
         """
 
         gdf_to_clip = gpd.read_file(self.hurricane_data_path, layer='atlantic_polygon_buffer')
-        clip_boundary = gpd.read_file(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp")
+        clip_boundary = gpd.read_file(get_config_item('MASK', 'COAST_BOUNDARY_PATH'))
 
         if gdf_to_clip.crs is None or clip_boundary.crs is None:
             raise ValueError("One or both GeoDataFrames are missing a CRS.")
@@ -551,23 +551,23 @@ class CreateHurricaneLayerEngine(Engine):
         self.polygons_to_raster()
 
         self.generate_cumulative_rasters(
-            output_folder=r'C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
+            output_folder=get_config_item('HURRICANE', 'COUNT_RASTER_PATH'),
             value="cumulative_count")
 
         self.generate_cumulative_rasters(
-            output_folder=r'C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
+            output_folder=get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH'),
             value="cumulative_windspeed")
 
         for start_year, end_year in self.year_ranges:
             self.average_rasters(
-                input_folder=r'C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
+                input_folder=get_config_item('HURRICANE', 'COUNT_RASTER_PATH'),
                 start_year=start_year,
                 end_year=end_year,
                 output_name=f"hurr_count"
             )
 
             self.average_rasters(
-                input_folder=r"C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
+                input_folder=get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH'),
                 start_year=start_year,
                 end_year=end_year,
                 output_name=f"hurr_strength"
