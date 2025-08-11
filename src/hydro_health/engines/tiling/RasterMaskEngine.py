@@ -9,6 +9,7 @@ import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
 from concurrent.futures import ThreadPoolExecutor
+from hydro_health.helpers.tools import get_config_item
 
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -24,17 +25,31 @@ class RasterMaskEngine:
         if prediction_file.exists() and training_data_outline.exists():
             training_file = ecoregion / f'training_mask_{ecoregion.stem}.tif'
             shutil.copy(prediction_file, training_file)
-            training_ds = gdal.Open(training_file, gdal.GA_Update)
+            training_ds = gdal.Open(str(training_file), gdal.GA_Update)
             shp_driver = ogr.GetDriverByName("ESRI Shapefile")
-            training_data_outline_ds = shp_driver.Open(training_data_outline)
-            for layer in training_data_outline_ds:
-                # TODO try to load the layer without looping in case more than 1 layer
-                # TODO verify if tile_index is used as full dataset or subset and we need to save that dataset
-                # TODO try to silence errors? or fix them?
-                gdal.PushErrorHandler('CPLQuietErrorHandler')
-                gdal.RasterizeLayer(training_ds, [1], layer, burn_values=[2])
-                break
+            training_data_outline_ds = shp_driver.Open(str(training_data_outline))
+            gdal.PushErrorHandler('CPLQuietErrorHandler')
+            training_mask_layer = training_data_outline_ds.GetLayer(0)
+            gpkg_driver = ogr.GetDriverByName("GPKG")
+            geopackage_ds = gpkg_driver.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
+            ecoregions_layer = geopackage_ds.GetLayer(get_config_item('SHARED', 'ECOREGIONS'))
+            ecoregions_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
+
+            in_memory_driver = ogr.GetDriverByName("Memory")
+            clipped_training_mask_ds = in_memory_driver.CreateDataSource('clipped_training_mask')
+            clipped_training_mask_layer = clipped_training_mask_ds.CreateLayer(
+                "clipped_training_mask_layer",
+                geom_type=training_mask_layer.GetGeomType(),
+                srs=training_mask_layer.GetSpatialRef(),
+            )
+            training_mask_layer.Clip(ecoregions_layer, clipped_training_mask_layer)
+
+            gdal.RasterizeLayer(training_ds, [1], clipped_training_mask_layer, burn_values=[2])
+            print(f' - {ecoregion.stem}')
+            geopackage_ds = None
+            clipped_training_mask_ds = None
             training_ds = None
+            shp_driver = None
             training_data_outline_ds = None
 
     def create_prediction_mask(self, ecoregion: pathlib.Path) -> None:
@@ -43,11 +58,10 @@ class RasterMaskEngine:
         # TODO try to share in_memory layer creation with multiprocessing
         # Project EcoRegions_50m to UTM
         gpkg = INPUTS / 'Master_Grids.gpkg'
-        gpkg_ds = ogr.Open(gpkg)
+        gpkg_ds = ogr.Open(str(gpkg))
         ecoregions_50m = gpkg_ds.GetLayerByName('EcoRegions_50m')
         in_memory_driver = ogr.GetDriverByName('Memory')
-        # in_memory_driver = ogr.GetDriverByName('ESRI Shapefile')
-        
+
         output_srs = osr.SpatialReference()
         output_srs.ImportFromEPSG(32617)
         output_ds = in_memory_driver.CreateDataSource('output_ecoregion')
@@ -61,7 +75,6 @@ class RasterMaskEngine:
         output_layer_definition = output_layer.GetLayerDefn()
         ecoregions_50m.ResetReading()
         for feature in ecoregions_50m:
-            # TODO how to get field
             ecoregion_id = json.loads(feature.ExportToJson())['properties']['EcoRegion']
             if ecoregion_id == ecoregion.stem:
                 geom = feature.GetGeometryRef()
@@ -117,8 +130,13 @@ class RasterMaskEngine:
 
             in_memory_layer = None
             in_memory_ds = None
+            temp_feature = None
+            target_ds = None
         gpkg_ds = None
         output_ds = None
+        in_memory_driver = None
+        in_memory = None
+        output_srs = None
 
     def delete_intermediate_files(self, outputs) -> None:
         """Delete any intermediate shapefiles"""
@@ -148,21 +166,10 @@ class RasterMaskEngine:
                 for file in json_files:
                     if ecoregion.stem not in approved_files:
                         approved_files[ecoregion.stem] = []
-                    # Disregard small area tile index
                     parent_project = file.parents[0]
-                    if json.load(open(file))['Shape_Area'] > 5000000:
-                        tile_index_shps = list(parent_project.rglob('tileindex*.shp'))
-                        if tile_index_shps:
-                            approved_files[ecoregion.stem].append(tile_index_shps[0])
-                    else:
-                        # delete digital coast folder if small area
-                        print(f' - Deleting small area: {parent_project.stem}')
-                        if parent_project.exists():
-                            # TODO will all ecoregions have 'mosaic_NCMP_6326' ? 
-                            vrt_file = parent_project.parents[0] / f'mosaic_NCMP_6326_{parent_project.stem}.vrt'
-                            if vrt_file.exists():
-                                vrt_file.unlink()
-                            shutil.rmtree(parent_project)
+                    tile_index_shps = list(parent_project.rglob('tileindex*.shp'))
+                    if tile_index_shps:
+                        approved_files[ecoregion.stem].append(tile_index_shps[0])
         return approved_files
 
     def get_transformation(self) -> osr.CoordinateTransformation:
@@ -198,7 +205,7 @@ class RasterMaskEngine:
         print('Creating prediction masks')
         self.process_prediction_masks(ecoregions, outputs)
         approved_files = self.get_approved_area_files(ecoregions)
-        print(f' - Found files for ecoregions: {approved_files.keys()}')
+        print(f' - Found files for ecoregions: {list(approved_files.keys())}')
         print('Dissolving tile index shapefiles')
         self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
         print('Merging all dissolved tile index shapfiles')
@@ -206,6 +213,7 @@ class RasterMaskEngine:
         print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.delete_intermediate_files(outputs)
+        print('Finished Raster Mask Creation')
 
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
