@@ -9,6 +9,8 @@ steps:
   run: true
 - tool: grid_digital_coast_files
   run: true
+- tool: run_validate_extents_engine
+  run: true
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
