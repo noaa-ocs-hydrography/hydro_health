@@ -1,17 +1,16 @@
-import os
-import re
-import math
-import numpy as np
 import rasterio
 from rasterio.warp import calculate_default_transform, reproject, Resampling
 from rasterio.transform import from_bounds
+from rasterio.features import shapes
+import numpy as np
 import matplotlib.pyplot as plt
-import contextily as cx
-from matplotlib import colors
+import os
+import re
+import math
+from shapely.geometry import shape
 
-def plot_rasters_by_year(input_folder, output_folder):
+def plot_rasters_by_year(input_folder, output_folder, mask_path):
     year_datasets = {}
-
     filename_pattern = re.compile(r'(.+)_(\d{4})_resampled\.tif', re.IGNORECASE)
 
     for filename in os.listdir(input_folder):
@@ -32,62 +31,77 @@ def plot_rasters_by_year(input_folder, output_folder):
         return
 
     target_crs = 'EPSG:3857'
+
+    # Open the mask file once and keep the object for the whole function
+    mask_src = rasterio.open(mask_path)
+    
+    # --- Part 1: Determine Global Min/Max for Consistent Colorbar ---
     global_min = np.inf
     global_max = -np.inf
-    global_left = np.inf
-    global_bottom = np.inf
-    global_right = -np.inf
-    global_top = -np.inf
-    reference_res = None
+    
+    all_raster_paths = [dataset['path'] for year in year_datasets for dataset in year_datasets[year]]
 
-    # Step 1: Scan rasters for global min/max and global bounds in target CRS
-    for year in year_datasets:
-        for dataset in year_datasets[year]:
-            with rasterio.open(dataset['path']) as src:
-                data = src.read(1, masked=True)
-                if data.min() < global_min:
-                    global_min = data.min()
-                if data.max() > global_max:
-                    global_max = data.max()
+    mask_data_raw = mask_src.read(1)
+    mask_is_valid = mask_data_raw != mask_src.nodata
 
+    for path in all_raster_paths:
+        with rasterio.open(path) as src:
+            data = src.read(1, masked=True)
+            if src.crs != mask_src.crs or src.bounds != mask_src.bounds:
+                # The rasters and mask might not be in the same projection or have the same extent,
+                # so we need to reproject and resample for accurate min/max calculation.
                 transform, width, height = calculate_default_transform(
-                    src.crs, target_crs, src.width, src.height, *src.bounds)
+                    src.crs, mask_src.crs, src.width, src.height, *src.bounds)
                 
-                left = transform.c
-                top = transform.f
-                right = left + width * transform.a
-                bottom = top + height * transform.e
+                reprojected_data = np.zeros((height, width), dtype=src.dtypes[0])
+                reproject(
+                    source=rasterio.band(src, 1),
+                    destination=reprojected_data,
+                    src_transform=src.transform,
+                    src_crs=src.crs,
+                    dst_transform=transform,
+                    dst_crs=mask_src.crs,
+                    dst_nodata=src.nodata,
+                    resampling=Resampling.bilinear
+                )
+                reprojected_mask = np.zeros((height, width), dtype=mask_src.dtypes[0])
+                reproject(
+                    source=rasterio.band(mask_src, 1),
+                    destination=reprojected_mask,
+                    src_transform=mask_src.transform,
+                    src_crs=mask_src.crs,
+                    dst_transform=transform,
+                    dst_crs=mask_src.crs,
+                    dst_nodata=mask_src.nodata,
+                    resampling=Resampling.nearest
+                )
 
-                global_left = min(global_left, left)
-                global_bottom = min(global_bottom, bottom)
-                global_right = max(global_right, right)
-                global_top = max(global_top, top)
+                combined_mask = np.logical_or(reprojected_data == src.nodata, reprojected_mask == mask_src.nodata)
+                masked_data = np.ma.array(reprojected_data, mask=combined_mask)
+            else:
+                combined_mask = np.logical_or(data.mask, ~mask_is_valid)
+                masked_data = np.ma.array(data, mask=combined_mask)
 
-                if reference_res is None:
-                    reference_res = (abs(transform.a), abs(transform.e))  # (xres, yres)
+            if masked_data.min() < global_min:
+                global_min = masked_data.min()
+            if masked_data.max() > global_max:
+                global_max = masked_data.max()
 
-    # Step 2: Define a common transform and shape
-    xres, yres = reference_res
-    dst_width = int((global_right - global_left) / xres)
-    dst_height = int((global_top - global_bottom) / yres)
-    common_transform = from_bounds(global_left, global_bottom, global_right, global_top, dst_width, dst_height)
-    common_extent = (global_left, global_right, global_bottom, global_top)
-
-    # Step 3: Prepare subplot grid
+    # --- Part 2: Plotting with Individual Extents ---
     sorted_years = sorted(year_datasets.keys())
     num_years = len(sorted_years)
     cols = math.ceil(math.sqrt(num_years))
     rows = math.ceil(num_years / cols)
 
-    fig, axes = plt.subplots(rows, cols, figsize=(15, 15), constrained_layout=True)
+    # Use plt.subplots with shared axes turned off
+    fig, axes = plt.subplots(rows, cols, figsize=(15, 15), constrained_layout=True, sharex=False, sharey=False)
+    
     if num_years == 1:
         axes = np.array([axes])
     else:
         axes = axes.flatten()
 
     im = None
-    
-    # Create a colormap from 'viridis' and set the color for NaN values to white
     cmap = plt.cm.get_cmap('viridis').copy()
     cmap.set_bad(color='white')
     
@@ -95,52 +109,78 @@ def plot_rasters_by_year(input_folder, output_folder):
         ax = axes[i]
         datasets = year_datasets[year]
         
-        title_lines = [dataset['title'] for dataset in datasets]
-        ax.set_title('\n'.join(title_lines), loc='left', fontsize=12, fontweight='bold')
+        # We assume only one dataset per year for simplicity in plotting
+        dataset = datasets[0]
+        
+        with rasterio.open(dataset['path']) as src:
+            # Re-calculate local transform and extent for this specific subplot
+            local_transform, local_width, local_height = calculate_default_transform(
+                src.crs, target_crs, src.width, src.height, *src.bounds)
+            local_extent = from_bounds(local_transform.c, local_transform.f + local_height * local_transform.e, 
+                                       local_transform.c + local_width * local_transform.a, local_transform.f, 
+                                       local_width, local_height).bounds
 
-        for j, dataset in enumerate(datasets):
-            with rasterio.open(dataset['path']) as src:
-                destination = np.zeros((dst_height, dst_width), dtype=src.dtypes[0])
-                reproject(
-                    source=rasterio.band(src, 1),
-                    destination=destination,
-                    src_transform=src.transform,
-                    src_crs=src.crs,
-                    dst_transform=common_transform,
-                    dst_crs=target_crs,
-                    dst_nodata=src.nodata,
-                    resampling=Resampling.bilinear
-                )
-                
-                # After reprojection, create a masked array based on the nodata value
-                if src.nodata is not None:
-                    masked_destination = np.ma.masked_equal(destination, src.nodata)
-                else:
-                    masked_destination = destination
-                
-                im = ax.imshow(masked_destination, extent=common_extent, cmap=cmap, vmin=global_min, vmax=global_max)
+            destination = np.zeros((local_height, local_width), dtype=src.dtypes[0])
+            reproject(
+                source=rasterio.band(src, 1),
+                destination=destination,
+                src_transform=src.transform,
+                src_crs=src.crs,
+                dst_transform=local_transform,
+                dst_crs=target_crs,
+                dst_nodata=src.nodata,
+                resampling=Resampling.bilinear
+            )
+            
+            # Use the already open mask_src for reprojection
+            mask_destination_local = np.zeros((local_height, local_width), dtype=mask_src.dtypes[0])
+            reproject(
+                source=rasterio.band(mask_src, 1),
+                destination=mask_destination_local,
+                src_transform=mask_src.transform,
+                src_crs=mask_src.crs,
+                dst_transform=local_transform,
+                dst_crs=target_crs,
+                dst_nodata=mask_src.nodata,
+                resampling=Resampling.nearest
+            )
+            
+            mask_boolean_local = mask_destination_local != mask_src.nodata
+            combined_mask = np.logical_or(destination == src.nodata, ~mask_boolean_local)
+            masked_destination = np.ma.array(destination, mask=combined_mask)
 
-        ax.tick_params(left=False, right=False, labelleft=False,
-                        labelbottom=False, bottom=False)
-        ax.set_aspect('equal')
+            im = ax.imshow(masked_destination, extent=local_extent, cmap=cmap, vmin=global_min, vmax=global_max)
+            
+            # Generate and plot the local mask outline
+            mask_geometries_local = [shape(geom) for geom, val in shapes(mask_boolean_local.astype(np.uint8), transform=local_transform) if val > 0]
+            for geom in mask_geometries_local:
+                x, y = geom.exterior.xy
+                ax.plot(x, y, color='red', linewidth=1.5, zorder=10)
 
-    # Step 4: Turn off unused axes
+            ax.set_title(dataset['title'], loc='left', fontsize=12, fontweight='bold')
+            ax.tick_params(left=False, right=False, labelleft=False,
+                           labelbottom=False, bottom=False)
+            ax.set_aspect('equal')
+
+    # --- Finalize the Plot ---
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
 
-    # Step 5: Add colorbar
     if global_min != np.inf and global_max != -np.inf and im is not None:
         cbar = fig.colorbar(im, ax=axes.ravel().tolist())
         cbar.set_label('Depth (meters)', fontsize=20, rotation=270, labelpad=20)
 
-    plt.suptitle("Raster Datasets by Year", fontsize=24)
+    plt.suptitle("Raster Datasets by Year (Individual Extent)", fontsize=24)
 
     os.makedirs(output_folder, exist_ok=True)
-    output_filename = 'raster_plots_all_years.png'
+    output_filename = 'raster_plots_individual_extent.png'
     output_path = os.path.join(output_folder, output_filename)
     plt.savefig(output_path, dpi=1200, bbox_inches='tight', format='png')
     plt.close(fig)
-    print(f"Plot saved to: {output_path}")
+    print(f"Individual extent plot saved to: {output_path}")
+
+    # Don't forget to close the mask file at the very end
+    mask_src.close()
 
 def plot_consecutive_year_differences(input_folder, output_folder):
     year_datasets = {}
@@ -238,7 +278,7 @@ def plot_consecutive_year_differences(input_folder, output_folder):
     # Create custom colormap and norm for difference plots
     cmap = plt.cm.get_cmap('RdYlBu').copy()
     # Define custom color for masked values (black)
-    cmap.set_bad(color='black')
+    cmap.set_bad(color='white')
     
     # Plotting differences
     num_diffs = len(diff_data)
@@ -283,6 +323,7 @@ def plot_consecutive_year_differences(input_folder, output_folder):
 # Set input/output folders
 raster_folder = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast_resampled"
 plot_output_folder = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast_plots"
+mask_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\training_mask_ER_3.tif"
 
-plot_rasters_by_year(raster_folder, plot_output_folder)
+plot_rasters_by_year(raster_folder, plot_output_folder, mask_path)
 plot_consecutive_year_differences(raster_folder, plot_output_folder)
