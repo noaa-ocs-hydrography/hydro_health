@@ -31,6 +31,20 @@ OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 class ModelDataPreProcessor:
     """Class for parallel preprocessing all model data"""
 
+    def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
+        """Generate a rugosity/roughness raster from the DEM"""
+
+        rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
+        rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
+        gdal.DEMProcessing(rugosity_file_path, tiff_file_path, 'Roughness')
+
+    def create_slope(self, tiff_file_path: pathlib.Path) -> None:
+        """Generate a slope raster from the DEM"""
+
+        slope_name = str(tiff_file_path.stem) + '_slope.tiff'
+        slope_file_path = tiff_file_path.parents[0] / slope_name
+        gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
+
     def focal_fill_block(self, block, w=3):
         """Efficient nan-aware focal mean using uniform_filter."""
         block = block.astype(np.float32)
@@ -120,17 +134,6 @@ class ModelDataPreProcessor:
             r = np.where(np.isnan(r), filled, r)
         
         return r
-    
-    # def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False):
-    #     """Main entry point for downloading Digital Coast data"""
-
-    #     digital_coast_folder = pathlib.Path(outputs) / 'DigitalCoast'
-
-    #     # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
-    #     self.process_tile_index(digital_coast_folder, tile_gdf, outputs)
-    #     self.process_intersected_datasets(digital_coast_folder, tile_gdf)
-    #     if digital_coast_folder.exists():
-    #         self.delete_unused_folder(digital_coast_folder)
 
     def repeat_disk_focal_fill(self, input_file, output_final, output_dir, n_repeats=5, w=3, layer_name="unknown"):
         """
@@ -145,6 +148,7 @@ class ModelDataPreProcessor:
         - w: window size for focal mean (must be odd)
         - layer_name: optional name for logging
         """
+        
         temp_file = input_file
         kernel = np.ones((w, w))
 
@@ -339,6 +343,7 @@ class ModelDataPreProcessor:
 
         client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
+
 
         preprocessed_dir = pathlib.Path(get_config_item('MODEL', 'PREPROCESSED_DIR'))
         processed_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
