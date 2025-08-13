@@ -2,21 +2,21 @@ DIGITALCOAST:
   API: https://maps.coast.noaa.gov/arcgis/rest/services/DAV/ElevationFootprints/MapServer/0/query?returnGeometry=false&f=json&where=1%3D1&outfields=%2A&spatialRel=esriSpatialRelIntersects&geometry=
   TILED_DATA: r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\HHM_Run\ER_3\model_variables\Prediction\raw\ER_3\DigitalCoast\tiled'
 HURRICANE:
-  COUNT_RASTER_PATH: ER_3\original_data_files\hurricane_data\hurricane_count_raster
-  CUMULATIVE_RASTER_PATH: ER_3\original_data_files\hurricane_data\hurricane_cumulative_raster
-  DATA_PATH: ER_3\original_data_files\hurricane_data
-  GPKG_PATH: ER_3\original_data_files\hurricane_data\hurricane_data.gpkg
-  RASTER_PATH: ER_3\original_data_files\hurricane_data\hurricane_rasters
-  YEAR_PAIR_RASTER_PATH: ER_3\model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
+  COUNT_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_cumulative_raster
+  DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data
+  GPKG_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_data.gpkg
+  RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_rasters
+  YEAR_PAIR_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
 MASK:
-  COAST_BOUNDARY_PATH: ER_3\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp
-  MASK_PRED_PATH: ER_3\prediction_masks\prediction_mask_ER_3.tif
+  COAST_BOUNDARY_PATH: \\nos.noaa\ocs\CSDLProjects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp
+  MASK_PRED_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif
 SEDIMENT:
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  DATA_PATH: ER_3\original_data_files\sediment_data
-  GPKG_PATH: ER_3\original_data_files\sediment_data\sediment_data.gpkg
-  MASK_PATH: ER_3\prediction_masks\prediction.mask.UTM17_8m.tif
-  RASTER_PATH: ER_3\model_variables\Prediction\pre_processed\sediment_rasters
+  DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data
+  GPKG_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg
+  MASK_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif
+  RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
@@ -27,6 +27,6 @@ SHARED:
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
 TSM:
-  DATA_PATH: ER_3\original_data_files\tsm_data\nc_files
-  MEAN_RASTER_PATH: ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
-  YEAR_PAIR_RASTER_PATH: ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters
+  DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
+  MEAN_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
+  YEAR_PAIR_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters

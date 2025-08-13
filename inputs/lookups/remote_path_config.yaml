@@ -11,10 +11,6 @@ HURRICANE:
 MASK:
   COAST_BOUNDARY_PATH: \\nos.noaa\ocs\CSDLProjects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp
   MASK_PRED_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif
-TSM:
-  DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
-  MEAN_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
-  YEAR_PAIR_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters
 SEDIMENT:
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
   DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data
@@ -30,3 +26,7 @@ SHARED:
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
+TSM:
+  DATA_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
+  MEAN_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
+  YEAR_PAIR_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters
