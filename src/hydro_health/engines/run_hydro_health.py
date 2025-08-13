@@ -62,6 +62,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_raster_mask_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 tools.grid_digital_coast_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
+            elif step["tool"] == "run_validate_extents_engine" and step["run"]:
+                runners.run_validate_extents_engine() 
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
                 runners.run_tsm_layer_engine()
             elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
