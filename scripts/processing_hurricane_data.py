@@ -1,15 +1,18 @@
 import os
-import requests
 import pathlib
+import requests
+
 import geopandas as gpd
-import pandas as pd
 import numpy as np
-from shapely.geometry import LineString, Polygon, GeometryCollection
-from shapely.ops import unary_union
+import pandas as pd
 import rasterio
+from rasterio import features
+from rasterio.transform import Affine
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 from scipy.ndimage import gaussian_filter
+from shapely.geometry import LineString, Polygon, GeometryCollection
+from shapely.ops import unary_union
 
 
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
@@ -232,7 +235,7 @@ def create_mega_polygon(current_polygon, next_polygon):
 
 def clip_polygons():
     gdf_to_clip = gpd.read_file(hurricane_data_path, layer='atlantic_polygon_buffer')
-    clip_boundary = gpd.read_file(r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\masks\50m_isobath_polygon\50m_isobath_polygon.shp')
+    clip_boundary = gpd.read_file(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp")
 
     if gdf_to_clip.crs is None or clip_boundary.crs is None:
         raise ValueError("One or both GeoDataFrames are missing a CRS.")
@@ -282,7 +285,7 @@ def polygons_to_raster(resolution=500):
         height = int(np.ceil((maxy - miny) / resolution))
         transform = from_bounds(minx, miny, maxx, maxy, width, height)
 
-        raster_data = np.full((height, width), np.NaN, dtype=np.float32)
+        raster_data = np.full((height, width), np.nan, dtype=np.float32)
 
         for _, row in group.iterrows():
             shapes = [(row.geometry, row['wind_speed'])]
@@ -290,7 +293,7 @@ def polygons_to_raster(resolution=500):
                 shapes,
                 out=raster_data,
                 transform=transform,
-                fill=np.NaN, 
+                fill=np.nan, 
             )
 
         raster_file = os.path.join(output_folder, f"{name}_{year}.tif")
@@ -306,7 +309,7 @@ def polygons_to_raster(resolution=500):
             count=1,
             dtype=raster_data.dtype,
             crs=gdf.crs,
-            nodata=np.NaN,
+            nodata=np.nan,
             transform=transform,
         ) as dst:
             dst.write(raster_data, 1)
@@ -315,15 +318,36 @@ def polygons_to_raster(resolution=500):
 
 def generate_cumulative_rasters(output_folder, value):
     input_raster_folder = r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_rasters'
-    mask_raster_path = r'C:\Users\aubrey.mccutchan\Documents\HydroHealth\masks\prediction.mask.WGS84_8m.tif'
+    mask_raster_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif"
     
+    target_resolution = 100.0
+
     with rasterio.open(mask_raster_path) as mask_src:
-        mask_data = mask_src.read(1) 
-        mask_transform = mask_src.transform
         mask_crs = mask_src.crs
-        mask_height, mask_width = mask_src.height, mask_src.width
+        
+        minx, miny, maxx, maxy = mask_src.bounds
+        
+        new_width = int(np.ceil((maxx - minx) / target_resolution))
+        new_height = int(np.ceil((maxy - miny) / target_resolution))
+        
+        mask_transform = Affine(target_resolution, 0, minx,
+                                0, -target_resolution, maxy)
+        
+        mask_data_resampled = np.full((new_height, new_width), np.nan, dtype=np.float32)
+        reproject(
+            source=mask_src.read(1),
+            destination=mask_data_resampled,
+            src_transform=mask_src.transform,
+            src_crs=mask_src.crs,
+            dst_transform=mask_transform,
+            dst_crs=mask_crs,
+            resampling=Resampling.nearest,
+            dst_nodata=np.nan
+        )
+        mask_data = mask_data_resampled
+        mask_height, mask_width = new_height, new_width
         mask_valid = mask_data == 1
-    
+
     year_folders = [f for f in os.listdir(input_raster_folder) if os.path.isdir(os.path.join(input_raster_folder, f))]
 
     for year_folder in year_folders:
@@ -341,17 +365,17 @@ def generate_cumulative_rasters(output_folder, value):
                 transform = src.transform
                 crs = src.crs
 
-                raster_data_resampled = np.full((mask_height, mask_width), np.NaN, dtype=np.float32)
-                if crs != mask_src.crs or transform != mask_src.transform:
-                    reproject(
-                        raster_data, raster_data_resampled,
-                        src_transform=transform,
-                        src_crs=crs,
-                        dst_transform=mask_src.transform,
-                        dst_crs=mask_src.crs,
-                        resampling=Resampling.bilinear,
-                        dst_nodata=np.nan 
-                    )
+                raster_data_resampled = np.full((mask_height, mask_width), np.nan, dtype=np.float32)
+                
+                reproject(
+                    raster_data, raster_data_resampled,
+                    src_transform=transform,
+                    src_crs=crs,
+                    dst_transform=mask_transform,
+                    dst_crs=mask_crs,
+                    resampling=Resampling.bilinear,
+                    dst_nodata=np.nan 
+                )
 
                 raster_data = raster_data_resampled
                 
@@ -362,10 +386,10 @@ def generate_cumulative_rasters(output_folder, value):
                 elif value == "cumulative_windspeed":
                     cumulative_windspeed += np.nan_to_num(raster_data, nan=0)
 
-            cumulative_windspeed[~mask_valid] = np.NaN
-            cumulative_count[~mask_valid] = np.NaN
-            
             print(f"Processed raster: {raster_file} for year {year_folder}")
+        
+        cumulative_windspeed[~mask_valid] = np.nan
+        cumulative_count[~mask_valid] = np.nan
 
         if value == "cumulative_count":
             output_name = f"cumulative_count_{year_folder}.tif"
@@ -376,6 +400,7 @@ def generate_cumulative_rasters(output_folder, value):
             output_raster = cumulative_windspeed
         
         output_path = os.path.join(output_folder, output_name)
+
         save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs)
         print(f"Cumulative raster for year {year_folder} saved to {output_path}.")
 
@@ -393,13 +418,13 @@ def save_raster(data, path, height, width, transform, crs):
         dtype=data.dtype,
         crs=crs,
         transform=transform,
-        nodata=np.NaN,
+        nodata=np.nan,
         compress="lzw",
     ) as dst:
         dst.write(data, 1)
 
 def average_rasters(input_folder, start_year, end_year, output_name):
-    output_folder = r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\year_averages"
+    output_folder = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\hurricane_year_pair_rasters"
 
     raster_files = [
         os.path.join(input_folder, f)
@@ -442,7 +467,7 @@ def average_rasters(input_folder, start_year, end_year, output_name):
     with rasterio.open(output_path, "w", **meta) as dst:
         dst.write(average_array, 1)
 
-    print(f"Averaged raster saved to {output_path}.")
+    print(f"Year pair raster saved to {output_path}.")
 
 year_ranges = [
     (2004, 2006),
@@ -457,23 +482,23 @@ clip_polygons()
 polygons_to_raster()
 
 generate_cumulative_rasters(
-    output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
+    output_folder=r'C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
     value="cumulative_count")
 
 generate_cumulative_rasters(
-    output_folder=r'C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
+    output_folder=r'C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters',
     value="cumulative_windspeed")
 
 for start_year, end_year in year_ranges:
     average_rasters(
-        input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_count_rasters",
+        input_folder=r'C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_count_rasters',
         start_year=start_year,
         end_year=end_year,
         output_name=f"hurr_count"
     )
 
     average_rasters(
-        input_folder=r"C:\Users\aubrey.mccutchan\Repo\hydro_health\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
+        input_folder=r"C:\Users\aubrey.mccutchan\Documents\Repo\hydro_health\inputs\hurricane_data\hurricane_cumulative_rasters",
         start_year=start_year,
         end_year=end_year,
         output_name=f"hurr_strength"
