@@ -13,13 +13,13 @@ import xarray as xr
 
 dask.config.set(scheduler='threads', num_workers=2)
 
-class ModelDataPreProcessor:
+class ModelDataPreEngine:
     """Class for parallel preprocessing all model data"""
 
     def __init__(self):
         self.engines = []
 
-    def add_engine(self, engine) -> None:
+    def add_additional_engine(self, engine) -> None:
         """Add an engine to the list of engines to run"""
 
         if not callable(getattr(engine, "run", None)):

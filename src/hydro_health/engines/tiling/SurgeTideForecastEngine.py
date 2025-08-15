@@ -6,7 +6,6 @@ import xarray as xr  # pip install cfgrib required for cfgrib engine
 import geopandas as gpd
 import s3fs  # require conda install h5netcdf
 import shapely
-import thalassa
 import numpy as np
 
 from datetime import datetime
@@ -18,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
-class SurgeTideForecastProcessor:
+class SurgeTideForecastEngine:
     """Download and convert any STOFS data"""
     
     def __init__(self) -> None:
@@ -79,13 +78,6 @@ class SurgeTideForecastProcessor:
         # url = f"s3://{bucket_name}/{key}"
         # ds = xr.open_dataset(s3.open(url, 'rb'), drop_variables=['nvel'])
 
-        # TODO thalassa can spatial filter based on shapely bbox
-        # import thalassa
-        # import shapely
-        # ds = thalassa.open_dataset("some_netcdf.nc")
-        # bbox = shapely.box(0, 0, 1, 1)
-        # ds = thalassa.crop(ds, bbox)
-
         # TODO other open-source options for spatial filter netcdf using numpy or xarray
         # https://stackoverflow.com/questions/29135885/netcdf4-extract-for-subset-of-lat-lon
         # https://github.com/Deltares/xugrid/issues/107
@@ -136,11 +128,6 @@ class SurgeTideForecastProcessor:
                     # vvel_bottom              (time, nSCHISM_hgrid_node) float64 ...
                     # uvel4.5                  (time, nSCHISM_hgrid_node) float64 ...
                     # vvel4.5
-
-                    normalized_ds = thalassa.normalize(ds)  # TODO this updates STOFS to expected variables
-                    box = shapely.box(-86.775, -86.7, 30.3750000000001, 30.45)
-                    subset = thalassa.crop(normalized_ds, box)
-                    print(subset)
                     break
 
 
@@ -161,7 +148,7 @@ class SurgeTideForecastProcessor:
         s3 = s3fs.S3FileSystem(anon=True)
         return s3
     
-    def process(self, outputs: str = False) -> None:
+    def run(self, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         # self.build_bucket_lookup()  # store s3 objects instead of folders
@@ -171,6 +158,6 @@ class SurgeTideForecastProcessor:
 
 if __name__ == "__main__":
     start = time.time()
-    processor = SurgeTideForecastProcessor()
-    processor.process(OUTPUTS)
+    engine = SurgeTideForecastEngine()
+    engine.run(OUTPUTS)
     print(f'Finished: {time.time() - start}')

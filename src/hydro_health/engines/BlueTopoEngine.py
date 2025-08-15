@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class BlueTopoProcessor:
+class BlueTopoEngine:
     """Class for parallel processing all BlueTopo tiles for a region"""
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
@@ -181,7 +181,7 @@ class BlueTopoProcessor:
             self.create_rugosity(tiff_file_path)
         return f'- {row["EcoRegion"]}'
 
-    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)

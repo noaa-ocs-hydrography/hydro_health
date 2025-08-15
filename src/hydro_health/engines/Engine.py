@@ -1,10 +1,8 @@
-import yaml
 import pathlib
 import sys
 import logging
 
 from osgeo import osr, gdal
-from hydro_health.helpers.tools import get_config_item
 
 
 gdal.UseExceptions()
@@ -29,7 +27,7 @@ class Engine:
     def check_logging(self) -> None:
         if self.logged:
             self.message(f'Check log: {self.log_path}')
-    
+
     def log_error(self) -> None:
         self.logger.error(gdal.GetLastErrorMsg())
         if not self.logged:
@@ -43,17 +41,6 @@ class Engine:
             getattr(module, 'AddMessage')(content)
         else:
             print(content)
-
-    def within_extent(self, shapefile_driver, longitude: float, latitude: float) -> bool:
-        """Check if lat/lon is within the WGS84 extent"""
-
-        wgs84_bbox = str(INPUTS / get_config_item('SHARED', 'BBOX_SHP'))
-        bbox_data = shapefile_driver.Open(wgs84_bbox)
-        bbox_extent = bbox_data.GetLayer().GetExtent()
-        if bbox_extent[0] < longitude < bbox_extent[1] and bbox_extent[2] < latitude < bbox_extent[3]:
-            return True
-        else:
-            return False
 
     def make_esri_projection(self, file_name, epsg=4326):
         """Create an Esri .prj file for a shapefile"""
