@@ -20,10 +20,10 @@ class RasterMaskEngine:
     def create_training_mask(self, ecoregion):
         """Create training mask for current ecoregion"""
 
-        prediction_file = ecoregion / f'prediction_mask_{ecoregion.stem}.tif'
-        training_data_outline = ecoregion / 'training_data_outlines.shp'
+        prediction_file = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'prediction_mask_{ecoregion.stem}.tif'
+        training_data_outline = ecoregion / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
         if prediction_file.exists() and training_data_outline.exists():
-            training_file = ecoregion / f'training_mask_{ecoregion.stem}.tif'
+            training_file = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'training_mask_{ecoregion.stem}.tif'
             shutil.copy(prediction_file, training_file)
             training_ds = gdal.Open(str(training_file), gdal.GA_Update)
             shp_driver = ogr.GetDriverByName("ESRI Shapefile")
@@ -96,7 +96,6 @@ class RasterMaskEngine:
         for feature in output_layer:
             feature_json = json.loads(feature.ExportToJson())
             ecoregion_id = feature_json['properties']['EcoRegion']
-            print('Building prediction mask:', ecoregion_id)
             # Create in memory layer and single polygon
             in_memory_ds = in_memory.CreateDataSource(f'output_layer_{ecoregion_id}')
             in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=output_layer.GetSpatialRef(), geom_type=ogr.wkbPolygon)
@@ -111,7 +110,8 @@ class RasterMaskEngine:
             x_res = int((xmax - xmin) / pixel_size)
             y_res = int((ymax - ymin) / pixel_size)
 
-            mask_path = ecoregion / f'prediction_mask_{ecoregion_id}.tif'
+            mask_path = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'prediction_mask_{ecoregion_id}.tif'
+            mask_path.parents[0].mkdir(parents=True, exist_ok=True)
             with gdal.GetDriverByName("GTiff").Create(
                 str(mask_path),
                 x_res,
@@ -160,7 +160,7 @@ class RasterMaskEngine:
 
         approved_files = {}
         for ecoregion in ecoregions:
-            digital_coast = ecoregion / 'DigitalCoast'
+            digital_coast = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if digital_coast.is_dir():
                 json_files = digital_coast.rglob('feature.json')
                 for file in json_files:
@@ -186,11 +186,11 @@ class RasterMaskEngine:
         """Creating full training outline shapefile for ecoregion"""
 
         for ecoregion in ecoregions:
-            digital_coast = ecoregion / 'DigitalCoast'
+            digital_coast = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if digital_coast.is_dir():
                 dissolved_shapefiles = digital_coast.rglob('*_dis.shp')
                 merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
-                training_datasets = ecoregion / 'training_data_outlines.shp'
+                training_datasets = ecoregion / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
                 merged_training_ds.to_file(training_datasets)
 
     def print_async_results(self, results: list[str], output_folder: str) -> None:
@@ -213,7 +213,6 @@ class RasterMaskEngine:
         print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.delete_intermediate_files(outputs)
-        print('Finished Raster Mask Creation')
 
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
