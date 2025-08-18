@@ -29,8 +29,8 @@ def get_env_param_lookup(env: str) -> dict[str]:
     else:
         param_lookup = {
             'input_directory': tools.Param(''),
-            'output_directory': tools.Param(str(OUTPUTS)),
-            'eco_regions': tools.Param('ER_3'),
+            'output_directory': tools.Param(tools.get_config_item('SHARED', 'OUTPUT_FOLDER')),
+            'eco_regions': tools.Param(''),
             'drawn_polygon': tools.Param('')
         }
     return param_lookup
@@ -38,19 +38,23 @@ def get_env_param_lookup(env: str) -> dict[str]:
 
 def run_hydro_health(config_name: str) -> None:
     start = time.time()
-    if os.path.exists(OUTPUTS / 'log_prints.txt'):
-        now = time.time()
-        os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
     env = tools.get_environment()
     print('Environment:', env)
     param_lookup = get_env_param_lookup(env)
-    print('Output folder:', param_lookup['output_directory'].valueAsText)
 
-    tiles = tools.get_ecoregion_tiles(param_lookup)
+    output_directory = pathlib.Path(param_lookup['output_directory'].valueAsText)
+    if os.path.exists(output_directory / 'log_prints.txt'):
+        now = time.time()
+        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{now}.txt')
+    print('Output folder:', output_directory)
+
     config_path = INPUTS / "run_configs" / config_name
     with open(config_path, "r") as lookup:
         config = yaml.safe_load(lookup)
         print(f'Script has been run {len(config["runtimes"])} time(s)')
+        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if tools.get_environment() == 'remote' else ''
+        print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
+        tiles = tools.get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup['output_directory'].valueAsText)
@@ -74,8 +78,9 @@ def run_hydro_health(config_name: str) -> None:
     end = time.time()
     print(f"Total Runtime: {end - start}")
     for ecoregion in pathlib.Path(param_lookup['output_directory'].valueAsText).glob('ER_*'):
-        if pathlib.Path(ecoregion / 'BlueTopo').is_dir():
-            print(f'{ecoregion.stem} BlueTopo tiles:', len(next(os.walk(os.path.join(param_lookup['output_directory'].valueAsText, ecoregion, 'BlueTopo')))[1]))
+        bluetopo_path = pathlib.Path(ecoregion / tools.get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo')
+        if bluetopo_path.is_dir():
+            print(f'{ecoregion.stem} BlueTopo tiles:', len(next(os.walk(str(bluetopo_path)))[1]))
         else:
             print('No tiles downloaded')
     print("done")
@@ -94,5 +99,5 @@ def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None
 
 
 if __name__ == "__main__":
-    config_name = "hydro_health_session_07082025.yaml"
+    config_name = "hydro_health_session_08132025.yaml"
     run_hydro_health(config_name)

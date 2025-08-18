@@ -18,6 +18,8 @@ from lxml import etree
 from osgeo import gdal
 from concurrent.futures import ThreadPoolExecutor
 
+from hydro_health.helpers.tools import get_config_item
+
 
 mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
@@ -106,7 +108,7 @@ class BlueTopoEngine:
         output_pathlib = pathlib.Path(output_folder)
         output_tile_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            current_file = output_pathlib / ecoregion_id / obj_summary.key
+            current_file = output_pathlib / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
                 if current_file.exists():
@@ -179,9 +181,9 @@ class BlueTopoEngine:
             self.set_ground_to_nodata(tiff_file_path)
             self.create_slope(tiff_file_path)
             self.create_rugosity(tiff_file_path)
-        return f'- {row["EcoRegion"]}'
 
     def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+        print('Downloading BlueTopo Datasets')
         param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)

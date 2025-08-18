@@ -35,7 +35,8 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         'NCMP': '*.tif'
     }
 
-    outputs = pathlib.Path(output_folder) / ecoregion / data_type
+
+    outputs = pathlib.Path(output_folder) / ecoregion / get_config_item(data_type.upper(), 'SUBFOLDER') / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
     output_geotiffs = {}
@@ -217,9 +218,9 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
     blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
     for ecoregion in ecoregions:
-        blue_topo_folder = ecoregion / 'BlueTopo'
+        blue_topo_folder = ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
         bluetopo_grids = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
-        data_folder = ecoregion / data_type
+        data_folder = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / data_type
         vrt_files = list(data_folder.glob('*.vrt'))
         for vrt in vrt_files:
             vrt_ds = gdal.Open(str(vrt))
@@ -237,7 +238,7 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
                 folder_name = tile.GetField('tile')
                 if folder_name in bluetopo_grids:
                     if current_tile_geom.Intersects(dissolve_geom):
-                        output_path = ecoregion / data_type / 'tiled' / folder_name
+                        output_path = ecoregion / get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER') / folder_name
                         output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
                         output_path.mkdir(parents=True, exist_ok=True)
                         print(f' - Creating {output_clipped_vrt.name}')
@@ -261,7 +262,6 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
             vrt_ds = None
     gpkg_ds = None
     blue_topo_layer = None
-    print('Finished Gridding Digital Coast')
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
