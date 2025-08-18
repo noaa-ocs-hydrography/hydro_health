@@ -15,6 +15,7 @@ from botocore.client import Config
 from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
+
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -36,7 +37,7 @@ class DigitalCoastEngine:
                 return True
         return False
     
-    def check_tile_index_areas(self, digital_coast_folder, ecoregion, outputs) -> None:
+    def check_tile_index_areas(self, digital_coast_folder, outputs) -> None:
         """Exclude any small area surveys"""
 
         self.write_message(f'Checking area size of tileindex files', outputs)
@@ -46,7 +47,6 @@ class DigitalCoastEngine:
             shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
             shp_df['area'] = shp_df['geometry'].area
             total_area = shp_df["area"].sum()
-            self.write_message(f' - Small area: {total_area} - {shp_path}', outputs)
             if total_area < self.approved_size:
                 self.write_message(f' - provider too small: {total_area} - {shp_path}', outputs)
                 move_providers.append(shp_path.parents[2])
@@ -66,24 +66,24 @@ class DigitalCoastEngine:
             url = url.replace(char, '')
         return url
 
-    def delete_unused_folder(self, digital_coast_folder: pathlib.Path) -> None:
+    def delete_unused_folder(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Delete any provider folders without a subfolder"""
 
         if digital_coast_folder.exists():
-            self.write_message('Deleting empty provider folders', str(digital_coast_folder.parents[1]))
+            self.write_message('Deleting empty provider folders', outputs)
             provider_folders = os.listdir(digital_coast_folder)
             provider_folders = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
             for provider in provider_folders:
                 if 'unused_providers' != provider.stem:
                     provider_folder = digital_coast_folder / provider
                     if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
-                        self.write_message(f' - removing empty provider: {provider_folder}', str(digital_coast_folder.parents[1]))
+                        self.write_message(f' - removing empty provider: {provider_folder}', outputs)
                         shutil.rmtree(provider_folder)
 
     def download_intersected_datasets(self, param_inputs: list[list]) -> None:
         """Parallel process spatial filter and download of datasets"""
 
-        tile_gdf, shp_path, output_folder = param_inputs
+        tile_gdf, shp_path, outputs = param_inputs
         shp_df = gpd.read_file(shp_path).to_crs(4326)
         shp_df.columns = shp_df.columns.str.lower()  # make url column all lowercase
         if 'tile' in shp_df.columns:
@@ -103,14 +103,14 @@ class DigitalCoastEngine:
                 dataset_name = cleansed_url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
-                    self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', output_folder)
+                    self.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', outputs)
                     continue
                 else:
-                    self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', output_folder)
+                    self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', outputs)
                 try:
                     intersected_response = requests.get(cleansed_url, timeout=15)
                 except requests.exceptions.ConnectionError:
-                    self.write_message(f'#####################\nTimeout error: {cleansed_url}', output_folder)
+                    self.write_message(f'#####################\nTimeout error: {cleansed_url}', outputs)
                     continue
 
                 if intersected_response.status_code == 200:
@@ -125,7 +125,7 @@ class DigitalCoastEngine:
     def download_tile_index(self, param_inputs: list[list]) -> None:
         """Parallel process and download tile index shapefiles"""
 
-        download_link, output_folder_path = param_inputs
+        download_link, provider_folder, outputs = param_inputs
         # TODO we already only choose USACE NCMP providers, so this might always be from this s3 bucket
         # only allow dem data type.  Others are: laz
         if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and 'dem' in download_link:
@@ -133,18 +133,18 @@ class DigitalCoastEngine:
             lidar_bucket = self.get_bucket()
             for obj_summary in lidar_bucket.objects.filter(Prefix=f"{data_file[1:]}"):
                 if 'tileindex' in obj_summary.key:
-                    output_zip_file = output_folder_path / obj_summary.key
+                    output_zip_file = provider_folder / obj_summary.key
                     file_parent_folder = output_zip_file.parents[0]
                     shp_path = output_zip_file.parents[0] / pathlib.Path(str(output_zip_file.stem) + '.shp')
+                    provider_and_file = str(pathlib.Path(*shp_path.parts[-4:]))
                     if os.path.exists(shp_path):
-                        self.write_message(f' - Skipping index: {output_zip_file.name}', output_folder_path.parents[2])
+                        self.write_message(f' - Skipping index: {provider_and_file}', outputs)
                         continue
                     else:
-                        self.write_message(f' - Downloading index: {output_zip_file.name}', output_folder_path.parents[2])
+                        self.write_message(f' - Downloading index: {provider_and_file}', outputs)
                     file_parent_folder.mkdir(parents=True, exist_ok=True) 
                     with open(output_zip_file, 'wb') as tile_index:
                         lidar_bucket.download_fileobj(obj_summary.key, tile_index)
-            return f'- {output_folder_path.parents[0]}/{data_file}'
 
     def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -166,7 +166,7 @@ class DigitalCoastEngine:
             if not self.approved_dataset(feature):
                 continue
             folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
-            output_folder_path = pathlib.Path(outputs) / ecoregion_id / 'DigitalCoast' / folder_name
+            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / folder_name
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON
@@ -227,39 +227,40 @@ class DigitalCoastEngine:
     def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
         """Main entry point for downloading Digital Coast data"""
 
+        print('Downloading Digital Coast Datasets')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
-                digital_coast_folder = pathlib.Path(outputs) / ecoregion / 'DigitalCoast'
+                digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
                 # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
                 ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
                 self.process_tile_index(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 # TODO remove check from RasterMaskEngine
-                self.check_tile_index_areas(digital_coast_folder, ecoregion, outputs)
-                self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf)
+                self.check_tile_index_areas(digital_coast_folder, outputs)
+                self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
                 if digital_coast_folder.exists():
-                    self.delete_unused_folder(digital_coast_folder)
+                    self.delete_unused_folder(digital_coast_folder, outputs)
 
-    def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame) -> None:
+    def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Download intersected Digital Coast files"""
 
-        self.write_message('Downloading elevation datasets', str(digital_coast_folder.parents[1]))
+        self.write_message('Downloading elevation datasets', outputs)
         tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
-        param_inputs = [[ecoregion_tile_gdf, shp_path, digital_coast_folder.parents[1]] for shp_path in tile_index_shapefiles]
+        param_inputs = [[ecoregion_tile_gdf, shp_path, outputs] for shp_path in tile_index_shapefiles]
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
-            self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), digital_coast_folder.parents[1])
+            self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), outputs)
 
     def process_tile_index(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
         """Download tile_index shapefiles"""
 
-        self.write_message('Download Tile Index shapefiles', str(digital_coast_folder.parents[1]))
+        self.write_message('Download Tile Index shapefiles', outputs)
         ecoregion_geom_strings = self.get_ecoregion_geometry_strings(tile_gdf, ecoregion)
 
         for geometry_coords in ecoregion_geom_strings:
             tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
-            param_inputs = [[link_dict['link'], link_dict['output_path']] for link_dict in tile_index_links]
+            param_inputs = [[link_dict['link'], link_dict['output_path'], outputs] for link_dict in tile_index_links]
             with ThreadPoolExecutor(int(os.cpu_count() - 2)) as tile_index_pool:
-                self.print_async_results(tile_index_pool.map(self.download_tile_index, param_inputs), str(digital_coast_folder.parents[1]))
+                tile_index_pool.map(self.download_tile_index, param_inputs)
             self.unzip_all_files(digital_coast_folder)
 
     def unzip_all_files(self, output_folder: str) -> None:
