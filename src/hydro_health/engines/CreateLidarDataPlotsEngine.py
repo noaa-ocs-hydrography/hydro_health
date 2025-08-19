@@ -36,18 +36,24 @@ class CreateLidarDataPlots(Engine):
 
     def __init__(self):
         super().__init__()
-        self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay'] 
-        self.sediment_data = None
+        # self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay'] 
+        # self.sediment_data = None
 
-    def resample_vrt_files(self, input_dir, output_dir, x_res=0.0359/40, y_res=0.0359/40, resampling_method='bilinear')-> None:
+    def resample_vrt_files(self, x_res=0.0359/40, y_res=0.0359/40, resampling_method='bilinear')-> None:
         """
-        Resample all .vrt files in the input directory and save them to the output directory."""
-        target_crs = "EPSG:32617"
+        Resample all .vrt files in the input directory and save them to the output directory.
+        param x_res: Horizontal resolution for resampling
+        param y_res: Vertical resolution for resampling
+        param resampling_method: Resampling method to use (e.g., 'bilinear', 'cubic')
+        """
+
+        input_dir = get_config_item("LIDAR_PLOTS", "INPUT_VRTS")
+        output_dir = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
 
         creation_options = [
-            "COMPRESS=DEFLATE",  # Use lossless DEFLATE compression
-            "TILED=YES",         # Create a tiled TIFF
-            "BIGTIFF=YES"        # Enable BigTIFF format for files > 4GB
+            "COMPRESS=LZW",  
+            "TILED=YES",        
+            "BIGTIFF=YES" #? I wonder if this is slowing things down
         ]
 
         vrt_files = glob.glob(os.path.join(input_dir, "*.vrt"))
@@ -57,7 +63,6 @@ class CreateLidarDataPlots(Engine):
             print(f"No .vrt files found in {input_dir}")
         else:
             for vrt_file in vrt_files:
-                # Get the base name of the file to create the output filename
                 base_name = os.path.basename(vrt_file)
                 output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
 
@@ -65,9 +70,7 @@ class CreateLidarDataPlots(Engine):
 
                 ds = gdal.Open(vrt_file)
                 srs = osr.SpatialReference(wkt=ds.GetProjection())
-                print(srs.GetAttrValue("AUTHORITY", 1))
 
-                # Use gdal.Warp to resample the VRT file with chunked processing enabled
                 try:
                     gdal.Warp(
                         output_filename,
@@ -85,5 +88,5 @@ class CreateLidarDataPlots(Engine):
 
     def run(self):
         """Entrypoint for processing the Lidar Data Plots"""
-        self.download_sediment_data()
+        # self.resample_vrt_files()
 
