@@ -2,18 +2,17 @@ ecoregions:
 - ER_3
 steps:
 - tool: run_bluetopo_tile_engine
-  run: true
+  run: false
 - tool: run_digital_coast_engine
   run: true
 - tool: run_vrt_creation
-  run: true
+  run: false
 - tool: run_raster_mask_engine
-  run: true
+  run: false
 - tool: grid_digital_coast_files
-  run: true
+  run: false
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
   run: false
-runtimes:
-- 08152025
+runtimes: []

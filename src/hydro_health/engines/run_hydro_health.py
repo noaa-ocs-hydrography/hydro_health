@@ -24,7 +24,7 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'input_directory': tools.Param(''),
             'output_directory': tools.Param(str(OUTPUTS)),
             'eco_regions': tools.Param(''),
-            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson'))
+            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons_er3.geojson'))
         }
     else:
         param_lookup = {

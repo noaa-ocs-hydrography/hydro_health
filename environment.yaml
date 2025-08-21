@@ -1,9 +1,13 @@
-name: arcgispro-conda-only
+name: arcgispro-py3-clone
 channels:
   - esri
   - defaults
 dependencies:
   - affine=2.3.0=pyhd3eb1b0_0
+  - aiobotocore=2.19.0=py311haa95532_0
+  - aiohttp=3.9.5=py311h2bbff1b_0
+  - aioitertools=0.12.0=py311haa95532_0
+  - aiosignal=1.2.0=pyhd3eb1b0_0
   - annotated-types=0.6.0=py_2
   - anyio=3.5.0=py311haa95532_0
   - anywidget=0.9.13=py_1
@@ -38,7 +42,7 @@ dependencies:
   - brotli-python=1.0.9=py311hd77b12b_8
   - c-ares=1.19.1=0
   - cachetools=5.3.3=py311haa95532_0
-  - certifi=2025.1.31=py311haa95532_0
+  - certifi=2025.8.3=py311haa95532_0
   - cffi=1.16.0=py311h2bbff1b_1
   - cftime=1.6.3=py311_0
   - chardet=4.0.0=py311haa95532_1003
@@ -65,11 +69,14 @@ dependencies:
   - et_xmlfile=1.1.0=py311haa95532_0
   - exceptiongroup=1.0.0rc9=pyhd8ed1ab_0
   - executing=0.8.3=pyhd3eb1b0_0
-  - fiona=1.9.6=py311_3
+  - fastapi=0.112.2=py311haa95532_0
+  - fiona=1.9.6=py311_4
   - flake8=7.0.0=py311haa95532_0
+  - flask=3.0.3=py311haa95532_0
   - folium=0.14.0=py311haa95532_0
   - fonttools=4.51.0=py311h2bbff1b_0
   - freetype=2.13.2=1
+  - frozenlist=1.4.0=py311h2bbff1b_0
   - fsspec=2024.6.1=py311haa95532_0
   - future=0.18.3=py311_0
   - gdal=3.9.2=arcgispro_py311_17844
@@ -96,11 +103,12 @@ dependencies:
   - ipython_genutils=0.2.0=pyhd3eb1b0_1
   - ipywidgets=8.1.5=py_0
   - isodate=0.6.0=py_0
+  - itsdangerous=2.2.0=py311haa95532_0
   - jdcal=1.4.1=pyhd3eb1b0_0
   - jedi=0.18.2=py_1
   - jinja2=3.1.4=py311haa95532_0
   - jmespath=1.0.1=py311haa95532_0
-  - joblib=1.4.2=py311haa95532_0
+  - joblib=1.5.1=py311haa95532_0
   - jpeg=9e=0
   - json5=0.9.25=py_0
   - jsonschema=4.19.2=py311haa95532_0
@@ -123,7 +131,7 @@ dependencies:
   - libbrotlicommon=1.1.0=1
   - libbrotlidec=1.1.0=1
   - libbrotlienc=1.1.0=1
-  - libcurl=8.9.1=0
+  - libcurl=8.12=0
   - libdeflate=1.20=1
   - libnghttp2=1.62.1=0
   - libpng=1.6.43=1
@@ -153,6 +161,7 @@ dependencies:
   - mpmath=1.3.0=py311haa95532_0
   - msgpack-python=1.0.3=py311h59b6b97_0
   - msrest=0.6.21=py_0
+  - multidict=6.0.4=py311h2bbff1b_0
   - munch=2.5.0=pyhd3eb1b0_0
   - mypy_extensions=1.0.0=py311haa95532_0
   - nbclassic=1.1.0=py_1
@@ -172,7 +181,7 @@ dependencies:
   - oauthlib=3.2.2=py_0
   - olefile=0.46=pyhd3eb1b0_0
   - openpyxl=3.1.2=py311h2bbff1b_0
-  - openssl=3.0.15=1
+  - openssl=3.0.16=0
   - orc=2.0.0=0
   - overrides=7.4.0=py311haa95532_0
   - packaging=24.1=py311haa95532_0
@@ -239,9 +248,11 @@ dependencies:
   - requests-toolbelt=1.0.0=py_0
   - rfc3339-validator=0.1.4=py311haa95532_0
   - rfc3986-validator=0.1.1=py311haa95532_0
+  - rioxarray=0.15.0=py_1
   - rpds-py=0.10.6=py311h062c2fa_0
   - rtree=1.0.1=py311h2eaa2aa_0
   - ruamel.yaml=0.17.21=py311h2bbff1b_0
+  - s3fs=2024.6.1=py311haa95532_0
   - s3transfer=0.11.2=py311haa95532_0
   - saspy=4.3.2=py_1
   - scikit-learn=1.3.0=py311_0
@@ -260,6 +271,7 @@ dependencies:
   - sqlite=3.46.1=0
   - sspilib=0.1.0=py311_0
   - stack_data=0.5.1=py_0
+  - starlette=0.38.2=py311haa95532_0
   - statsmodels=0.14.0=py311hd7041d2_0
   - swat=1.13.3=py311_1
   - sympy=1.12=py311_0
@@ -275,8 +287,6 @@ dependencies:
   - tqdm=4.66.5=py311h746a85d_0
   - traitlets=5.14.3=py311haa95532_0
   - truststore=0.9.1=py_0
-  - typing-extensions=4.11.0=py311haa95532_0
-  - typing_extensions=4.11.0=py311haa95532_0
   - tzdata=2024a=h04d1e81_0
   - ujson=5.4.0=py311hd77b12b_0
   - unicodedata2=15.1.0=py311h2bbff1b_0
@@ -287,6 +297,7 @@ dependencies:
   - wcwidth=0.2.5=pyhd3eb1b0_0
   - webencodings=0.5.1=py311haa95532_1
   - websocket-client=1.8.0=py311haa95532_0
+  - werkzeug=3.1.3=py311haa95532_0
   - wheel=0.44.0=py311haa95532_0
   - widgetsnbextension=4.0.13=py_0
   - win_inet_pton=1.1.0=py311_1
@@ -305,10 +316,30 @@ dependencies:
   - xyzservices=2022.9.0=py311haa95532_1
   - xz=5.4.7=0
   - yaml=0.2.5=0
+  - yarl=1.11.0=py311_0
   - zeromq=4.3.5=0
   - zict=3.0.0=py_0
   - zipp=3.17.0=py311haa95532_0
   - zlib=1.3.1=1
   - zlib-ng=2.1.6=2
   - zstd=1.5.6=1
-prefix: C:\Users\Stephen.Patterson\AppData\Local\ESRI\conda\envs\arcgispro-conda-only
+  - pip:
+      - dnspython==2.7.0
+      - email-validator==2.2.0
+      - fastapi-cli==0.0.8
+      - fastapi-cloud-cli==0.1.5
+      - httptools==0.6.4
+      - markdown-it-py==4.0.0
+      - mdurl==0.1.2
+      - python-dotenv==1.1.1
+      - python-multipart==0.0.20
+      - rich==14.1.0
+      - rich-toolkit==0.15.0
+      - rignore==0.6.4
+      - sentry-sdk==2.34.1
+      - shellingham==1.5.4
+      - typer==0.16.0
+      - typing-extensions==4.14.1
+      - uvicorn==0.35.0
+      - websockets==15.0.1
+prefix: C:\Users\Stephen.Patterson\AppData\Local\ESRI\conda\envs\arcgispro-py3-clone

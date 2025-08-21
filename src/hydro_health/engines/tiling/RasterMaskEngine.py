@@ -141,7 +141,7 @@ class RasterMaskEngine:
     def delete_intermediate_files(self, outputs) -> None:
         """Delete any intermediate shapefiles"""
 
-        merged_shapefiles = pathlib.Path(outputs).rglob('training_data*')
+        merged_shapefiles = pathlib.Path(outputs).rglob('training_data_outlines*')
         for file in merged_shapefiles:
             file.unlink()
 
