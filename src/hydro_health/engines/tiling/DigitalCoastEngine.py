@@ -143,6 +143,7 @@ class DigitalCoastEngine:
                     writer.write(f'Description: {description.get_text()}\n')
                     writer.write(f'{start.get_text()}, {end.get_text()}\n')
             self.write_message(f' - stored metadata: {provider_folder}', outputs)
+            self.write_message(f' - metadata URL: {full_list_url}')
         except requests.exceptions.ConnectionError:
             self.write_message(f'#####################\nMetadata error: {full_list_url}', outputs)
             pass
