@@ -48,12 +48,14 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         # Project all geotiff to match BlueTopo tiles WGS84
         if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
 
-            provider_folder = geotiff_path.parents[2].stem
+            
             unused_providers_folder = outputs / 'unused_providers'
-            unused_providers_names = [folder.stem for folder in unused_providers_folder.iterdir() if folder.is_dir()]
-            if provider_folder in unused_providers_names:
-                print(f' - Skipping unused provider: {provider_folder}')
-                continue
+            if unused_providers_folder.exists():
+                unused_providers_names = [folder.stem for folder in unused_providers_folder.iterdir() if folder.is_dir()]
+                provider_folder = geotiff_path.parents[2].stem
+                if provider_folder in unused_providers_names:
+                    print(f' - Skipping unused provider: {provider_folder}')
+                    continue
 
             geotiff_ds = None  # close original dataset
             old_geotiff = geotiff_path.parents[0] / f'{geotiff_path.stem}_old.tif'
