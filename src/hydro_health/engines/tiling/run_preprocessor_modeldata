@@ -15,7 +15,8 @@ if __name__ == '__main__':
     profiler.enable()
 
     engine = ModelDataPreProcessor()
-    engine.run_gap_fill(r"C:\Users\aubrey.mccutchan\Documents")
+    # engine.run_gap_fill(r"C:\Users\aubrey.mccutchan\Documents")
+    engine.process()
 
     profiler.disable()
     stats = pstats.Stats(profiler)

@@ -30,6 +30,35 @@ OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 class ModelDataPreProcessor:
     """Class for parallel preprocessing all model data"""
+    def __init__(self):
+        self.year_ranges = [
+            (2004, 2006),
+            (2006, 2010),
+            (2010, 2015),
+            (2015, 2022)]
+    
+    def create_nan_stats_csv(self, df, tile_id)-> pd.DataFrame:
+        """Analyzes a DataFrame for a single tile and returns its NaN stats.
+
+        :param df: DataFrame containing the data for a single tile
+        :param tile_id: Identifier for the tile being processed
+        :return: DataFrame with NaN statistics for the tile
+        """
+
+        if df.empty:
+            return pd.DataFrame() 
+        
+        new_row = {'tile_id': tile_id}
+        
+        # Find all 'b.change' columns and calculate NaN percentages
+        change_columns = [col for col in df.columns if col.startswith('b.change.')]
+        for col_name in change_columns:
+            year_pair = col_name.replace('b.change.', '')
+            nan_percent = df[col_name].isna().mean() * 100
+            
+            new_row[f"{year_pair}_nan_percent"] = round(nan_percent, 2)
+
+        return pd.DataFrame([new_row])
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
@@ -45,7 +74,7 @@ class ModelDataPreProcessor:
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
 
-    def focal_fill_block(self, block, w=3):
+    def focal_fill_block(self, block, w=3)-> np.ndarray:
         """Efficient nan-aware focal mean using uniform_filter."""
         block = block.astype(np.float32)
         nan_mask = np.isnan(block)
@@ -61,7 +90,7 @@ class ModelDataPreProcessor:
 
         return np.where(nan_mask, filled, block)
 
-    def fill_with_fallback(self, input_file, output_file, max_iters=10, fallback_repeats=5, w=3, chunk_size=1024):
+    def fill_with_fallback(self, input_file, output_file, max_iters=10, fallback_repeats=5, w=3, chunk_size=1024)-> None:
         """
         Attempt chunked iterative focal fill using Dask and rioxarray.
         """
@@ -107,7 +136,7 @@ class ModelDataPreProcessor:
         da.rio.to_raster(output_file)
         print(f"Filled raster written to: {output_file}")
 
-    def iterative_focal_fill(self, r, max_iters=10, w=3):
+    def iterative_focal_fill(self, r, max_iters=10, w=3)-> np.ndarray:
         """
         Iteratively fills NaN values in a 2D NumPy array using a focal mean filter.
         
@@ -135,7 +164,7 @@ class ModelDataPreProcessor:
         
         return r
 
-    def repeat_disk_focal_fill(self, input_file, output_final, output_dir, n_repeats=5, w=3, layer_name="unknown"):
+    def repeat_disk_focal_fill(self, input_file, output_final, output_dir, n_repeats=5, w=3, layer_name="unknown")-> None:
         """
         Repeatedly fills NaN values in a raster by applying focal mean filtering
         and writing intermediate results to disk. Uses disk I/O for each pass.
@@ -190,7 +219,7 @@ class ModelDataPreProcessor:
         else:
             print(f" Final result file was not created for {layer_name}")
 
-    def run_gap_fill(self, output_dir, max_iters=10, fallback_repeats=10, w=3):
+    def run_gap_fill(self, output_dir, max_iters=10, fallback_repeats=10, w=3)-> None:
         """
         Sequentially fills gaps in raster files using iterative focal fill with fallback strategy.
         
@@ -220,8 +249,9 @@ class ModelDataPreProcessor:
 
         print("Gap fill process complete.")
 
-    def clip_rasters_by_tile(self, raster_dir, output_dir, data_type):
+    def clip_rasters_by_tile(self, raster_dir, output_dir, data_type)-> None:
         """ Clip raster files by tile and save the data in a specified directory.
+
         :param str raster_dir: directory containing the raster files to be processed
         :param str output_dir: directory to save the output files
         :param str data_type: Specifies the type of data being processed either "prediction" or "training"
@@ -237,23 +267,32 @@ class ModelDataPreProcessor:
 
         for _, sub_grid in sub_grids.iterrows():
             tile_name = sub_grid['tile_id'] 
-            output_path = os.path.join(output_dir, f"{tile_name}_{data_type}_clipped_data.parquet")
+            output_folder = os.path.join(output_dir, tile_name)
 
             # Delay each part separately
-            gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, raster_dir, output_dir, data_type)
-            ungridded_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, raster_dir, output_dir, data_type)
+            gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, raster_dir)
+            ungridded_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, raster_dir)
 
             # Delay the combining + saving
-            combined_task = self.save_combined_data(gridded_task, ungridded_task, output_path, data_type)
+            combined_task = self.save_combined_data(gridded_task, ungridded_task, output_folder, data_type, tile_id=tile_name)
 
             tasks.append(combined_task)
 
-        dask.compute(*tasks) 
+        results_list = dask.compute(*tasks)
 
-    def create_subgrids(self, mask_gdf, output_dir, process_type):
+        # 3. Combine the list of result DataFrames into one final DataFrame.
+        print("Combining results...")
+        final_results_df = pd.concat(results_list, ignore_index=True)
+
+        output_csv_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts.csv"
+        final_results_df.to_csv(output_csv_path, index=False, na_rep='NA')
+
+    def create_subgrids(self, mask_gdf, output_dir, process_type)-> None:
         """ Create subgrids layer by intersecting grid tiles with the mask geometries
+
         :param gdf mask_gdf: GeoDataFrame containing the mask geometries
         :param str output_dir: directory to save the output files
+        :param str process_type: Specifies the type of data being processed either "prediction" or "training"
         :return: None
         """        
         
@@ -271,8 +310,10 @@ class ModelDataPreProcessor:
         intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
         intersecting_sub_grids.to_file(os.path.join(output_dir, f"{process_type}_intersecting_subgrids.gpkg"), driver="GPKG") 
 
-    def parallel_processing_rasters(self, input_directory, mask_pred, mask_train):
+    def parallel_processing_rasters(self, input_directory, mask_pred, mask_train)-> None:
         """Process prediction and training rasters in parallel using Dask.
+
+        :param str input_directory: Directory containing the raster files to be processed
         :param gdf mask_pred: Prediction mask GeoDataFrame
         :param gdf mask_train: Training mask GeoDataFrame
         :return: None
@@ -326,7 +367,7 @@ class ModelDataPreProcessor:
 
         dask.compute(*training_tasks)    
 
-    def process(self):
+    def process(self)-> None:
         """ Main function to process model data.
         """        
 
@@ -354,7 +395,6 @@ class ModelDataPreProcessor:
         output_dir_pred = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
         output_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
 
-
         print(" - Clipping prediction rasters by tile...")
         # self.clip_rasters_by_tile(raster_dir=processed_dir, output_dir=output_dir_pred, data_type="prediction")
         print(" - Clipping training rasters by tile...")
@@ -362,8 +402,9 @@ class ModelDataPreProcessor:
     
         client.close()
 
-    def process_prediction_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
+    def process_prediction_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8)-> None:
         """ Reprojects, resamples, and crops a raster to a target CRS, resolution, and extent
+
         :param str raster_path: path to the raster file
         :param gdf mask_gdf: GeoDataFrame containing the mask geometries
         :param str output_path: path to save the processed raster
@@ -407,8 +448,9 @@ class ModelDataPreProcessor:
         if os.path.exists(in_memory_cutline):
             gdal.Unlink(in_memory_cutline)
 
-    def process_training_raster(self, raster_path, mask_gdf, output_path):
+    def process_training_raster(self, raster_path, mask_gdf, output_path)-> None:
         """ Process a training raster by clipping it with a mask GeoDataFrame and saving the output.
+
         :param str raster_path: path to the raster file
         :param gdf mask_gdf: GeoDataFrame containing the mask geometries
         :param str output_path: path to save the processed raster
@@ -458,7 +500,7 @@ class ModelDataPreProcessor:
             if gdal.VSIStatL(in_memory_cutline) == 0:
                 gdal.Unlink(in_memory_cutline)  
 
-    def raster_to_spatial_df(self, raster_path, process_type):
+    def raster_to_spatial_df(self, raster_path, process_type)-> gpd.GeoDataFrame:
         """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries.
 
         :param str raster_path: path to the raster file
@@ -489,24 +531,32 @@ class ModelDataPreProcessor:
         return gdf
 
     @dask.delayed
-    def save_combined_data(self, gridded_df, ungridded_df, output_path):
+    def save_combined_data(self, gridded_df, ungridded_df, output_folder, data_type, tile_id)-> pd.DataFrame:
         """ Combine gridded and ungridded dataframes and save to a parquet file.
+
         :param gridded_df: delayed gridded data DataFrame
         :param ungridded_df: delayed ungridded data DataFrame
         :param output_path: path to save the combined DataFrame
+        :param data_type: type of data being processed (e.g., "prediction" or "training")
+        :param tile_id: identifier for the tile being processed
         :return: None
         """
 
-        combined = pd.concat([gridded_df, ungridded_df], ignore_index=True)
-        combined.to_parquet(output_path, engine="pyarrow", index=False)   
+        if not os.path.exists(output_folder):
+            os.makedirs(output_folder)
+        output_path = os.path.join(output_folder, f"{tile_id}_{data_type}_clipped_data.parquet")
 
-    def subtile_process_gridded(self, sub_grid, raster_dir):
+        combined = pd.concat([gridded_df, ungridded_df], ignore_index=True)
+        combined.to_parquet(output_path, engine="pyarrow", index=False)  
+        nan_row = self.create_nan_stats_csv(combined, tile_id) 
+        return nan_row
+
+    def subtile_process_gridded(self, sub_grid, raster_dir)-> pd.DataFrame:
         """ Process a single tile by clipping gridded raster data and saving the data in a specified directory.
 
         :param _type_ sub_grid: sub-grid information containing tile_id and geometry
         :param _type_ raster_dir: input directory containing the raster files to be processed
-        :param _type_ output_dir: output directory to save the processed data
-        :param _type_ data_type: predicts or training data
+        :return: GeoDataFrame containing the clipped raster data
         """        
         
         sub_tile_name = sub_grid['tile_id']
@@ -520,7 +570,7 @@ class ModelDataPreProcessor:
         ]
 
         if not raster_files:
-            print(f"No matching raster files found for tile {sub_tile_name}, skipping...")
+            print(f"No matching gridded raster files found for tile {sub_tile_name}, skipping...")
             return
 
         tile_extent = sub_grid.geometry.bounds
@@ -558,9 +608,6 @@ class ModelDataPreProcessor:
 
         combined_data['geometry'] = [Point(x, y) for x, y in zip(combined_data['X'], combined_data['Y'])]
         combined_data = gpd.GeoDataFrame(combined_data, geometry='geometry', crs='EPSG:32617') 
-
-        # nan_percentage = combined_data['bathy_2006'].isna().mean() * 100
-        # print(f"Percentage of NaNs in bathy_2006: {nan_percentage:.2f}%")
 
         exclude_keywords = ['rugosity', 'slope', 'survey_end_date', 'unc']
         keep_unchanged = ['X', 'Y', 'FID', 'geometry']
@@ -608,15 +655,13 @@ class ModelDataPreProcessor:
                 new_col_name = f'b.change.{year1}_{year2}'
                 combined_data[new_col_name] = combined_data[col2] - combined_data[col1]
 
-            print(combined_data.columns)
-
         else:
             print(f"Only {len(bathy_cols)} year of bathy data found for tile {sub_tile_name}, skipping bathy change calculations.")
             return combined_data    
 
         return combined_data
 
-    def subtile_process_ungridded(self, sub_grid, raster_dir):
+    def subtile_process_ungridded(self, sub_grid, raster_dir)-> gpd.GeoDataFrame:
         """ Process a single tile by clipping ungridded raster data and saving the data in a specified directory.
 
         :param gpkg sub_grid: sub-grid information containing tile_id and geometry
@@ -636,8 +681,7 @@ class ModelDataPreProcessor:
             ]
 
             if not raster_files:
-                print(f"No matching raster files found for tile {sub_tile_name}, skipping...")
-                return
+                print(f"No static {data} raster found for tile {sub_tile_name}, skipping...")
 
             tile_extent = sub_grid.geometry.bounds        
 
@@ -678,3 +722,4 @@ class ModelDataPreProcessor:
         raster_gdf = gpd.GeoDataFrame(combined_data, geometry='geometry', crs='EPSG:32617') 
 
         return raster_gdf
+    
