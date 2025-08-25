@@ -209,21 +209,15 @@ class DigitalCoastEngine:
             if not self.approved_dataset(feature):
                 continue
             folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
-            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / folder_name
+            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / f"{folder_name}_{feature['attributes']['ID']}"
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON
             output_json = pathlib.Path(output_folder_path) / 'feature.json'
-            if os.path.exists(output_json):
-                # Read the existing json
-                with open(output_json) as reader:
-                    provider_json = json.load(reader)
-                    external_provider_links = provider_json['ExternalProviderLink']
-            else:
-                external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
-                feature['attributes']['ExternalProviderLink'] = external_provider_links
-                with open(output_json, 'a') as writer:
-                    writer.write(json.dumps(feature['attributes'], indent=4))
+            external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
+            feature['attributes']['ExternalProviderLink'] = external_provider_links
+            with open(output_json, 'a') as writer:
+                writer.write(json.dumps(feature['attributes'], indent=4))
 
             for external_data in external_provider_links:
                 if external_data['label'] == 'Bulk Download':
