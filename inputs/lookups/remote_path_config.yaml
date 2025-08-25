@@ -4,7 +4,7 @@ DIGITALCOAST:
   SUBFOLDER: model_variables\Prediction\raw
   API: https://coast.noaa.gov/dataviewer/api/v1/search/missions
   BUCKET: noaa-nos-coastal-lidar-pds
-  TILED_SUBFOLDER: model_variables\Prediction\pre-processed\tiled
+  TILED_SUBFOLDER: model_variables\Prediction\pre_processed\tiled
 HURRICANE:
   COUNT_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_count_raster
   CUMULATIVE_RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_cumulative_raster

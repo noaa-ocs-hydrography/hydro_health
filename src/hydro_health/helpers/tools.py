@@ -35,7 +35,6 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         'NCMP': '*.tif'
     }
 
-
     outputs = pathlib.Path(output_folder) / ecoregion / get_config_item(data_type.upper(), 'SUBFOLDER') / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
@@ -48,8 +47,17 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         geotiff_srs = geotiff_ds.GetSpatialRef()
         # Project all geotiff to match BlueTopo tiles WGS84
         if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
-            geotiff_ds = None  # close original dataset
 
+            
+            unused_providers_folder = outputs / 'unused_providers'
+            if unused_providers_folder.exists():
+                unused_providers_names = [folder.stem for folder in unused_providers_folder.iterdir() if folder.is_dir()]
+                provider_folder = geotiff_path.parents[2].stem
+                if provider_folder in unused_providers_names:
+                    print(f' - Skipping unused provider: {provider_folder}')
+                    continue
+
+            geotiff_ds = None  # close original dataset
             old_geotiff = geotiff_path.parents[0] / f'{geotiff_path.stem}_old.tif'
             geotiff_path.rename(old_geotiff)
             raster_wgs84 = geotiff_path.parents[0] / f'{geotiff_path.stem}_wgs84.tif'
@@ -237,9 +245,12 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
                 current_tile_geom = tile.GetGeometryRef()
                 folder_name = tile.GetField('tile')
                 if folder_name in bluetopo_grids:
+                    output_path = ecoregion / get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER') / folder_name
+                    output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
+                    if output_clipped_vrt.exists():
+                        print(f' - Skipping {output_clipped_vrt.name}')
+                        continue
                     if current_tile_geom.Intersects(dissolve_geom):
-                        output_path = ecoregion / get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER') / folder_name
-                        output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
                         output_path.mkdir(parents=True, exist_ok=True)
                         print(f' - Creating {output_clipped_vrt.name}')
                         try:
@@ -291,5 +302,5 @@ def run_vrt_creation(param_lookup: dict[str]) -> None:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
             create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+        print(f'Building {ecoregion} - DigitalCoast VRT files')
         create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
-
