@@ -396,9 +396,9 @@ class ModelDataPreProcessor:
         output_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
 
         print(" - Clipping prediction rasters by tile...")
-        # self.clip_rasters_by_tile(raster_dir=processed_dir, output_dir=output_dir_pred, data_type="prediction")
+        self.clip_rasters_by_tile(raster_dir=processed_dir, output_dir=output_dir_pred, data_type="prediction")
         print(" - Clipping training rasters by tile...")
-        self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
+        # self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
     
         client.close()
 
