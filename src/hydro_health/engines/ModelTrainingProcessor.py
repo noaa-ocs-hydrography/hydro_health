@@ -160,10 +160,18 @@ def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
         all_predictors = list(set(static_predictors + dynamic_predictors + rugosity_start + rugosity_end) & set(training_data.columns))
         print(f"all predictors: {all_predictors}")
 
-        print(training_data.head(5))
+        # print(f'full: {training_data}')
+        nan_counts = training_data[all_predictors + [response_var]].isnull().sum()
 
-        sub_data = training_data[all_predictors + [response_var]].dropna().reset_index(drop=True)
-        print(sub_data.head(5))
+        # print("---------------------------------------")
+        # print("Number of Missing Values (NaNs) per Column:")
+        # print("---------------------------------------")
+        # print(nan_counts.sort_values(ascending=False).to_string())
+
+        all_predictors=['bathy_2006', 'bathy_2010', 'sed_size_raster_100m']
+
+        sub_data = training_data[all_predictors + [response_var]].dropna()
+        print(f"dropped date remaining: {sub_data}")
 
         if len(sub_data) < 50 or sub_data[response_var].nunique() <= 1:
             logging.warning(f"Skipping Boruta for Tile: {tile_id} | Pair: {pair} - Insufficient data.")
