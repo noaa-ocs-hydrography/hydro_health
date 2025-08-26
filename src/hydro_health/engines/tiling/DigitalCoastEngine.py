@@ -284,7 +284,7 @@ class DigitalCoastEngine:
         """Download intersected Digital Coast files"""
 
         self.write_message('Downloading elevation datasets', outputs)
-        tile_index_shapefiles = digital_coast_folder.rglob('*.shp')
+        tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('tileindex*.shp') if 'unused_providers' not in str(folder)]
         param_inputs = [[ecoregion_tile_gdf, shp_path, outputs] for shp_path in tile_index_shapefiles]
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), outputs)
