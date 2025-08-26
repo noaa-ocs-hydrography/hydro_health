@@ -111,7 +111,7 @@ class DigitalCoastEngine:
                 else:
                     self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', outputs)
                 try:
-                    intersected_response = requests.get(cleansed_url, timeout=15)
+                    intersected_response = requests.get(cleansed_url, timeout=5)
                 except requests.exceptions.ConnectionError:
                     self.write_message(f'#####################\nTimeout error: {cleansed_url}', outputs)
                     continue
