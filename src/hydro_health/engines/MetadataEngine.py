@@ -30,7 +30,7 @@ class MetadataEngine:
         """Parallel process and download metadata dates"""
 
         label, download_link, provider_folder, outputs = param_inputs
-        # self.write_message(f' - getting metadata: {provider_folder.stem}', outputs)
+        self.write_message(f' - getting metadata: {provider_folder.stem}', outputs)
         if label == 'Metadata':
             full_list_url = download_link + '/inport-xml'
             try:
@@ -45,9 +45,9 @@ class MetadataEngine:
                         end = time.find('end-date-time')
                         writer.write(f'Description: {description}\n')
                         writer.write(f'{start.get_text()}, {end.get_text()}\n')
-                # self.write_message(f' - stored metadata: {provider_folder}', outputs)
+                self.write_message(f' - stored metadata: {provider_folder}', outputs)
             except requests.exceptions.ConnectionError:
-                # self.write_message(f'#####################\nMetadata error: {full_list_url}', outputs)
+                self.write_message(f'#####################\nMetadata error: {full_list_url}', outputs)
                 pass
         else:
             # handle CUDEM data
@@ -58,7 +58,7 @@ class MetadataEngine:
             with open(provider_folder / 'metadata.txt', 'w') as writer:
                 writer.write(f'Description: CUDEM\n')
                 writer.write(f'{start}, {end}\n')
-            # self.write_message(f' - stored metadata: {provider_folder}', outputs)
+            self.write_message(f' - stored metadata: {provider_folder}', outputs)
 
     def read_json_files(self, digital_coast_folder: pathlib.Path, ecoregion: str, outputs: str) -> None:
         """Read JSON files to download metadata information"""
@@ -100,9 +100,9 @@ class MetadataEngine:
         return geometry_coords
 
     def run(self, ecoregions: list[str], outputs: str = False) -> None:
-        """Main entry point for downloading Digital Coast data"""
+        """Main entry point for creating metadata.txt for tracking year-pairs"""
 
-        print('Downloading Digital Coast Datasets')
+        print('Downloading Metadata Datasets')
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
             digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
