@@ -284,7 +284,7 @@ class ModelDataPreProcessor:
         print("Combining results...")
         final_results_df = pd.concat(results_list, ignore_index=True)
 
-        output_csv_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts.csv"
+        output_csv_path = f"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts_{data_type}.csv"
         final_results_df.to_csv(output_csv_path, index=False, na_rep='NA')
 
     def create_subgrids(self, mask_gdf, output_dir, process_type)-> None:
@@ -546,9 +546,10 @@ class ModelDataPreProcessor:
             os.makedirs(output_folder)
         output_path = os.path.join(output_folder, f"{tile_id}_{data_type}_clipped_data.parquet")
 
-        combined = pd.concat([gridded_df, ungridded_df], ignore_index=True)
+        combined = pd.merge(gridded_df, ungridded_df, on=['X', 'Y'], how='outer')
         combined.to_parquet(output_path, engine="pyarrow", index=False)  
         nan_row = self.create_nan_stats_csv(combined, tile_id) 
+
         return nan_row
 
     def subtile_process_gridded(self, sub_grid, raster_dir)-> pd.DataFrame:
@@ -590,12 +591,10 @@ class ModelDataPreProcessor:
                 col_vals = raster_data[:, 1]
 
                 xs, ys = rasterio.transform.xy(transform, row_vals, col_vals, offset='center')
-                fids = np.ravel_multi_index((row_vals, col_vals), cropped_r.shape)
 
                 raster_df = pd.DataFrame({
                     'X': xs,
                     'Y': ys,
-                    'FID': fids,
                     'Value': raster_values,
                     'Raster': os.path.splitext(os.path.basename(file))[0]
                 })
@@ -603,14 +602,14 @@ class ModelDataPreProcessor:
                 clipped_data.append(raster_df)
 
         combined_data = pd.concat(clipped_data, axis=0, join='outer', ignore_index=True)
-        combined_data_pivot = combined_data.pivot(index=['X', 'Y', 'FID'], columns='Raster', values='Value').reset_index()
+        combined_data_pivot = combined_data.pivot(index=['X', 'Y'], columns='Raster', values='Value').reset_index()
         combined_data = combined_data_pivot
 
         combined_data['geometry'] = [Point(x, y) for x, y in zip(combined_data['X'], combined_data['Y'])]
         combined_data = gpd.GeoDataFrame(combined_data, geometry='geometry', crs='EPSG:32617') 
 
         exclude_keywords = ['rugosity', 'slope', 'survey_end_date', 'unc']
-        keep_unchanged = ['X', 'Y', 'FID', 'geometry']
+        keep_unchanged = ['X', 'Y', 'geometry']
 
         new_columns = {}
 
@@ -657,7 +656,7 @@ class ModelDataPreProcessor:
 
         else:
             print(f"Only {len(bathy_cols)} year of bathy data found for tile {sub_tile_name}, skipping bathy change calculations.")
-            return combined_data    
+            return combined_data 
 
         return combined_data
 
@@ -680,8 +679,8 @@ class ModelDataPreProcessor:
                 if f.endswith('.tif') and data in f
             ]
 
-            if not raster_files:
-                print(f"No static {data} raster found for tile {sub_tile_name}, skipping...")
+            # if not raster_files:
+                # print(f"No static {data} raster found for tile {sub_tile_name}, skipping...")
 
             tile_extent = sub_grid.geometry.bounds        
 
@@ -702,12 +701,9 @@ class ModelDataPreProcessor:
                     # Convert pixel row/col to spatial coordinates
                     xs, ys = rasterio.transform.xy(transform, row_vals, col_vals, offset='center')
 
-                    fids = np.ravel_multi_index((row_vals, col_vals), cropped_r.shape)
-
                     raster_df = pd.DataFrame({
                         'X': xs,
                         'Y': ys,
-                        'FID': fids,
                         'Value': raster_values,
                         'Raster': os.path.splitext(os.path.basename(file))[0]
                     })
@@ -715,7 +711,7 @@ class ModelDataPreProcessor:
                     clipped_data.append(raster_df)
 
         combined_data = pd.concat(clipped_data, axis=0, join='outer', ignore_index=True)
-        combined_data_pivot = combined_data.pivot(index=['X', 'Y', 'FID'], columns='Raster', values='Value').reset_index()
+        combined_data_pivot = combined_data.pivot(index=['X', 'Y'], columns='Raster', values='Value').reset_index()
         combined_data = combined_data_pivot
         combined_data['geometry'] = [Point(x, y) for x, y in zip(combined_data['X'], combined_data['Y'])]
 
