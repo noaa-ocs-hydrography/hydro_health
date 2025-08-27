@@ -126,6 +126,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         
         vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
         gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
+        print(f'- finished VRT: {vrt_filename}')
 
 
 def get_environment() -> str:
