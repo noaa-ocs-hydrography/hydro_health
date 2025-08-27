@@ -60,6 +60,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup['output_directory'].valueAsText)
+            elif step["tool"] == "run_metadata_engine" and step["run"]:
+                runners.run_metadata_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
                 tools.run_vrt_creation(param_lookup)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:

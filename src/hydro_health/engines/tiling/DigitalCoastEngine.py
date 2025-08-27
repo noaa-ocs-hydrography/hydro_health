@@ -28,7 +28,6 @@ class DigitalCoastEngine:
 
     def __init__(self) -> None:
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
-        self.tile_index_links = None  # Store for use with CUDEM
 
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
@@ -125,29 +124,6 @@ class DigitalCoastEngine:
         else:
             return f'- No intersect: {shp_path.stem}'
 
-    def download_metadata(self, param_inputs: list[list]) -> None:
-        """Parallel process and download metadata dates"""
-
-        download_link, provider_folder, outputs = param_inputs
-        full_list_url = download_link + '/inport-xml'
-        try:
-            metadata_response = requests.get(full_list_url)
-            metadata_xml = metadata_response.content
-            xml_root = BeautifulSoup(metadata_xml, features="xml")
-            time_frames = xml_root.find_all('time-frame')
-            with open(provider_folder / 'metadata.txt', 'w') as writer:
-                for time in time_frames:
-                    description = time.find('description')
-                    start = time.find('start-date-time')
-                    end = time.find('end-date-time')
-                    writer.write(f'Description: {description.get_text()}\n')
-                    writer.write(f'{start.get_text()}, {end.get_text()}\n')
-            self.write_message(f' - stored metadata: {provider_folder}', outputs)
-            self.write_message(f' - metadata URL: {full_list_url}')
-        except requests.exceptions.ConnectionError:
-            self.write_message(f'#####################\nMetadata error: {full_list_url}', outputs)
-            pass
-
     def download_support_files(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
         """Download tile_index shapefiles"""
 
@@ -155,14 +131,11 @@ class DigitalCoastEngine:
         ecoregion_geom_strings = self.get_ecoregion_geometry_strings(tile_gdf, ecoregion)
 
         for geometry_coords in ecoregion_geom_strings:
-            self.tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
-            bulk_download_params = [[link_dict['link'], link_dict['provider_path'], outputs] for link_dict in self.tile_index_links if link_dict['label'] == 'Bulk Download']
-            metadata_params = [[link_dict['link'], link_dict['provider_path'], outputs] for link_dict in self.tile_index_links if link_dict['label'] == 'Metadata']
+            tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
+            bulk_download_params = [[link_dict['link'], link_dict['provider_path'], outputs] for link_dict in tile_index_links if link_dict['label'] == 'Bulk Download']
 
             with ThreadPoolExecutor(int(os.cpu_count() - 2)) as bulk_pool:
                 bulk_pool.map(self.download_tile_index, bulk_download_params)
-            with ThreadPoolExecutor(int(os.cpu_count() - 2)) as meta_pool:
-                meta_pool.map(self.download_metadata, metadata_params)
             self.unzip_all_files(digital_coast_folder)
 
     def download_tile_index(self, param_inputs: list[list]) -> None:
@@ -216,16 +189,12 @@ class DigitalCoastEngine:
             output_json = pathlib.Path(output_folder_path) / 'feature.json'
             external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
             feature['attributes']['ExternalProviderLink'] = external_provider_links
-            with open(output_json, 'a') as writer:
+            with open(output_json, 'w') as writer:
                 writer.write(json.dumps(feature['attributes'], indent=4))
 
             for external_data in external_provider_links:
                 if external_data['label'] == 'Bulk Download':
-                    tile_index_links.append({'label': 'Bulk Download', 'link': external_data['link'], 'provider_path': output_folder_path})
-                elif external_data['label'] == 'Metadata':
-                    tile_index_links.append({'label': 'Metadata', 'link': external_data['link'], 'provider_path': output_folder_path})
-                elif external_data['label'] == 'ISO metadata':
-                    tile_index_links.append({'label': 'ISO metadata', 'provider_path': output_folder_path}) 
+                    tile_index_links.append({'label': 'Bulk Download', 'link': external_data['link'], 'provider_path': output_folder_path}) 
         return tile_index_links
 
     def get_bucket(self) -> boto3.resource:
@@ -276,7 +245,6 @@ class DigitalCoastEngine:
                 self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 self.check_tile_index_areas(digital_coast_folder, outputs)
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
-                self.store_cudem_metadata(ecoregion_tile_gdf, ecoregion, outputs)
                 if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder, outputs)
 
@@ -288,28 +256,6 @@ class DigitalCoastEngine:
         param_inputs = [[ecoregion_tile_gdf, shp_path, outputs] for shp_path in tile_index_shapefiles]
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
             self.print_async_results(intersected_pool.map(self.download_intersected_datasets, param_inputs), outputs)
-
-    def store_cudem_metadata(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
-        """Parallel process and download CUDEM metadata"""
-
-        self.write_message('Storing CUDEM metadata', outputs)
-        ecoregion_geom_strings = self.get_ecoregion_geometry_strings(tile_gdf, ecoregion)
-
-        for _ in ecoregion_geom_strings:
-            iso_metadata_params = [[link_dict['provider_path'], outputs] for link_dict in self.tile_index_links if link_dict['label'] == 'ISO metadata']
-            for provider_info in iso_metadata_params:
-                provider_folder, outputs = provider_info
-                # CUDEM seems to have same provider name with unique tiff names
-                # only using first result for now unless provider name changes
-                cudem_tiffs = provider_folder.rglob('*.tif')  # will CUDEM files not end in "YYYYv1.tif"?
-                years = sorted([tif.stem[-6:-2] for tif in cudem_tiffs])
-                start = years[0]
-                end = years[-1]  # if only 1 year, -1 will still work
-                with open(provider_folder / 'metadata.txt', 'w') as writer:
-                    writer.write(f'Description: CUDEM\n')
-                    writer.write(f'{start}, {end}\n')
-                self.write_message(f' - stored metadata: {provider_folder}', outputs)
-                break
 
     def unzip_all_files(self, output_folder: str) -> None:
         """Unzip all zip files in a folder"""

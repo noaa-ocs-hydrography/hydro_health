@@ -5,6 +5,8 @@ steps:
   run: true
 - tool: run_digital_coast_engine
   run: true
+- tool: run_metadata_engine
+  run: true
 - tool: run_vrt_creation
   run: true
 - tool: run_raster_mask_engine
@@ -15,4 +17,5 @@ steps:
   run: false
 - tool: run_sediment_layer_engine
   run: false
-runtimes: []
+runtimes:
+- 08272025
