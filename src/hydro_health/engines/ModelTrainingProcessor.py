@@ -37,8 +37,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 output_dir = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles"
 # TODO update this to use the global parameter for the year pairs
 year_pairs = [
-            ('2006_2010'),
-            ('2016_2020')]
+            ('2006_2010')]
 block_size_m = 200 # The 200m block size that worked well for the scale of our sub-grid tile size - to support cross validation and k folds
 grid_gpkg_path = (r"N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg") # from Blue topo
 #
@@ -102,6 +101,7 @@ def select_predictors_boruta_py(output_dir_train, year_pairs, max_runs=100):
     logging.info("Log - Boruta Predictor Selection")
 
     for pair in year_pairs:
+        tasks = []
         csv_path = os.path.join(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts.csv")
         df = pd.read_csv(csv_path)
 
@@ -116,13 +116,16 @@ def select_predictors_boruta_py(output_dir_train, year_pairs, max_runs=100):
         # -------------------------------------------------------
         # 2. ITERATE THROUGH TILES AND YEAR PAIRS----
         # -------------------------------------------------------
-        tasks = [delayed(_worker_boruta_tile)(tile_id, output_dir_train, pair, max_runs)
-                for tile_id in tile_ids]
+        tasks.append(dask.delayed(_worker_boruta_tile)(tile_id, output_dir_train, pair, max_runs)
+                for tile_id in tile_ids)
 
         # print("Submitting tasks to Dask scheduler...")
-        compute(*tasks)
+        dask.compute(*tasks)
 
         print("\n Boruta Predictor Selection Complete! Check `predictor_selection_log.txt` for details.\n")
+
+    # TODO this will need adjusted some to account for multiple year pairs
+    create_boruta_summary_report(output_dir_train, tile_ids)
 
 def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
     """Helper worker function for running Boruta on a single tile."""
@@ -158,20 +161,9 @@ def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
         rugosity_end = [col for col in training_data.columns if col.startswith(f"rugosity") and col.endswith(end_year)]
 
         all_predictors = list(set(static_predictors + dynamic_predictors + rugosity_start + rugosity_end) & set(training_data.columns))
-        print(f"all predictors: {all_predictors}")
-
-        # print(f'full: {training_data}')
-        nan_counts = training_data[all_predictors + [response_var]].isnull().sum()
-
-        # print("---------------------------------------")
-        # print("Number of Missing Values (NaNs) per Column:")
-        # print("---------------------------------------")
-        # print(nan_counts.sort_values(ascending=False).to_string())
-
-        all_predictors=['bathy_2006', 'bathy_2010', 'sed_size_raster_100m']
 
         sub_data = training_data[all_predictors + [response_var]].dropna()
-        print(f"dropped date remaining: {sub_data}")
+        # print(f"dropped date remaining: {sub_data}")
 
         if len(sub_data) < 50 or sub_data[response_var].nunique() <= 1:
             logging.warning(f"Skipping Boruta for Tile: {tile_id} | Pair: {pair} - Insufficient data.")
@@ -193,13 +185,24 @@ def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
 
         decision_map = {True: 'Confirmed', False: 'Rejected'}
         tentative_indices = np.where(feat_selector.support_weak_)[0]
+        # decision_map = {True: 'Confirmed', False: 'Tentative'} 
+        mean_importances = feat_selector.estimator.feature_importances_[:len(all_predictors)]        
+        # print(len(mean_importances))
+        # print(len([decision_map.get(val, 'Tentative') for val in feat_selector.support_]))
 
-        # The .feature_importances_ attribute has one score for each predictor
         stats_df = pd.DataFrame({
             'predictor': all_predictors,
-            'meanImp': feat_selector.cv_scores_,
+            'meanImp': mean_importances,
             'decision': [decision_map.get(val, 'Tentative') for val in feat_selector.support_]
         })
+
+        # The .feature_importances_ attribute has one score for each predictor
+        # stats_df = pd.DataFrame({
+        #     'predictor': all_predictors,
+        #     'meanImp': feat_selector.feature_importances_,
+        #     'decision': [decision_map.get(val, 'Tentative') for val in feat_selector.support_]
+        # })
+
         for idx in tentative_indices:
             stats_df.loc[idx, 'decision'] = 'Tentative'
 
@@ -218,9 +221,9 @@ def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
             pickle.dump(output_list, f)
 
     except Exception as e:
-        logging.error(f"ERROR in Boruta selection for Tile: {tile_id} | Pair: {pair} | {e}", exc_info=True)
+        logging.error(f"ERROR in Boruta selection for Tile: {tile_id} | Pair: {pair} | {e}")
 
-def create_boruta_summary_report(output_dir_train, overall_report_filename="boruta_summary_report.png", by_year_report_filename="boruta_importance_by_year.png", top_n=10):
+def create_boruta_summary_report(output_dir_train, tile_ids, overall_report_filename="boruta_summary_report.png", by_year_report_filename="boruta_importance_by_year.png", top_n=10):
     """
     Create Visual Reports for Boruta Predictor Selection.
 
@@ -240,9 +243,15 @@ def create_boruta_summary_report(output_dir_train, overall_report_filename="boru
     # -------------------------------------------------------
     print("📊 Starting Boruta summary report generation...")
 
-    selection_files = [os.path.join(root, name)
-                       for root, _, files in os.walk(output_dir_train)
-                       for name in files if name.startswith("boruta_selection_") and name.endswith(".pkl")]
+    selection_files = []
+    for tile_id in tile_ids:
+        tile_dir = os.path.join(output_dir_train, tile_id)
+        if os.path.isdir(tile_dir):
+            # Now, list the files in the specific tile directory
+            for name in os.listdir(tile_dir):
+                if name.startswith("boruta_selection_") and name.endswith(".pkl"):
+                    selection_files.append(os.path.join(tile_dir, name))
+    print(selection_files)
 
     if not selection_files:
         print("No 'boruta_selection_*.pkl' files found. Please run the selection script first.")
@@ -393,8 +402,8 @@ def generate_cv_diagnostic_plot(sf_data, block_geom, max_k, tile_id, pair, outpu
 
     except Exception as e:
         logging.error(f"Could not generate CV diagnostic plot for {tile_id}/{pair}: {e}")
-    finally:
-        plt.close('all')
+    # finally:
+    #     plt.close('all')
 
 def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=20, n_folds=5):
     """
@@ -413,7 +422,6 @@ def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename=master_log_file, filemode='w')
     logging.info(f"Error Log - XGBoost Full Training (run started at {pd.Timestamp.now()})")
 
-    # --- Setup Parallel Processing ---
     training_sub_grids_utm = gpd.read_file(training_sub_grids_utm_path)
     tile_ids = list(training_sub_grids_utm['tile_id'])
     grid_crs = training_sub_grids_utm.crs # Extract CRS for raster saving
@@ -421,16 +429,9 @@ def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train
     # -------------------------------------------------------
     # 2. MAIN PARALLEL PROCESSING LOOP
     # -------------------------------------------------------
-    # Create a list of delayed tasks for Dask
 
-        #     prediction_tasks = []
-        # for file in prediction_files:
-        #     input_path = os.path.join(input_directory, file)
-        #     output_path = os.path.join(prediction_out, file.name)
-        #     prediction_tasks.append(dask.delayed(self.process_prediction_raster)(input_path, mask_gdf, output_path))
-
-        # dask.compute(*prediction_tasks)  
     tasks = []    
+    tile_ids = []
     for pair in year_pairs:
         csv_path = os.path.join(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts.csv")
         df = pd.read_csv(csv_path)
@@ -482,259 +483,261 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
     # logger.info(f"Worker log for tile: {tile_id} started at {pd.Timestamp.now()}")
 
     # for pair in year_pairs:
+
+    # --- a. Load Data---
+    print(f"\nProcessing Tile: {tile_id} | Year Pair: {pair}")
+    training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.parquet")
+    boruta_results_path = os.path.join(tile_dir, f"boruta_selection_{pair}.pkl")
+
+    if not os.path.exists(training_data_path) or not os.path.exists(boruta_results_path):
+        print("DIAGNOSTIC: Missing input file(s). Skipping.")
+        return
+
+    full_training_gdf = pd.read_parquet(training_data_path)
+    with open(boruta_results_path, 'rb') as f:
+        boruta_results = pickle.load(f)
+    predictors = boruta_results['confirmed_predictors']
+    response_var = f"b.change.{pair}"
+
+    if not predictors or response_var not in full_training_gdf.columns:
+        print("DIAGNOSTIC: No predictors or response variable found. Skipping.")
+        return
+    print(f"DIAGNOSTIC: Loaded {len(full_training_gdf)} total rows from input data.")
+
+    # -------------------------------------------------------
+    # 3. FILTER & PREPARE TRAINING DATA----
+    # -------------------------------------------------------
+    cols_to_keep = predictors + [response_var, "X", "Y"]
+    subgrid_gdf = full_training_gdf[list(set(cols_to_keep) & set(full_training_gdf.columns))].copy()
+    for col in predictors + [response_var]:
+        subgrid_gdf[col] = pd.to_numeric(subgrid_gdf[col], errors='coerce')
+    subgrid_gdf.dropna(subset=(predictors + [response_var]), inplace=True)
+    subgrid_gdf.reset_index(drop=True, inplace=True)
+
+    print(f"DIAGNOSTIC: Filtered data to {len(subgrid_gdf)} rows with finite values for training.")
+    if len(subgrid_gdf) < 100:
+        print("DIAGNOSTIC: Insufficient data (<100 rows) after filtering. Skipping.")
+        return
+    
+    # TODO it does seem like maybe my tiles don't have geometry column to begin with, like maybe not geoparquet
+    subgrid_gdf = gpd.GeoDataFrame(
+        subgrid_gdf, 
+        geometry=gpd.points_from_xy(subgrid_gdf.X, subgrid_gdf.Y),
+        crs="EPSG:32617"  
+    )
+
+    subgrid_pd = pd.DataFrame(subgrid_gdf.drop(columns=['geometry']))
+
+    predictor_ranges = pd.DataFrame({
+        'Predictor': predictors,
+        'Min_Value': [subgrid_pd[p].min() for p in predictors],
+        'Max_Value': [subgrid_pd[p].max() for p in predictors]
+    })
+    predictor_ranges['Range_Width'] = predictor_ranges['Max_Value'] - predictor_ranges['Min_Value']
+
+    # -------------------------------------------------------
+    # 4. INITIALIZE METRIC OUTPUT STORAGE ARRAYS----
+    # -------------------------------------------------------
+    deviance_mat = np.full((n_boot, 3), np.nan, dtype=float)
+    influence_mat = np.full((len(predictors), n_boot), np.nan, dtype=float)
+    boot_array = np.full((len(subgrid_gdf), 1, n_boot), np.nan, dtype=float)
+
+    # -------------------------------------------------------
+    # 5. SETUP for PARTIAL DEPENDENCE PLOT (PDP) DATA----
+    # -------------------------------------------------------
+    pred_mins = subgrid_pd[predictors].min().to_dict()
+    pred_maxs = subgrid_pd[predictors].max().to_dict()
+
+    pdp_env_ranges_list = []
+    for pred in predictors:
+        min_val, max_val = pred_mins.get(pred), pred_maxs.get(pred)
+        vals = np.linspace(min_val, max_val, 100) if pd.notna(min_val) and pd.notna(max_val) and min_val < max_val else np.repeat(min_val, 100)
+        pdp_env_ranges_list.append(pd.DataFrame({'Env_Value': vals, 'Predictor': pred}))
+    pdp_env_ranges_df = pd.concat(pdp_env_ranges_list, ignore_index=True)
+
+    if len(subgrid_pd) >= 100: # Sample 100 spatial points
+        sampled_coords = subgrid_gdf[['X', 'Y']].head(100)
+        pdp_env_ranges_df['X'] = np.tile(sampled_coords['X'], len(predictors))
+        pdp_env_ranges_df['Y'] = np.tile(sampled_coords['Y'], len(predictors))
+        # pdp_env_ranges_df['FID'] = np.tile(sampled_coords['FID'], len(predictors))
+
+    pd_array = np.full((100, len(predictors), n_boot), np.nan, dtype=float)
+    all_pdp_long_list = []
+
+    # -------------------------------------------------------
+    # 6. SETUP ADAPTIVE SPATIAL CROSS VALIDATION & MODEL TRAINING
+    # -------------------------------------------------------
+    best_iteration = 100 # Default fallback value
+    cv_results_df = None
+
+    bounds = subgrid_gdf.total_bounds
+    grid_cells = [box(x0, y0, x0 + block_size_m, y0 + block_size_m) for x0 in np.arange(bounds[0], bounds[2], block_size_m) for y0 in np.arange(bounds[1], bounds[3], block_size_m)]
+    grid_gdf = gpd.GeoDataFrame({'geometry': grid_cells}, crs=grid_crs)
+    points_in_blocks = gpd.sjoin(subgrid_gdf, grid_gdf, how="inner", predicate="within")
+    active_blocks_gdf = grid_gdf.iloc[points_in_blocks['index_right'].unique()]
+    max_k = len(active_blocks_gdf)
+
+    # TODO maybe move this
+    generate_cv_diagnostic_plot(subgrid_gdf, active_blocks_gdf, max_k, tile_id, pair, output_dir_train)
+
+    k_final = min(n_folds, max_k)
+
     try:
-        # --- a. Load Data---
-        print(f"\nProcessing Tile: {tile_id} | Year Pair: {pair}")
-        training_data_path = os.path.join(tile_dir, f"{tile_id}_training_clipped_data.parquet")
-        print(training_data_path)
-        boruta_results_path = os.path.join(tile_dir, f"boruta_selection_{pair}.pkl")
+        if k_final < 2: raise ValueError(f"CV not possible. Only {max_k} spatial block(s) found.")
+        subgrid_gdf['block_id'] = gpd.sjoin(subgrid_gdf, active_blocks_gdf, how='left', predicate='within')['index_right'].fillna(-1)
+        gkf = GroupKFold(n_splits=k_final)
+        fold_splits = gkf.split(subgrid_gdf, groups=subgrid_gdf['block_id'])
+        best_nrounds_per_fold, rmse_per_fold, mae_per_fold = [], [], []
 
-        if not os.path.exists(training_data_path) or not os.path.exists(boruta_results_path):
-            print("DIAGNOSTIC: Missing input file(s). Skipping.")
-            return
+        for k, (train_idx, test_idx) in enumerate(fold_splits):
+            train_set, test_set = subgrid_gdf.iloc[train_idx], subgrid_gdf.iloc[test_idx]
+            if test_set[response_var].nunique() < 2:
+                print(f"INFO: Skipping fold {k+1} due to zero variance in the test set response.")
+                continue
 
-        full_training_gdf = gpd.read_parquet(training_data_path)
-        with open(boruta_results_path, 'rb') as f:
-            boruta_results = pickle.load(f)
-        predictors = boruta_results['confirmed_predictors']
-        response_var = f"b.change.{pair}"
+            dtrain_fold = xgb.DMatrix(train_set[predictors], label=train_set[response_var])
+            dtest_fold = xgb.DMatrix(test_set[predictors], label=test_set[response_var])
+            watchlist_fold = [(dtest_fold, 'test')]
+            evals_result = {}
 
-        if not predictors or response_var not in full_training_gdf.columns:
-            print("DIAGNOSTIC: No predictors or response variable found. Skipping.")
-            return
-        print(f"DIAGNOSTIC: Loaded {len(full_training_gdf)} total rows from input data.")
-
-        # -------------------------------------------------------
-        # 3. FILTER & PREPARE TRAINING DATA----
-        # -------------------------------------------------------
-        cols_to_keep = predictors + [response_var, "X", "Y", "FID", "geometry"]
-        subgrid_gdf = full_training_gdf[list(set(cols_to_keep) & set(full_training_gdf.columns))].copy()
-        for col in predictors + [response_var]:
-            subgrid_gdf[col] = pd.to_numeric(subgrid_gdf[col], errors='coerce')
-        subgrid_gdf.dropna(subset=(predictors + [response_var]), inplace=True)
-        subgrid_gdf.reset_index(drop=True, inplace=True)
-
-        print(f"DIAGNOSTIC: Filtered data to {len(subgrid_gdf)} rows with finite values for training.")
-        if len(subgrid_gdf) < 100:
-            print("DIAGNOSTIC: Insufficient data (<100 rows) after filtering. Skipping.")
-            return
-
-        subgrid_data = pd.DataFrame(subgrid_gdf.drop(columns='geometry'))
-
-        predictor_ranges = pd.DataFrame({
-            'Predictor': predictors,
-            'Min_Value': [subgrid_data[p].min() for p in predictors],
-            'Max_Value': [subgrid_data[p].max() for p in predictors]
-        })
-        predictor_ranges['Range_Width'] = predictor_ranges['Max_Value'] - predictor_ranges['Min_Value']
-
-        # -------------------------------------------------------
-        # 4. INITIALIZE METRIC OUTPUT STORAGE ARRAYS----
-        # -------------------------------------------------------
-        deviance_mat = np.full((n_boot, 3), np.nan, dtype=float)
-        influence_mat = np.full((len(predictors), n_boot), np.nan, dtype=float)
-        boot_array = np.full((len(subgrid_data), 1, n_boot), np.nan, dtype=float)
-
-        # -------------------------------------------------------
-        # 5. SETUP for PARTIAL DEPENDENCE PLOT (PDP) DATA----
-        # -------------------------------------------------------
-        pred_mins = subgrid_data[predictors].min().to_dict()
-        pred_maxs = subgrid_data[predictors].max().to_dict()
-
-        pdp_env_ranges_list = []
-        for pred in predictors:
-            min_val, max_val = pred_mins.get(pred), pred_maxs.get(pred)
-            vals = np.linspace(min_val, max_val, 100) if pd.notna(min_val) and pd.notna(max_val) and min_val < max_val else np.repeat(min_val, 100)
-            pdp_env_ranges_list.append(pd.DataFrame({'Env_Value': vals, 'Predictor': pred}))
-        pdp_env_ranges_df = pd.concat(pdp_env_ranges_list, ignore_index=True)
-
-        if len(subgrid_data) >= 100: # Sample 100 spatial points
-            sampled_coords = subgrid_data[['X', 'Y', 'FID']].head(100)
-            pdp_env_ranges_df['X'] = np.tile(sampled_coords['X'], len(predictors))
-            pdp_env_ranges_df['Y'] = np.tile(sampled_coords['Y'], len(predictors))
-            pdp_env_ranges_df['FID'] = np.tile(sampled_coords['FID'], len(predictors))
-
-        pd_array = np.full((100, len(predictors), n_boot), np.nan, dtype=float)
-        all_pdp_long_list = []
-
-        # -------------------------------------------------------
-        # 6. SETUP ADAPTIVE SPATIAL CROSS VALIDATION & MODEL TRAINING
-        # -------------------------------------------------------
-        best_iteration = 100 # Default fallback value
-        cv_results_df = None
-
-        bounds = subgrid_gdf.total_bounds
-        grid_cells = [box(x0, y0, x0 + block_size_m, y0 + block_size_m) for x0 in np.arange(bounds[0], bounds[2], block_size_m) for y0 in np.arange(bounds[1], bounds[3], block_size_m)]
-        grid_gdf = gpd.GeoDataFrame({'geometry': grid_cells}, crs=grid_crs)
-        points_in_blocks = gpd.sjoin(subgrid_gdf, grid_gdf, how="inner", predicate="within")
-        active_blocks_gdf = grid_gdf.iloc[points_in_blocks['index_right'].unique()]
-        max_k = len(active_blocks_gdf)
-
-        generate_cv_diagnostic_plot(subgrid_gdf, active_blocks_gdf, max_k, tile_id, pair, output_dir_train)
-
-        k_final = min(n_folds, max_k)
-
-        try:
-            if k_final < 2: raise ValueError(f"CV not possible. Only {max_k} spatial block(s) found.")
-            subgrid_gdf['block_id'] = gpd.sjoin(subgrid_gdf, active_blocks_gdf, how='left', predicate='within')['index_right'].fillna(-1)
-            gkf = GroupKFold(n_splits=k_final)
-            fold_splits = gkf.split(subgrid_gdf, groups=subgrid_gdf['block_id'])
-            best_nrounds_per_fold, rmse_per_fold, mae_per_fold = [], [], []
-
-            for k, (train_idx, test_idx) in enumerate(fold_splits):
-                train_set, test_set = subgrid_data.iloc[train_idx], subgrid_data.iloc[test_idx]
-                if test_set[response_var].nunique() < 2:
-                    print(f"INFO: Skipping fold {k+1} due to zero variance in the test set response.")
-                    continue
-
-                dtrain_fold = xgb.DMatrix(train_set[predictors], label=train_set[response_var])
-                dtest_fold = xgb.DMatrix(test_set[predictors], label=test_set[response_var])
-                watchlist_fold = [(dtest_fold, 'test')]
-                evals_result = {}
-
-                fold_model = xgb.train(
-                    params={'max_depth': 4, 'eta': 0.01, 'gamma': 1, 'objective': 'reg:squarederror', 'eval_metric': ['rmse', 'mae']},
-                    dtrain=dtrain_fold, num_boost_round=1000,
-                    evals=watchlist_fold, early_stopping_rounds=10,
-                    evals_result=evals_result, verbose_eval=False
-                )
-                if fold_model.best_iteration > 0:
-                    best_nrounds_per_fold.append(fold_model.best_iteration)
-                    rmse_per_fold.append(evals_result['test']['rmse'][fold_model.best_iteration -1])
-                    mae_per_fold.append(evals_result['test']['mae'][fold_model.best_iteration -1])
-
-            if best_nrounds_per_fold:
-                best_iteration = int(np.mean(best_nrounds_per_fold))
-                cv_results_df = pd.DataFrame({'tile_id': [tile_id], 'year_pair': [pair], 'best_iteration': [best_iteration], 'test_rmse_mean': [np.mean(rmse_per_fold)], 'test_rmse_std': [np.std(rmse_per_fold)], 'test_mae_mean': [np.mean(mae_per_fold)], 'test_mae_std': [np.std(mae_per_fold)]})
-                print(f"DIAGNOSTIC: CV successful. Optimal iteration: {best_iteration}")
-            else: raise ValueError("Manual CV loop failed to find any best iterations.")
-        except Exception as e:
-            print(f"WARNING: CV SKIPPED for Tile: {tile_id} | Pair: {pair} with error: {e}. Using default {best_iteration} rounds.")
-            cv_results_df = pd.DataFrame({'tile_id': [tile_id], 'year_pair': [pair], 'best_iteration': [best_iteration], 'test_rmse_mean': [np.nan], 'test_rmse_std': [np.nan], 'test_mae_mean': [np.nan], 'test_mae_std': [np.nan]})
-
-        # FINAL TRAINING MODEL
-        dtrain_full = xgb.DMatrix(subgrid_data[predictors], label=subgrid_data[response_var])
-        xgb_params = {
-            'max_depth': 4, 'eta': 0.01, 'gamma': 1, 'subsample': 0.7,
-            'colsample_bytree': 0.8, 'objective': 'reg:squarederror'
-        }
-
-        print(f"DIAGNOSTIC: Starting bootstrap loop for {n_boot} iterations...")
-
-        for b in range(n_boot):
-            xgb_model = xgb.train(
-                params=xgb_params, dtrain=dtrain_full,
-                num_boost_round=best_iteration, nthreads=1
+            fold_model = xgb.train(
+                params={'max_depth': 4, 'eta': 0.01, 'gamma': 1, 'objective': 'reg:squarederror', 'eval_metric': ['rmse', 'mae']},
+                dtrain=dtrain_fold, num_boost_round=1000,
+                evals=watchlist_fold, early_stopping_rounds=10,
+                evals_result=evals_result, verbose_eval=False
             )
+            if fold_model.best_iteration > 0:
+                best_nrounds_per_fold.append(fold_model.best_iteration)
+                rmse_per_fold.append(evals_result['test']['rmse'][fold_model.best_iteration -1])
+                mae_per_fold.append(evals_result['test']['mae'][fold_model.best_iteration -1])
 
-            # -------------------------------------------------------
-            # 7. STORE MODEL METRICS ----
-            # -------------------------------------------------------
-            predictions = xgb_model.predict(dtrain_full)
-            boot_array[:, 0, b] = predictions
-
-            importance_matrix = xgb_model.get_score(importance_type='gain')
-            if importance_matrix:
-                for i, pred in enumerate(predictors):
-                    influence_mat[i, b] = importance_matrix.get(pred, 0)
-
-            r2 = r2_score(subgrid_data[response_var], predictions)
-            deviance_mat[b, 0] = r2 # Dev.Exp
-            deviance_mat[b, 1] = np.sqrt(mean_squared_error(subgrid_data[response_var], predictions)) # RMSE
-            deviance_mat[b, 2] = r2 # R2
-
-            # -------------------------------------------------------
-            # 8. STORE PARTIAL DEPENDENCE PLOT DATA ----
-            # -------------------------------------------------------
-            pdp_storage_boot = []
-            predictor_means = subgrid_data[predictors].mean().to_dict()
-
-            for j, pred_name in enumerate(predictors):
-                pdp_grid = pd.DataFrame([predictor_means] * 100)
-                pdp_grid[pred_name] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Env_Value'].values
-                pdp_predictions = xgb_model.predict(xgb.DMatrix(pdp_grid[predictors]))
-
-                pd_array[:, j, b] = pdp_predictions
-
-                pdp_df = pd.DataFrame({
-                    'Predictor': pred_name, 'Env_Value': pdp_grid[pred_name],
-                    'Replicate': f"Rep_{b+1}", 'PDP_Value': pdp_predictions
-                })
-                if 'X' in pdp_env_ranges_df.columns:
-                    pdp_df['X'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['X'].values
-                    pdp_df['Y'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Y'].values
-                    pdp_df['FID'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['FID'].values
-                pdp_storage_boot.append(pdp_df)
-
-            all_pdp_long_list.append(pd.concat(pdp_storage_boot, ignore_index=True))
-
-        print("DIAGNOSTIC: Bootstrap loop finished.")
-        pdp_long_df = pd.concat(all_pdp_long_list, ignore_index=True)
-
-        # -------------------------------------------------------
-        # 8.5. PROCESS BOOTSTRAP PREDICTIONS & CALCULATE STATISTICS
-        # -------------------------------------------------------
-        print(f"DIAGNOSTIC: Processing bootstrap results. Array dimensions: {boot_array.shape}")
-
-        mean_prediction = np.mean(boot_array, axis=2).flatten()
-        uncertainty_sd = np.std(boot_array, axis=2).flatten()
-        if n_boot == 1: uncertainty_sd = np.zeros_like(uncertainty_sd)
-
-        boot_df = pd.DataFrame({
-            'FID': subgrid_data['FID'], 'X': subgrid_data['X'], 'Y': subgrid_data['Y'],
-            'b.change_actual': subgrid_data[response_var],
-            'Mean_Prediction': mean_prediction, 'Uncertainty_SD': uncertainty_sd
-        })
-        print(f"DIAGNOSTIC: Created final bootstrap data frame with {len(boot_df)} rows.")
-
-        # -------------------------------------------------------
-        # 9. SAVE OUTPUTS----
-        # -------------------------------------------------------
-        os.makedirs(tile_dir, exist_ok=True)
-        print(f"DIAGNOSTIC: Writing outputs to {tile_dir}")
-
-        cv_results_df.to_parquet(os.path.join(tile_dir, f"cv_results_{pair}.parquet"))
-        pd.DataFrame(deviance_mat, columns=["Dev.Exp", "RMSE", "R2"]).to_parquet(os.path.join(tile_dir, f"deviance_{pair}.parquet"))
-        pd.DataFrame(influence_mat, index=predictors, columns=[f"Rep_{i+1}" for i in range(n_boot)]).reset_index().rename(columns={'index': 'Predictor'}).to_parquet(os.path.join(tile_dir, f"influence_{pair}.parquet"), index=False)
-        predictor_ranges.to_parquet(os.path.join(tile_dir, f"predictor_ranges_{pair}.parquet"))
-        boot_df.to_parquet(os.path.join(tile_dir, f"bootstraps_{pair}.parquet"))
-        pdp_long_df.to_parquet(os.path.join(tile_dir, f"pdp_data_long_{pair}.parquet"))
-        pdp_env_ranges_df.to_parquet(os.path.join(tile_dir, f"pdp_env_ranges_{pair}.parquet"))
-
-        # Save Rasters
-        res = 10 # Assuming 10m resolution
-        min_x, min_y, max_x, max_y = subgrid_gdf.total_bounds
-        out_shape = (int(np.ceil((max_y - min_y) / res)), int(np.ceil((max_x - min_x) / res)))
-        transform = from_origin(min_x, max_y, res, res)
-        for col, filename in [('Mean_Prediction', f"Mean_Boots_Prediction_{pair}.tif"), ('Uncertainty_SD', f"Uncertainty_SD_{pair}.tif")]:
-            raster_data = np.full(out_shape, np.nan, dtype=np.float32)
-            for _, row in boot_df.dropna(subset=[col]).iterrows():
-                r, c = rasterio.transform.rowcol(transform, row['X'], row['Y'])
-                if 0 <= r < out_shape[0] and 0 <= c < out_shape[1]: raster_data[r, c] = row[col]
-            with rasterio.open(os.path.join(tile_dir, filename), 'w', driver='GTiff', height=out_shape[0], width=out_shape[1], count=1, dtype=raster_data.dtype, crs=grid_crs, transform=transform, nodata=np.nan) as dst:
-                dst.write(raster_data, 1)
-
-        final_model = xgb.train(params=xgb_params, dtrain=dtrain_full, num_boost_round=best_iteration)
-        final_model.save_model(os.path.join(tile_dir, f"xgb_model_{pair}.json"))
-
-        # GENERATE DIAGNOSTIC PLOT OF MODEL FIT ---
-        plot_data = boot_df.dropna(subset=['Mean_Prediction'])
-        fig, ax = plt.subplots(figsize=(7, 7))
-        sns.scatterplot(data=plot_data, x='b.change_actual', y='Mean_Prediction', alpha=0.3, color="darkblue", ax=ax)
-        ax.axline((0, 0), slope=1, color="red", linestyle="--", linewidth=1)
-        ax.set_title(f"Model Fit for Tile: {tile_id} | Pair: {pair}")
-        ax.set_xlabel("Actual Change (m)")
-        ax.set_ylabel("Mean Predicted Change (m)")
-        subtitle = f"Mean R-squared = {np.nanmean(deviance_mat[:, 2]):.3f} | Mean RMSE = {np.nanmean(deviance_mat[:, 1]):.3f}"
-        fig.suptitle(subtitle, y=0.92, fontsize=10)
-        plot_dir = os.path.join(output_dir_train, tile_id, "diagnostic_plots")
-        os.makedirs(plot_dir, exist_ok=True)
-        plt.savefig(os.path.join(plot_dir, f"model_fit_{pair}.png"), dpi=150)
-        plt.close()
-        print("DIAGNOSTIC: All outputs saved successfully.")
-
+        if best_nrounds_per_fold:
+            best_iteration = int(np.mean(best_nrounds_per_fold))
+            cv_results_df = pd.DataFrame({'tile_id': [tile_id], 'year_pair': [pair], 'best_iteration': [best_iteration], 'test_rmse_mean': [np.mean(rmse_per_fold)], 'test_rmse_std': [np.std(rmse_per_fold)], 'test_mae_mean': [np.mean(mae_per_fold)], 'test_mae_std': [np.std(mae_per_fold)]})
+            print(f"DIAGNOSTIC: CV successful. Optimal iteration: {best_iteration}")
+        else: raise ValueError("Manual CV loop failed to find any best iterations.")
     except Exception as e:
-        print(f"FATAL ERROR in training for Tile: {tile_id} | Pair: {pair} | {e}", exc_info=True)
+        print(f"WARNING: CV SKIPPED for Tile: {tile_id} | Pair: {pair} with error: {e}. Using default {best_iteration} rounds.")
+        cv_results_df = pd.DataFrame({'tile_id': [tile_id], 'year_pair': [pair], 'best_iteration': [best_iteration], 'test_rmse_mean': [np.nan], 'test_rmse_std': [np.nan], 'test_mae_mean': [np.nan], 'test_mae_std': [np.nan]})
+
+    # FINAL TRAINING MODEL
+    dtrain_full = xgb.DMatrix(subgrid_gdf[predictors], label=subgrid_gdf[response_var])
+    xgb_params = {
+        'max_depth': 4, 'eta': 0.01, 'gamma': 1, 'subsample': 0.7,
+        'colsample_bytree': 0.8, 'objective': 'reg:squarederror',  'n_jobs': 1
+    }
+
+    print(f"DIAGNOSTIC: Starting bootstrap loop for {n_boot} iterations...")
+
+    for b in range(n_boot):
+        xgb_model = xgb.train(
+            params=xgb_params, dtrain=dtrain_full,
+            num_boost_round=best_iteration)
+
+        # -------------------------------------------------------
+        # 7. STORE MODEL METRICS ----
+        # -------------------------------------------------------
+        predictions = xgb_model.predict(dtrain_full)
+        boot_array[:, 0, b] = predictions
+
+        importance_matrix = xgb_model.get_score(importance_type='gain')
+        if importance_matrix:
+            for i, pred in enumerate(predictors):
+                influence_mat[i, b] = importance_matrix.get(pred, 0)
+
+        r2 = r2_score(subgrid_gdf[response_var], predictions)
+        deviance_mat[b, 0] = r2 # Dev.Exp
+        deviance_mat[b, 1] = np.sqrt(mean_squared_error(subgrid_gdf[response_var], predictions)) # RMSE
+        deviance_mat[b, 2] = r2 # R2
+
+        # -------------------------------------------------------
+        # 8. STORE PARTIAL DEPENDENCE PLOT DATA ----
+        # -------------------------------------------------------
+        pdp_storage_boot = []
+        predictor_means = subgrid_gdf[predictors].mean().to_dict()
+
+        for j, pred_name in enumerate(predictors):
+            pdp_grid = pd.DataFrame([predictor_means] * 100)
+            pdp_grid[pred_name] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Env_Value'].values
+            pdp_predictions = xgb_model.predict(xgb.DMatrix(pdp_grid[predictors]))
+
+            pd_array[:, j, b] = pdp_predictions
+
+            pdp_df = pd.DataFrame({
+                'Predictor': pred_name, 'Env_Value': pdp_grid[pred_name],
+                'Replicate': f"Rep_{b+1}", 'PDP_Value': pdp_predictions
+            })
+            if 'X' in pdp_env_ranges_df.columns:
+                pdp_df['X'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['X'].values
+                pdp_df['Y'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Y'].values
+                # pdp_df['FID'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['FID'].values
+            pdp_storage_boot.append(pdp_df)
+
+        all_pdp_long_list.append(pd.concat(pdp_storage_boot, ignore_index=True))
+
+    print("DIAGNOSTIC: Bootstrap loop finished.")
+    pdp_long_df = pd.concat(all_pdp_long_list, ignore_index=True)
+
+    # -------------------------------------------------------
+    # 8.5. PROCESS BOOTSTRAP PREDICTIONS & CALCULATE STATISTICS
+    # -------------------------------------------------------
+    print(f"DIAGNOSTIC: Processing bootstrap results. Array dimensions: {boot_array.shape}")
+
+    mean_prediction = np.mean(boot_array, axis=2).flatten()
+    uncertainty_sd = np.std(boot_array, axis=2).flatten()
+    if n_boot == 1: uncertainty_sd = np.zeros_like(uncertainty_sd)
+
+    boot_df = pd.DataFrame({'X': subgrid_gdf['X'], 'Y': subgrid_gdf['Y'],
+        'b.change_actual': subgrid_gdf[response_var],
+        'Mean_Prediction': mean_prediction, 'Uncertainty_SD': uncertainty_sd
+    })
+    print(f"DIAGNOSTIC: Created final bootstrap data frame with {len(boot_df)} rows.")
+
+    # -------------------------------------------------------
+    # 9. SAVE OUTPUTS----
+    # -------------------------------------------------------
+    os.makedirs(tile_dir, exist_ok=True)
+    print(f"DIAGNOSTIC: Writing outputs to {tile_dir}")
+
+    cv_results_df.to_parquet(os.path.join(tile_dir, f"cv_results_{pair}.parquet"))
+    pd.DataFrame(deviance_mat, columns=["Dev.Exp", "RMSE", "R2"]).to_parquet(os.path.join(tile_dir, f"deviance_{pair}.parquet"))
+    pd.DataFrame(influence_mat, index=predictors, columns=[f"Rep_{i+1}" for i in range(n_boot)]).reset_index().rename(columns={'index': 'Predictor'}).to_parquet(os.path.join(tile_dir, f"influence_{pair}.parquet"), index=False)
+    predictor_ranges.to_parquet(os.path.join(tile_dir, f"predictor_ranges_{pair}.parquet"))
+    boot_df.to_parquet(os.path.join(tile_dir, f"bootstraps_{pair}.parquet"))
+    pdp_long_df.to_parquet(os.path.join(tile_dir, f"pdp_data_long_{pair}.parquet"))
+    pdp_env_ranges_df.to_parquet(os.path.join(tile_dir, f"pdp_env_ranges_{pair}.parquet"))
+
+    # Save Rasters
+    res = 10 # Assuming 10m resolution
+    min_x, min_y, max_x, max_y = subgrid_gdf.total_bounds
+    out_shape = (int(np.ceil((max_y - min_y) / res)), int(np.ceil((max_x - min_x) / res)))
+    transform = from_origin(min_x, max_y, res, res)
+    for col, filename in [('Mean_Prediction', f"Mean_Boots_Prediction_{pair}.tif"), ('Uncertainty_SD', f"Uncertainty_SD_{pair}.tif")]:
+        raster_data = np.full(out_shape, np.nan, dtype=np.float32)
+        for _, row in boot_df.dropna(subset=[col]).iterrows():
+            r, c = rasterio.transform.rowcol(transform, row['X'], row['Y'])
+            if 0 <= r < out_shape[0] and 0 <= c < out_shape[1]: raster_data[r, c] = row[col]
+        with rasterio.open(os.path.join(tile_dir, filename), 'w', driver='GTiff', height=out_shape[0], width=out_shape[1], count=1, dtype=raster_data.dtype, crs=grid_crs, transform=transform, nodata=np.nan) as dst:
+            dst.write(raster_data, 1)
+
+    final_model = xgb.train(params=xgb_params, dtrain=dtrain_full, num_boost_round=best_iteration)
+    final_model.save_model(os.path.join(tile_dir, f"xgb_model_{pair}.json"))
+
+    # GENERATE DIAGNOSTIC PLOT OF MODEL FIT ---
+    plot_data = boot_df.dropna(subset=['Mean_Prediction'])
+    fig, ax = plt.subplots(figsize=(7, 7))
+    sns.scatterplot(data=plot_data, x='b.change_actual', y='Mean_Prediction', alpha=0.3, color="darkblue", ax=ax)
+    ax.axline((0, 0), slope=1, color="red", linestyle="--", linewidth=1)
+    ax.set_title(f"Model Fit for Tile: {tile_id} | Pair: {pair}")
+    ax.set_xlabel("Actual Change (m)")
+    ax.set_ylabel("Mean Predicted Change (m)")
+    subtitle = f"Mean R-squared = {np.nanmean(deviance_mat[:, 2]):.3f} | Mean RMSE = {np.nanmean(deviance_mat[:, 1]):.3f}"
+    fig.suptitle(subtitle, y=0.92, fontsize=10)
+    plot_dir = os.path.join(output_dir_train, tile_id, "diagnostic_plots")
+    os.makedirs(plot_dir, exist_ok=True)
+    plt.savefig(os.path.join(plot_dir, f"model_fit_{pair}.png"), dpi=150)
+    plt.close()
+    print("DIAGNOSTIC: All outputs saved successfully.")
 
 
 # ==============================================================================
@@ -929,11 +932,11 @@ def main_workflow():
     specific_tile_ids = ["BH4RZ577_2"] 
 
     # Step 1: Run Predictor Selection
-    select_predictors_boruta_py(output_dir_train, year_pairs)
-    create_boruta_summary_report(output_dir_train)
+    # select_predictors_boruta_py(output_dir_train, year_pairs)
+    
 
     # # Step 2: Run the Main Model Training
-    # model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=5, n_folds=3)
+    model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=5, n_folds=3)
 
     # # Step 3: Run Post-Training Reporting and Diagnostics
     # create_xgboost_performance_report(output_dir_train, tile_ids=specific_tile_ids)
