@@ -100,8 +100,8 @@ class DigitalCoastEngine:
             for i, url in enumerate(urls):
                 cleansed_url = self.cleansed_url(url)
                 # Only download .tif files
-                if not cleansed_url.endswith('.tif'):
-                    continue
+                # if not cleansed_url.endswith('.tif'):
+                #     continue
                 dataset_name = cleansed_url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
@@ -144,11 +144,11 @@ class DigitalCoastEngine:
         download_link, provider_folder, outputs = param_inputs
         # TODO we already only choose USACE NCMP providers, so this might always be from this s3 bucket
         # only allow dem data type.  Others are: laz
-        if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and 'dem' in download_link:
+        if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link or 'laz' in download_link):
             _, data_file = download_link.replace('/index.html', '').split('.com')
             lidar_bucket = self.get_bucket()
             for obj_summary in lidar_bucket.objects.filter(Prefix=f"{data_file[1:]}"):
-                if 'tileindex' in obj_summary.key:
+                if 'tileindex' in obj_summary.key and obj_summary.key.endswith('.zip'):
                     output_zip_file = provider_folder / obj_summary.key
                     file_parent_folder = output_zip_file.parents[0]
                     shp_path = output_zip_file.parents[0] / pathlib.Path(str(output_zip_file.stem) + '.shp')
@@ -245,8 +245,8 @@ class DigitalCoastEngine:
                 self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 self.check_tile_index_areas(digital_coast_folder, outputs)
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
-                if digital_coast_folder.exists():
-                    self.delete_unused_folder(digital_coast_folder, outputs)
+                # if digital_coast_folder.exists():
+                #     self.delete_unused_folder(digital_coast_folder, outputs)
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Download intersected Digital Coast files"""

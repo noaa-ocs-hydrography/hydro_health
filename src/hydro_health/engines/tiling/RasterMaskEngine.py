@@ -153,6 +153,8 @@ class RasterMaskEngine:
                 for tile_index_path in approved_files[ecoregion.stem]:
                     tile_index = gpd.read_file(tile_index_path).dissolve()
                     dissolved_tile_index = tile_index_path.parents[0] / pathlib.Path(tile_index_path.stem + '_dis.shp')
+                    if dissolved_tile_index.exists():
+                        dissolved_tile_index.unlink()
                     tile_index.to_file(dissolved_tile_index)
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
@@ -162,7 +164,7 @@ class RasterMaskEngine:
         for ecoregion in ecoregions:
             digital_coast = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if digital_coast.is_dir():
-                json_files = digital_coast.rglob('feature.json')
+                json_files = [folder for folder in digital_coast.rglob('feature.json') if 'unused_providers' not in str(folder)]
                 for file in json_files:
                     if ecoregion.stem not in approved_files:
                         approved_files[ecoregion.stem] = []
@@ -188,7 +190,7 @@ class RasterMaskEngine:
         for ecoregion in ecoregions:
             digital_coast = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if digital_coast.is_dir():
-                dissolved_shapefiles = digital_coast.rglob('*_dis.shp')
+                dissolved_shapefiles = [folder for folder in digital_coast.rglob('*_dis.shp') if 'unused_providers' not in str(folder)]
                 merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
                 training_datasets = ecoregion / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
                 merged_training_ds.to_file(training_datasets)

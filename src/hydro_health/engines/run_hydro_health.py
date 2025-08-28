@@ -101,5 +101,5 @@ def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None
 
 
 if __name__ == "__main__":
-    config_name = "hydro_health_session_08132025.yaml"
+    config_name = "hydro_health_session_08272025.yaml"
     run_hydro_health(config_name)
