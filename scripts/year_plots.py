@@ -18,7 +18,7 @@ os.environ['GDAL_MEM_ENABLE_OPEN'] = 'YES'
 def getYearDatasets(input_folder):
     """Parses filenames to group raster datasets by year."""
     year_datasets = {}
-    filename_pattern = re.compile(r'(.+)_(\d{4})_resampled\.tif', re.IGNORECASE)
+    filename_pattern = re.compile(r'(.+)_(\d{4})_\d+_resampled.tif', re.IGNORECASE)
 
     for filename in os.listdir(input_folder):
         if filename.endswith('.tif'):
@@ -72,7 +72,6 @@ def calculateExtent(paths, target_crs):
     common_extent = (local_left, local_right, local_bottom, local_top)
     
     return common_transform, common_extent, (dst_height, dst_width)
-
 
 def reprojectToGrid(path, transform, shape, target_crs, resampling_method=Resampling.bilinear):
     """Reprojects a raster to a specified grid."""
@@ -130,7 +129,7 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
         print("No raster files found.")
         return
 
-    target_crs = 'EPSG:3857'
+    target_crs = 'EPSG:4326'
     shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
     
     all_raster_paths = [ds['path'] for year in year_datasets for ds in year_datasets[year]]
@@ -143,7 +142,6 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
     global_min, global_max = np.inf, -np.inf
     for path in all_raster_paths:
         reprojected_data, nodata = reprojectToGrid(path, common_transform, common_shape, target_crs)
-        # For color scaling, we still respect the mask.
         combined_mask = np.logical_or(reprojected_data == nodata, ~mask_boolean_global)
         masked_data = np.ma.array(reprojected_data, mask=combined_mask)
         if masked_data.count() > 0:
@@ -152,7 +150,7 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
 
     cmap = plt.colormaps['ocean'].copy()
     cmap.set_bad(color='white')
-    colors = ['red', 'blue', 'green', 'purple', 'orange']
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown', 'cyan', 'magenta', 'yellow', 'pink']
     sorted_years = sorted(year_datasets.keys())
     num_years = len(sorted_years)
     cols = math.ceil(math.sqrt(num_years))
@@ -164,23 +162,23 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
     
     for i, year in enumerate(sorted_years):
         ax = axes[i]
-        # Create a separate mask for area calculation that IGNORES the external mask.
         final_area_mask = np.zeros(common_shape, dtype=bool)
-        
+        legend_handles = [] # Create a list to hold legend handles
+
         for j, dataset in enumerate(year_datasets[year]):
             destination, nodata = reprojectToGrid(dataset['path'], common_transform, common_shape, target_crs)
             
-            # For area calculation: a pixel is valid if it simply has data.
             current_area_mask = destination != nodata
             final_area_mask = np.logical_or(final_area_mask, current_area_mask)
             
-            # For plotting outlines: use the same logic as area calculation.
             data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=common_transform) if val > 0]
             for geom in data_geometries:
                 x, y = geom.exterior.xy
                 ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
             
-            # For display: mask out nodata AND areas outside the external mask.
+            # Add a custom line to our list of legend handles
+            legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=dataset['dataset_name']))
+            
             display_mask = np.logical_or(destination == nodata, ~mask_boolean_global)
             masked_destination = np.ma.array(destination, mask=display_mask)
             im = ax.imshow(masked_destination, extent=common_extent, cmap=cmap, vmin=global_min, vmax=global_max)
@@ -191,15 +189,19 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
         
         setupSubplot(ax, shp_gdf, common_extent)
         
-        title_y_pos, spacing = 1.10, 0.02
-        for j, dataset in enumerate(year_datasets[year]):
-            ax.text(0.0, title_y_pos - (j * spacing), f"{year} {dataset['dataset_name']}", transform=ax.transAxes, color=colors[j % len(colors)], fontsize=12, fontweight='bold', ha='left', va='bottom')
-        
-        # Calculate area based on the final union of valid TIFF pixels ONLY.
+        # --- MODIFIED SECTION START ---
+        # Calculate area
         valid_pixels = np.sum(final_area_mask)
         pixel_area_m2 = abs(common_transform.a * common_transform.e)
         total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
-        ax.text(0.0, title_y_pos - (len(year_datasets[year]) * spacing) - spacing, f"Total Area: {total_area_km2:.2f} km$^2$", transform=ax.transAxes, fontsize=12, fontweight='bold', ha='left', va='bottom')
+        
+        # Set a single title with the year and total area
+        ax.set_title(f"{year}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
+        
+        # Add the legend underneath the subplot
+        ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
+                  fancybox=True, shadow=False, ncol=2, fontsize=8)
+        # --- MODIFIED SECTION END ---
 
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
@@ -213,10 +215,9 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
         print("No raster files found.")
         return
 
-    target_crs = 'EPSG:3857'
+    target_crs = 'EPSG:4326'
     shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
     
-    # Calculate global min/max for consistent color scaling
     all_raster_paths = [ds['path'] for year in year_datasets for ds in year_datasets[year]]
     global_transform, _, global_shape = calculateExtent(all_raster_paths + [mask_path], target_crs)
     mask_reproj_global, mask_nodata_global = reprojectToGrid(mask_path, global_transform, global_shape, target_crs, Resampling.nearest)
@@ -233,7 +234,7 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
 
     cmap = plt.colormaps['ocean'].copy()
     cmap.set_bad(color='white')
-    colors = ['red', 'blue', 'green', 'purple', 'orange']
+    colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown', 'cyan', 'magenta', 'yellow', 'pink']
     sorted_years = sorted(year_datasets.keys())
     num_years = len(sorted_years)
     cols = math.ceil(math.sqrt(num_years))
@@ -252,23 +253,23 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
         mask_boolean_local = mask_reproj_local != mask_nodata_local
         mask_geometries_local = [shape(geom) for geom, val in shapes(mask_boolean_local.astype(np.uint8), transform=local_transform) if val > 0]
         
-        # Create a separate mask for area calculation that IGNORES the external mask.
         final_area_mask = np.zeros(local_shape, dtype=bool)
+        legend_handles = [] # Create a list to hold legend handles
 
         for j, dataset in enumerate(year_datasets[year]):
             destination, nodata = reprojectToGrid(dataset['path'], local_transform, local_shape, target_crs)
             
-            # For area calculation: a pixel is valid if it simply has data.
             current_area_mask = destination != nodata
             final_area_mask = np.logical_or(final_area_mask, current_area_mask)
             
-            # For plotting outlines: use the same logic as area calculation.
             data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=local_transform) if val > 0]
             for geom in data_geometries:
                 x, y = geom.exterior.xy
                 ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
+
+            # Add a custom line to our list of legend handles
+            legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=dataset['dataset_name']))
             
-            # For display: mask out nodata AND areas outside the local mask.
             display_mask = np.logical_or(destination == nodata, ~mask_boolean_local)
             masked_destination = np.ma.array(destination, mask=display_mask)
             im = ax.imshow(masked_destination, extent=local_extent, cmap=cmap, vmin=global_min, vmax=global_max)
@@ -279,21 +280,24 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
         
         setupSubplot(ax, shp_gdf, local_extent)
         
-        title_y_pos, spacing = 1.10, 0.02
-        for j, dataset in enumerate(year_datasets[year]):
-            ax.text(0.0, title_y_pos - (j * spacing), f"{year} {dataset['dataset_name']}", transform=ax.transAxes, color=colors[j % len(colors)], fontsize=12, fontweight='bold', ha='left', va='bottom')
-        
-        # Calculate area based on the final union of valid TIFF pixels ONLY.
+        # --- MODIFIED SECTION START ---
+        # Calculate area
         valid_pixels = np.sum(final_area_mask)
         pixel_area_m2 = abs(local_transform.a * local_transform.e)
         total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
-        ax.text(0.0, title_y_pos - (len(year_datasets[year]) * spacing) - spacing, f"Total Area: {total_area_km2:.2f} km$^2$", transform=ax.transAxes, fontsize=12, fontweight='bold', ha='left', va='bottom')
+        
+        # Set a single title with the year and total area
+        ax.set_title(f"{year}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
+        
+        # Add the legend underneath the subplot
+        ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
+                  fancybox=True, shadow=False, ncol=2, fontsize=8)
+        # --- MODIFIED SECTION END ---
 
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
 
     finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Individual Extent)", os.path.join(output_folder, 'year_plots_individual_extent.png'), 600)
-
 
 def plot_difference(input_folder, output_folder, mask_path, shp_path, mode, use_individual_extent=False):
     """Calculates and plots raster differences for consecutive or all year pairs."""
@@ -304,7 +308,7 @@ def plot_difference(input_folder, output_folder, mask_path, shp_path, mode, use_
     
     year_datasets = {year: data[0]['path'] for year, data in year_datasets_map.items()}
 
-    target_crs = 'EPSG:3857'
+    target_crs = 'EPSG:4326'
     shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
     sorted_years = sorted(year_datasets.keys())
     
