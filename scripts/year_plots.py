@@ -12,32 +12,87 @@ from itertools import combinations
 import geopandas as gpd
 from matplotlib.lines import Line2D
 
-# This environment variable is important for handling large raster files
+
 os.environ['GDAL_MEM_ENABLE_OPEN'] = 'YES'
 
+def extract_date_from_metadata(metadata_path):
+    """Extracts the first date in YYYY-MM format from a metadata file."""
+    try:
+        with open(metadata_path, 'r') as f:
+            content = f.read()
+            date_matches_ym = re.findall(r'(?:19|20)\d{2}-\d{2}', content)
+            if date_matches_ym:
+                return sorted(list(set(date_matches_ym)))
+
+            date_matches_y = re.findall(r'(?:19|20)\d{2}', content)
+            if date_matches_y:
+                return sorted(list(set(date_matches_y)))
+
+            return 'Missing'
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"Warning: Error reading metadata file {metadata_path}: {e}")
+    return None  
+
 def getYearDatasets(input_folder):
-    """Parses filenames to group raster datasets by year."""
+    """
+    Parses filenames to group raster datasets by year.
+    If year is not in filename, it searches metadata for a date to use for grouping.
+    """
     year_datasets = {}
-    filename_pattern = re.compile(r'(.+)_(\d{4})_\d+_resampled.tif', re.IGNORECASE)
+    filename_pattern = re.compile(r'(.+?)(?:_(\d{4}))?_(\d+)_resampled\.tif', re.IGNORECASE)
+    
+    base_folder = os.path.dirname(input_folder)
+    base_folder = os.path.join(base_folder, 'DigitalCoast')
 
     for filename in os.listdir(input_folder):
         if filename.endswith('.tif'):
             match = filename_pattern.search(filename)
             if match:
-                dataset_info, year = match.groups()
+                dataset_info, year_from_filename, unique_id = match.groups()
                 
                 if "USACE" in dataset_info and "NCMP" in dataset_info:
                     dataset_name = "USACE"
                 else:
                     dataset_name = dataset_info.split('_')[-1]
                 
-                if year not in year_datasets:
-                    year_datasets[year] = []
-                year_datasets[year].append({
+                # --- Search for the acquisition date in metadata for every file ---
+                acquisition_date = None
+                try:
+                    for folder_name in os.listdir(base_folder):
+                        potential_path = os.path.join(base_folder, folder_name)
+                        if os.path.isdir(potential_path) and f'_{unique_id}' in folder_name:
+                            metadata_path = os.path.join(potential_path, 'metadata.txt')
+                            acquisition_date = extract_date_from_metadata(metadata_path)
+                            if acquisition_date:
+                                break
+                except FileNotFoundError:
+                    # This warning is helpful if the base 'DigitalCoast' folder is missing
+                    print(f"Warning: Base folder '{base_folder}' not found. Cannot search for metadata.")
+                
+                # Determine the year for grouping data and the string for the plot title
+                grouping_year = year_from_filename
+                title_str = year_from_filename
+
+                if not grouping_year:
+                    grouping_year = 'No Year Found'
+
+                # Set a specific title for plots where year was not in the filename
+                if not title_str:
+                    title_str = 'Date Not in Filename'
+
+                if grouping_year not in year_datasets:
+                    year_datasets[grouping_year] = []
+                
+                year_datasets[grouping_year].append({
                     'path': os.path.join(input_folder, filename),
-                    'dataset_name': dataset_name
+                    'dataset_name': dataset_name,
+                    'date': acquisition_date,  # For the legend (e.g., '2019-05')
+                    'title': title_str         # For the subplot title (e.g., '2019' or 'Date Not in Filename')
                 })
     return year_datasets
+
 
 def calculateExtent(paths, target_crs):
     """Calculates a common extent for a list of raster files."""
@@ -110,11 +165,13 @@ def finalizeFigure(fig, axes, im, cbar_label, suptitle, output_path, dpi):
         cbar = fig.colorbar(im, ax=axes.ravel().tolist())
         cbar.set_label(cbar_label, fontsize=20, rotation=270, labelpad=20)
 
+    # Added a legend for the new 'Overlap Area' outline
     legend_lines = [
         Line2D([0], [0], color='black', lw=0.5, label='Mask Outline'),
-        Line2D([0], [0], color='gray', lw=0.5, label='50m Isobath')
+        Line2D([0], [0], color='gray', lw=0.5, label='50m Isobath'),
+        Line2D([0], [0], color='red', lw=1.5, label='Overlap Area') # New legend entry
     ]
-    fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=2, fontsize=14)
+    fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=1, fontsize=14)
     
     plt.suptitle(suptitle, fontsize=24)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
@@ -129,7 +186,7 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
         print("No raster files found.")
         return
 
-    target_crs = 'EPSG:4326'
+    target_crs = 'EPSG:3857'
     shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
     
     all_raster_paths = [ds['path'] for year in year_datasets for ds in year_datasets[year]]
@@ -163,12 +220,13 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
     for i, year in enumerate(sorted_years):
         ax = axes[i]
         final_area_mask = np.zeros(common_shape, dtype=bool)
-        legend_handles = [] # Create a list to hold legend handles
+        legend_handles = []
 
         for j, dataset in enumerate(year_datasets[year]):
             destination, nodata = reprojectToGrid(dataset['path'], common_transform, common_shape, target_crs)
-            
-            current_area_mask = destination != nodata
+
+            # Update the current_area_mask to exclude values >= 0
+            current_area_mask = np.logical_and(destination != nodata, destination < 0)
             final_area_mask = np.logical_or(final_area_mask, current_area_mask)
             
             data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=common_transform) if val > 0]
@@ -176,9 +234,12 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
                 x, y = geom.exterior.xy
                 ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
             
-            # Add a custom line to our list of legend handles
-            legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=dataset['dataset_name']))
+            # The legend label includes the acquisition date if available
+            date_str = f" ({dataset['date']})" if dataset.get('date') else ""
+            label_text = f"{dataset['dataset_name']}{date_str}"
+            legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
             
+            # The display_mask is now simpler since the >= 0 values are already handled
             display_mask = np.logical_or(destination == nodata, ~mask_boolean_global)
             masked_destination = np.ma.array(destination, mask=display_mask)
             im = ax.imshow(masked_destination, extent=common_extent, cmap=cmap, vmin=global_min, vmax=global_max)
@@ -189,19 +250,15 @@ def plot_rasters_by_year(input_folder, output_folder, mask_path, shp_path):
         
         setupSubplot(ax, shp_gdf, common_extent)
         
-        # --- MODIFIED SECTION START ---
-        # Calculate area
         valid_pixels = np.sum(final_area_mask)
         pixel_area_m2 = abs(common_transform.a * common_transform.e)
         total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
         
-        # Set a single title with the year and total area
-        ax.set_title(f"{year}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
+        subplot_title = year_datasets[year][0]['title']
+        ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
         
-        # Add the legend underneath the subplot
-        ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
-                  fancybox=True, shadow=False, ncol=2, fontsize=8)
-        # --- MODIFIED SECTION END ---
+        ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.3), 
+                fancybox=True, shadow=False, ncol=1, fontsize=8)
 
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
@@ -215,7 +272,7 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
         print("No raster files found.")
         return
 
-    target_crs = 'EPSG:4326'
+    target_crs = 'EPSG:3857'
     shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
     
     all_raster_paths = [ds['path'] for year in year_datasets for ds in year_datasets[year]]
@@ -254,12 +311,12 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
         mask_geometries_local = [shape(geom) for geom, val in shapes(mask_boolean_local.astype(np.uint8), transform=local_transform) if val > 0]
         
         final_area_mask = np.zeros(local_shape, dtype=bool)
-        legend_handles = [] # Create a list to hold legend handles
+        legend_handles = []
 
         for j, dataset in enumerate(year_datasets[year]):
             destination, nodata = reprojectToGrid(dataset['path'], local_transform, local_shape, target_crs)
             
-            current_area_mask = destination != nodata
+            current_area_mask = np.logical_and(destination != nodata, destination < 0)
             final_area_mask = np.logical_or(final_area_mask, current_area_mask)
             
             data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=local_transform) if val > 0]
@@ -267,8 +324,9 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
                 x, y = geom.exterior.xy
                 ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
 
-            # Add a custom line to our list of legend handles
-            legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=dataset['dataset_name']))
+            date_str = f" ({dataset['date']})" if dataset.get('date') else ""
+            label_text = f"{dataset['dataset_name']}{date_str}"
+            legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
             
             display_mask = np.logical_or(destination == nodata, ~mask_boolean_local)
             masked_destination = np.ma.array(destination, mask=display_mask)
@@ -280,19 +338,17 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
         
         setupSubplot(ax, shp_gdf, local_extent)
         
-        # --- MODIFIED SECTION START ---
-        # Calculate area
         valid_pixels = np.sum(final_area_mask)
         pixel_area_m2 = abs(local_transform.a * local_transform.e)
         total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
         
-        # Set a single title with the year and total area
-        ax.set_title(f"{year}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
+        # --- MODIFICATION ---
+        # Use the 'title' field from the dataset dictionary for the subplot title
+        subplot_title = year_datasets[year][0]['title']
+        ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
         
-        # Add the legend underneath the subplot
         ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
-                  fancybox=True, shadow=False, ncol=2, fontsize=8)
-        # --- MODIFIED SECTION END ---
+                  fancybox=True, shadow=False, ncol=1, fontsize=8)
 
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
@@ -302,46 +358,76 @@ def plot_rasters_by_year_individual(input_folder, output_folder, mask_path, shp_
 def plot_difference(input_folder, output_folder, mask_path, shp_path, mode, use_individual_extent=False):
     """Calculates and plots raster differences for consecutive or all year pairs."""
     year_datasets_map = getYearDatasets(input_folder)
+    
+    if 'No Year Found' in year_datasets_map:
+        print("Excluding datasets where no year could be found from difference plots.")
+        del year_datasets_map['No Year Found']
+
     if not year_datasets_map or len(year_datasets_map) < 2:
         print("Not enough years of data to calculate differences.")
         return
     
-    year_datasets = {year: data[0]['path'] for year, data in year_datasets_map.items()}
-
-    target_crs = 'EPSG:4326'
+    target_crs = 'EPSG:3857'
     shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
-    sorted_years = sorted(year_datasets.keys())
+    sorted_years = sorted(year_datasets_map.keys())
     
-    # Global min/max calculation for consistent color scale across all difference plots
-    all_paths = list(year_datasets.values()) + [mask_path]
+    all_raster_paths = [ds['path'] for year in year_datasets_map for ds in year_datasets_map[year]]
+    all_paths = all_raster_paths + [mask_path]
     global_transform, global_extent, global_shape = calculateExtent(all_paths, target_crs)
     mask_reproj_global, mask_nodata_global = reprojectToGrid(mask_path, global_transform, global_shape, target_crs, Resampling.nearest)
     mask_boolean_global = mask_reproj_global != mask_nodata_global
     
-    reprojected_global = {}
+    # Combine multiple datasets for each year into a single raster representation.
+    reprojected_combined_rasters = {}
     for year in sorted_years:
-        data, nodata = reprojectToGrid(year_datasets[year], global_transform, global_shape, target_crs)
-        reprojected_global[year] = np.ma.array(data, mask=np.logical_or(data == nodata, ~mask_boolean_global))
+        year_paths = [ds['path'] for ds in year_datasets_map[year]]
+        if not year_paths:
+            continue
+            
+        combined_data = None
+        combined_nodata = None
+        combined_mask = np.ones(global_shape, dtype=bool) # Start with all masked
+
+        for path in year_paths:
+            data, nodata = reprojectToGrid(path, global_transform, global_shape, target_crs)
+            
+            if combined_data is None:
+                combined_data = np.full(global_shape, nodata, dtype=data.dtype)
+                combined_nodata = nodata
+                
+            current_mask = data != nodata
+            valid_pixels = np.where(current_mask)
+            
+            combined_data[valid_pixels] = data[valid_pixels]
+            combined_mask[valid_pixels] = False
+        
+        # Apply the 50m isobath mask to the combined data
+        final_mask = np.logical_or(combined_mask, ~mask_boolean_global)
+        reprojected_combined_rasters[year] = np.ma.array(combined_data, mask=final_mask)
 
     global_diff_min, global_diff_max = np.inf, -np.inf
     year_pairs_for_minmax = list(combinations(sorted_years, 2))
     for year1, year2 in year_pairs_for_minmax:
-        diff = reprojected_global[year2] - reprojected_global[year1]
-        if diff.count() > 0:
-            global_diff_min = min(global_diff_min, diff.min())
-            global_diff_max = max(global_diff_max, diff.max())
-
+        if year1 in reprojected_combined_rasters and year2 in reprojected_combined_rasters:
+            diff = reprojected_combined_rasters[year2] - reprojected_combined_rasters[year1]
+            if diff.count() > 0:
+                global_diff_min = min(global_diff_min, diff.min())
+                global_diff_max = max(global_diff_max, diff.max())
+    
     year_pairs = list(combinations(sorted_years, 2)) if mode == 'all' else list(zip(sorted_years, sorted_years[1:]))
     
     diff_data = []
     for year1, year2 in year_pairs:
-        path1, path2 = year_datasets[year1], year_datasets[year2]
+        if year1 not in reprojected_combined_rasters or year2 not in reprojected_combined_rasters:
+            continue
+
+        data1_combined, data2_combined = reprojected_combined_rasters[year1], reprojected_combined_rasters[year2]
         
-        # Use globally reprojected data for overlap calculation to be consistent
-        data1_global, data2_global = reprojected_global[year1], reprojected_global[year2]
-        combined_mask_global = np.ma.mask_or(data1_global.mask, data2_global.mask)
+        # Calculate the mask for the overlapping valid data
+        combined_mask_global = np.ma.mask_or(data1_combined.mask, data2_combined.mask)
         overlapping_pixels = np.sum(~combined_mask_global)
-        smaller_year_pixels = min(np.sum(~data1_global.mask), np.sum(~data2_global.mask))
+        
+        smaller_year_pixels = min(np.sum(~data1_combined.mask), np.sum(~data2_combined.mask))
         overlap_percentage = (overlapping_pixels / smaller_year_pixels * 100) if smaller_year_pixels > 0 else 0
         
         if mode == 'all' and overlap_percentage < 5:
@@ -352,7 +438,12 @@ def plot_difference(input_folder, output_folder, mask_path, shp_path, mode, use_
         overlap_text = f"Overlap: {overlap_percentage:.2f}% ({overlap_area_km2:.2f} km$^2$)"
         title = f'Difference: {year1} to {year2}\n{overlap_text}'
         
-        diff_data.append({'title': title, 'path1': path1, 'path2': path2, 'year1': year1, 'year2': year2})
+        diff_data.append({
+            'title': title, 
+            'year1': year1, 
+            'year2': year2,
+            'overlap_mask_global': ~combined_mask_global 
+        })
         
     if not diff_data:
         print(f"No year pairs found for '{mode}' mode with sufficient overlap.")
@@ -371,31 +462,53 @@ def plot_difference(input_folder, output_folder, mask_path, shp_path, mode, use_
     for i, data_dict in enumerate(diff_data):
         ax = axes[i]
         
+        current_overlap_mask = data_dict['overlap_mask_global']
+        current_transform = global_transform
+        current_extent = global_extent
+        current_mask_boolean = mask_reproj_global != mask_nodata_global # This is the 50m isobath mask
+
         if use_individual_extent:
-            local_transform, local_extent, local_shape = calculateExtent([data_dict['path1'], data_dict['path2'], mask_path], target_crs)
-            
-            data1, nodata1 = reprojectToGrid(data_dict['path1'], local_transform, local_shape, target_crs)
-            data2, nodata2 = reprojectToGrid(data_dict['path2'], local_transform, local_shape, target_crs)
+            # Re-calculate local extent based on the combined rasters for the two years
+            year1_paths = [ds['path'] for ds in year_datasets_map[data_dict['year1']]]
+            year2_paths = [ds['path'] for ds in year_datasets_map[data_dict['year2']]]
+            local_transform, local_extent, local_shape = calculateExtent(year1_paths + year2_paths + [mask_path], target_crs)
+
+            # Reproject the combined rasters to the local extent for plotting
+            data1_combined_local, _ = reprojectToGrid(reprojected_combined_rasters[data_dict['year1']].filled(reprojected_combined_rasters[data_dict['year1']]._fill_value), local_transform, local_shape, target_crs)
+            data2_combined_local, _ = reprojectToGrid(reprojected_combined_rasters[data_dict['year2']].filled(reprojected_combined_rasters[data_dict['year2']]._fill_value), local_transform, local_shape, target_crs)
             mask_reproj, mask_nodata = reprojectToGrid(mask_path, local_transform, local_shape, target_crs, Resampling.nearest)
             
-            mask_boolean = mask_reproj != mask_nodata
-            combined_mask = np.logical_or.reduce((data1 == nodata1, data2 == nodata2, ~mask_boolean))
-            diff = np.ma.array(data2 - data1, mask=combined_mask)
-            
-            im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
-            mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=local_transform) if val > 0]
-            setupSubplot(ax, shp_gdf, local_extent)
-        else:
-            diff = reprojected_global[data_dict['year2']] - reprojected_global[data_dict['year1']]
-            im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
-            mask_boolean = mask_reproj_global != mask_nodata_global
-            mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=global_transform) if val > 0]
-            setupSubplot(ax, shp_gdf, global_extent)
+            current_mask_boolean = mask_reproj != mask_nodata
+            combined_data_mask_local = np.logical_or.reduce((data1_combined_local == reprojected_combined_rasters[data_dict['year1']]._fill_value, data2_combined_local == reprojected_combined_rasters[data_dict['year2']]._fill_value, ~current_mask_boolean))
+            data1_masked = np.ma.masked_greater_equal(reprojected_combined_rasters[data_dict['year1']], 0)
+            data2_masked = np.ma.masked_greater_equal(reprojected_combined_rasters[data_dict['year2']], 0)
+            diff = data2_masked - data1_masked
 
-        ax.set_title(data_dict['title'], loc='left', fontsize=12, fontweight='bold')
+            current_overlap_mask = ~combined_data_mask_local 
+            current_transform = local_transform
+            current_extent = local_extent
+
+            im_diff = ax.imshow(diff, extent=current_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
+        else:
+            diff = reprojected_combined_rasters[data_dict['year2']] - reprojected_combined_rasters[data_dict['year1']]
+            im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
+
+        # Plot the 50m isobath mask
+        mask_geometries = [shape(geom) for geom, val in shapes(current_mask_boolean.astype(np.uint8), transform=current_transform) if val > 0]
         for geom in mask_geometries:
             x, y = geom.exterior.xy
-            ax.plot(x, y, color='black', linewidth=0.5, zorder=10)
+            ax.plot(x, y, color='black', linewidth=0.5, zorder=10) # Changed to black for general mask
+
+        # Plot the overlapping data in red
+        if current_overlap_mask.any(): # Check if there's any overlap to plot
+            overlap_geometries = [shape(geom) for geom, val in shapes(current_overlap_mask.astype(np.uint8), transform=current_transform) if val > 0]
+            for geom in overlap_geometries:
+                x, y = geom.exterior.xy
+                ax.plot(x, y, color='red', linewidth=1.5, zorder=12) # Red outline for overlap
+
+        setupSubplot(ax, shp_gdf, current_extent)
+        ax.set_title(data_dict['title'], loc='left', fontsize=12, fontweight='bold')
+        
 
     for j in range(i + 1, len(axes)):
         axes[j].axis('off')
@@ -411,20 +524,18 @@ def plot_difference(input_folder, output_folder, mask_path, shp_path, mode, use_
 
 def plot_consecutive_year_differences(input_folder, output_folder, mask_path, shp_path):
     plot_difference(input_folder, output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-    plot_difference(input_folder, output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+    # plot_difference(input_folder, output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
 def plot_all_year_differences(input_folder, output_folder, mask_path, shp_path):
     plot_difference(input_folder, output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-    plot_difference(input_folder, output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+    # plot_difference(input_folder, output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
 
-# Set input/output folders
 raster_folder = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast_resampled"
 plot_output_folder = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast_plots"
 mask_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\training_mask_ER_3.tif"
 shp_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp"
 
-# Call the functions
-plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
-plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
+# plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
+# plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
 plot_consecutive_year_differences(raster_folder, plot_output_folder, mask_path, shp_path)
 plot_all_year_differences(raster_folder, plot_output_folder, mask_path, shp_path)
