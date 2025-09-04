@@ -9,6 +9,7 @@ import sys
 import geopandas as gpd
 import pathlib
 
+from collections import defaultdict
 from botocore.client import Config
 from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,35 @@ class DigitalCoastEngine(Engine):
 
     def __init__(self):
         super().__init__()
+
+    def breakup_cudem(self, digital_coast_folder) -> None:
+        """Create unique year folders for CUDEM data"""
+
+        cudem_folders = digital_coast_folder.glob('NOAA_NCEI_0*')
+        for folder in cudem_folders:
+            year_tifs = defaultdict(list)
+            tif_files = folder.rglob('*.tif')
+            for tif_file in tif_files:
+                year = str(tif_file.stem)[-6:-2]
+                year_tifs[year].append(tif_file)
+            for year in year_tifs:
+                print(f'Creating {year} folder for CUDEM')
+                project_folder = year_tifs[year][0].parents[0]
+                # Create new year folder
+                year_folder = digital_coast_folder / f'NOAA_NCEI_{year}_{str(folder.stem)[-4:]}' / 'dem' / project_folder.stem
+                year_folder.mkdir(parents=True, exist_ok=True)
+                # Copy year tifs to new folder
+                for tif_file in year_tifs[year]:
+                    shutil.move(tif_file, year_folder)
+                # Copy tileindex
+                tile_index_files = project_folder.glob('tileindex*')
+                for tile_index in tile_index_files:
+                    shutil.copy(tile_index, year_folder)
+                # Copy feature.json
+                feature_json = project_folder.parents[1] / 'feature.json'
+                shutil.copy(feature_json, year_folder.parents[1])
+            # Delete old CUDEM folder
+            shutil.rmtree(folder)
 
     def check_tile_index_areas(self, digital_coast_folder, outputs) -> None:
         """Exclude any small area surveys"""
@@ -177,6 +207,7 @@ class DigitalCoastEngine(Engine):
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
                 if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder, outputs)
+                self.breakup_cudem(digital_coast_folder)
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Download intersected Digital Coast files"""
