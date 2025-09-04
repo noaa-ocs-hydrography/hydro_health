@@ -7,6 +7,8 @@ import sys
 import shutil
 import geopandas as gpd
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
 from hydro_health.engines.Engine import Engine
@@ -105,39 +107,56 @@ class LAZConversionEngine(Engine):
             df_joined = df_joined.loc[df_joined['tile'].notnull()]
             shp_folder = shp_path.parents[0]
             urls = df_joined['url'].unique()
-            for url in urls:
-                cleansed_url = self.cleansed_url(url)
-                dataset_name = cleansed_url.split('/')[-1]
-                output_laz = shp_folder / dataset_name
-                converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
 
-                if output_laz.exists():
-                    if converted_laz.exists():
-                        self.write_message(f' - found converted: {converted_laz}', outputs)
+            param_inputs = [(url, shp_folder, outputs) for url in urls]
+            with ThreadPoolExecutor(int(os.cpu_count() - 2)) as bulk_pool:
+                print('- Starting LAZ conversion')
+                bulk_pool.map(self.download_single_laz, param_inputs)
+
+    def download_single_laz(self, param_inputs) -> None:
+        """Threading method for downloading and converting and LAZ file"""
+
+        url, shp_folder, outputs = param_inputs
+
+        retry_strategy = Retry(
+            total=3,  # retries
+            backoff_factor=1,  # delay in seconds
+            status_forcelist=[404],  # Status codes to retry on
+            allowed_methods=["GET"]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        request_session = requests.Session()
+        request_session.mount("https://", adapter)
+        request_session.mount("http://", adapter)
+
+        cleansed_url = self.cleansed_url(url)
+        dataset_name = cleansed_url.split('/')[-1]
+        output_laz = shp_folder / dataset_name
+        converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
+
+        if output_laz.exists():
+            if converted_laz.exists():
+                self.write_message(f' - found converted: {converted_laz}', outputs)
+                output_laz.unlink()
+            else:  
+                converted = self.convert_laz_file(output_laz)
+                if converted:
+                    print(f' - converted: {output_laz}')
+                    output_laz.unlink()
+        else:
+            try:
+                intersected_response = request_session.get(cleansed_url)
+                if intersected_response.status_code == 200:
+                    with open(output_laz, 'wb') as file:
+                        file.write(intersected_response.content)
+                    converted = self.convert_laz_file(output_laz)
+                    if converted:
+                        print(f' - converted: {output_laz}')
                         output_laz.unlink()
-                    else:  
-                        converted = self.convert_laz_file(output_laz)
-                        if converted:
-                            print(f' - converted: {output_laz}')
-                            output_laz.unlink()
                 else:
-                    try:
-                        intersected_response = requests.get(cleansed_url, timeout=5)
-                        # TODO try S3 library instead of requests
-                        # TODO try Session with retries
-                        # TODO review with Gemini for enhancments to logging
-                        if intersected_response.status_code == 200:
-                            with open(output_laz, 'wb') as file:
-                                file.write(intersected_response.content)
-                            converted = self.convert_laz_file(output_laz)
-                            if converted:
-                                print(f' - converted: {output_laz}')
-                                output_laz.unlink()
-                        else:
-                            self.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
-                    except requests.exceptions.ConnectionError:
-                        self.write_message(f'Timeout error: {cleansed_url}', outputs)
-                        continue
+                    self.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
+            except requests.exceptions.ConnectionError:
+                self.write_message(f'Timeout error: {cleansed_url}', outputs)
 
     def get_laz_providers(self, tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Obtain all provider URL info by ecoregion"""
@@ -161,11 +180,6 @@ class LAZConversionEngine(Engine):
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
-            # param_inputs = [[ecoregion_tile_gdf, list(laz_folder.rglob('*.shp'))[0], outputs] for laz_folder in self.laz_folders]
-            # with ThreadPoolExecutor(int(os.cpu_count() - 2)) as bulk_pool:
-            #     print('- Starting LAZ conversion')
-            #     bulk_pool.map(self.download_intersected_datasets, param_inputs)
-            print(outputs)
             for laz_folder in self.laz_folders:
                  self.download_intersected_datasets([ecoregion_tile_gdf, list(laz_folder.rglob('*.shp'))[0], outputs])
 

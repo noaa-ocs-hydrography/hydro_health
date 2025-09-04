@@ -54,7 +54,7 @@ class Engine:
         illegal_chars = ['{', '}']
         for char in illegal_chars:
             url = url.replace(char, '')
-        return url
+        return url.strip()
     
     def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
         """Query NOWCoast REST API for available datasets"""
