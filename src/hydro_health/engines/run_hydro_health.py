@@ -25,6 +25,7 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'output_directory': tools.Param(str(OUTPUTS)),
             'eco_regions': tools.Param(''),
             'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson'))
+            # 'drawn_polygon': tools.Param('')
         }
     else:
         param_lookup = {
@@ -60,6 +61,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup['output_directory'].valueAsText)
+            elif step["tool"] == "run_laz_conversion_engine" and step["run"]:
+                runners.run_laz_conversion_engine(tiles, param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_metadata_engine" and step["run"]:
                 runners.run_metadata_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
@@ -68,8 +71,6 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_raster_mask_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 tools.grid_digital_coast_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
-            elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
-                runners.run_tsm_layer_engine()
             elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
                 runners.run_sediment_layer_engine()
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
@@ -78,7 +79,7 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_hurricane_layer_engine  
     update_config_runtime(config_path, config)
     end = time.time()
-    print(f"Total Runtime: {end - start}")
+    print(f"Total Runtime: {(end - start) / 60}")
     for ecoregion in pathlib.Path(param_lookup['output_directory'].valueAsText).glob('ER_*'):
         bluetopo_path = pathlib.Path(ecoregion / tools.get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo')
         if bluetopo_path.is_dir():

@@ -1,9 +1,7 @@
 """Class for obtaining all available files"""
 
 import boto3
-import json
 import os
-import re
 import zipfile
 import requests
 import shutil
@@ -11,33 +9,23 @@ import sys
 import geopandas as gpd
 import pathlib
 
-from bs4 import BeautifulSoup
 from botocore.client import Config
 from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
 
 from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class DigitalCoastEngine:
+class DigitalCoastEngine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self) -> None:
-        self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
-
-    def approved_dataset(self, feature_json: dict[dict]) -> bool:
-        """Only allow certain provider types"""
-
-        # CUDEM: NOAA NCEI
-        provider_list_text = ['USACE', 'NCMP', 'NGS', 'NOAA NCEI']
-        for text in provider_list_text:
-            if text in feature_json['attributes']['provider_results_name']:
-                return True
-        return False
+    def __init__(self):
+        super().__init__()
 
     def check_tile_index_areas(self, digital_coast_folder, outputs) -> None:
         """Exclude any small area surveys"""
@@ -60,14 +48,6 @@ class DigitalCoastEngine:
                 shutil.rmtree(unused_provider_folder / provider.stem)
             shutil.move(provider, unused_provider_folder)
 
-    def cleansed_url(self, url: str) -> str:
-        """Remove found illegal characters from URLs"""
-
-        illegal_chars = ['{', '}']
-        for char in illegal_chars:
-            url = url.replace(char, '')
-        return url
-
     def delete_unused_folder(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Delete any provider folders without a subfolder"""
 
@@ -78,7 +58,8 @@ class DigitalCoastEngine:
             for provider in provider_folders:
                 if 'unused_providers' != provider.stem:
                     provider_folder = digital_coast_folder / provider
-                    if not provider_folder.suffix and 'dem' not in os.listdir(provider_folder):
+                    data_types = os.listdir(provider_folder)
+                    if not provider_folder.suffix and 'dem' not in data_types and 'laz' not in data_types:
                         self.write_message(f' - removing empty provider: {provider_folder}', outputs)
                         shutil.rmtree(provider_folder)
 
@@ -100,8 +81,8 @@ class DigitalCoastEngine:
             for i, url in enumerate(urls):
                 cleansed_url = self.cleansed_url(url)
                 # Only download .tif files
-                # if not cleansed_url.endswith('.tif'):
-                #     continue
+                if not cleansed_url.endswith('.tif'):
+                    continue
                 dataset_name = cleansed_url.split('/')[-1]
                 output_file = shp_folder / dataset_name
                 if os.path.exists(output_file):
@@ -162,41 +143,6 @@ class DigitalCoastEngine:
                     with open(output_zip_file, 'wb') as tile_index:
                         lidar_bucket.download_fileobj(obj_summary.key, tile_index)
 
-    def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
-        """Query NOWCoast REST API for available datasets"""
-
-        payload = {
-            "aoi": f"SRID=4269;{geometry_coords}",
-            "published": "true",
-            "dataTypes": ["Lidar", "DEM"],
-            "dialect": "arcgis",
-        }
-        response = requests.post(get_config_item('DIGITALCOAST', 'API'), data=payload)
-        datasets_json = response.json()
-
-        if response.status_code == 404:
-            raise Exception(f"Digital Coast Error: {response.reason}")
-
-        tile_index_links = []
-        for feature in datasets_json['features']:
-            if not self.approved_dataset(feature):
-                continue
-            folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
-            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / f"{folder_name}_{feature['attributes']['ID']}"
-            output_folder_path.mkdir(parents=True, exist_ok=True)
-
-            # Write out JSON
-            output_json = pathlib.Path(output_folder_path) / 'feature.json'
-            external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
-            feature['attributes']['ExternalProviderLink'] = external_provider_links
-            with open(output_json, 'w') as writer:
-                writer.write(json.dumps(feature['attributes'], indent=4))
-
-            for external_data in external_provider_links:
-                if external_data['label'] == 'Bulk Download':
-                    tile_index_links.append({'label': 'Bulk Download', 'link': external_data['link'], 'provider_path': output_folder_path}) 
-        return tile_index_links
-
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
@@ -208,22 +154,6 @@ class DigitalCoastEngine:
         s3 = boto3.resource('s3', **creds)
         nbs_bucket = s3.Bucket(get_config_item('DIGITALCOAST', 'BUCKET'))
         return nbs_bucket
-
-    def get_ecoregion_geometry_strings(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str) -> str:
-        """Build bbox string dictionary of tiles in web mercator projection"""
-
-        geometry_coords = []
-        ecoregion_groups = tile_gdf.groupby('EcoRegion')
-        for er_id, ecoregion_group in ecoregion_groups:
-            if er_id == ecoregion:
-                ecoregion_group_web_mercator = ecoregion_group.to_crs(4269)  # POST request only allows this EPSG
-                ecoregion_group_web_mercator['geom_type'] = 'Polygon'
-                tile_geometries = ecoregion_group_web_mercator[['geom_type', 'geometry']]
-                tile_boundary = tile_geometries.dissolve(by='geom_type')
-                tile_wkt = tile_boundary.iloc[0].geometry
-                geometry_coords.append(tile_wkt)
-
-        return geometry_coords
 
     def print_async_results(self, results: list[str], output_folder: str) -> None:
         """Consolidate result printing"""
@@ -245,8 +175,8 @@ class DigitalCoastEngine:
                 self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 self.check_tile_index_areas(digital_coast_folder, outputs)
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
-                # if digital_coast_folder.exists():
-                #     self.delete_unused_folder(digital_coast_folder, outputs)
+                if digital_coast_folder.exists():
+                    self.delete_unused_folder(digital_coast_folder, outputs)
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Download intersected Digital Coast files"""
@@ -266,8 +196,3 @@ class DigitalCoastEngine:
             # Delete zip file after extract
             zipped_file.unlink()
 
-    def write_message(self, message: str, output_folder: str) -> None:
-        """Write a message to the main logfile in the output folder"""
-
-        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
-            writer.write(message + '\n')

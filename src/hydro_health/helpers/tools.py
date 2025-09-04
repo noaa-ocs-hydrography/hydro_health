@@ -79,7 +79,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
                 xRes=resolution,
                 yRes=resolution,
                 resampleAlg="bilinear",
-                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
+                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=YES", "TILED=YES"]
             )
             wgs84_ds = None
             
