@@ -36,8 +36,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 # update to ER3 directories
 output_dir = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles"
 # TODO update this to use the global parameter for the year pairs
-year_pairs = [
-            ('2006_2010')]
+year_pairs = ['2006_2010']
 block_size_m = 200 # The 200m block size that worked well for the scale of our sub-grid tile size - to support cross validation and k folds
 grid_gpkg_path = (r"N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Now_Coast_NBS_Data/Tessellation/Modeling_Tile_Scheme_20241205_151018.gpkg") # from Blue topo
 #
@@ -101,6 +100,7 @@ def select_predictors_boruta_py(output_dir_train, year_pairs, max_runs=100):
     logging.info("Log - Boruta Predictor Selection")
 
     for pair in year_pairs:
+        print(pair)
         tasks = []
         csv_path = os.path.join(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts.csv")
         df = pd.read_csv(csv_path)
@@ -402,8 +402,10 @@ def generate_cv_diagnostic_plot(sf_data, block_geom, max_k, tile_id, pair, outpu
 
     except Exception as e:
         logging.error(f"Could not generate CV diagnostic plot for {tile_id}/{pair}: {e}")
-    # finally:
-    #     plt.close('all')
+    finally:
+        # Crucial fix to prevent "RuntimeError: main thread is not in main loop"
+        # when running in a multi-process environment like Dask.
+        plt.close('all')
 
 def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=20, n_folds=5):
     """
@@ -423,29 +425,27 @@ def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train
     logging.info(f"Error Log - XGBoost Full Training (run started at {pd.Timestamp.now()})")
 
     training_sub_grids_utm = gpd.read_file(training_sub_grids_utm_path)
-    tile_ids = list(training_sub_grids_utm['tile_id'])
     grid_crs = training_sub_grids_utm.crs # Extract CRS for raster saving
 
     # -------------------------------------------------------
     # 2. MAIN PARALLEL PROCESSING LOOP
     # -------------------------------------------------------
-
-    tasks = []    
-    tile_ids = []
+    tasks = []
+    all_tile_ids = []
     for pair in year_pairs:
         csv_path = os.path.join(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts.csv")
         df = pd.read_csv(csv_path)
 
         nan_percent_col = f'{pair}_nan_percent'
-
-        # Filter rows where the value in the column is < 100, then select 'tile_id'
-        # TODO which percent limit to use?
-        tile_ids = df.loc[df[nan_percent_col] < 95, 'tile_id'].tolist()
-        print(tile_ids)
-        for tile_id in tile_ids:
+        tile_ids_for_pair = df.loc[df[nan_percent_col] < 95, 'tile_id'].tolist()
+        print(f"Found {len(tile_ids_for_pair)} tiles for pair {pair}.")
+        
+        # FIX: Appending to a master list to consolidate logs correctly later.
+        all_tile_ids.extend(tile_ids_for_pair)
+        
+        for tile_id in tile_ids_for_pair:
             tasks.append(dask.delayed(_worker_train_tile)(tile_id, output_dir_train, pair, block_size_m, n_boot, n_folds, grid_crs))
 
-    # Execute all tasks in parallel using Dask's scheduler
     print("Submitting tasks to Dask scheduler...")
     dask.compute(*tasks)
 
@@ -454,35 +454,35 @@ def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train
     # -------------------------------------------------------
     print("\nParallel processing complete. Consolidating logs...")
     with open(master_log_file, 'a') as master:
-        for tile_id in tile_ids:
+        # FIX: Using the collected list of all tile IDs to ensure no logs are missed.
+        for tile_id in sorted(list(set(all_tile_ids))):
             worker_log_path = os.path.join(output_dir_train, tile_id, f"log_worker_train_{tile_id}.txt")
             if os.path.exists(worker_log_path):
                 try:
                     with open(worker_log_path, 'r') as worker_log:
                         master.write(f"\n--- Log for Tile: {tile_id} ---\n")
                         master.write(worker_log.read())
-                    os.remove(worker_log_path) # Clean up individual worker logs
+                    os.remove(worker_log_path)
                 except IOError as e:
                     print(f"Could not read or remove worker log {worker_log_path}: {e}")
 
     print(f"\n✅ Model Training Complete! Check `{master_log_file}` for details.\n")
 
 def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_folds, grid_crs):
-    """Helper worker function for training on a single tile."""
-    # Inner Loop - over year pairs runs sequentially
+    """
+    Helper worker function for training on a single tile.
+    
+    This function is run on a Dask worker and must be self-contained.
+    The matplotlib backend is set here to ensure it works in a non-main thread.
+    """
+    # --- FIX: Set a non-GUI matplotlib backend for Dask worker process ---
+    # This prevents the "main thread is not in main loop" error.    
+    import matplotlib.pyplot as plt
+    import matplotlib
+
+    matplotlib.use('Agg')
+    
     tile_dir = os.path.join(output_dir_train, tile_id)
-    # worker_log_file = os.path.join(tile_dir, f"log_worker_train_{tile_id}.txt")
-    # log_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    # file_handler = logging.FileHandler(worker_log_file, mode='w')
-    # file_handler.setFormatter(log_formatter)
-    # logger = logging.getLogger(f'worker_train_{tile_id}')
-    # logger.setLevel(logging.INFO)
-    # if not logger.handlers:
-    #     logger.addHandler(file_handler)
-
-    # logger.info(f"Worker log for tile: {tile_id} started at {pd.Timestamp.now()}")
-
-    # for pair in year_pairs:
 
     # --- a. Load Data---
     print(f"\nProcessing Tile: {tile_id} | Year Pair: {pair}")
@@ -519,7 +519,6 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
         print("DIAGNOSTIC: Insufficient data (<100 rows) after filtering. Skipping.")
         return
     
-    # TODO it does seem like maybe my tiles don't have geometry column to begin with, like maybe not geoparquet
     subgrid_gdf = gpd.GeoDataFrame(
         subgrid_gdf, 
         geometry=gpd.points_from_xy(subgrid_gdf.X, subgrid_gdf.Y),
@@ -555,19 +554,17 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
         pdp_env_ranges_list.append(pd.DataFrame({'Env_Value': vals, 'Predictor': pred}))
     pdp_env_ranges_df = pd.concat(pdp_env_ranges_list, ignore_index=True)
 
-    if len(subgrid_pd) >= 100: # Sample 100 spatial points
+    if len(subgrid_pd) >= 100:
         sampled_coords = subgrid_gdf[['X', 'Y']].head(100)
         pdp_env_ranges_df['X'] = np.tile(sampled_coords['X'], len(predictors))
         pdp_env_ranges_df['Y'] = np.tile(sampled_coords['Y'], len(predictors))
-        # pdp_env_ranges_df['FID'] = np.tile(sampled_coords['FID'], len(predictors))
-
     pd_array = np.full((100, len(predictors), n_boot), np.nan, dtype=float)
     all_pdp_long_list = []
 
     # -------------------------------------------------------
     # 6. SETUP ADAPTIVE SPATIAL CROSS VALIDATION & MODEL TRAINING
     # -------------------------------------------------------
-    best_iteration = 100 # Default fallback value
+    best_iteration = 100
     cv_results_df = None
 
     bounds = subgrid_gdf.total_bounds
@@ -577,7 +574,6 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
     active_blocks_gdf = grid_gdf.iloc[points_in_blocks['index_right'].unique()]
     max_k = len(active_blocks_gdf)
 
-    # TODO maybe move this
     generate_cv_diagnostic_plot(subgrid_gdf, active_blocks_gdf, max_k, tile_id, pair, output_dir_train)
 
     k_final = min(n_folds, max_k)
@@ -646,9 +642,9 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
                 influence_mat[i, b] = importance_matrix.get(pred, 0)
 
         r2 = r2_score(subgrid_gdf[response_var], predictions)
-        deviance_mat[b, 0] = r2 # Dev.Exp
-        deviance_mat[b, 1] = np.sqrt(mean_squared_error(subgrid_gdf[response_var], predictions)) # RMSE
-        deviance_mat[b, 2] = r2 # R2
+        deviance_mat[b, 0] = r2
+        deviance_mat[b, 1] = np.sqrt(mean_squared_error(subgrid_gdf[response_var], predictions))
+        deviance_mat[b, 2] = r2
 
         # -------------------------------------------------------
         # 8. STORE PARTIAL DEPENDENCE PLOT DATA ----
@@ -670,7 +666,6 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
             if 'X' in pdp_env_ranges_df.columns:
                 pdp_df['X'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['X'].values
                 pdp_df['Y'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['Y'].values
-                # pdp_df['FID'] = pdp_env_ranges_df[pdp_env_ranges_df['Predictor'] == pred_name]['FID'].values
             pdp_storage_boot.append(pdp_df)
 
         all_pdp_long_list.append(pd.concat(pdp_storage_boot, ignore_index=True))
@@ -708,7 +703,7 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
     pdp_env_ranges_df.to_parquet(os.path.join(tile_dir, f"pdp_env_ranges_{pair}.parquet"))
 
     # Save Rasters
-    res = 10 # Assuming 10m resolution
+    res = 10
     min_x, min_y, max_x, max_y = subgrid_gdf.total_bounds
     out_shape = (int(np.ceil((max_y - min_y) / res)), int(np.ceil((max_x - min_x) / res)))
     transform = from_origin(min_x, max_y, res, res)
@@ -736,8 +731,9 @@ def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_
     plot_dir = os.path.join(output_dir_train, tile_id, "diagnostic_plots")
     os.makedirs(plot_dir, exist_ok=True)
     plt.savefig(os.path.join(plot_dir, f"model_fit_{pair}.png"), dpi=150)
-    plt.close()
+    plt.close() # Crucial fix to close the plot
     print("DIAGNOSTIC: All outputs saved successfully.")
+
 
 
 # ==============================================================================
@@ -754,7 +750,7 @@ def diagnose_xgb_run(output_dir_train, tile_id, year_pair):
         return
 
     paths = {
-        'training_data': os.path.join(base_path, f"{tile_id}_training_clipped_data.geoparquet"),
+        'training_data': os.path.join(base_path, f"{tile_id}_training_clipped_data.parquet"),
         'boruta_results': os.path.join(base_path, f"boruta_selection_{year_pair}.pkl"),
         'xgb_model': os.path.join(base_path, f"xgb_model_{year_pair}.json"),
         'deviance': os.path.join(base_path, f"deviance_{year_pair}.parquet"),
@@ -763,7 +759,7 @@ def diagnose_xgb_run(output_dir_train, tile_id, year_pair):
 
     missing_files = [name for name, path in paths.items() if not os.path.exists(path)]
     if missing_files:
-        print(f"One or more required files are missing: {', '.join(missing_files)}")
+        print(f"Error: One or more required files are missing: {', '.join(missing_files)}. Process stopped.")
         return
 
     print("1. Loading and preparing data...")
@@ -814,53 +810,67 @@ def create_xgboost_performance_report(output_dir_train, tile_ids=None, cv_report
     """Creates visual reports for XGBoost model performance."""
     print("📊 Starting XGBoost performance report generation...")
 
-    def find_files(pattern):
-        all_files = [os.path.join(root, name) for root, _, files in os.walk(output_dir_train) for name in files if name.startswith(pattern) and name.endswith(".parquet")]
-        if tile_ids:
-            # Correctly filter files based on tile_ids in their path
-            return [f for f in all_files if any(f'/{tid}/' in f.replace('\\', '/') for tid in tile_ids)]
-        return all_files
+    def find_files_in_specific_tiles(tile_ids, output_dir_train, pattern):
+        """
+        Finds files matching a pattern specifically within directories named after tile_ids.
+        """
+        found_files = []
+        if not tile_ids:
+            return [] 
 
-    cv_files = find_files("cv_results_")
-    deviance_files = find_files("deviance_")
+        for tid in tile_ids:
+            tile_path = os.path.join(output_dir_train, str(tid))
+            if os.path.isdir(tile_path):
+                for root, _, files in os.walk(tile_path):
+                    for name in files:
+                        if name.startswith(pattern) and name.endswith(".parquet"):
+                            found_files.append(os.path.join(root, name))
+        return found_files
 
-    if cv_files:
-        cv_df = pd.concat([pd.read_parquet(f) for f in cv_files], ignore_index=True)
-        if not cv_df.empty:
-            fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-            fig.suptitle("XGBoost Cross-Validation Summary", fontsize=16)
-            sns.histplot(cv_df['best_iteration'], ax=axes[0, 0], color="cornflowerblue")
-            axes[0, 0].set_title("Distribution of Best Training Iterations")
-            sns.barplot(data=cv_df, x='year_pair', y='test_rmse_mean', ax=axes[0, 1], color="darkseagreen", errorbar=None)
-            axes[0, 1].set_title("Average Test RMSE by Year Pair")
-            sns.barplot(data=cv_df, x='year_pair', y='test_mae_mean', ax=axes[1, 0], color="darkkhaki", errorbar=None)
-            axes[1, 0].set_title("Average Test MAE by Year Pair")
-            sns.scatterplot(data=cv_df, x='test_rmse_mean', y='test_mae_mean', ax=axes[1, 1], alpha=0.3)
-            axes[1, 1].set_title("CV Error: RMSE vs. MAE")
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.savefig(os.path.join(output_dir_train, cv_report_filename))
-            plt.close()
-            print(f"Saved CV report to: {cv_report_filename}")
+    cv_files = find_files_in_specific_tiles(tile_ids, output_dir_train, "cv_results_")
+    print(f"Found {len(cv_files)} CV result files.")
 
-    if deviance_files:
-        deviance_df = pd.concat([pd.read_parquet(f).assign(year_pair=f.split('_')[-1].split('.')[0], tile_id=f.split(os.sep)[-2]) for f in deviance_files], ignore_index=True)
-        if not deviance_df.empty:
-            fig, axes = plt.subplots(2, 2, figsize=(14, 12))
-            fig.suptitle("XGBoost Final Model Performance Summary", fontsize=16)
-            sns.histplot(deviance_df['Dev.Exp'], ax=axes[0, 0], color="slateblue")
-            axes[0, 0].set_title("Distribution of Deviance Explained")
-            sns.histplot(deviance_df['RMSE'], ax=axes[0, 1], color="tomato")
-            axes[0, 1].set_title("Distribution of Final Model RMSE")
-            sns.histplot(deviance_df['R2'], ax=axes[1, 0], color="gold")
-            axes[1, 0].set_title("Distribution of Final Model R-squared")
-            sns.boxplot(data=deviance_df, x='year_pair', y='R2', ax=axes[1, 1], color="lightblue")
-            axes[1, 1].set_title("R-squared Performance by Year Pair")
-            plt.tight_layout(rect=[0, 0, 1, 0.96])
-            plt.savefig(os.path.join(output_dir_train, perf_report_filename))
-            plt.close()
-            print(f"Saved performance report to: {perf_report_filename}")
+    deviance_files = find_files_in_specific_tiles(tile_ids, output_dir_train, "deviance_")
+    print(f"Found {len(deviance_files)} deviance result files.")
 
-def create_pdp_report_magnitude(output_dir, year_pairs, tile_id=None, exclude_predictors=None, plot_output_dir=None, n_bins=50):
+    for tile_id in tile_ids:
+        if cv_files:
+            cv_df = pd.concat([pd.read_parquet(f) for f in cv_files], ignore_index=True)
+            if not cv_df.empty:
+                fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+                fig.suptitle("XGBoost Cross-Validation Summary", fontsize=16)
+                sns.histplot(cv_df['best_iteration'], ax=axes[0, 0], color="cornflowerblue")
+                axes[0, 0].set_title("Distribution of Best Training Iterations")
+                sns.barplot(data=cv_df, x='year_pair', y='test_rmse_mean', ax=axes[0, 1], color="darkseagreen", errorbar=None)
+                axes[0, 1].set_title("Average Test RMSE by Year Pair")
+                sns.barplot(data=cv_df, x='year_pair', y='test_mae_mean', ax=axes[1, 0], color="darkkhaki", errorbar=None)
+                axes[1, 0].set_title("Average Test MAE by Year Pair")
+                sns.scatterplot(data=cv_df, x='test_rmse_mean', y='test_mae_mean', ax=axes[1, 1], alpha=0.3)
+                axes[1, 1].set_title("CV Error: RMSE vs. MAE")
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                plt.savefig(os.path.join(output_dir_train, tile_id, cv_report_filename))
+                plt.close()
+                print(f"Saved CV report to: {cv_report_filename}")
+
+        if deviance_files:
+            deviance_df = pd.concat([pd.read_parquet(f).assign(year_pair=f.split('_')[-1].split('.')[0], tile_id=f.split(os.sep)[-2]) for f in deviance_files], ignore_index=True)
+            if not deviance_df.empty:
+                fig, axes = plt.subplots(2, 2, figsize=(14, 12))
+                fig.suptitle("XGBoost Final Model Performance Summary", fontsize=16)
+                sns.histplot(deviance_df['Dev.Exp'], ax=axes[0, 0], color="slateblue")
+                axes[0, 0].set_title("Distribution of Deviance Explained")
+                sns.histplot(deviance_df['RMSE'], ax=axes[0, 1], color="tomato")
+                axes[0, 1].set_title("Distribution of Final Model RMSE")
+                sns.histplot(deviance_df['R2'], ax=axes[1, 0], color="gold")
+                axes[1, 0].set_title("Distribution of Final Model R-squared")
+                sns.boxplot(data=deviance_df, x='year_pair', y='R2', ax=axes[1, 1], color="lightblue")
+                axes[1, 1].set_title("R-squared Performance by Year Pair")
+                plt.tight_layout(rect=[0, 0, 1, 0.96])
+                plt.savefig(os.path.join(output_dir_train, tile_id, perf_report_filename))
+                plt.close()
+                print(f"Saved performance report to: {perf_report_filename}")
+
+def create_pdp_report_normalized(output_dir, year_pairs, tile_id=None, exclude_predictors=None, plot_output_dir=None, n_bins=50):
     """Creates a PDP magnitude plot with a fixed y-axis across facets."""
     print("📊 Starting PDP Magnitude report generation...")
     if plot_output_dir is None: plot_output_dir = output_dir
@@ -891,7 +901,7 @@ def create_pdp_report_magnitude(output_dir, year_pairs, tile_id=None, exclude_pr
         plt.close()
         print(f"Saved magnitude plot for {pair}")
 
-def create_pdp_report_shape(output_dir, year_pairs, tile_id=None, plot_output_dir=None, n_bins=50):
+def create_pdp_report(output_dir, year_pairs, tile_id=None, plot_output_dir=None, n_bins=50):
     """Creates a PDP shape plot with a free y-axis for each facet."""
     print("📊 Starting PDP Shape report generation...")
     if plot_output_dir is None: plot_output_dir = output_dir
@@ -929,20 +939,20 @@ def main_workflow():
     Main function to execute the entire modeling workflow.
     """
 
-    specific_tile_ids = ["BH4RZ577_2"] 
+    specific_tile_ids = ["BH4QJ58D_2"] 
 
     # Step 1: Run Predictor Selection
     # select_predictors_boruta_py(output_dir_train, year_pairs)
     
 
     # # Step 2: Run the Main Model Training
-    model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=5, n_folds=3)
+    # model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=5, n_folds=3)
 
     # # Step 3: Run Post-Training Reporting and Diagnostics
     # create_xgboost_performance_report(output_dir_train, tile_ids=specific_tile_ids)
-    # diagnose_xgb_run(output_dir_train, "BH4RZ577_2", "2004_2006")
-    # create_pdp_report_magnitude(output_dir_train, years)
-    # create_pdp_report_shape(output_dir_train, years)
+    # diagnose_xgb_run(output_dir_train, "BH4QJ58D_2", "2006_2010")
+    # create_pdp_report_normalized(output_dir_train, year_pairs)
+    create_pdp_report(output_dir_train, year_pairs)
 
 if __name__ == "__main__":
     profiler = cProfile.Profile()
