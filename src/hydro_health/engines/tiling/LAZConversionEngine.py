@@ -34,21 +34,28 @@ class LAZConversionEngine(Engine):
         print(f'- Checking area size of tileindex files')
         remove_laz = []
         for i, laz_folder in enumerate(self.laz_folders):
-            shp_path = list(laz_folder.rglob('*.shp'))[0]
-            shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
-            shp_df['area'] = shp_df['geometry'].area
-            total_area = shp_df["area"].sum()
-            if total_area < self.approved_size:
-                print(f' - provider too small: {total_area} - {shp_path}')
-                digital_coast_folder = shp_path.parents[5]
-                provider = shp_path.parents[4]
-                unused_provider_folder = digital_coast_folder / 'unused_providers'
-                if not unused_provider_folder.exists():
-                    unused_provider_folder.mkdir()
-                if pathlib.Path(unused_provider_folder / provider.stem).exists():
-                    shutil.rmtree(unused_provider_folder / provider.stem)
-                shutil.move(provider, unused_provider_folder)
-                remove_laz.append(i)
+            shp_path = list(laz_folder.rglob('*.shp'))
+            if shp_path:
+                shp_path = shp_path[0]
+                shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
+                shp_df['area'] = shp_df['geometry'].area
+                total_area = shp_df["area"].sum()
+                if total_area < self.approved_size:
+                    print(f' - provider too small: {total_area} - {shp_path}')
+                    # dynamically obtain digital coast and provider folder
+                    # sometimes less subfolders
+                    digital_coast_folder = [path for path in shp_path.parents if path.stem == 'DigitalCoast'][0]
+                    provider_index = [i-1 for i, path in enumerate(shp_path.parents) if path.stem == 'DigitalCoast'][0]
+                    provider = shp_path.parents[provider_index]
+                    unused_provider_folder = digital_coast_folder / 'unused_providers'
+                    if not unused_provider_folder.exists():
+                        unused_provider_folder.mkdir()
+                    if pathlib.Path(unused_provider_folder / provider.stem).exists():
+                        shutil.rmtree(unused_provider_folder / provider.stem)
+                    shutil.move(provider, unused_provider_folder)
+                    remove_laz.append(i)
+            else:
+                print(f' - missing tileindex: {laz_folder}')
         for index in remove_laz:
             print(f' - deleting {self.laz_folders[index]}')
             del self.laz_folders[index]
@@ -165,7 +172,7 @@ class LAZConversionEngine(Engine):
         for ecoregion in ecoregions:
             print(f'Processing LAZ files for {ecoregion}')
             digital_coast_folder = pathlib.Path(outputs) / ecoregion /  get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-            self.laz_folders = list(digital_coast_folder.glob('**/laz'))
+            self.laz_folders = [folder for folder in digital_coast_folder.glob('**/laz') if 'unused_providers' not in str(folder)]
 
     def print_async_results(self, results: list[str], output_folder: str) -> None:
         """Consolidate result printing"""
