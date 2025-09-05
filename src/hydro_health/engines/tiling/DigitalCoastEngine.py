@@ -9,6 +9,8 @@ import sys
 import geopandas as gpd
 import pathlib
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from collections import defaultdict
 from botocore.client import Config
 from botocore import UNSIGNED
@@ -121,9 +123,20 @@ class DigitalCoastEngine(Engine):
                 else:
                     self.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', outputs)
                 try:
-                    intersected_response = requests.get(cleansed_url, timeout=5)
+                    retry_strategy = Retry(
+                        total=3,  # retries
+                        backoff_factor=1,  # delay in seconds
+                        status_forcelist=[404],  # Status codes to retry on
+                        allowed_methods=["GET"]
+                    )
+                    adapter = HTTPAdapter(max_retries=retry_strategy)
+                    request_session = requests.Session()
+                    request_session.mount("https://", adapter)
+                    request_session.mount("http://", adapter)
+
+                    intersected_response = request_session.get(cleansed_url, timeout=5)
                 except requests.exceptions.ConnectionError:
-                    self.write_message(f'#####################\nTimeout error: {cleansed_url}', outputs)
+                    self.write_message(f'Timeout error: {cleansed_url}', outputs)
                     continue
 
                 if intersected_response.status_code == 200:
