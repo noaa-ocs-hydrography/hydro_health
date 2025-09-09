@@ -48,6 +48,9 @@ class DigitalCoastEngine(Engine):
                 year_folder.mkdir(parents=True, exist_ok=True)
                 # Copy year tifs to new folder
                 for tif_file in year_tifs[year]:
+                    output_tif_file = year_folder / tif_file.name
+                    if output_tif_file.exists():
+                        output_tif_file.unlink()
                     shutil.move(tif_file, year_folder)
                 # Copy tileindex
                 tile_index_files = project_folder.glob('tileindex*')
