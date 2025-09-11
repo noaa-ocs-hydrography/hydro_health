@@ -50,3 +50,7 @@ SHARED:
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
+TERRAIN:
+  INPUT_DIR: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\tiled'
+  FILLED_DIR: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs'
+  OUTPUTS: 'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs'

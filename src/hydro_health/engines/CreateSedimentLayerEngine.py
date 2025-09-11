@@ -24,8 +24,6 @@ class CreateSedimentLayerEngine(Engine):
         super().__init__()
         self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay'] 
         self.sediment_data = None
-        # TODO consider how this engine will be called for each tile
-        self.tile_path = None
         if param_lookup:
             self.param_lookup = param_lookup
             if self.param_lookup['input_directory'].valueAsText:

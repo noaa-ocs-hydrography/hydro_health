@@ -1,37 +1,22 @@
 import os
-import pathlib
-import geopandas as gpd
 import pandas as pd
-import time
 import shutil
 from scipy.ndimage import generic_filter, uniform_filter
 import rioxarray
 import xarray as xr
-
-from osgeo import ogr, osr, gdal
-from scipy.spatial import Voronoi
-from shapely.geometry import Polygon
-from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
 import os
-import glob
-import time
 import re
 import numpy as np
 import pandas as pd
 import rasterio
-from scipy.ndimage import generic_filter
+from scipy.ndimage import uniform_filter, binary_erosion
 from dask.distributed import Client, LocalCluster
 import dask
 
-
-osr.DontUseExceptions()
-INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
-gpkg_path = INPUTS / 'sediment_data' / 'sediment_data.gpkg'
+from hydro_health.helpers.tools import get_config_item
 
 
-class CreateSeabedTerrainLayerEngine(Engine):
+class CreateSeabedTerrainLayerEngine():
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
     def __init__(self, 
@@ -72,7 +57,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
         # The core logic: only replace the original NaNs with the filled values.
         return np.where(nan_mask, filled, block)
 
-    def fill_with_fallback(self, input_file, output_file, max_iters=10, chunk_size=1024) -> None:
+    def fill_with_fallback(self, input_file, output_file, max_iters=5, chunk_size=1024) -> None:
         """
         Performs chunked iterative focal fill on a raster file using Dask and rioxarray.
 
@@ -94,6 +79,25 @@ class CreateSeabedTerrainLayerEngine(Engine):
         nodata = ds.rio.nodata
         da = ds.squeeze().astype("float32")
         da = da.where(da != nodata)
+        
+        # --- NEW OPTIMIZATION ---
+        # A more advanced check for missing data to distinguish between
+        # exterior (boundary) NaNs and interior gaps.
+        print("Checking for interior gaps...")
+        
+        # We need to compute the NaN mask to use binary_erosion from SciPy.
+        nan_mask = da.isnull().compute()
+
+        interior_nan_count = binary_erosion(nan_mask, structure=np.ones((3,3))).sum()
+        print(interior_nan_count)
+        
+        # Erode the mask. Any remaining 'True' values indicate an interior NaN.
+        # This is a much more precise check.
+        if not binary_erosion(nan_mask, structure=np.ones((3,3))).any():
+            print(f"No interior gaps found in {os.path.basename(input_file)}. Skipping fill process.")
+            shutil.copyfile(input_file, output_file)
+            print(f"File copied to: {output_file}")
+            return
 
         # Iterative focal filling using Dask's map_blocks for parallel processing.
         for i in range(max_iters):
@@ -118,11 +122,15 @@ class CreateSeabedTerrainLayerEngine(Engine):
         # Replace any remaining NaNs with the original NoData value and save.
         da = da.fillna(nodata)
         da = da.expand_dims(dim="band")
+
+        da.rio.write_crs(ds.rio.crs, inplace=True)
+        da.rio.write_transform(ds.rio.transform(), inplace=True)
+        
         da.rio.write_nodata(nodata, inplace=True)
         da.rio.to_raster(output_file)
         print(f"Filled raster written to: {output_file}")
 
-    def run_gap_fill(self, input_file, output_dir, max_iters=10, w=3) -> None:
+    def run_gap_fill(self, input_file, output_dir, max_iters) -> None:
         """
         The main entry point for the gap-filling process.
 
@@ -143,8 +151,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
         self.fill_with_fallback(
             input_file=input_file,
             output_file=output_file,
-            max_iters=max_iters,
-            w=w
+            max_iters=max_iters
         )
 
         print("Gap fill process complete.")
@@ -290,6 +297,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
             all_samples = {'slope': [], 'bpi_fine_std': [], 'bpi_broad_std': []}
             
             for f in files_to_sample:
+                print(f"    Sampling from: {os.path.basename(f)}")    
                 try:
                     with rasterio.open(f) as src:
                         bathy_array = src.read(1)
@@ -297,6 +305,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
                         cell_size = src.res[0]
                         
                         # Take a random sample of valid pixel indices
+                        print(f"      - Extracting up to {pixels_per_file} random valid pixels...")
                         valid_pixels = np.argwhere(~np.isnan(bathy_array))
                         if len(valid_pixels) > pixels_per_file:
                             sample_indices = valid_pixels[np.random.choice(len(valid_pixels), pixels_per_file, replace=False)]
@@ -305,12 +314,15 @@ class CreateSeabedTerrainLayerEngine(Engine):
                         
                         # Create a small array around each sample point to handle focal operations
                         # This is an approximation but avoids processing the whole raster
+                        print("      - Calculating derivatives for sampled pixels...")
                         slope_sample, _ = self.calculate_slope_and_tri(bathy_array, cell_size)
+                        print("      - Calculating BPI for sampled pixels...")
                         
                         bpi_fine_sample = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
                         bpi_broad_sample = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
                         
                         # Get the sampled values
+                        print("      - Collecting sampled values...")
                         rows, cols = sample_indices[:, 0], sample_indices[:, 1]
                         all_samples['slope'].append(slope_sample[rows, cols])
                         all_samples['bpi_fine_std'].append(self.standardize_raster_array(bpi_fine_sample)[rows, cols])
@@ -394,7 +406,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
             
             for suffix, data_array in outputs.items():
                 out_path = os.path.join(output_dir, base_name + suffix)
-                profile.update(dtype=data_array.dtype.name, nodata=0, count=1)
+                profile.update(dtype=data_array.dtype.name, nodata=np.nan, count=1)
                 with rasterio.open(out_path, 'w', **profile) as dst:
                     dst.write(data_array.astype(profile['dtype']), 1)
 
@@ -411,36 +423,28 @@ class CreateSeabedTerrainLayerEngine(Engine):
     # ==============================================================================
     def start(self):
         """Main function to find all bathy files and process them in parallel."""
-        # --- 1. DEFINE USER INPUTS ---
-        root_dirs = [
-            r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\BlueTopo",
-            r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\tiled"
-        ]
 
-        main_output_dir = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\BTM_outputs"
+        main_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
         dictionary_output_dir = os.path.join(main_output_dir, "dictionaries")
-
-        self.run_gap_fill(input_file_path, output_directory, max_iters=5)
 
         client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
 
-        best_radii = {'fine': (8, 32), 'broad': (80, 240)}
+        input_dir = get_config_item('TERRAIN', 'INPUT_DIR')
+        filled_dir = get_config_item('TERRAIN', 'FILLED_DIR')
+
+        file_paths = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
+        file_paths = r"C:\Users\aubrey.mccutchan\Documents\sample_data"
+
+        tasks = []
+        for file in file_paths:
+            task = dask.delayed(self.run_gap_fill(file, filled_dir, max_iters=3))
+            tasks.append(task)
+            
+        dask.compute(*tasks)
 
         # --- 2. FIND ALL BATHY FILES TO PROCESS ---
-        bathy_files_to_process = []
-        print("Scanning for bathymetry files...")
-        for root in root_dirs:
-            if os.path.isdir(root):
-                tile_folders = [d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))]
-                for tile in tile_folders:
-                    tif_files = glob.glob(os.path.join(root, tile, "*.tif"))
-                    bathy_files_to_process.extend(tif_files)
-        
-        bathy_files_to_process = [
-            f for f in bathy_files_to_process 
-            if not any(suffix in f for suffix in ['_slope', '_rugosity', '_bpi', '_classification'])
-        ]
+        bathy_files_to_process = [os.path.join(filled_dir, f) for f in os.listdir(filled_dir)]
         
         if not bathy_files_to_process:
             print("No bathymetry files found to process. Exiting.")
@@ -448,34 +452,18 @@ class CreateSeabedTerrainLayerEngine(Engine):
 
         print(f"Found {len(bathy_files_to_process)} bathymetry files to process.")
 
+        best_radii = {'fine': (8, 32), 'broad': (80, 240)}
         # --- 3. RUN PHASE 1: PRE-COMPUTE DICTIONARIES ---
         self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
         # --- 4. RUN PHASE 2: PARALLEL CLASSIFICATION ---
-        cluster = LocalCluster()
-        client = Client(cluster)
-        print(f"\nDask dashboard available at: {client.dashboard_link}")
-        
         tasks = []
         for bathy_file in bathy_files_to_process:
             task = dask.delayed(self.generate_terrain_products_python)(bathy_file, best_radii, dictionary_output_dir)
             tasks.append(task)
             
-        print("\nStarting parallel processing of all files...")
-        results = dask.compute(*tasks)
+        dask.compute(*tasks)
         
         print("\n--- Processing Complete ---")
-        
-        success_count = sum(1 for r in results if isinstance(r, str) and r.startswith("Success"))
-        fail_count = len(results) - success_count
-        print(f"Successfully processed: {success_count} files")
-        print(f"Failed to process: {fail_count} files")
-        
-        if fail_count > 0:
-            print("\n--- Failures ---")
-            for r in results:
-                if isinstance(r, str) and r.startswith("FAILED"):
-                    print(r)
                     
         client.close()
-        cluster.close()

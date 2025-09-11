@@ -14,8 +14,7 @@ if __name__ == '__main__':
     profiler.enable()
 
     engine = CreateSeabedTerrainLayerEngine()
-    # engine.run_gap_fill(r"C:\Users\aubrey.mccutchan\Documents")
-    engine.process()
+    engine.start()
 
     profiler.disable()
     stats = pstats.Stats(profiler)

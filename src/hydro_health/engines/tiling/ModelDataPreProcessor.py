@@ -3,7 +3,6 @@
 import os
 import pathlib
 import re
-from osgeo import gdal
 from pathlib import Path
 
 import dask
@@ -12,6 +11,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from dask.distributed import Client, print
+from osgeo import gdal
 from rasterio.features import shapes
 from shapely.geometry import Point, box, shape
 
