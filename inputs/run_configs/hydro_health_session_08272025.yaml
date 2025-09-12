@@ -5,6 +5,10 @@ steps:
   run: true
 - tool: run_digital_coast_engine
   run: true
+- tool: run_laz_conversion_engine
+  run: false
+- tool: run_metadata_engine
+  run: true
 - tool: run_vrt_creation
   run: true
 - tool: run_raster_mask_engine

@@ -3,6 +3,8 @@ import geopandas as gpd
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
+from hydro_health.engines.MetadataEngine import MetadataEngine
+from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
@@ -34,6 +36,21 @@ def run_digital_coast_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
     
     engine = DigitalCoastEngine()
     engine.run(tiles, outputs)
+
+
+def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
+    """Entry point for converting all LAZ files to TIF"""
+
+    engine = LAZConversionEngine()
+    engine.run(tiles, outputs)
+
+
+def run_metadata_engine(outputs:str) -> None:
+    """Entry point for parallel processing of BlueTopo tiles"""
+
+    ecoregions = [file_path.stem for file_path in pathlib.Path(outputs).rglob('ER_*') if file_path.is_dir()]
+    engine = MetadataEngine()
+    engine.run(ecoregions, outputs)
 
 
 def run_tsm_layer_engine() -> None:
