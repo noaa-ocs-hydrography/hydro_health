@@ -1,4 +1,5 @@
 import json
+import sys
 import numpy as np
 import pathlib
 import subprocess
@@ -6,7 +7,8 @@ import pickle
 
 
 INPUTS = pathlib.Path(__file__).parents[1] / "inputs"
-OUTPUTS = pathlib.Path(__file__).parents[1] / "outputs"
+# OUTPUTS = pathlib.Path(__file__).parents[1] / "outputs"
+OUTPUTS = pathlib.Path(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Cost_Manual_Downloads\laz_issues\laz\geoid18")
 
 
 def convert_laz_files():
