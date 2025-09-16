@@ -128,7 +128,7 @@ if __name__ == "__main__":
     # if get_environment() == 'local':
     #     output_folder = r'C:\Users\Stephen.Patterson\Data\Repos\hydro_health\outputs'
     # else:
-    stop = 'NOAA_NGS_2019_9709'
+    stop = 'NOAA_NGS_2022_10149'
     output_folder = r'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run'
     
     # provider = 'NOAA_NGS_2016_6365'  # 781mb file becomes 20gb WGS84?
