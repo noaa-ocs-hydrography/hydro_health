@@ -46,7 +46,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         wgs84_srs.ImportFromEPSG(4326)
         geotiff_srs = geotiff_ds.GetSpatialRef()
         # Project all geotiff to match BlueTopo tiles WGS84
-        if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
+        if data_type == 'DigitalCoast' and geotiff_srs.GetName() != wgs84_srs.GetName():
 
             
             unused_providers_folder = outputs / 'unused_providers'
@@ -78,8 +78,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
                 dstNodata=-9999,
                 xRes=resolution,
                 yRes=resolution,
-                resampleAlg="bilinear",
-                creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=YES", "TILED=YES"]
+                creationOptions=["COMPRESS=ZSTD", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
             )
             wgs84_ds = None
             

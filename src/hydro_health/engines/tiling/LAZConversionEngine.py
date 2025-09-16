@@ -141,29 +141,30 @@ class LAZConversionEngine(Engine):
         output_laz = shp_folder / dataset_name
         converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
 
-        if output_laz.exists():
-            if converted_laz.exists():
-                self.write_message(f' - found converted: {converted_laz}', outputs)
+        if converted_laz.exists():
+            print(f' - found converted: {converted_laz.parents[-3:-1]}')
+            if output_laz.exists():
                 output_laz.unlink()
-            else:  
+        else:
+            if output_laz.exists():
                 converted = self.convert_laz_file(output_laz)
                 if converted:
                     print(f' - converted: {output_laz}')
                     output_laz.unlink()
-        else:
-            try:
-                intersected_response = request_session.get(cleansed_url)
-                if intersected_response.status_code == 200:
-                    with open(output_laz, 'wb') as file:
-                        file.write(intersected_response.content)
-                    converted = self.convert_laz_file(output_laz)
-                    if converted:
-                        print(f' - converted: {output_laz}')
-                        output_laz.unlink()
-                else:
-                    self.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
-            except requests.exceptions.ConnectionError:
-                self.write_message(f'Timeout error: {cleansed_url}', outputs)
+            else:
+                try:
+                    intersected_response = request_session.get(cleansed_url)
+                    if intersected_response.status_code == 200:
+                        with open(output_laz, 'wb') as file:
+                            file.write(intersected_response.content)
+                        converted = self.convert_laz_file(output_laz)
+                        if converted:
+                            print(f' - converted: {output_laz}')
+                            output_laz.unlink()
+                    else:
+                        self.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
+                except requests.exceptions.ConnectionError:
+                    self.write_message(f'Timeout error: {cleansed_url}', outputs)
 
     def get_laz_providers(self, tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Obtain all provider URL info by ecoregion"""
