@@ -142,7 +142,7 @@ class LAZConversionEngine(Engine):
         converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
 
         if converted_laz.exists():
-            print(f' - found converted: {converted_laz.name}', outputs)
+            print(f' - found converted: {converted_laz.name}')
             if output_laz.exists():
                 output_laz.unlink()
         else:
