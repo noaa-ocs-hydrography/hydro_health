@@ -4,7 +4,7 @@ steps:
 - tool: run_bluetopo_tile_engine
   run: true
 - tool: run_digital_coast_engine
-  run: false
+  run: true
 - tool: run_laz_conversion_engine
   run: false
 - tool: run_metadata_engine
@@ -21,3 +21,5 @@ steps:
   run: false
 runtimes:
 - 09162025
+- 09172025
+- 09172025

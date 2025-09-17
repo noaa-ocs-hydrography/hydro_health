@@ -17,13 +17,8 @@ from botocore import UNSIGNED
 from lxml import etree
 from osgeo import gdal
 
-
-import dask
-from dask.distributed import Client, LocalCluster
-import dask.dataframe as dd
-
 from hydro_health.helpers.tools import get_config_item
-
+from hydro_health.engines.Engine import Engine
 
 
 def _process_tile(param_inputs: list[list]) -> None:
@@ -45,19 +40,12 @@ def _process_tile(param_inputs: list[list]) -> None:
         engine.create_rugosity(tiff_file_path)
 
 
-class BlueTopoEngine:
+class BlueTopoEngine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self) -> None:
-        self.cluster = None
-        self.client = None
+    def __init__(self):
+        super().__init__()
 
-    def close_dask(self) -> None:
-        """Shut down Dask objects"""
-
-        self.client.close()
-        self.cluster.close()
-        
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
 
@@ -221,12 +209,6 @@ class BlueTopoEngine:
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
-
-    def setup_dask(self) -> None:
-        """Create Dask objects outside of init"""
-
-        self.cluster = LocalCluster(n_workers=os.cpu_count() - 2, threads_per_worker=1)
-        self.client = Client(self.cluster)
 
     def write_message(self, message: str, output_folder: str|pathlib.Path) -> None:
         """Write a message to the main logfile in the output folder"""
