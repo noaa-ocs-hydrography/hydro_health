@@ -147,7 +147,7 @@ class Engine:
 
         self.cluster = LocalCluster(processes=processes)
         self.client = Client(self.cluster)
-        print(self.client.dashboard_link)
+        # print(self.client.dashboard_link)
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""
