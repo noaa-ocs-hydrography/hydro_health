@@ -7,7 +7,10 @@ import requests
 import shutil
 import geopandas as gpd
 import pathlib
+import os
+import sys
 
+from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from collections import defaultdict
@@ -16,6 +19,8 @@ from botocore import UNSIGNED
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
+
+set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 def _download_tile_index(param_inputs: list[list]) -> None:

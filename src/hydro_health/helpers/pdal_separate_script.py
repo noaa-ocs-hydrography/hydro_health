@@ -2,6 +2,12 @@ import pdal
 import json
 import pickle
 import sys
+import os
+import sys
+
+from multiprocessing import set_executable
+
+set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 pickle_file_path = sys.argv[1]

@@ -7,9 +7,11 @@ import rasterio
 import geopandas as gpd
 import pandas as pd
 import pathlib
-
 import numpy as np
+import os
+import sys
 
+from multiprocessing import set_executable
 from hydro_health.helpers import hibase_logging
 from datetime import datetime
 from botocore.client import Config
@@ -19,6 +21,8 @@ from osgeo import gdal
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
+
+set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 def _process_tile(param_inputs: list[list]) -> None:

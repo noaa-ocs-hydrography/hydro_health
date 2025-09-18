@@ -142,11 +142,12 @@ class Engine:
         file.write(output_projection.ExportToWkt())
         file.close()
 
-    def setup_dask(self) -> None:
+    def setup_dask(self, processes=False) -> None:
         """Create Dask objects outside of init"""
 
-        self.cluster = LocalCluster(n_workers=os.cpu_count() - 2, threads_per_worker=1)
+        self.cluster = LocalCluster(processes=processes)
         self.client = Client(self.cluster)
+        print(self.client.dashboard_link)
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""
