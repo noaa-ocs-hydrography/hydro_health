@@ -194,7 +194,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
+    if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
@@ -212,8 +212,8 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     tiles = gpd.clip(mask_tiles, selected_sub_grids, keep_geom_type=True)
     # Store EcoRegion ID with tiles
     tiles = tiles.sjoin(selected_ecoregions, how="left")[['tile', 'EcoRegion', 'geometry']]
-    selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
-    tiles.to_file(output_folder / 'selected_tiles.shp') 
+    # selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
+    # tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
 

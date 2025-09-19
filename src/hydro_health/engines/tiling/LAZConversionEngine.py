@@ -22,7 +22,7 @@ HELPERS = pathlib.Path(__file__).parents[2] / 'helpers'
 def _download_single_laz(param_inputs) -> None:
     """Threading method for downloading and converting and LAZ file"""
 
-    url, shp_folder, outputs = param_inputs
+    url, shp_folder, outputs, current, total = param_inputs
 
     engine = LAZConversionEngine()
 
@@ -43,14 +43,14 @@ def _download_single_laz(param_inputs) -> None:
     converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
 
     if converted_laz.exists():
-        print(f' - found converted: {"/".join(converted_laz.parts[-5:])}')
+        print(f' - {current} of {total} found converted: {"/".join(converted_laz.parts[-5:])}')
         if output_laz.exists():
             output_laz.unlink()
     else:
         if output_laz.exists():
             converted = engine.convert_laz_file(output_laz)
             if converted:
-                print(f' - converted: {output_laz}')
+                print(f' - {current} of {total} converted: {output_laz}')
                 output_laz.unlink()
         else:
             try:
@@ -60,7 +60,7 @@ def _download_single_laz(param_inputs) -> None:
                         file.write(intersected_response.content)
                     converted = engine.convert_laz_file(output_laz)
                     if converted:
-                        print(f' - converted: {output_laz}')
+                        print(f' - {current} of {total} converted: {output_laz}')
                         output_laz.unlink()
                 else:
                     engine.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
@@ -164,7 +164,7 @@ class LAZConversionEngine(Engine):
             urls = df_joined['url'].unique()
 
             print('- Starting conversion')
-            param_inputs = [(url, shp_folder, outputs) for url in urls]
+            param_inputs = [(url, shp_folder, outputs, i, len(urls)) for i, url in enumerate(urls)]
             future_tiles = self.client.map(_download_single_laz, param_inputs)
             _ = self.client.gather(future_tiles)
 
@@ -196,7 +196,7 @@ class LAZConversionEngine(Engine):
     def run(self, tiles: gpd.GeoDataFrame, outputs: str) -> None:
         """Main entry point for converting LAZ data"""
 
-        self.setup_dask()
+        self.setup_dask(processes=False)
         self.get_laz_providers(tiles, outputs)
         self.check_tile_index_areas()
         self.process_laz_files(tiles, outputs)

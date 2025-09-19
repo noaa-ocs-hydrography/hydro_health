@@ -142,7 +142,7 @@ class Engine:
         file.write(output_projection.ExportToWkt())
         file.close()
 
-    def setup_dask(self, processes=False) -> None:
+    def setup_dask(self, processes=True) -> None:
         """Create Dask objects outside of init"""
 
         self.cluster = LocalCluster(processes=processes)

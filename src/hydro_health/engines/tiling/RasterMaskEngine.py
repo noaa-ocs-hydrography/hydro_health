@@ -8,7 +8,8 @@ import pandas as pd
 import geopandas as gpd
 
 from osgeo import ogr, osr, gdal
-from concurrent.futures import ThreadPoolExecutor
+
+from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -141,7 +142,10 @@ def _create_training_mask(ecoregion):
         training_data_outline_ds = None
 
 
-class RasterMaskEngine:
+class RasterMaskEngine(Engine):
+    def __init__(self):
+        super().__init__()
+
     def delete_intermediate_files(self, outputs) -> None:
         """Delete any intermediate shapefiles"""
 
@@ -209,6 +213,7 @@ class RasterMaskEngine:
     def run(self, outputs: str) -> None:
         ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
         print('Creating prediction masks')
+        self.setup_dask()
         self.process_prediction_masks(ecoregions, outputs)
         approved_files = self.get_approved_area_files(ecoregions)
         print(f' - Found files for ecoregions: {list(approved_files.keys())}')
@@ -218,8 +223,9 @@ class RasterMaskEngine:
         self.merge_dissolved_polygons(ecoregions)
         print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
+        self.close_dask()
         self.delete_intermediate_files(outputs)
-
+        
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
 
