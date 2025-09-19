@@ -164,7 +164,7 @@ class LAZConversionEngine(Engine):
             urls = df_joined['url'].unique()
 
             print('- Starting conversion')
-            param_inputs = [(url, shp_folder, outputs, i, len(urls)) for i, url in enumerate(urls)]
+            param_inputs = [(url, shp_folder, outputs, i+1, len(urls)) for i, url in enumerate(urls)]
             future_tiles = self.client.map(_download_single_laz, param_inputs)
             _ = self.client.gather(future_tiles)
 
