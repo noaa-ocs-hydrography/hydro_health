@@ -1,8 +1,8 @@
 """Class for parallel preprocessing all model data"""
 
 import os
-import pathlib
 import re
+import pathlib
 from pathlib import Path
 
 import dask
@@ -15,14 +15,11 @@ from osgeo import gdal
 from rasterio.features import shapes
 from shapely.geometry import Point, box, shape
 
-os.environ["GDAL_CACHEMAX"] = "64"
-
 from hydro_health.helpers.tools import get_config_item
 
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+os.environ["GDAL_CACHEMAX"] = "64"
 
-
-class ModelDataPreProcessor:
+class ModelDataPreProcessor():
     """Class for parallel preprocessing all model data"""
     def __init__(self):
         self.year_ranges = [
@@ -30,29 +27,6 @@ class ModelDataPreProcessor:
             (2006, 2010),
             (2010, 2015),
             (2015, 2022)]
-    
-    def create_nan_stats_csv(self, df, tile_id)-> pd.DataFrame:
-        """Analyzes a DataFrame for a single tile and returns its NaN stats.
-
-        :param df: DataFrame containing the data for a single tile
-        :param tile_id: Identifier for the tile being processed
-        :return: DataFrame with NaN statistics for the tile
-        """
-
-        if df.empty:
-            return pd.DataFrame() 
-        
-        new_row = {'tile_id': tile_id}
-        
-        # Find all 'b.change' columns and calculate NaN percentages
-        change_columns = [col for col in df.columns if col.startswith('b.change.')]
-        for col_name in change_columns:
-            year_pair = col_name.replace('b.change.', '')
-            nan_percent = df[col_name].isna().mean() * 100
-            
-            new_row[f"{year_pair}_nan_percent"] = round(nan_percent, 2)
-
-        return pd.DataFrame([new_row])
 
     def clip_rasters_by_tile(self, raster_dir, output_dir, data_type)-> None:
         """ Clip raster files by tile and save the data in a specified directory.
@@ -91,6 +65,29 @@ class ModelDataPreProcessor:
 
         output_csv_path = f"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\year_pair_nan_counts_{data_type}.csv"
         final_results_df.to_csv(output_csv_path, index=False, na_rep='NA')
+
+    def create_nan_stats_csv(self, df, tile_id)-> pd.DataFrame:
+        """Analyzes a DataFrame for a single tile and returns its NaN stats.
+
+        :param df: DataFrame containing the data for a single tile
+        :param tile_id: Identifier for the tile being processed
+        :return: DataFrame with NaN statistics for the tile
+        """
+
+        if df.empty:
+            return pd.DataFrame() 
+        
+        new_row = {'tile_id': tile_id}
+        
+        # Find all 'b.change' columns and calculate NaN percentages
+        change_columns = [col for col in df.columns if col.startswith('b.change.')]
+        for col_name in change_columns:
+            year_pair = col_name.replace('b.change.', '')
+            nan_percent = df[col_name].isna().mean() * 100
+            
+            new_row[f"{year_pair}_nan_percent"] = round(nan_percent, 2)
+
+        return pd.DataFrame([new_row])
 
     def create_subgrids(self, mask_gdf, output_dir, process_type)-> None:
         """ Create subgrids layer by intersecting grid tiles with the mask geometries
@@ -173,19 +170,18 @@ class ModelDataPreProcessor:
         dask.compute(*training_tasks)    
 
     def process(self)-> None:
-        """ Main function to process model data.
-        """        
+        """ Main function to process model data."""        
 
         subgrids_output_dir = pathlib.Path(get_config_item('MODEL', 'MODEL_SUBGRIDS'))
 
-        # prediction_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK')), process_type='prediction')
-        # training_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK')), process_type='training')
+        prediction_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK')), process_type='prediction')
+        training_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK')), process_type='training')
 
         mask_prediction_pq = pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK_PQ'))
         mask_training_pq = pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK_PQ'))
 
-        # self.create_subgrids(mask_gdf=mask_prediction_pq, output_dir=subgrids_output_dir, process_type = 'prediction')
-        # self.create_subgrids(mask_gdf=mask_training_pq, output_dir=subgrids_output_dir, process_type = 'training') 
+        self.create_subgrids(mask_gdf=mask_prediction_pq, output_dir=subgrids_output_dir, process_type = 'prediction')
+        self.create_subgrids(mask_gdf=mask_training_pq, output_dir=subgrids_output_dir, process_type = 'training') 
 
         client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
@@ -193,7 +189,7 @@ class ModelDataPreProcessor:
         preprocessed_dir = pathlib.Path(get_config_item('MODEL', 'PREPROCESSED_DIR'))
         processed_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
 
-        # self.parallel_processing_rasters(preprocessed_dir, mask_prediction_pq, mask_training_pq)
+        self.parallel_processing_rasters(preprocessed_dir, mask_prediction_pq, mask_training_pq)
 
         input_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
         output_dir_pred = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
@@ -202,7 +198,7 @@ class ModelDataPreProcessor:
         print(" - Clipping prediction rasters by tile...")
         self.clip_rasters_by_tile(raster_dir=processed_dir, output_dir=output_dir_pred, data_type="prediction")
         print(" - Clipping training rasters by tile...")
-        # self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
+        self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
     
         client.close()
 

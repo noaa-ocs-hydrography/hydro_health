@@ -14,7 +14,7 @@ if __name__ == '__main__':
     profiler.enable()
 
     engine = CreateSeabedTerrainLayerEngine()
-    engine.start()
+    engine.process()
 
     profiler.disable()
     stats = pstats.Stats(profiler)

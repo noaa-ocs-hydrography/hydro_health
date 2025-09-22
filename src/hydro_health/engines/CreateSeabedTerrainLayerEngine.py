@@ -1,17 +1,15 @@
 import os
-import pandas as pd
-import shutil
-from scipy.ndimage import generic_filter, uniform_filter
-import rioxarray
-import xarray as xr
-import os
 import re
+import shutil
+
+import dask
 import numpy as np
 import pandas as pd
 import rasterio
-from scipy.ndimage import uniform_filter, binary_erosion
-from dask.distributed import Client, LocalCluster
-import dask
+import rioxarray
+import xarray as xr
+from dask.distributed import Client, print
+from scipy.ndimage import binary_erosion, generic_filter, uniform_filter
 
 from hydro_health.helpers.tools import get_config_item
 
@@ -19,10 +17,12 @@ from hydro_health.helpers.tools import get_config_item
 class CreateSeabedTerrainLayerEngine():
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
-    def __init__(self, 
-                 param_lookup:dict=None):
-        super().__init__()
-        self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay']
+    def __init__(self):
+        self.year_ranges = [
+            (2004, 2006),
+            (2006, 2010),
+            (2010, 2015),
+            (2015, 2022)]
 
     def focal_fill_block(self, block: np.ndarray, w=3) -> np.ndarray:
         """
@@ -30,14 +30,12 @@ class CreateSeabedTerrainLayerEngine():
 
         This is a low-level helper function that operates on a small chunk of data.
         It calculates a focal mean while correctly handling NaN (missing) values.
-        
-        Parameters:
-        - block: A 2D NumPy array with NaNs to be filled.
-        - w: The window size for the focal mean. Must be an odd number.
-        
-        Returns:
-        - A NumPy array with NaNs filled by the focal mean.
+
+        param np.ndarray block: 2D NumPy array representing a chunk of raster data.
+        param int w: Size of the moving window (must be odd).
+        return: 2D NumPy array with NaNs filled in the block.
         """
+
         block = block.astype(np.float32)
         nan_mask = np.isnan(block)
 
@@ -65,12 +63,13 @@ class CreateSeabedTerrainLayerEngine():
         to avoid loading it all into memory. It then iteratively applies the
         focal_fill_block function to fill small gaps.
         
-        Parameters:
-        - input_file: Path to the input raster file.
-        - output_file: Path where the filled raster will be saved.
-        - max_iters: The maximum number of fill iterations to run.
-        - chunk_size: The size of the chunks to process at a time.
+        param str input_file: Path to the input raster file.
+        param str output_file: Path where the filled raster will be saved.
+        param int max_iters: Maximum number of fill iterations to perform.
+        param int chunk_size: Size of the chunks to process at a time.
+        return: None
         """
+
         print(f"Attempting chunked fill for {os.path.basename(input_file)}")
 
         # Open input raster lazily with Dask. This is the key to handling large files.
@@ -133,20 +132,19 @@ class CreateSeabedTerrainLayerEngine():
     def run_gap_fill(self, input_file, output_dir, max_iters) -> None:
         """
         The main entry point for the gap-filling process.
-
         This function sets up the file paths and orchestrates the call to the
         chunked, Dask-based fill process.
         
-        Parameters:
-        - input_file: Path to the single input raster file.
-        - output_dir: Directory where the output file will be saved.
-        - max_iters: Maximum number of focal fill iterations.
-        - w: The focal window size.
+        param str input_file: Path to the input raster file.
+        param str output_dir: Directory where the filled raster will be saved.
+        param int max_iters: Maximum number of fill iterations to perform.
+        return: None
         """
+
         print("Starting gap fill module...")
 
         output_file = os.path.join(
-            output_dir, os.path.splitext(os.path.basename(input_file))[0] + "_filled_python.tif"
+            output_dir, os.path.splitext(os.path.basename(input_file))[0] + "_filled.tif"
         )
         self.fill_with_fallback(
             input_file=input_file,
@@ -186,8 +184,16 @@ class CreateSeabedTerrainLayerEngine():
     #   CORE BTM HELPER FUNCTIONS
     # ==============================================================================
 
-    def calculate_bpi(self, bathy_array, cell_size, inner_radius, outer_radius):
-        """Calculates the Bathymetric Position Index for a numpy array."""
+    def calculate_bpi(self, bathy_array, cell_size, inner_radius, outer_radius) -> np.ndarray:
+        """Calculates the Bathymetric Position Index for a numpy array.
+         param np.ndarray bathy_array: 2D numpy array of bathymetry values.
+         param float cell_size: Size of each cell in the raster (assumed square).
+         param float inner_radius: Inner radius for the annulus (in same units as cell_size).
+         param float outer_radius: Outer radius for the annulus (in same units as cell_size).
+         return: 2D numpy array of BPI values.
+
+        """
+        
         inner_cells = int(round(inner_radius / cell_size))
         outer_cells = int(round(outer_radius / cell_size))
         
@@ -210,16 +216,26 @@ class CreateSeabedTerrainLayerEngine():
         
         return bathy_array - mean_annulus
 
-    def standardize_raster_array(self, input_array):
-        """Standardizes a numpy array (mean=0, sd=1)."""
+    def standardize_raster_array(self, input_array) -> np.ndarray:
+        """Standardizes a numpy array (mean=0, sd=1).
+        
+        param np.ndarray input_array: 2D numpy array to standardize.
+        return: 2D numpy array of standardized values.
+        """
+
         mean = np.nanmean(input_array)
         std = np.nanstd(input_array)
         if std == 0:
             return np.zeros_like(input_array)
         return (input_array - mean) / std
 
-    def calculate_slope_and_tri(self, bathy_array, cell_size):
-        """Calculates slope (in degrees) and Terrain Ruggedness Index (TRI)."""
+    def calculate_slope_and_tri(self, bathy_array, cell_size) -> tuple[np.ndarray, np.ndarray]:
+        """Calculates slope (in degrees) and Terrain Ruggedness Index (TRI).
+        param np.ndarray bathy_array: 2D numpy array of bathymetry values.
+        param float cell_size: Size of each cell in the raster (assumed square).
+        return: Tuple of 2D numpy arrays (slope in degrees, TRI).
+        """
+
         gy, gx = np.gradient(bathy_array, cell_size)
         slope_rad = np.arctan(np.sqrt(gx**2 + gy**2))
         slope_deg = np.degrees(slope_rad)
@@ -233,8 +249,15 @@ class CreateSeabedTerrainLayerEngine():
         
         return slope_deg, tri
 
-    def create_classification_dictionary(self, bpi_broad_std_sample, bpi_fine_std_sample, slope_sample):
-        """Creates a data-driven classification dictionary from representative sample arrays."""
+    def create_classification_dictionary(self, bpi_broad_std_sample, bpi_fine_std_sample, slope_sample) -> pd.DataFrame:
+        """Creates a data-driven classification dictionary from representative sample arrays.
+
+        param np.ndarray bpi_broad_std_sample: 1D array of standardized broad BPI samples.
+        param np.ndarray bpi_fine_std_sample: 1D array of standardized fine BPI samples.
+        param np.ndarray slope_sample: 1D array of slope samples.
+        return: Pandas DataFrame representing the classification dictionary.
+        """
+
         broad_breaks = np.nanquantile(bpi_broad_std_sample, [0.15, 0.85])
         fine_breaks = np.nanquantile(bpi_fine_std_sample, [0.15, 0.85])
         slope_break = np.nanquantile(slope_sample, 0.85)
@@ -262,11 +285,19 @@ class CreateSeabedTerrainLayerEngine():
     #   PHASE 1: PRE-COMPUTATION OF CONSISTENT DICTIONARIES
     # ==============================================================================
 
-    def create_regionally_consistent_dictionaries(self, all_files, best_radii, output_dir, max_sample_files=10, pixels_per_file=20000):
+    def create_regionally_consistent_dictionaries(self, all_files, best_radii, output_dir, max_sample_files=10, pixels_per_file=20000) -> None:
         """
         Scans files, groups by year, samples pixels, and creates a single consistent
         classification dictionary for each year.
+
+        param list all_files: List of file paths to process.
+        param dict best_radii: Dictionary with 'fine' and 'broad' radius tuples.
+        param str output_dir: Directory where dictionaries will be saved.
+        param int max_sample_files: Max number of files to sample per year.
+        param int pixels_per_file: Number of random pixels to sample from each file.
+        return: None
         """
+
         print("\n--- PHASE 1: Creating Regionally Consistent Dictionaries ---")
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -351,15 +382,22 @@ class CreateSeabedTerrainLayerEngine():
     #   PHASE 2: PARALLEL PROCESSING OF INDIVIDUAL RASTERS
     # ==============================================================================
 
-    def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir):
+    def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir) -> str:
         """
         Main function to process one bathymetry raster using a pre-computed dictionary.
+
+        param str bathy_path: Path to the input bathymetry raster file.
+        param dict best_radii: Dictionary with 'fine' and 'broad' radius tuples.
+        param str dictionary_dir: Directory where pre-computed dictionaries are stored.
+        return: Status message indicating success or failure.
         """
+        
         try:
             base_name = os.path.splitext(os.path.basename(bathy_path))[0]
-            output_dir = os.path.dirname(bathy_path)
+            output_dir = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs\BTM_outputs"
             
             # Determine the year and load the correct dictionary
+            # TODO this might need to be adjusted based on actual file naming conventions
             year = 'bt_bathy' # default for generic name
             match = re.search(r'(\d{4})', base_name)
             if match:
@@ -421,30 +459,41 @@ class CreateSeabedTerrainLayerEngine():
     # ==============================================================================
     #   MAIN ORCHESTRATION SCRIPT
     # ==============================================================================
-    def start(self):
+    def process(self) -> None:
         """Main function to find all bathy files and process them in parallel."""
-
-        main_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
-        dictionary_output_dir = os.path.join(main_output_dir, "dictionaries")
 
         client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
 
+        main_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
+        dictionary_output_dir = os.path.join(main_output_dir, "dictionaries")
+
         input_dir = get_config_item('TERRAIN', 'INPUT_DIR')
         filled_dir = get_config_item('TERRAIN', 'FILLED_DIR')
 
-        file_paths = [os.path.join(input_dir, f) for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        file_paths = r"C:\Users\aubrey.mccutchan\Documents\sample_data"
+        keywords_to_exclude = ['tsm', 'hurricane', 'bluetopo']
+        lidar_data_paths = [
+            os.path.join(input_dir, f)
+            for f in os.listdir(input_dir)
+            if f.lower().endswith(('.tif', '.tiff')) and not any(keyword in f.lower() for keyword in keywords_to_exclude)
+        ]        
 
         tasks = []
-        for file in file_paths:
+        for file in lidar_data_paths:
             task = dask.delayed(self.run_gap_fill(file, filled_dir, max_iters=3))
             tasks.append(task)
             
         dask.compute(*tasks)
 
         # --- 2. FIND ALL BATHY FILES TO PROCESS ---
+        # Lidar filles files
         bathy_files_to_process = [os.path.join(filled_dir, f) for f in os.listdir(filled_dir)]
+
+        # Adding Blutopo files to the lists
+        bathy_files_to_process.extend(
+            [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
+            if f.endswith(('.tif', '.tiff')) and 'bluetopo' in f]
+        )
         
         if not bathy_files_to_process:
             print("No bathymetry files found to process. Exiting.")
@@ -457,6 +506,7 @@ class CreateSeabedTerrainLayerEngine():
         self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
         # --- 4. RUN PHASE 2: PARALLEL CLASSIFICATION ---
+        print("\n--- PHASE 2: Parallel Processing of terrain products")
         tasks = []
         for bathy_file in bathy_files_to_process:
             task = dask.delayed(self.generate_terrain_products_python)(bathy_file, best_radii, dictionary_output_dir)
