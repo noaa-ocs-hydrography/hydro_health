@@ -163,7 +163,8 @@ class RasterMaskEngine(Engine):
                     dissolved_tile_index = tile_index_path.parents[0] / pathlib.Path(tile_index_path.stem + '_dis.shp')
                     if dissolved_tile_index.exists():
                         dissolved_tile_index.unlink()
-                    tile_index.to_file(dissolved_tile_index)
+                    # Some providers are in NAD83(NSRS2007)
+                    tile_index.to_crs("EPSG:4326").to_file(dissolved_tile_index)
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
         """Get list of intersected features from ecoregion tile index shapefile"""
@@ -177,7 +178,7 @@ class RasterMaskEngine(Engine):
                     if ecoregion.stem not in approved_files:
                         approved_files[ecoregion.stem] = []
                     parent_project = file.parents[0]
-                    tile_index_shps = list(parent_project.rglob('tileindex*.shp'))
+                    tile_index_shps = list(parent_project.rglob('*index*.shp'))
                     if tile_index_shps:
                         approved_files[ecoregion.stem].append(tile_index_shps[0])
         return approved_files

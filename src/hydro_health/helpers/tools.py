@@ -72,17 +72,15 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
                 wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
 
             wgs84_ds = gdal.Open(str(raster_wgs84))
+            input_resolution = wgs84_ds.GetGeoTransform()
             # Compress and overwrite original geotiff path
-
-            # TODO run and see if standard XY will fix 2010 failure
-            resolution = 0.000008983
             gdal.Warp(
                 geotiff,
                 wgs84_ds,
                 srcNodata=wgs84_ds.GetRasterBand(1).GetNoDataValue(),
                 dstNodata=-9999,
-                xRes=resolution,
-                yRes=resolution,
+                xRes=input_resolution[1],
+                yRes=input_resolution[5],
                 creationOptions=["COMPRESS=ZSTD", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
             )
             wgs84_ds = None
@@ -98,7 +96,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
         projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
-        provider_folder = geotiff_path.parents[2].name
+        provider_folder = geotiff_path.parents[2].name if 'dem' in str(geotiff_path) else geotiff_path.parents[3].name
         # Handle BlueTopo and DigitalCoast differently
         clean_crs_key = f'{clean_crs_string}_{provider_folder}' if data_type == 'DigitalCoast' else clean_crs_string
         # Store tile and CRS
@@ -271,7 +269,7 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
                                 creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
                             )
                         except Exception as e:
-                            print('failure:', e)
+                            print(f'failure: {vrt.name} - ', e)
                     current_tile_geom = None
             shp_driver = None
             dissolve_layer = None
