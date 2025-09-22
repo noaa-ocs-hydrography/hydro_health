@@ -67,7 +67,7 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_metadata_engine" and step["run"]:
                 runners.run_metadata_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
-                tools.run_vrt_creation(param_lookup)
+                tools.run_vrt_creation(param_lookup, skip_existing=False)  # Skip existing if needed
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
                 runners.run_raster_mask_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:

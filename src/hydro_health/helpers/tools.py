@@ -24,7 +24,7 @@ class Param:
             return self.value
 
 
-def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
+def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
     """Create an output VRT from found .tif files"""
 
     glob_lookup = {
@@ -41,6 +41,11 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
     output_geotiffs = {}
     for geotiff_path in geotiffs:
         geotiff = str(geotiff_path)
+        if skip_existing:
+            output_vrt = geotiff_path.parents[0] / f'{geotiff_path.stem}.vrt'
+            if output_vrt.exists():
+                print(f'Skipping VRT: {output_vrt.name}')
+                continue
         geotiff_ds = gdal.Open(geotiff)
         wgs84_srs = osr.SpatialReference()
         wgs84_srs.ImportFromEPSG(4326)
@@ -295,12 +300,12 @@ def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs
     return raster_wgs84
 
 
-def run_vrt_creation(param_lookup: dict[str]) -> None:
+def run_vrt_creation(param_lookup: dict[str], skip_existing=False) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
 
     for ecoregion in get_ecoregion_folders(param_lookup):
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)
