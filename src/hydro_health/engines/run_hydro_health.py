@@ -24,15 +24,15 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'input_directory': tools.Param(''),
             'output_directory': tools.Param(str(OUTPUTS)),
             'eco_regions': tools.Param(''),
-            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson'))
-            # 'drawn_polygon': tools.Param('')
+            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson')),
+            'env': env
         }
     else:
         param_lookup = {
             'input_directory': tools.Param(''),
             'output_directory': tools.Param(tools.get_config_item('SHARED', 'OUTPUT_FOLDER')),
             'eco_regions': tools.Param(''),
-            'drawn_polygon': tools.Param('')
+            'env': env
         }
     return param_lookup
 
@@ -53,7 +53,8 @@ def run_hydro_health(config_name: str) -> None:
     with open(config_path, "r") as lookup:
         config = yaml.safe_load(lookup)
         print(f'Script has been run {len(config["runtimes"])} time(s)')
-        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if tools.get_environment() == 'remote' else ''
+        # load ecoregions from config for remote run
+        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if env == 'remote' else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
         tiles = tools.get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
@@ -66,7 +67,7 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_metadata_engine" and step["run"]:
                 runners.run_metadata_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
-                tools.run_vrt_creation(param_lookup)
+                tools.run_vrt_creation(param_lookup, skip_existing=False)  # Skip existing if needed
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
                 runners.run_raster_mask_engine(param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:

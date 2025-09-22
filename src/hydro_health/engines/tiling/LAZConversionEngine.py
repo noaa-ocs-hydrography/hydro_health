@@ -1,23 +1,71 @@
-import os
 import pathlib
 import pickle
 import requests
 import subprocess
-import sys
 import shutil
 import geopandas as gpd
+import os
+import sys
 
+from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import set_executable
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
-
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 HELPERS = pathlib.Path(__file__).parents[2] / 'helpers'
+
+
+def _download_single_laz(param_inputs) -> None:
+    """Threading method for downloading and converting and LAZ file"""
+
+    url, shp_folder, outputs, current, total = param_inputs
+
+    engine = LAZConversionEngine()
+
+    retry_strategy = Retry(
+        total=3,  # retries
+        backoff_factor=1,  # delay in seconds
+        status_forcelist=[404],  # Status codes to retry on
+        allowed_methods=["GET"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+    request_session = requests.Session()
+    request_session.mount("https://", adapter)
+    request_session.mount("http://", adapter)
+
+    cleansed_url = engine.cleansed_url(url)
+    dataset_name = cleansed_url.split('/')[-1]
+    output_laz = shp_folder / dataset_name
+    converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
+
+    if converted_laz.exists():
+        print(f' - {current} of {total} found converted: {"/".join(converted_laz.parts[-5:])}')
+        if output_laz.exists():
+            output_laz.unlink()
+    else:
+        if output_laz.exists():
+            converted = engine.convert_laz_file(output_laz)
+            if converted:
+                print(f' - {current} of {total} converted: {output_laz}')
+                output_laz.unlink()
+        else:
+            try:
+                intersected_response = request_session.get(cleansed_url)
+                if intersected_response.status_code == 200:
+                    with open(output_laz, 'wb') as file:
+                        file.write(intersected_response.content)
+                    converted = engine.convert_laz_file(output_laz)
+                    if converted:
+                        print(f' - {current} of {total} converted: {output_laz}')
+                        output_laz.unlink()
+                else:
+                    engine.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
+            except requests.exceptions.ConnectionError:
+                engine.write_message(f'Timeout error: {cleansed_url}', outputs)
 
 
 class LAZConversionEngine(Engine):
@@ -115,56 +163,10 @@ class LAZConversionEngine(Engine):
             shp_folder = shp_path.parents[0]
             urls = df_joined['url'].unique()
 
-            param_inputs = [(url, shp_folder, outputs) for url in urls]
-            with ThreadPoolExecutor(int(os.cpu_count() - 2)) as bulk_pool:
-                print('- Starting LAZ conversion')
-                bulk_pool.map(self.download_single_laz, param_inputs)
-
-    def download_single_laz(self, param_inputs) -> None:
-        """Threading method for downloading and converting and LAZ file"""
-
-        url, shp_folder, outputs = param_inputs
-
-        retry_strategy = Retry(
-            total=3,  # retries
-            backoff_factor=1,  # delay in seconds
-            status_forcelist=[404],  # Status codes to retry on
-            allowed_methods=["GET"]
-        )
-        adapter = HTTPAdapter(max_retries=retry_strategy)
-        request_session = requests.Session()
-        request_session.mount("https://", adapter)
-        request_session.mount("http://", adapter)
-
-        cleansed_url = self.cleansed_url(url)
-        dataset_name = cleansed_url.split('/')[-1]
-        output_laz = shp_folder / dataset_name
-        converted_laz = output_laz.parents[0] / f'{output_laz.stem}.tif'
-
-        if converted_laz.exists():
-            print(f' - found converted: {converted_laz.parents[-3:-1]}')
-            if output_laz.exists():
-                output_laz.unlink()
-        else:
-            if output_laz.exists():
-                converted = self.convert_laz_file(output_laz)
-                if converted:
-                    print(f' - converted: {output_laz}')
-                    output_laz.unlink()
-            else:
-                try:
-                    intersected_response = request_session.get(cleansed_url)
-                    if intersected_response.status_code == 200:
-                        with open(output_laz, 'wb') as file:
-                            file.write(intersected_response.content)
-                        converted = self.convert_laz_file(output_laz)
-                        if converted:
-                            print(f' - converted: {output_laz}')
-                            output_laz.unlink()
-                    else:
-                        self.write_message(f'LAZ Download failed, {intersected_response.status_code}: {cleansed_url}', outputs)
-                except requests.exceptions.ConnectionError:
-                    self.write_message(f'Timeout error: {cleansed_url}', outputs)
+            print('- Starting conversion')
+            param_inputs = [(url, shp_folder, outputs, i+1, len(urls)) for i, url in enumerate(urls)]
+            future_tiles = self.client.map(_download_single_laz, param_inputs)
+            _ = self.client.gather(future_tiles)
 
     def get_laz_providers(self, tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Obtain all provider URL info by ecoregion"""
@@ -194,6 +196,8 @@ class LAZConversionEngine(Engine):
     def run(self, tiles: gpd.GeoDataFrame, outputs: str) -> None:
         """Main entry point for converting LAZ data"""
 
+        self.setup_dask(processes=False)
         self.get_laz_providers(tiles, outputs)
         self.check_tile_index_areas()
         self.process_laz_files(tiles, outputs)
+        self.close_dask()

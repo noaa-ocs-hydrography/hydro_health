@@ -1,12 +1,14 @@
 import pathlib
 import sys
 import json
-import logging
+import os
 import re
 import requests
 import geopandas as gpd
 
 from osgeo import osr, gdal
+from dask.distributed import Client, LocalCluster
+
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -23,6 +25,8 @@ class Engine:
 
     def __init__(self):
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
+        self.cluster = None
+        self.client = None
 
     # def __init__(self):
     #     # set up logging
@@ -55,6 +59,12 @@ class Engine:
         for char in illegal_chars:
             url = url.replace(char, '')
         return url.strip()
+    
+    def close_dask(self) -> None:
+        """Shut down Dask objects"""
+
+        self.client.close()
+        self.cluster.close()
     
     def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -131,6 +141,13 @@ class Engine:
         file = open(OUTPUTS / f'{file_name}.prj', 'w')
         file.write(output_projection.ExportToWkt())
         file.close()
+
+    def setup_dask(self, processes=True) -> None:
+        """Create Dask objects outside of init"""
+
+        self.cluster = LocalCluster(processes=processes)
+        self.client = Client(self.cluster)
+        # print(self.client.dashboard_link)
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""

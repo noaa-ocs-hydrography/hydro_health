@@ -24,7 +24,7 @@ class Param:
             return self.value
 
 
-def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
+def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
     """Create an output VRT from found .tif files"""
 
     glob_lookup = {
@@ -41,6 +41,11 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
     output_geotiffs = {}
     for geotiff_path in geotiffs:
         geotiff = str(geotiff_path)
+        if skip_existing:
+            output_vrt = geotiff_path.parents[0] / f'{geotiff_path.stem}.vrt'
+            if output_vrt.exists():
+                print(f'Skipping VRT: {output_vrt.name}')
+                continue
         geotiff_ds = gdal.Open(geotiff)
         wgs84_srs = osr.SpatialReference()
         wgs84_srs.ImportFromEPSG(4326)
@@ -67,17 +72,15 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
                 wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
 
             wgs84_ds = gdal.Open(str(raster_wgs84))
+            input_resolution = wgs84_ds.GetGeoTransform()
             # Compress and overwrite original geotiff path
-
-            # TODO run and see if standard XY will fix 2010 failure
-            resolution = 0.000008983
             gdal.Warp(
                 geotiff,
                 wgs84_ds,
                 srcNodata=wgs84_ds.GetRasterBand(1).GetNoDataValue(),
                 dstNodata=-9999,
-                xRes=resolution,
-                yRes=resolution,
+                xRes=input_resolution[1],
+                yRes=input_resolution[5],
                 creationOptions=["COMPRESS=ZSTD", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
             )
             wgs84_ds = None
@@ -93,7 +96,7 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
         projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
-        provider_folder = geotiff_path.parents[2].name
+        provider_folder = geotiff_path.parents[2].name if 'dem' in str(geotiff_path) else geotiff_path.parents[3].name
         # Handle BlueTopo and DigitalCoast differently
         clean_crs_key = f'{clean_crs_string}_{provider_folder}' if data_type == 'DigitalCoast' else clean_crs_string
         # Store tile and CRS
@@ -171,7 +174,7 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
+    if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
@@ -194,7 +197,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
+    if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
@@ -212,8 +215,8 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     tiles = gpd.clip(mask_tiles, selected_sub_grids, keep_geom_type=True)
     # Store EcoRegion ID with tiles
     tiles = tiles.sjoin(selected_ecoregions, how="left")[['tile', 'EcoRegion', 'geometry']]
-    selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
-    tiles.to_file(output_folder / 'selected_tiles.shp') 
+    # selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
+    # tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
 
@@ -266,7 +269,7 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
                                 creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
                             )
                         except Exception as e:
-                            print('failure:', e)
+                            print(f'failure: {vrt.name} - ', e)
                     current_tile_geom = None
             shp_driver = None
             dissolve_layer = None
@@ -295,12 +298,12 @@ def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs
     return raster_wgs84
 
 
-def run_vrt_creation(param_lookup: dict[str]) -> None:
+def run_vrt_creation(param_lookup: dict[str], skip_existing=False) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
 
     for ecoregion in get_ecoregion_folders(param_lookup):
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo')
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)
