@@ -174,7 +174,7 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
+    if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
