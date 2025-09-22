@@ -175,11 +175,11 @@ class ModelDataPreProcessor():
 
         subgrids_output_dir = pathlib.Path(get_config_item('MODEL', 'MODEL_SUBGRIDS'))
 
-        prediction_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK')), process_type='prediction')
-        training_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK')), process_type='training')
+        prediction_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MASK', 'MASK_PRED_PATH')), process_type='prediction')
+        training_mask_df = self.raster_to_spatial_df(pathlib.Path(get_config_item('MASK', 'MASK_TRAINING_PATH')), process_type='training')
 
-        mask_prediction_pq = pathlib.Path(get_config_item('MODEL', 'PREDICTION_MASK_PQ'))
-        mask_training_pq = pathlib.Path(get_config_item('MODEL', 'TRAINING_MASK_PQ'))
+        mask_prediction_pq = pathlib.Path(get_config_item('MASK', 'PREDICTION_MASK_PQ'))
+        mask_training_pq = pathlib.Path(get_config_item('MASK', 'TRAINING_MASK_PQ'))
 
         self.create_subgrids(mask_gdf=mask_prediction_pq, output_dir=subgrids_output_dir, process_type = 'prediction')
         self.create_subgrids(mask_gdf=mask_training_pq, output_dir=subgrids_output_dir, process_type = 'training') 
@@ -324,7 +324,7 @@ class ModelDataPreProcessor():
             gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
             gdf = gdf.to_crs("EPSG:32617") 
 
-            masks_dir = Path(get_config_item("MODEL", "MASKS_DIR"))  # this is a folder path
+            masks_dir = Path(get_config_item('MASK', 'MASKS_DIR')) 
             mask_path = masks_dir / f"{process_type}_mask.parquet"
 
             gdf.to_parquet(mask_path)

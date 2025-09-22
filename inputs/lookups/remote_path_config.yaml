@@ -15,7 +15,21 @@ HURRICANE:
 MASK:
   SUBFOLDER: masks
   COAST_BOUNDARY_PATH: N:\CSDLProjects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp
+  MASKS_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\
   MASK_PRED_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif
+  MASK_TRAINING_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\training_mask_ER_3.tif
+  PREDICTION_MASK_PQ: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask.parquet
+  TRAINING_MASK_PQ: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\training_mask.parquet
+MODEL:
+  MODEL_SUBGRIDS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids
+  PREPROCESSED_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed
+  PREDICTION_OUTPUT_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed
+  PREDICTION_TILES_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles
+  TRAINING_TILES_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles
+  SUBGRIDS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids\Prediction.subgrid.WGS84_8m.gpkg
+  PREDICTION_SUB_GRIDS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids\prediction_intersecting_subgrids.gpkg
+  TRAINING_SUB_GRIDS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_subgrids\training_intersecting_subgrids.gpkg
+  TRAINING_OUTPUT_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\processed  
 SEDIMENT:
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
   DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data
@@ -32,6 +46,10 @@ SHARED:
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_FOLDER: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run
+TERRAIN:
+  INPUT_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed
+  FILLED_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs
+  OUTPUTS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs
 TSM:
   DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
   MEAN_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
