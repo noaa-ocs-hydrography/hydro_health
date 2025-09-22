@@ -4,7 +4,10 @@ import pathlib
 import geopandas as gpd
 
 from hydro_health.HHLayerTool import HHLayerTool
-from hydro_health.helpers import tools
+from hydro_health.helpers import runners, tools
+
+
+INPUTS = pathlib.Path(__file__).parents[2] / 'inputs'
 
 
 class RunHydroHealthModelTool(HHLayerTool):
@@ -85,12 +88,12 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Create prediction and training masks for all ecoregions"""
 
         arcpy.AddMessage(f'Creating prediction and training masks for ecoregions')
-        tools.process_create_masks(self.param_lookup['output_directory'].valueAsText)
+        runners.process_create_masks(self.param_lookup['output_directory'].valueAsText)
 
     def download_bluetopo_tiles(self, tiles: gpd.GeoDataFrame) -> None:
         """Download all bluetopo tiles"""
 
-        tools.process_bluetopo_tiles(tiles, self.param_lookup['output_directory'].valueAsText)
+        runners.run_bluetopo_tile_engine(tiles, self.param_lookup['output_directory'].valueAsText)
         ecoregions = tools.get_ecoregion_folders(self.param_lookup)
         for ecoregion in ecoregions:
             arcpy.AddMessage(f" - {ecoregion} BlueTopo tiles: {len(next(os.walk(pathlib.Path(self.param_lookup['output_directory'].valueAsText) / ecoregion / 'BlueTopo'))[1])}")
@@ -105,7 +108,7 @@ class RunHydroHealthModelTool(HHLayerTool):
         """Download all digital coast tiles"""
 
         arcpy.AddMessage('Obtaining Digital Coast data for selected area')
-        tools.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
+        runners.process_digital_coast_files(tiles, self.param_lookup['output_directory'].valueAsText)
         for ecoregion in tools.get_ecoregion_folders(self.param_lookup):
             arcpy.AddMessage(f'Building {ecoregion} - Digital Coast VRT file')
             tools.create_raster_vrts(self.param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')

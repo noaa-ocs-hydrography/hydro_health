@@ -4,19 +4,12 @@ import geopandas as gpd
 import rioxarray as rxr
 import rasterio
 
-from rio_vrt import build_vrt
-from hydro_health.engines.tiling.BlueTopoProcessor import BlueTopoProcessor
-from hydro_health.engines.tiling.DigitalCoastProcessor import DigitalCoastProcessor
-from hydro_health.engines.tiling.RasterMaskProcessor import RasterMaskProcessor
-from hydro_health.engines.tiling.SurgeTideForecastProcessor import SurgeTideForecastProcessor
-from osgeo import gdal, osr
+from socket import gethostname
+from osgeo import gdal, osr, ogr
 
 
 gdal.UseExceptions()
-gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
-gdal.SetConfigOption("GDALWARP_IGNORE_BAD_CUTLINE", "YES")
-gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
-gdal.SetCacheMax(2684354560)  # 20gb RAM
+
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
@@ -31,14 +24,7 @@ class Param:
             return self.value
 
 
-def process_create_masks(outputs:str) -> None:
-    """Create prediction and training masks for found ecoregions"""
-
-    processor = RasterMaskProcessor()
-    processor.process(outputs)
-
-
-def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str) -> None:
+def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
     """Create an output VRT from found .tif files"""
 
     glob_lookup = {
@@ -49,51 +35,68 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         'NCMP': '*.tif'
     }
 
-    outputs = pathlib.Path(output_folder) / ecoregion / data_type
+    outputs = pathlib.Path(output_folder) / ecoregion / get_config_item(data_type.upper(), 'SUBFOLDER') / data_type
     geotiffs = list(outputs.rglob(glob_lookup[file_type]))
 
     output_geotiffs = {}
     for geotiff_path in geotiffs:
         geotiff = str(geotiff_path)
-        output_vrt = geotiff_path.parents[0] / f'{geotiff_path.stem}.vrt'
-        if output_vrt.exists():
-            print(f'Skipping VRT: {output_vrt.name}')
-        else:
+        if skip_existing:
+            output_vrt = geotiff_path.parents[0] / f'{geotiff_path.stem}.vrt'
+            if output_vrt.exists():
+                print(f'Skipping VRT: {output_vrt.name}')
+                continue
+        geotiff_ds = gdal.Open(geotiff)
+        wgs84_srs = osr.SpatialReference()
+        wgs84_srs.ImportFromEPSG(4326)
+        geotiff_srs = geotiff_ds.GetSpatialRef()
+        # Project all geotiff to match BlueTopo tiles WGS84
+        if data_type == 'DigitalCoast' and geotiff_srs.GetName() != wgs84_srs.GetName():
+
+            
+            unused_providers_folder = outputs / 'unused_providers'
+            if unused_providers_folder.exists():
+                unused_providers_names = [folder.stem for folder in unused_providers_folder.iterdir() if folder.is_dir()]
+                provider_folder = geotiff_path.parents[2].stem
+                if provider_folder in unused_providers_names:
+                    print(f' - Skipping unused provider: {provider_folder}')
+                    continue
+
+            geotiff_ds = None  # close original dataset
+            old_geotiff = geotiff_path.parents[0] / f'{geotiff_path.stem}_old.tif'
+            geotiff_path.rename(old_geotiff)
+            raster_wgs84 = geotiff_path.parents[0] / f'{geotiff_path.stem}_wgs84.tif'
+            rasterio_wgs84 = rasterio.crs.CRS.from_epsg(4326)
+            with rxr.open_rasterio(old_geotiff) as geotiff_raster:
+                wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
+                wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
+
+            wgs84_ds = gdal.Open(str(raster_wgs84))
+            input_resolution = wgs84_ds.GetGeoTransform()
+            # Compress and overwrite original geotiff path
+            gdal.Warp(
+                geotiff,
+                wgs84_ds,
+                srcNodata=wgs84_ds.GetRasterBand(1).GetNoDataValue(),
+                dstNodata=-9999,
+                xRes=input_resolution[1],
+                yRes=input_resolution[5],
+                creationOptions=["COMPRESS=ZSTD", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
+            )
+            wgs84_ds = None
+            
+            # Delete intermediate files
+            old_geotiff.unlink()
+            raster_wgs84.unlink()
+
+            # repoen new geotiff
             geotiff_ds = gdal.Open(geotiff)
-            wgs84_srs = osr.SpatialReference()
-            wgs84_srs.ImportFromEPSG(4326)
-            geotiff_srs = geotiff_ds.GetSpatialRef()
-            # Project all geotiff to match BlueTopo tiles WGS84
-            if data_type == 'DigitalCoast' and not geotiff_srs.IsSame(wgs84_srs):
-                geotiff_ds = None  # close dataset
 
-                old_geotiff = geotiff_path.parents[0] / f'{geotiff_path.stem}_old.tif'
-                geotiff_path.rename(old_geotiff)
-                raster_wgs84 = geotiff_path.parents[0] / f'{geotiff_path.stem}_wgs84.tif'
-                rasterio_wgs84 = rasterio.crs.CRS.from_epsg(4326)
-                with rxr.open_rasterio(old_geotiff) as geotiff_raster:
-                    wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
-                    wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
-
-                wgs84_ds = gdal.Open(str(raster_wgs84))
-                # Compress and overwrite original geotiff path
-                gdal.Warp(
-                    geotiff,
-                    wgs84_ds,
-                    creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
-                )
-                wgs84_ds = None
-                
-                # Delete intermediate files
-                old_geotiff.unlink()
-                raster_wgs84.unlink()
-
-        geotiff_ds = gdal.Open(geotiff)  # reopen new projected geotiff path
         projection_wkt = geotiff_ds.GetProjection()
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)  
         projected_crs_string = spatial_ref.GetAuthorityCode('DATUM')
         clean_crs_string = projected_crs_string.replace('/', '').replace(' ', '_')
-        provider_folder = geotiff_path.parents[2].name
+        provider_folder = geotiff_path.parents[2].name if 'dem' in str(geotiff_path) else geotiff_path.parents[3].name
         # Handle BlueTopo and DigitalCoast differently
         clean_crs_key = f'{clean_crs_string}_{provider_folder}' if data_type == 'DigitalCoast' else clean_crs_string
         # Store tile and CRS
@@ -125,17 +128,39 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
                 )
             vrt_tiles.append(output_raster_vrt)
         
-        vrt_filename = outputs / f'mosaic_{file_type}_{crs}.vrt'
-        # gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
-        if not vrt_filename.exists():
-            build_vrt(str(vrt_filename), vrt_tiles)
-    print('finished create_raster_vrts')
+        vrt_filename = str(outputs / f'mosaic_{file_type}_{crs}.vrt')
+        gdal.BuildVRT(vrt_filename, vrt_tiles, callback=gdal.TermProgress_nocb)
+        print(f'- finished VRT: {vrt_filename}')
 
 
-def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
-    """Load config and return speciific key"""
+def get_environment() -> str:
+    """Determine current environment running code"""
 
-    with open(str(INPUTS / 'lookups' / 'config.yaml'), 'r') as lookup:
+    hostname = gethostname()
+    if 'L' in hostname:
+        return  'local'
+    elif 'VS' in hostname:
+        return 'remote'
+    else:
+        return 'remote'
+
+
+def get_config_item(parent: str, child: str=False, env_string: str=False) -> str:
+    """
+    Load config and return speciific key
+    :param str parent: Primary key in config
+    :param str child: Secondary key in config
+    :param str env_string: Optional explicit value of "local" or "remote"
+    :returns str: Value from local or remote YAML config
+    """
+
+    # TODO add sample data and folders to input folder
+
+    env = env_string if env_string else None
+    if env is None:
+        env = get_environment()
+    
+    with open(str(INPUTS / 'lookups' / f'{env}_path_config.yaml'), 'r') as lookup:
         config = yaml.safe_load(lookup)
         parent_item = config[parent]
         if child:
@@ -144,24 +169,25 @@ def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
             return parent_item
 
 
-def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
-    """Obtain a subset of tiles based on state names"""
+def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+    """Obtain the intersected EcoRegion folders"""
 
-    geopackage = INPUTS / get_config_item('SHARED', 'DATABASE')
+    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
+    # get master_grid geopackage path
+    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    if param_lookup['env'] == 'local':
+        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    else:
+        # get eco region from shapefile that matches drop down choices
+        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
+        eco_regions = [region.split('-')[0] for region in eco_regions]
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    return list(selected_ecoregions['EcoRegion'].unique())
 
-    all_states = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'STATES'), columns=['STATE_NAME'])
-    coastal_states = param_lookup['coastal_states'].valueAsText.replace("'", "").split(';')
-    selected_states = all_states[all_states['STATE_NAME'].isin(coastal_states)]
-
-    all_tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=[get_config_item('SHARED', 'TILENAME')], mask=selected_states)
-    state_tiles = all_tiles.sjoin(selected_states)  # needed to keep STATE_NAME
-    state_tiles = state_tiles.drop(['index_right'], axis=1)
-
-    coastal_boundary = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'BOUNDARY'))
-    tiles = state_tiles.sjoin(coastal_boundary)
-    # tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
-
-    return tiles
 
 
 def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
@@ -173,7 +199,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
+    if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
@@ -191,99 +217,67 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     tiles = gpd.clip(mask_tiles, selected_sub_grids, keep_geom_type=True)
     # Store EcoRegion ID with tiles
     tiles = tiles.sjoin(selected_ecoregions, how="left")[['tile', 'EcoRegion', 'geometry']]
-    selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
-    tiles.to_file(output_folder / 'selected_tiles.shp') 
+    # selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
+    # tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
 
 
-def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
-    """Obtain the intersected EcoRegion folders"""
+def grid_digital_coast_files(outputs: str, data_type: str) -> None:
+    """Process for gridding Digital Coast files to BlueTopo grid"""
 
-    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
-    # get master_grid geopackage path
-    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['drawn_polygon'].value:
-        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
-        make_ecoregion_folders(selected_ecoregions, output_folder)
-    else:
-        # get eco region from shapefile that matches drop down choices
-        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
-        eco_regions = [region.split('-')[0] for region in eco_regions]
-        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
-        make_ecoregion_folders(selected_ecoregions, output_folder)
-    return list(selected_ecoregions['EcoRegion'].unique())
-
-
-def get_digitalcoast_folders(data_folder) -> list[pathlib.Path]:
-    """Get the lower level project folders for Digital Coast"""
-
-    digitalcoast_projects = [folder for folder in data_folder.iterdir() if folder.is_dir() and folder.stem != 'tiled']
-    digitalcoast_file_folders = []
-    for project in digitalcoast_projects:
-        dem_folder = project / 'dem'
-        for file_folder in dem_folder.iterdir():
-            if file_folder.is_dir():
-                digitalcoast_file_folders.append(file_folder)
-    return digitalcoast_file_folders
-
-
-def grid_digitalcoast_files(outputs: str) -> None:
-    """Clip VRT files to BlueTopo grid"""
-
-    blue_topo_layer = gpd.read_file(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')), layer=get_config_item('SHARED', 'TILES'))
+    print('Gridding Digital Coast files to BlueTopo grids')
+    gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
+    blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
     ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
     for ecoregion in ecoregions:
-        blue_topo_folder = ecoregion / 'BlueTopo'
-        bluetopo_folders = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
-
-        data_folder = ecoregion / 'DigitalCoast'
-        digitalcoast_file_folders = get_digitalcoast_folders(data_folder)
-
-        for file_folder in digitalcoast_file_folders:
-            tileindex_shp_path = list(file_folder.glob('tileindex*.shp'))[0]
-            tileindex_gdf = gpd.read_file(tileindex_shp_path)
-            tiled_folder = file_folder.parents[2] / 'tiled'
-            for bluetopo_folder in bluetopo_folders:
-                bluetopo_data = blue_topo_layer[blue_topo_layer['tile'] == bluetopo_folder]
-                polygon_wkt = bluetopo_data['geometry'].iloc[0]
-                tile_bluetopo_intersect = tileindex_gdf[tileindex_gdf.intersects(bluetopo_data.unary_union)]
-                if len(tile_bluetopo_intersect) > 0:
-                    intersected_images = [str(file_folder / pathlib.Path(image).name) for image in tile_bluetopo_intersect['location']]
-                    bad_files, good_files = [], []
-                    for image in intersected_images:
-                        if not pathlib.Path(image).exists():
-                            bad_files.append(image)
-                        else:
-                            good_files.append(image)
-                    if bad_files:
-                        with open(ecoregion.parents[0] / 'log_grid_tiling.txt', 'a') as writer:
-                            print(f'bad files: {bad_files}')
-                            for bad_file in bad_files:
-                                writer.write(bad_file + '\n')
-                            writer.write('\n')
-                    if good_files:
-                        output_path = tiled_folder / bluetopo_folder
+        blue_topo_folder = ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
+        bluetopo_grids = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
+        data_folder = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / data_type
+        vrt_files = list(data_folder.glob('*.vrt'))
+        for vrt in vrt_files:
+            vrt_ds = gdal.Open(str(vrt))
+            vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[3:])
+            vrt_tile_index = list(vrt_data_folder.rglob('*_dis.shp'))[0]
+            shp_driver = ogr.GetDriverByName('ESRI Shapefile')
+            vrt_tile_index_shp = shp_driver.Open(vrt_tile_index, 0)
+            dissolve_layer = vrt_tile_index_shp.GetLayer(0)
+            dissolve_feature = dissolve_layer.GetFeature(0)  # have to keep reference to feature or it will garbage collect
+            dissolve_geom = dissolve_feature.GetGeometryRef()
+            blue_topo_layer.ResetReading()
+            for tile in blue_topo_layer:
+                # Clip VRT by current polygon
+                current_tile_geom = tile.GetGeometryRef()
+                folder_name = tile.GetField('tile')
+                if folder_name in bluetopo_grids:
+                    output_path = ecoregion / get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER') / folder_name
+                    output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
+                    if output_clipped_vrt.exists():
+                        print(f' - Skipping {output_clipped_vrt.name}')
+                        continue
+                    if current_tile_geom.Intersects(dissolve_geom):
                         output_path.mkdir(parents=True, exist_ok=True)
-                        project_name = pathlib.Path(tileindex_shp_path).parents[2]
-                        clipped_vrt = output_path / f'{project_name.stem}_{bluetopo_folder}.tif'
-                        if clipped_vrt.exists():
-                            continue
-                        print(f'Creating {clipped_vrt.name}')
-                        in_memory_vrt = gdal.BuildVRT('', good_files, callback=gdal.TermProgress_nocb)
-                        gdal.Warp(
-                            clipped_vrt,
-                            in_memory_vrt,
-                            format='GTiff',
-                            cutlineDSName=polygon_wkt,
-                            cropToCutline=True,
-                            warpMemoryLimit=2684354560,
-                            dstNodata=in_memory_vrt.GetRasterBand(1).GetNoDataValue(),
-                            cutlineSRS=in_memory_vrt.GetProjection(),
-                            creationOptions=["COMPRESS=DEFLATE", "BIGTIFF=IF_NEEDED", "TILED=YES"]
-                        )
+                        print(f' - Creating {output_clipped_vrt.name}')
+                        try:
+                            polygon = current_tile_geom.ExportToWkt()
+                            gdal.Warp(
+                                str(output_clipped_vrt),
+                                str(vrt),
+                                format='GTiff',
+                                cutlineDSName=polygon,
+                                cropToCutline=True,
+                                dstNodata=-9999,
+                                cutlineSRS=vrt_ds.GetProjection(),
+                                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
+                            )
+                        except Exception as e:
+                            print(f'failure: {vrt.name} - ', e)
+                    current_tile_geom = None
+            shp_driver = None
+            dissolve_layer = None
+            vrt_ds = None
+    gpkg_ds = None
+    blue_topo_layer = None
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
@@ -292,35 +286,6 @@ def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder:
     for _, row in selected_ecoregions.iterrows():
         ecoregion_folder = output_folder / row['EcoRegion']
         ecoregion_folder.mkdir(parents=True, exist_ok=True)
-
-
-def process_bluetopo_tiles(tiles: gpd.GeoDataFrame, outputs:str) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
-
-    # get environment (dev, prod)
-    # if dev, use multiprocessing
-    # if prod, send to API endpoint of listeners in kubernetes
-        # pickle each tuple of engine and tile
-        # unpickle the object
-        # call the class method with the tile argument
-        # log success of each call
-        # notify the main caller of completion?!
-    processor = BlueTopoProcessor()
-    processor.process(tiles, outputs)
-
-
-def process_digital_coast_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
-    """Entry point for parallel proccessing of Digital Coast data"""
-    
-    processor = DigitalCoastProcessor()
-    processor.process(tiles, outputs)
-
-
-def process_stofs_files(tiles: gpd.GeoDataFrame, outputs: str) -> None:
-    """Entry point for parallel processing of STOFS data"""
-
-    processor = SurgeTideForecastProcessor()
-    processor.process(tiles, outputs)
 
 
 def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs84_srs: osr.SpatialReference) -> pathlib.Path:
@@ -333,3 +298,14 @@ def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs
         dstSRS=wgs84_srs
     )
     return raster_wgs84
+
+
+def run_vrt_creation(param_lookup: dict[str], skip_existing=False) -> None:
+    """Entry point for building VRT files for BlueTopo and Digital Coast data"""
+
+    for ecoregion in get_ecoregion_folders(param_lookup):
+        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
+            print(f'Building {ecoregion} - {dataset} VRT file')
+            create_raster_vrts(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
+        print(f'Building {ecoregion} - DigitalCoast VRT files')
+        create_raster_vrts(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)

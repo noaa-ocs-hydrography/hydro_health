@@ -3,27 +3,52 @@
 import boto3
 import os
 import rasterio
-import sys
+
 import geopandas as gpd
 import pandas as pd
 import pathlib
-import multiprocessing as mp
 import numpy as np
+import os
+import sys
 
+from multiprocessing import set_executable
 from hydro_health.helpers import hibase_logging
 from datetime import datetime
 from botocore.client import Config
 from botocore import UNSIGNED
 from lxml import etree
 from osgeo import gdal
-from concurrent.futures import ThreadPoolExecutor
+
+from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
+
+set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+def _process_tile(param_inputs: list[list]) -> None:
+    """Static function for pickling that handles processing of a single tile"""
+
+    output_folder, tile_id, ecoregion_id = param_inputs
+
+    engine = BlueTopoEngine()
+
+    tiff_file_path = engine.download_nbs_tile(output_folder, tile_id, ecoregion_id)
+    if tiff_file_path:
+        engine.create_survey_end_date_tiff(tiff_file_path)
+        mb_tiff_file = engine.rename_multiband(tiff_file_path)
+        engine.multiband_to_singleband(mb_tiff_file, band=1)
+        engine.multiband_to_singleband(mb_tiff_file, band=2)
+        mb_tiff_file.unlink() # delete the original multiband file
+        engine.set_ground_to_nodata(tiff_file_path)
+        engine.create_slope(tiff_file_path)
+        engine.create_rugosity(tiff_file_path)
 
 
-class BlueTopoProcessor:
+class BlueTopoEngine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
+
+    def __init__(self):
+        super().__init__()
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
@@ -97,16 +122,14 @@ class BlueTopoProcessor:
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, output_folder: str, row: gpd.GeoSeries) -> pathlib.Path:
+    def download_nbs_tile(self, output_folder: str, tile_id: str, ecoregion_id: str) -> pathlib.Path:
         """Download all NBS files for a single tile"""
 
-        tile_id = row[0]
-        ecoregion_id = row[1]
         nbs_bucket = self.get_bucket()
         output_pathlib = pathlib.Path(output_folder)
         output_tile_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            current_file = output_pathlib / ecoregion_id / obj_summary.key
+            current_file = output_pathlib / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
                 if current_file.exists():
@@ -165,26 +188,15 @@ class BlueTopoProcessor:
             if result:
                 self.write_message(result, output_folder)
 
-    def process_tile(self, param_inputs: list[list]) -> None:
-        """Handle processing of a single tile"""
+    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+        print('Downloading BlueTopo Datasets')
 
-        output_folder, row = param_inputs
-        tiff_file_path = self.download_nbs_tile(output_folder, row)
-        if tiff_file_path:
-            self.create_survey_end_date_tiff(tiff_file_path)
-            mb_tiff_file = self.rename_multiband(tiff_file_path)
-            self.multiband_to_singleband(mb_tiff_file, band=1)
-            self.multiband_to_singleband(mb_tiff_file, band=2)
-            mb_tiff_file.unlink() # delete the original multiband file
-            self.set_ground_to_nodata(tiff_file_path)
-            self.create_slope(tiff_file_path)
-            self.create_rugosity(tiff_file_path)
-        return f'- {row["EcoRegion"]}'
-
-    def process(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
-        param_inputs = [[outputs, row] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
-        with ThreadPoolExecutor(int(os.cpu_count() - 2)) as intersected_pool:
-            self.print_async_results(intersected_pool.map(self.process_tile, param_inputs), outputs)
+        self.setup_dask()
+        param_inputs = [[outputs, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+        future_tiles = self.client.map(_process_tile, param_inputs)
+        tile_results = self.client.gather(future_tiles)
+        self.print_async_results(tile_results, outputs)
+        self.close_dask()
 
         # log all tiles using tile_gdf
         tiles = list(tile_gdf['tile'])
