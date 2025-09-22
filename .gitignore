@@ -4,7 +4,7 @@ inputs/*
 src/hydro_health/*.xml
 *.pyc
 **/__pycache__
-inputs/lookups/hydro_health.config
+/inputs/lookups/hydro_health.config
 
 # Allow
 !inputs/*wgs84*
