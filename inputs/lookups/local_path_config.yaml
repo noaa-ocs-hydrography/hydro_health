@@ -1,0 +1,37 @@
+BLUETOPO:
+  SUBFOLDER: model_variables\Prediction\pre_processed
+DIGITALCOAST:
+  SUBFOLDER: model_variables\Prediction\raw
+  API: https://coast.noaa.gov/dataviewer/api/v1/search/missions
+  BUCKET: noaa-nos-coastal-lidar-pds
+  TILED_SUBFOLDER: model_variables\Prediction\pre_processed\tiled
+HURRICANE:
+  COUNT_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_cumulative_raster
+  DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data
+  GPKG_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_data.gpkg
+  RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_rasters
+  YEAR_PAIR_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
+MASK:
+  SUBFOLDER: masks
+  COAST_BOUNDARY_PATH: N:\CSDLProjects\Hydro_Health_Model\HHM2025\working\coastal_boundary_dataset\50m_isobath_polygon\50m_isobath_polygon.shp
+  MASK_PRED_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\masks\prediction_mask_ER_3.tif
+SEDIMENT:
+  DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
+  DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data
+  GPKG_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg
+  MASK_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif
+  RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\sediment_rasters
+SHARED:
+  BBOX_SHP: north_america_clip_wgs84.shp
+  MASTER_GRIDS: Master_Grids.gpkg
+  TILES: BlueTopo_Tile_Scheme_20250220_115927
+  STATES: USA_Census_States_200km_Overlap
+  ECOREGIONS: EcoRegions_50m
+  ECOGRIDTILES: Eco_Region_Grid_Tiles
+  MODELSUBGRIDTILES: Model_sub_Grid_Tiles
+  BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
+TSM:
+  DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
+  MEAN_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
+  YEAR_PAIR_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters

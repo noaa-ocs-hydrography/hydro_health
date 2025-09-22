@@ -1,5 +1,6 @@
-"""Class for parallel preprocessing all model data"""
+"""Class for data acquisition and preprocessing of model data"""
 
+import dask
 import os
 import re
 import pathlib

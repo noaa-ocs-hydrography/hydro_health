@@ -30,3 +30,21 @@ The Hydro Health model current contains an ArcGIS Python Toolbox and associated 
 5. Click run to start the tool <br>
 6. Click **View Details** to see log messages that show the status of the tool
 7. View the output folder you selected to see the output data
+
+
+## Developer Use
+Code is obtained from GitHub: **https://github.com/noaa-ocs-hydrography/hydro_health**
+The tools were originally built to run from within an ArcGIS Python Toolbox.  
+The code is mostly ran from the command line and requires usage of an ArcGIS Pro Conda environment. 
+
+### Conda Environment Setup
+There is an **environment.yaml** file in the parent directory. 
+Create environment from file: **conda env create -f path/to/environment.yml**
+This will create an ArcGIS Pro Conda environment with Python v3.11.10.
+This is the recommended method for building a Conda environment on remote servers as well. 
+The envrionment will have all required libraries installed. 
+1. GDAL
+2. Geopandas
+3. rioxarray
+4. boto3
+5. s3fs

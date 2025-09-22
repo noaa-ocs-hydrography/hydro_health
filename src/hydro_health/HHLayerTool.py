@@ -1,4 +1,7 @@
 import arcpy
+import pathlib
+import time
+import os
 
 
 class HHLayerTool:
@@ -30,4 +33,13 @@ class HHLayerTool:
             'input_directory', 
             'output_directory'
             ]
+    
+    def reset_log_file(self, param_lookup) -> None:
+        """Archive the previous log file"""
+
+        output = self.param_lookup['output_directory'].valueAsText
+        log_path = pathlib.Path(output) / 'log_prints.txt'
+        if log_path.exists():
+            now = time.time()
+            os.rename(log_path, pathlib.Path(output) / f'log_prints_{now}.txt')
     
