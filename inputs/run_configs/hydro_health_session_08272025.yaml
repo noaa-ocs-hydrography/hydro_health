@@ -1,7 +1,13 @@
+ecoregions:
+- ER_3
 steps:
 - tool: run_bluetopo_tile_engine
   run: true
 - tool: run_digital_coast_engine
+  run: true
+- tool: run_laz_conversion_engine
+  run: true
+- tool: run_metadata_engine
   run: true
 - tool: run_vrt_creation
   run: true
@@ -13,6 +19,4 @@ steps:
   run: false
 - tool: run_sediment_layer_engine
   run: false
-- tool: run_hurricane_layer_engine
-  run: false  
 runtimes: []
