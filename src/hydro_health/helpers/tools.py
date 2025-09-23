@@ -113,6 +113,8 @@ def create_raster_vrts(output_folder: str, file_type: str, ecoregion: str, data_
         spatial_ref = None
         geotiff_ds = None
     
+    # TODO HHPM-156 - this waits until the above loop adds all tifs to output_geotiffs
+    # this is thousands of files on remote.  Should we do it for each provider at a time?
     for crs, tile_dict in output_geotiffs.items():
         # Create VRT for each tile and set output CRS to fix heterogenous crs issue
         vrt_tiles = []
