@@ -394,7 +394,7 @@ class CreateSeabedTerrainLayerEngine():
         
         try:
             base_name = os.path.splitext(os.path.basename(bathy_path))[0]
-            output_dir = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs\BTM_outputs"
+            output_dir = os.path.join(get_config_item('TERRAIN', 'OUTPUTS'), 'BTM_outputs')
             
             # Determine the year and load the correct dictionary
             # TODO this might need to be adjusted based on actual file naming conventions
