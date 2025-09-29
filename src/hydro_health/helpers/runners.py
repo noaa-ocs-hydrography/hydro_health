@@ -10,6 +10,9 @@ from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecas
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
+from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
+
+from hydro_health.helpers.tools import get_ecoregion_folders
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -50,6 +53,18 @@ def run_metadata_engine(outputs:str) -> None:
     ecoregions = [file_path.stem for file_path in pathlib.Path(outputs).rglob('ER_*') if file_path.is_dir()]
     engine = MetadataEngine()
     engine.run(ecoregions, outputs)
+
+
+def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
+    """Entry point for building VRT files for BlueTopo and Digital Coast data"""
+
+    engine = RasterVRTEngine()
+    for ecoregion in get_ecoregion_folders(param_lookup):
+        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
+            print(f'Building {ecoregion} - {dataset} VRT file')
+            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
+        print(f'Building {ecoregion} - DigitalCoast VRT files')
+        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)
 
 
 def run_tsm_layer_engine() -> None:
