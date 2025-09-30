@@ -142,7 +142,7 @@ def get_approved_area_files():
                     approved_files[ecoregion] = []
                 if json.load(open(file))['Shape_Area'] > 5000000:
                     parent_project = file.parents[0]
-                    tile_index_shps = list(parent_project.rglob('tileindex*.shp'))
+                    tile_index_shps = list(parent_project.rglob('*index*.shp'))
                     if tile_index_shps:
                         approved_files[ecoregion].append(tile_index_shps[0])
     return approved_files
