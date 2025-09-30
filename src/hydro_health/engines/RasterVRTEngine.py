@@ -9,7 +9,7 @@ from hydro_health.helpers.tools import get_config_item
 
 class RasterVRTEngine:
     """Class for handling VRT creation of BlueTopo and DigitalCoast datasets"""
-    
+
     def __init__(self) -> None:
         self.glob_lookup = {
             'elevation': '*[0-9].tiff',
@@ -21,6 +21,12 @@ class RasterVRTEngine:
 
     def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict[str]):
         """Create main VRT files from list of outputs"""
+
+        # TODO CUDEM VRT are empty
+        # 6326_NOAA_NCEI_2019_8483 {'crs': <osgeo.osr.SpatialReference; proxy of <Swig Object of type 'OSRSpatialReferenceShadow *' at 0x0000017F228836F0> >, 
+        # 'tiles': [WindowsPath('c:/Users/Stephen.Patterson/Data/Repos/hydro_health/outputs/ER_3/model_variables/Prediction/raw/DigitalCoast/NOAA_NCEI_2019_8483/dem/NCEI_ninth_Topobathy_2014_8483/ncei19_n30X50_w086X25_2019v1.tif'), 
+        # WindowsPath('c:/Users/Stephen.Patterson/Data/Repos/hydro_health/outputs/ER_3/model_variables/Prediction/raw/DigitalCoast/NOAA_NCEI_2019_8483/dem/NCEI_ninth_Topobathy_2014_8483/ncei19_n30X50_w086X50_2019v1.tif'), 
+        # WindowsPath('c:/Users/Stephen.Patterson/Data/Repos/hydro_health/outputs/ER_3/model_variables/Prediction/raw/DigitalCoast/NOAA_NCEI_2019_8483/dem/NCEI_ninth_Topobathy_2014_8483/ncei19_n39x00_w075x25_2014v1.tif')]}
 
         for crs, tile_dict in output_geotiffs.items():
             # Create VRT for each tile and set output CRS to fix heterogenous crs issue
