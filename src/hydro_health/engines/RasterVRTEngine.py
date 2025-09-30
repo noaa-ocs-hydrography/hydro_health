@@ -19,7 +19,7 @@ class RasterVRTEngine:
             'NCMP': '*.tif'
         }
 
-    def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict[str]):
+    def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict[str]) -> None:
         """Create main VRT files from list of outputs"""
 
         for crs, tile_dict in output_geotiffs.items():
