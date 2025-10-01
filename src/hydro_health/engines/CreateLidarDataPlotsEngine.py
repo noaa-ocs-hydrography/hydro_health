@@ -391,7 +391,6 @@ class CreateLidarDataPlotsEngine():
             if os.path.exists(output_filename):
                 skip_message = f"Output file {output_filename} already exists. Skipping."
                 print(skip_message)
-                return skip_message
 
             print(f"Processing {base_name}...")
 
@@ -479,9 +478,8 @@ class CreateLidarDataPlotsEngine():
             )
             tasks.append(task)
 
-        print("Starting parallel processing with Dask...")
-        results = dask.compute(*tasks)
-        print("All Dask tasks have been completed.")
+        dask.compute(*tasks)
+        print("All vrts have been resampled.")
 
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
@@ -498,14 +496,14 @@ class CreateLidarDataPlotsEngine():
         mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
         shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
 
-        self.plot_rasters_by_year(self, raster_folder, plot_output_folder, mask_path, shp_path)
-        self.plot_rasters_by_year_individual(self, raster_folder, plot_output_folder, mask_path, shp_path)
+        # self.plot_rasters_by_year(self, raster_folder, plot_output_folder, mask_path, shp_path)
+        # self.plot_rasters_by_year_individual(self, raster_folder, plot_output_folder, mask_path, shp_path)
 
-        self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-        self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
+        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
-        self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-        self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
+        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
 
         print("Lidar Data Plots processing complete.")
 
