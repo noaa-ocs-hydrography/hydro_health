@@ -7,6 +7,7 @@ import geopandas as gpd
 from shapely.geometry import shape
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
+from itertools import combinations
 
 import rasterio
 from rasterio.enums import Resampling
@@ -462,6 +463,7 @@ class CreateLidarDataPlotsEngine():
             return
 
         print(f"Found {len(vrt_files)} VRT files to process.")
+        print(f"Unique items in vrt_files: {len(set(vrt_files))}")
 
         tasks = []
 
@@ -478,8 +480,126 @@ class CreateLidarDataPlotsEngine():
             )
             tasks.append(task)
 
-        dask.compute(*tasks)
+        # dask.compute(*tasks)
         print("All vrts have been resampled.")
+
+    def plot_difference(self, input_folder, output_folder, mask_path, shp_path, mode, use_individual_extent=False) -> None:
+        """
+        Calculates and plots raster differences for consecutive or all year pairs.
+        param str input_folder: Folder containing the input raster files.
+        param str output_folder: Folder to save the output plots.
+        param str mask_path: Path to the mask raster file.
+        param str shp_path: Path to the shapefile for coastline plotting.
+        param str mode: 'consecutive' for consecutive year differences, 'all' for all year pairs with >=5% overlap.
+        param bool use_individual_extent: Whether to use individual extents for each subplot.
+        return: None
+        """
+
+        year_datasets_map = self.getYearDatasets(input_folder)
+        if not year_datasets_map or len(year_datasets_map) < 2:
+            print("Not enough years of data to calculate differences.")
+            return
+        
+        year_datasets = {year: data[0]['path'] for year, data in year_datasets_map.items()}
+
+        target_crs = 'EPSG:3857'
+        shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
+        sorted_years = sorted(year_datasets.keys())
+        
+        all_paths = list(year_datasets.values()) + [mask_path]
+        global_transform, global_extent, global_shape = self.calculateExtent(all_paths, target_crs)
+        mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_path, global_transform, global_shape, target_crs, Resampling.nearest)
+        mask_boolean_global = mask_reproj_global != mask_nodata_global
+        
+        reprojected_global = {}
+        for year in sorted_years:
+            data, nodata = self.reprojectToGrid(year_datasets[year], global_transform, global_shape, target_crs)
+            reprojected_global[year] = np.ma.array(data, mask=np.logical_or(data == nodata, ~mask_boolean_global))
+
+        global_diff_min, global_diff_max = np.inf, -np.inf
+        year_pairs_for_minmax = list(combinations(sorted_years, 2))
+        for year1, year2 in year_pairs_for_minmax:
+            diff = reprojected_global[year2] - reprojected_global[year1]
+            if diff.count() > 0:
+                global_diff_min = min(global_diff_min, diff.min())
+                global_diff_max = max(global_diff_max, diff.max())
+
+        year_pairs = list(combinations(sorted_years, 2)) if mode == 'all' else list(zip(sorted_years, sorted_years[1:]))
+        
+        diff_data = []
+        for year1, year2 in year_pairs:
+            path1, path2 = year_datasets[year1], year_datasets[year2]
+            
+            data1_global, data2_global = reprojected_global[year1], reprojected_global[year2]
+            combined_mask_global = np.ma.mask_or(data1_global.mask, data2_global.mask)
+            overlapping_pixels = np.sum(~combined_mask_global)
+            smaller_year_pixels = min(np.sum(~data1_global.mask), np.sum(~data2_global.mask))
+            overlap_percentage = (overlapping_pixels / smaller_year_pixels * 100) if smaller_year_pixels > 0 else 0
+            
+            if mode == 'all' and overlap_percentage < 5:
+                continue
+            
+            pixel_area_m2 = abs(global_transform.a * global_transform.e)
+            overlap_area_km2 = (overlapping_pixels * pixel_area_m2) / 1e6
+            overlap_text = f"Overlap: {overlap_percentage:.2f}% ({overlap_area_km2:.2f} km$^2$)"
+            title = f'Difference: {year1} to {year2}\n{overlap_text}'
+            
+            diff_data.append({'title': title, 'path1': path1, 'path2': path2, 'year1': year1, 'year2': year2})
+            
+        if not diff_data:
+            print(f"No year pairs found for '{mode}' mode with sufficient overlap.")
+            return
+
+        num_diffs = len(diff_data)
+        cols = math.ceil(math.sqrt(num_diffs))
+        rows = math.ceil(num_diffs / cols)
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(15, 15), constrained_layout=True, sharex=not use_individual_extent, sharey=not use_individual_extent)
+        axes = np.atleast_1d(axes).flatten()
+        im_diff = None
+        cmap = plt.colormaps['ocean'].copy()
+        cmap.set_bad(color='white')
+
+        for i, data_dict in enumerate(diff_data):
+            ax = axes[i]
+            
+            if use_individual_extent:
+                local_transform, local_extent, local_shape = self.calculateExtent([data_dict['path1'], data_dict['path2'], mask_path], target_crs)
+                
+                data1, nodata1 = self.reprojectToGrid(data_dict['path1'], local_transform, local_shape, target_crs)
+                data2, nodata2 = self.reprojectToGrid(data_dict['path2'], local_transform, local_shape, target_crs)
+                mask_reproj, mask_nodata = self.reprojectToGrid(mask_path, local_transform, local_shape, target_crs, Resampling.nearest)
+                
+                mask_boolean = mask_reproj != mask_nodata
+                combined_mask = np.logical_or.reduce((data1 == nodata1, data2 == nodata2, ~mask_boolean))
+                diff = np.ma.array(data2 - data1, mask=combined_mask)
+                
+                im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
+                mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=local_transform) if val > 0]
+                self.setupSubplot(ax, shp_gdf, local_extent)
+            else:
+                diff = reprojected_global[data_dict['year2']] - reprojected_global[data_dict['year1']]
+                im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
+                mask_boolean = mask_reproj_global != mask_nodata_global
+                mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=global_transform) if val > 0]
+                self.setupSubplot(ax, shp_gdf, global_extent)
+
+            ax.set_title(data_dict['title'], loc='left', fontsize=12, fontweight='bold')
+            for geom in mask_geometries:
+                x, y = geom.exterior.xy
+                ax.plot(x, y, color='black', linewidth=0.5, zorder=10)
+
+        for j in range(i + 1, len(axes)):
+            axes[j].axis('off')
+        
+        extent_type = "Individual" if use_individual_extent else "Global"
+        suptitle = f"{mode.capitalize().replace('_', ' ')} Year Differences ({extent_type} Extent)"
+        if mode == 'all':
+            suptitle = f"All Year Differences >= 5% Overlap ({extent_type} Extent)"
+        
+        output_filename = f'{mode}_year_differences_{extent_type.lower()}_extent.png'
+        dpi = 600 if use_individual_extent else 1200
+        self.finalizeFigure(fig, axes, im_diff, 'Difference (m)', suptitle, os.path.join(output_folder, output_filename), dpi)
 
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
@@ -487,7 +607,7 @@ class CreateLidarDataPlotsEngine():
         client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
         
-        self.resample_vrt_files()
+        # self.resample_vrt_files()
 
         client.close()
 
@@ -496,14 +616,15 @@ class CreateLidarDataPlotsEngine():
         mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
         shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
 
-        # self.plot_rasters_by_year(self, raster_folder, plot_output_folder, mask_path, shp_path)
-        # self.plot_rasters_by_year_individual(self, raster_folder, plot_output_folder, mask_path, shp_path)
+        # self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
+        # self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
 
-        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
-        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-        # self.plot_difference(self, raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+
 
         print("Lidar Data Plots processing complete.")
 
