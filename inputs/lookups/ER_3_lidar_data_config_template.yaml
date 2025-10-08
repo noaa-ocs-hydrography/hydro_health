@@ -3,379 +3,473 @@ EcoRegion-3:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   USGS_1885_9562:
     use: false
-    date: 1885-01-01, 2021-12-31
+    date: 2021-12-31, 1885-01-01
     year: null
+    note: null
   NOAA_USGS_NASA_1998_22:
     use: false
     date: 1998-10-29, 1998-11-09
     year: null
+    note: null
   USGS_2001_525:
     use: false
     date: 2001-09-09, 2001-10-13
     year: null
+    note: null
   USGS_NASA_2002_6303:
     use: false
     date: Date not found
     year: null
+    note: null
   USACE_USACE_NCMP_2004_19:
     use: false
-    date: 2004-04-01, 2004-09-25
+    date: 2004-09-25, 2004-04-01
     year: null
+    note: null
   USACE_USACE_NCMP_2004_37:
     use: false
-    date: 2004-11-01, 2004-12-31
+    date: 2004-12-31, 2004-11-01
     year: null
+    note: null
   USGS_2004_1123:
     use: false
     date: Date not found
     year: null
+    note: null
   USACE_USACE_NCMP_2005_29:
     use: false
     date: 2005-07-13, 2005-07-25
     year: null
+    note: null
   USACE_USACE_NCMP_2005_31:
     use: false
-    date: 2005-10-12, 2005-12-11
+    date: 2005-12-11, 2005-10-12
     year: null
+    note: null
   USACE_USACE_NCMP_2006_44:
     use: false
     date: 2006-05-28, 2006-06-10
     year: null
+    note: null
   NPS_USGS_NASA_2007_522:
     use: false
     date: 2007-06-27, 2007-06-30
     year: null
+    note: null
   USACE_FL_State_Agencies_2007_529:
     use: false
     date: 2007-06-18, 2007-08-30
     year: null
+    note: null
   USACE_NCMP_2010_9453:
     use: false
-    date: Date not found
+    date: 2010-01, 2010-03
     year: null
+    note: null
   USACE_NCMP_2010_9454:
     use: false
     date: 2010-06-20, 2010-07-22
     year: null
+    note: null
   USACE_USACE_NCMP_2010_1064:
     use: false
-    date: Date not found
+    date: 2010-01, 2010-03
     year: null
+    note: null
   USACE_USACE_NCMP_2010_8603:
     use: false
     date: 2010-06-20, 2010-07-22
     year: null
+    note: null
   USGS_2011_1425:
     use: false
-    date: 2011-01-22, 2011-01-28
+    date: 2011-01-28, 2011-01-22
     year: null
+    note: null
   NOAA_NCEI_2014_8483:
     use: false
-    date: Date not found
+    date: '2014'
     year: null
+    note: null
   NOAA_NGS_2014_4972:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   NOAA_NGS_2014_5102:
     use: false
     date: 2014-08-29, 2014-09-23
     year: null
+    note: null
   NOAA_NGS_2015_6210:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   NOAA_NGS_2015_6212:
     use: false
     date: Date not found
     year: null
+    note: null
   SRWMD_USGS_2015_9172:
     use: false
-    date: 2015-12-10, 2016-01-14
+    date: 2016-01-14, 2015-12-10
     year: null
+    note: null
   SRWMD_USGS_2015_9178:
     use: false
-    date: 2015-12-10, 2016-01-14
+    date: 2016-01-14, 2015-12-10
     year: null
+    note: null
   USACE_USACE_NCMP_2015_5183:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   USACE_USACE_NCMP_2015_5190:
     use: false
-    date: 2015-06-06, 2015-06-30
+    date: 2015-06-30, 2015-06-06
     year: null
+    note: null
   NOAA_NCEI_2016_8483:
     use: false
-    date: Date not found
+    date: '2016'
     year: null
+    note: null
   NOAA_NCEI_2016_8580:
     use: false
-    date: Date not found
+    date: '2016'
     year: null
+    note: null
   NOAA_NGS_2016_6246:
     use: false
     date: 2016-04-19, 2016-04-25
     year: null
+    note: null
   NOAA_NGS_2016_6271:
     use: false
-    date: 2016-07-21, 2016-11-21
+    date: 2016-11-21, 2016-07-21
     year: null
+    note: null
   NOAA_NGS_2016_6272:
     use: false
-    date: 2016-07-21, 2016-11-21
+    date: 2016-11-21, 2016-07-21
     year: null
+    note: null
   NOAA_NGS_2016_6322:
     use: false
-    date: 2016-11-03, 2016-11-11
+    date: 2016-11-11, 2016-11-03
     year: null
+    note: null
   NOAA_NGS_2016_6363:
     use: false
-    date: 2016-07-21, 2016-11-21
+    date: 2016-11-21, 2016-07-21
     year: null
+    note: null
   NOAA_NGS_2016_6364:
     use: false
-    date: 2016-07-21, 2016-11-21
+    date: 2016-11-21, 2016-07-21
     year: null
+    note: null
   NOAA_NGS_2016_6365:
     use: false
-    date: 2016-07-21, 2016-11-21
+    date: 2016-11-21, 2016-07-21
     year: null
+    note: null
   NOAA_NGS_2016_6366:
     use: false
     date: 2016-04-19, 2016-04-25
     year: null
+    note: null
   NOAA_NGS_2016_8407:
     use: false
     date: 2016-05-06, 2016-05-17
     year: null
+    note: null
   NOAA_NGS_2016_8574:
     use: false
-    date: 2016-10-11, 2016-10-24
+    date: 2016-10-24, 2016-10-11
     year: null
+    note: null
   NOAA_NGS_2016_8583:
     use: false
-    date: 2016-10-11, 2016-10-24
+    date: 2016-10-24, 2016-10-11
     year: null
+    note: null
   NOAA_NGS_2016_8771:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   NOAA_NGS_2016_8773:
     use: false
     date: 2016-02-11, 2016-02-14
     year: null
+    note: null
   NOAA_NGS_2016_8781:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   NOAA_NGS_2016_8791:
     use: false
     date: 2016-05-11, 2016-05-14
     year: null
+    note: null
   USACE_USACE_NCMP_2016_5186:
     use: false
-    date: 2016-07-23, 2016-10-10
+    date: 2016-10-10, 2016-07-23
     year: null
+    note: null
   USACE_USACE_NCMP_2016_6371:
     use: false
-    date: 2016-07-23, 2016-10-10
+    date: 2016-10-10, 2016-07-23
     year: null
+    note: null
   USGS_2016_9174:
     use: false
-    date: 2016-12-02, 2019-11-12, 2016-12-02, 2017-02-15, 2016-12-28, 2017-03-09,
-      2017-02-17, 2017-04-02, 2017-02-26, 2017-11-20, 2017-03-16, 2017-04-02, 2017-03-19,
-      2018-12-18, 2018-01-02, 2018-01-19, 2018-01-14, 2018-12-17
+    date: 2017-03-19, 2018-01-14, 2018-12-18, 2016-12-02, 2017-03-16, 2017-04-02,
+      2017-11-20, 2016-12-28, 2017-02-15, 2017-02-26, 2018-12-17, 2018-01-19, 2017-03-09,
+      2017-02-17, 2018-01-02, 2019-11-12
     year: null
+    note: null
   NOAA_NCEI_2017_8483:
     use: false
-    date: Date not found
+    date: '2017'
     year: null
+    note: null
   NOAA_NCEI_2017_8580:
     use: false
-    date: Date not found
+    date: '2017'
     year: null
+    note: null
   NOAA_NGS_2017_8412:
     use: false
-    date: 2017-02-16, 2017-02-20
+    date: 2017-02-20, 2017-02-16
     year: null
+    note: null
   NOAA_NGS_2017_8480:
     use: false
-    date: 2017-02-16, 2017-02-20
+    date: 2017-02-20, 2017-02-16
     year: null
+    note: null
   NOAA_NGS_2017_8793:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   SRWMD_USGS_2017_9179:
     use: false
-    date: 2017-01-14, 2017-02-10
+    date: 2017-02-10, 2017-01-14
     year: null
+    note: null
   USACE_2017_6330:
     use: false
     date: 2017-09-18, 2017-10-25
     year: null
+    note: null
   USACE_2017_8388:
     use: false
     date: 2017-09-18, 2017-10-25
     year: null
+    note: null
   USGS_2017_9118:
     use: false
-    date: 2017-01-14, 2017-02-10
+    date: 2017-02-10, 2017-01-14
     year: null
+    note: null
   USGS_2017_9818:
     use: false
     date: 2017-04-19, 2017-06-12
     year: null
+    note: null
   NOAA_NCEI_2018_8483:
     use: false
-    date: Date not found
+    date: '2018'
     year: null
+    note: null
   NOAA_NCEI_2018_8580:
     use: false
-    date: Date not found
+    date: '2018'
     year: null
+    note: null
   NOAA_NGS_2018_8925:
     use: false
     date: 2018-07-14, 2018-07-26
     year: null
+    note: null
   NOAA_NGS_2018_9060:
     use: false
     date: 2018-11-20, 2019-03-23
     year: null
+    note: null
   NOAA_NGS_2018_9081:
     use: false
     date: 2018-11-20, 2019-03-23
     year: null
+    note: null
   NOAA_NGS_2018_9609:
     use: false
-    date: 2018-07-30, 2018-08-06
+    date: 2018-08-06, 2018-07-30
     year: null
+    note: null
   NOAA_NGS_2018_9652:
     use: false
-    date: 2018-09-13, 2018-11-02
+    date: 2018-11-02, 2018-09-13
     year: null
+    note: null
   USACE_2018_8625:
     use: false
     date: 2018-10-24, 2018-11-04
     year: null
+    note: null
   USACE_2018_8629:
     use: false
     date: 2018-10-24, 2018-11-04
     year: null
+    note: null
   USDA_NRCS_USGS_2018_9049:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   USGS_2018_9117:
     use: false
     date: 2018-10-27, 2018-11-03
     year: null
+    note: null
   NOAA_NCEI_2019_8483:
     use: false
-    date: Date not found
+    date: '2019'
     year: null
+    note: null
   NOAA_NCEI_2019_8580:
     use: false
-    date: Date not found
+    date: '2019'
     year: null
+    note: null
   NOAA_NGS_2019_9278:
     use: false
-    date: 2019-11-22, 2019-12-20
+    date: 2019-12-20, 2019-11-22
     year: null
+    note: null
   NOAA_NGS_2019_9279:
     use: false
-    date: 2019-11-22, 2019-12-20
+    date: 2019-12-20, 2019-11-22
     year: null
+    note: null
   NOAA_NGS_2019_9708:
     use: false
-    date: 2019-11-26, 2020-04-28, 2019-11-27, 2020-04-09, 2019-11-27, 2020-02-22,
-      2019-11-27, 2020-07-30, 2019-12-04, 2020-05-02, 2019-12-15, 2020-06-27, 2020-01-01,
-      2020-07-30, 2020-01-27, 2020-04-28, 2020-02-15, 2020-05-19
+    date: 2020-05-19, 2020-01-01, 2019-12-04, 2019-11-27, 2019-11-26, 2020-05-02,
+      2019-12-15, 2020-06-27, 2020-02-22, 2020-01-27, 2020-02-15, 2020-04-28, 2020-07-30,
+      2020-04-09
     year: null
+    note: null
   NOAA_NGS_2019_9709:
     use: false
     date: metadata.txt not found
     year: null
+    note: null
   NOAA_NCEI_2020_8483:
     use: false
-    date: Date not found
+    date: '2020'
     year: null
+    note: null
   NOAA_NCEI_2020_8580:
     use: false
-    date: Date not found
+    date: '2020'
     year: null
+    note: null
   USACE_NCMP_2020_9264:
     use: false
-    date: 2020-09-22, 2020-10-05, 2020-09-25, 2020-10-13, 2020-10-01, 2020-10-13
+    date: 2020-09-22, 2020-10-13, 2020-10-05, 2020-09-25, 2020-10-01
     year: null
+    note: null
   USACE_USACE_NCMP_2020_9200:
     use: false
-    date: 2020-09-22, 2020-10-05, 2020-09-25, 2020-10-13, 2020-10-01, 2020-10-13
+    date: 2020-09-22, 2020-10-13, 2020-10-05, 2020-09-25, 2020-10-01
     year: null
+    note: null
   NOAA_NGS_2021_9480:
     use: false
-    date: 2021-01-26, 2021-02-27
+    date: 2021-02-27, 2021-01-26
     year: null
+    note: null
   NOAA_NGS_2021_9481:
     use: false
-    date: 2021-01-26, 2021-02-27
+    date: 2021-02-27, 2021-01-26
     year: null
+    note: null
   NOAA_NCEI_2022_8483:
     use: false
-    date: Date not found
+    date: '2022'
     year: null
+    note: null
   NOAA_NCEI_2022_8580:
     use: false
-    date: Date not found
+    date: '2022'
     year: null
+    note: null
   NOAA_NGS_2022_10149:
     use: false
     date: 2022-10-27, 2022-11-29
     year: null
+    note: null
   NOAA_NGS_2022_10150:
     use: false
     date: 2022-10-27, 2022-11-29
     year: null
+    note: null
   NOAA_NGS_2022_10151:
     use: false
     date: 2022-10-18, 2022-12-03
     year: null
+    note: null
   NOAA_NGS_2022_10152:
     use: false
     date: 2022-10-18, 2022-12-03
     year: null
+    note: null
   NOAA_NGS_2022_10263:
     use: false
     date: 2022-02-04, 2023-05-16
     year: null
+    note: null
   USACE_2022_10010:
     use: false
     date: 2022-11-16, 2022-11-18
     year: null
+    note: null
   USACE_NCMP_2022_10012:
     use: false
     date: 2022-05-09, 2022-06-08
     year: null
+    note: null
   USACE_NCMP_2022_10314:
     use: false
-    date: 2022-06-24, 2022-06-25, 2022-06-27, 2022-08-08, 2022-07-17, 2022-07-19
+    date: 2022-06-24, 2022-06-27, 2022-08-08, 2022-07-19, 2022-06-25, 2022-07-17
     year: null
+    note: null
   USACE_NCMP_2022_10315:
     use: false
-    date: 2022-06-24, 2022-06-25, 2022-06-27, 2022-08-08, 2022-07-17, 2022-07-19
+    date: 2022-06-24, 2022-06-27, 2022-08-08, 2022-07-19, 2022-06-25, 2022-07-17
     year: null
+    note: null
   USACE_NCMP_2022_9570:
     use: false
     date: 2022-05-09, 2022-06-08
     year: null
+    note: null
   USACE_NCMP_2022_9651:
     use: false
     date: 2022-11-16, 2022-11-18
     year: null
+    note: null
   USACE_NCMP_2024_10208:
     use: false
     date: Date not found
     year: null
+    note: null

@@ -39,9 +39,9 @@ def generate_ecoregion_yaml(ecoregion_number, base_path, output_filename) -> Non
         try:
             with open(metadata_path, 'r') as f:
                 content = f.read()
-                dates_found = re.findall(r'\d{4}-\d{2}-\d{2}', content)
+                dates_found = re.findall(r'\b\d{4}(?:-\d{2}(?:-\d{2})?)?\b', content)
                 if dates_found:
-                    date_str = ', '.join(dates_found)
+                    date_str = ', '.join(set(dates_found))
         except FileNotFoundError:
             date_str = 'metadata.txt not found'
         except Exception as e:
@@ -50,7 +50,8 @@ def generate_ecoregion_yaml(ecoregion_number, base_path, output_filename) -> Non
         config_data[section_name][dir_name] = {
             'use': False,
             'date': date_str,
-            'year': None
+            'year': None,
+            'note': None
         }
 
     try:
@@ -65,7 +66,6 @@ if __name__ == '__main__':
     
     DATA_DIRECTORY = r'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast'
 
-    
     OUTPUT_FILE = os.path.join(INPUTS, f'ER_{ECOREGION_ID}_lidar_data_config_template.yaml')
 
     generate_ecoregion_yaml(
