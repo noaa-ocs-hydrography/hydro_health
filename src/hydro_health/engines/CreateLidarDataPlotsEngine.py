@@ -112,7 +112,7 @@ class CreateLidarDataPlotsEngine():
 
         if im is not None and im.get_array() is not None and im.get_array().count() > 0:
             cbar = fig.colorbar(im, ax=axes.ravel().tolist())
-            cbar.set_label(cbar_label, fontsize=20, rotation=270, labelpad=20)
+            cbar.set_label(cbar_label, fontsize=14, rotation=270, labelpad=20)
 
         # Added a legend for the new 'Overlap Area' outline
         legend_lines = [
@@ -120,9 +120,9 @@ class CreateLidarDataPlotsEngine():
             Line2D([0], [0], color='gray', lw=0.5, label='50m Isobath'),
             Line2D([0], [0], color='red', lw=1.5, label='Overlap Area') # New legend entry
         ]
-        fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=1, fontsize=14)
+        fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=1, fontsize=8)
         
-        plt.suptitle(suptitle, fontsize=24)
+        plt.suptitle(suptitle, fontsize=14)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         plt.savefig(output_path, dpi=dpi, format='png', bbox_inches='tight')
         plt.close(fig)
@@ -272,7 +272,7 @@ class CreateLidarDataPlotsEngine():
             total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
             
             subplot_title = year_datasets[year][0]['title']
-            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
+            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=8)
             
             ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.3), 
                     fancybox=True, shadow=False, ncol=1, fontsize=8)
@@ -369,7 +369,7 @@ class CreateLidarDataPlotsEngine():
             
             # Use the 'title' field from the dataset dictionary for the subplot title
             subplot_title = year_datasets[year][0]['title']
-            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=10)
+            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=8)
             
             ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
                     fancybox=True, shadow=False, ncol=1, fontsize=8)
@@ -584,7 +584,7 @@ class CreateLidarDataPlotsEngine():
                 mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=global_transform) if val > 0]
                 self.setupSubplot(ax, shp_gdf, global_extent)
 
-            ax.set_title(data_dict['title'], loc='left', fontsize=12, fontweight='bold')
+            ax.set_title(data_dict['title'], loc='left', fontsize=8, fontweight='bold')
             for geom in mask_geometries:
                 x, y = geom.exterior.xy
                 ax.plot(x, y, color='black', linewidth=0.5, zorder=10)
@@ -604,26 +604,26 @@ class CreateLidarDataPlotsEngine():
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
-        client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
-        print(f"Dask Dashboard: {client.dashboard_link}")
+        # client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
+        # print(f"Dask Dashboard: {client.dashboard_link}")
         
         # self.resample_vrt_files()
 
-        client.close()
+        # client.close()
 
         raster_folder = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
         plot_output_folder = get_config_item("LIDAR_PLOTS", "PLOT_OUTPUTS")
         mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
         shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
 
-        # self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
+        self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
         # self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
 
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+        # self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
+        # self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
         self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+        # self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
 
 
         print("Lidar Data Plots processing complete.")
@@ -642,8 +642,8 @@ class CreateLidarDataPlotsEngine():
         ax.set_ylim(extent[2], extent[3])
         ax.set_aspect('equal')
         ax.tick_params(left=True, right=True, labelleft=True, labelbottom=True, bottom=True)
-        ax.set_xlabel('X distance (km)', fontsize=10)
-        ax.set_ylabel('Y distance (km)', fontsize=10)
+        ax.set_xlabel('X distance (km)', fontsize=8)
+        ax.set_ylabel('Y distance (km)', fontsize=8)
         
         xticks = ax.get_xticks()
         yticks = ax.get_yticks()
