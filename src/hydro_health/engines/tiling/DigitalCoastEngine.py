@@ -21,6 +21,7 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+os.environ['SHAPE_RESTORE_SHX'] = 'YES'  # Reruns are throwing fiona DriverError for .SHX, line 60
 
 
 def _download_tile_index(param_inputs: list[list]) -> None:
@@ -30,8 +31,6 @@ def _download_tile_index(param_inputs: list[list]) -> None:
 
     engine = DigitalCoastEngine()
 
-    # TODO we already only choose USACE NCMP providers, so this might always be from this s3 bucket
-    # only allow dem data type.  Others are: laz
     if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link or 'laz' in download_link):
         _, data_file = download_link.replace('/index.html', '').split('.com')
         lidar_bucket = engine.get_bucket()
@@ -137,9 +136,11 @@ class DigitalCoastEngine(Engine):
                         output_tif_file.unlink()
                     shutil.move(tif_file, year_folder)
                 # Copy tileindex
-                tile_index_files = project_folder.glob('tileindex*')
+                tile_index_files = project_folder.glob('*index*.shp')
                 for tile_index in tile_index_files:
-                    shutil.copy(tile_index, year_folder)
+                    # use gpd to copy all shp files at once
+                    tile_index_df = gpd.read_file(tile_index)
+                    tile_index_df.to_file(year_folder / tile_index.name)
                 # Copy feature.json
                 feature_json = project_folder.parents[1] / 'feature.json'
                 shutil.copy(feature_json, year_folder.parents[1])
@@ -150,7 +151,7 @@ class DigitalCoastEngine(Engine):
         """Exclude any small area surveys"""
 
         self.write_message(f'Checking area size of tileindex files', outputs)
-        tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('tileindex*.shp') if 'unused_providers' not in str(folder)]
+        tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(folder)]
         move_providers = []
         for shp_path in tile_index_shapefiles:
             shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
@@ -238,7 +239,7 @@ class DigitalCoastEngine(Engine):
         """Download intersected Digital Coast files"""
 
         self.write_message('Downloading elevation datasets', outputs)
-        tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('tileindex*.shp') if 'unused_providers' not in str(folder)]
+        tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(folder)]
         param_inputs = [[ecoregion_tile_gdf, shp_path, outputs] for shp_path in tile_index_shapefiles]
         future_tiles = self.client.map(_download_intersected_datasets, param_inputs)
         tile_results = self.client.gather(future_tiles)
