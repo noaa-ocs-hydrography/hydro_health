@@ -118,7 +118,7 @@ class CreateLidarDataPlotsEngine():
 
         if im is not None and im.get_array() is not None and im.get_array().count() > 0:
             cbar = fig.colorbar(im, ax=axes.ravel().tolist())
-            cbar.set_label(cbar_label, fontsize=14, rotation=270, labelpad=20)
+            cbar.set_label(cbar_label, fontsize=8, rotation=270, labelpad=20)
 
         # Added a legend for the new 'Overlap Area' outline
         legend_lines = [
@@ -126,9 +126,9 @@ class CreateLidarDataPlotsEngine():
             Line2D([0], [0], color='gray', lw=0.5, label='50m Isobath'),
             Line2D([0], [0], color='red', lw=1.5, label='Overlap Area') # New legend entry
         ]
-        fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=1, fontsize=8)
+        fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=1, fontsize=2)
         
-        plt.suptitle(suptitle, fontsize=14)
+        plt.suptitle(suptitle, fontsize=16, fontweight='bold')
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         plt.savefig(output_path, dpi=dpi, format='png', bbox_inches='tight')
         plt.close(fig)
@@ -136,7 +136,9 @@ class CreateLidarDataPlotsEngine():
 
     def getYearDatasets(self, input_folder, config) -> dict:
         year_datasets = {}
-        filename_pattern = re.compile(r'(.+?)(?:_(\d{4}))?_(\d+)_resampled\.tif', re.IGNORECASE)
+        import re
+
+        filename_pattern = re.compile(r'(.+?)(?:_(\d{4}))?(?:_(\d+))?_resampled\.tif', re.IGNORECASE)
         
         base_folder = os.path.dirname(input_folder)
         base_folder = os.path.join(base_folder, 'DigitalCoast')
@@ -237,11 +239,14 @@ class CreateLidarDataPlotsEngine():
         global_min, global_max = np.inf, -np.inf
         for path in all_raster_paths:
             reprojected_data, nodata = self.reprojectToGrid(path, common_transform, common_shape, target_crs)
-            combined_mask = np.logical_or(reprojected_data == nodata, ~mask_boolean_global)
+            combined_mask = np.logical_or.reduce((
+                    reprojected_data == nodata, 
+                    ~mask_boolean_global, # or ~mask_boolean_global_scope for the other function
+                    reprojected_data >= 0
+                ))
             masked_data = np.ma.array(reprojected_data, mask=combined_mask)
             if masked_data.count() > 0:
                 global_min = min(global_min, masked_data.min())
-                global_max = max(global_max, masked_data.max())
 
         cmap = plt.colormaps['ocean'].copy()
         cmap.set_bad(color='white')
@@ -278,9 +283,13 @@ class CreateLidarDataPlotsEngine():
                 legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
                 
                 # The display_mask is now simpler since the >= 0 values are already handled
-                display_mask = np.logical_or(destination == nodata, ~mask_boolean_global)
+                display_mask = np.logical_or.reduce((
+                    destination == nodata, 
+                    ~mask_boolean_global, # or ~mask_boolean_local for the other function
+                    destination >= 0
+                ))
                 masked_destination = np.ma.array(destination, mask=display_mask)
-                im = ax.imshow(masked_destination, extent=common_extent, cmap=cmap, vmin=global_min, vmax=global_max)
+                im = ax.imshow(masked_destination, extent=common_extent, cmap=cmap, vmin=global_min, vmax=0)
 
             for geom in mask_geometries_global:
                 x, y = geom.exterior.xy
@@ -293,7 +302,10 @@ class CreateLidarDataPlotsEngine():
             total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
             
             subplot_title = self.year_datasets[year][0]['title']
-            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=8)
+            ax.set_title(
+                f"{subplot_title}\nTotal Area: {total_area_km2:.0f} km$^2$",
+                fontsize=10
+            )
             
             ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.3), 
                     fancybox=True, shadow=False, ncol=1, fontsize=8)
@@ -328,11 +340,14 @@ class CreateLidarDataPlotsEngine():
         global_min, global_max = np.inf, -np.inf
         for path in all_raster_paths:
             reprojected_data, nodata = self.reprojectToGrid(path, global_transform, global_shape, target_crs)
-            combined_mask = np.logical_or(reprojected_data == nodata, ~mask_boolean_global_scope)
+            combined_mask = np.logical_or.reduce((
+                    reprojected_data == nodata, 
+                    ~mask_boolean_global_scope, 
+                    reprojected_data >= 0
+                ))
             masked_data = np.ma.array(reprojected_data, mask=combined_mask)
             if masked_data.count() > 0:
                 global_min = min(global_min, masked_data.min())
-                global_max = max(global_max, masked_data.max())
 
         cmap = plt.colormaps['ocean'].copy()
         cmap.set_bad(color='white')
@@ -389,10 +404,10 @@ class CreateLidarDataPlotsEngine():
             
             # Use the 'title' field from the dataset dictionary for the subplot title
             subplot_title = self.year_datasets[year][0]['title']
-            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.2f} km$^2$", fontsize=8)
+            ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.0f} km$^2$", fontsize=8)
             
             ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
-                    fancybox=True, shadow=False, ncol=1, fontsize=8)
+                    fancybox=True, shadow=False, ncol=1, fontsize=2)
 
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
@@ -556,13 +571,14 @@ class CreateLidarDataPlotsEngine():
             overlapping_pixels = np.sum(~combined_mask_global)
             smaller_year_pixels = min(np.sum(~data1_global.mask), np.sum(~data2_global.mask))
             overlap_percentage = (overlapping_pixels / smaller_year_pixels * 100) if smaller_year_pixels > 0 else 0
-            
-            if mode == 'all' and overlap_percentage < 5:
-                continue
-            
+
             pixel_area_m2 = abs(global_transform.a * global_transform.e)
             overlap_area_km2 = (overlapping_pixels * pixel_area_m2) / 1e6
-            overlap_text = f"Overlap: {overlap_percentage:.2f}% ({overlap_area_km2:.2f} km$^2$)"
+            
+            if mode == 'all' and overlap_area_km2 < 10 or overlap_percentage < 1:
+                continue
+
+            overlap_text = f"Overlap: {overlap_area_km2:.0f} km$^2$ ({overlap_percentage:.1f}%)"
             title = f'Difference: {year1} to {year2}\n{overlap_text}'
             
             diff_data.append({'title': title, 'path1': path1, 'path2': path2, 'year1': year1, 'year2': year2})
@@ -602,12 +618,12 @@ class CreateLidarDataPlotsEngine():
                 ))
                 diff = np.ma.array(data2 - data1, mask=combined_mask)
                 
-                im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
+                im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=0)
                 mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=local_transform) if val > 0]
                 self.setupSubplot(ax, shp_gdf, local_extent)
             else:
                 diff = reprojected_global[data_dict['year2']] - reprojected_global[data_dict['year1']]
-                im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
+                im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=0)
                 # --- ADD THIS CODE BLOCK ---
                 # Create a mask of the valid overlap area
                 overlap_mask = ~np.ma.mask_or(reprojected_global[data_dict['year1']].mask, reprojected_global[data_dict['year2']].mask)
@@ -626,7 +642,7 @@ class CreateLidarDataPlotsEngine():
                 mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=global_transform) if val > 0]
                 self.setupSubplot(ax, shp_gdf, global_extent)
 
-            ax.set_title(data_dict['title'], loc='left', fontsize=8, fontweight='bold')
+            ax.set_title(data_dict['title'], loc='left', fontsize=8)
             for geom in mask_geometries:
                 x, y = geom.exterior.xy
                 ax.plot(x, y, color='black', linewidth=0.5, zorder=10)
@@ -637,7 +653,7 @@ class CreateLidarDataPlotsEngine():
         extent_type = "Individual" if use_individual_extent else "Global"
         suptitle = f"{mode.capitalize().replace('_', ' ')} Year Differences ({extent_type} Extent)"
         if mode == 'all':
-            suptitle = f"All Year Differences >= 5% Overlap ({extent_type} Extent)"
+            suptitle = f"All Year Differences >= 10 km2 or 1% Overlap ({extent_type} Extent)"
         
         output_filename = f'{mode}_year_differences_{extent_type.lower()}_extent.png'
         dpi = 600 if use_individual_extent else 1200
@@ -662,6 +678,7 @@ class CreateLidarDataPlotsEngine():
 
         self.config = self.load_config(config_path, 'EcoRegion-3')
         self.year_datasets = self.getYearDatasets(raster_folder, self.config)
+        print(self.year_datasets)
 
         self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
         # self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
@@ -689,10 +706,10 @@ class CreateLidarDataPlotsEngine():
         ax.set_ylim(extent[2], extent[3])
         ax.set_aspect('equal')
         ax.tick_params(left=True, right=True, labelleft=True, labelbottom=True, bottom=True)
-        ax.set_xlabel('X distance (km)', fontsize=8)
-        ax.set_ylabel('Y distance (km)', fontsize=8)
+        ax.set_xlabel('X distance (km)', fontsize=4)
+        ax.set_ylabel('Y distance (km)', fontsize=4)
         
         xticks = ax.get_xticks()
         yticks = ax.get_yticks()
-        ax.set_xticklabels([f'{val/1000:.1f}' for val in xticks], fontsize=8)
-        ax.set_yticklabels([f'{val/1000:.1f}' for val in yticks], fontsize=8)
+        ax.set_xticklabels([f'{val/1000:.1f}' for val in xticks], fontsize=4)
+        ax.set_yticklabels([f'{val/1000:.1f}' for val in yticks], fontsize=4)

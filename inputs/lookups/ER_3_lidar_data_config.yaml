@@ -14,11 +14,16 @@ EcoRegion-3:
     date: 1998-10-29, 1998-11-09
     year: null
     note: Don't use, valid dataset, but every value is positive
+  USGS_2001:
+    use: true
+    date: null
+    year: null
+    note: Valid dataset, manual download      
   USGS_2001_525:
     use: false
     date: 2001-09-09, 2001-10-13
     year: null
-    note: Corrupted LAZ dataset, no DEM available or alternative dataset
+    note: Corrupted LAZ dataset, using the manual download 2001_USGS_ATM_J1233561 instead, although smaller extent?
   USGS_NASA_2002_6303:
     use: false
     date: Date not found
@@ -39,21 +44,46 @@ EcoRegion-3:
     date: Date not found
     year: '2004'
     note: Resampled tif might need higher resolution
+  PostIvan_2004:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download
+  PreIvan_2004:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download
+  postivannorthgulf_2004:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download  
+  PostDennis_2005:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download          
   USACE_USACE_NCMP_2005_29:
     use: false
     date: 2005-07-13, 2005-07-25
     year: null
-    note: CRS issue for VRT creation
+    note: CRS issue for VRT creation, post dennis dataset. I will use the manual download 2005_PostDennis_J1233565 instead
   USACE_USACE_NCMP_2005_31:
     use: false
     date: 2005-12-11, 2005-10-12
     year: null
-    note: CRS issue for VRT creation
+    note: CRS issue for VRT creation, this is a post katrina dataset that is small. 2005_PostDennis_J1233565 doesn't cover
   USACE_USACE_NCMP_2006_44:
     use: false
     date: 2006-05-28, 2006-06-10
     year: null
     note: Corrupted LAZ dataset
+  PostWilma_2006:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download
   NPS_USGS_NASA_2007_522:
     use: True
     date: 2007-06-27, 2007-06-30
@@ -373,6 +403,16 @@ EcoRegion-3:
     date: metadata.txt not found
     year: null
     note: Corrupted data. LAZ. Don't use, duplicate dataset like NOAA_NGS_2019_9708
+  NGSFL_2019:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download   
+  NGSFLtopobathyDEMIrmaJ1233606_2019:
+    use: True
+    date: null
+    year: null
+    note: Valid dataset, manual download       
   NOAA_NCEI_2020_8483:
     use: True
     date: '2020'

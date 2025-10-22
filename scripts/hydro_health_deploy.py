@@ -6,7 +6,7 @@ import shutil
 import pathlib
 
 
-CODE_FOLDER = pathlib.Path(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\Code\hydro_health")
+CODE_FOLDER = pathlib.Path(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\Code\hydro_health\Aubrey_Code")
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 HYDRO_HEALTH = pathlib.Path(__file__).parents[1] / 'src' / 'hydro_health'
 SRC_FOLDER = HYDRO_HEALTH.parents[1]
