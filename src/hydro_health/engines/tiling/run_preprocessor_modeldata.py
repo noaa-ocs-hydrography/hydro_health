@@ -19,11 +19,7 @@ if __name__ == '__main__':
 
     processor = ModelDataPreProcessor()
 
-    processor.add_engine(CreateTSMLayerEngine())
-    processor.add_engine(CreateSedimentLayerEngine()) 
-    # processor.add_engine(CreateHurricaneLayerEngine()) 
-
-    processor.run_all()
+    processor.process()
 
     profiler.disable()
     stats = pstats.Stats(profiler)

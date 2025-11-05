@@ -5,15 +5,20 @@ EcoRegion-3:
     year: null
     note: null
   USGS_1885_9562:
-    use: True
+    use: false
     date: 2021-12-31, 1885-01-01
     year: null
     note: Need to review, which year to use? This dataset is a vertical slice that may not be useful
+  FallGCJ1233560_1998:
+    use: true
+    date: null
+    year: null
+    note: Valid dataset, manual download   
   NOAA_USGS_NASA_1998_22:
     use: false
     date: 1998-10-29, 1998-11-09
     year: null
-    note: Don't use, valid dataset, but every value is positive
+    note: Don't use, for some reason the extent is much smaller than the manual download
   USGS_2001:
     use: true
     date: null
@@ -60,10 +65,10 @@ EcoRegion-3:
     year: null
     note: Valid dataset, manual download  
   PostDennis_2005:
-    use: True
+    use: false
     date: null
     year: null
-    note: Valid dataset, manual download          
+    note: Decided not to use. Valid dataset, manual download          
   USACE_USACE_NCMP_2005_29:
     use: false
     date: 2005-07-13, 2005-07-25
@@ -125,20 +130,20 @@ EcoRegion-3:
     year: null
     note: Don't use, dataset located off the coast of Delaware, not sure why it was included by the filter
   NOAA_NGS_2014_4972:
-    use: True
+    use: false
     date: metadata.txt not found
     year: '2014'
-    note: Valid dataset. Use year 2014
+    note: Decided not to use. Valid dataset. Use year 2014
   NOAA_NGS_2014_5102:
-    use: True
+    use: false
     date: 2014-08-29, 2014-09-23
     year: null
-    note: Valid dataset
+    note: Decided not to use. Valid dataset
   NOAA_NGS_2015_6210:
-    use: True
+    use: False
     date: metadata.txt not found
     year: null
-    note: Valid dataset, larger coverage than NOAA_NGS_2015_6212
+    note: Decided not to use. Valid dataset, larger coverage than NOAA_NGS_2015_6212
   NOAA_NGS_2015_6212:
     use: false
     date: Date not found
@@ -332,15 +337,15 @@ EcoRegion-3:
     year: null
     note: Corrupted LAZ, not seeing an alternative
   NOAA_NGS_2018_9060:
-    use: false
-    date: 2018-11-20, 2019-03-23
-    year: null
-    note: Don't use, duplicate dataset like NOAA_NGS_2018_9081
-  NOAA_NGS_2018_9081:
     use: True
     date: 2018-11-20, 2019-03-23
     year: null
-    note: Valid dataset, duplicate with larger coverage than NOAA_NGS_2018_9060
+    note: Valid dataset, duplicate dataset like NOAA_NGS_2018_9081
+  NOAA_NGS_2018_9081:
+    use: false
+    date: 2018-11-20, 2019-03-23
+    year: null
+    note: Valid dataset, duplicate with larger coverage than NOAA_NGS_2018_9060, but looks corrupted
   NOAA_NGS_2018_9609:
     use: false
     date: 2018-08-06, 2018-07-30
@@ -439,10 +444,10 @@ EcoRegion-3:
     year: null
     note: Corrupted data, single value of 56.58. LAZ. Don't use it is a duplicate of NOAA_NGS_2021_9481
   NOAA_NGS_2021_9481:
-    use: True
+    use: False
     date: 2021-02-27, 2021-01-26
     year: null
-    note: Valid dataset that is not a duplicate
+    note: Decided not to use, valid dataset that is not a duplicate
   NOAA_NCEI_2022_8483:
     use: True
     date: '2022'

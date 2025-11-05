@@ -9,7 +9,12 @@ import rasterio
 import rioxarray
 import xarray as xr
 from dask.distributed import Client, print
-from scipy.ndimage import binary_erosion, generic_filter, uniform_filter
+from dask import delayed, compute
+from scipy.ndimage import binary_erosion, generic_filter
+import itertools
+from pathlib import Path
+from collections import defaultdict
+from joblib import Parallel, delayed
 
 from hydro_health.helpers.tools import get_config_item
 
@@ -18,11 +23,7 @@ class CreateSeabedTerrainLayerEngine():
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
     def __init__(self):
-        self.year_ranges = [
-            (2004, 2006),
-            (2006, 2010),
-            (2010, 2015),
-            (2015, 2022)]
+        pass
 
     def focal_fill_block(self, block: np.ndarray, w=3) -> np.ndarray:
         """
@@ -146,6 +147,11 @@ class CreateSeabedTerrainLayerEngine():
         output_file = os.path.join(
             output_dir, os.path.splitext(os.path.basename(input_file))[0] + "_filled.tif"
         )
+
+        if os.path.exists(output_file):
+            print(f"File already exists, skipping gap fill: {os.path.basename(output_file)}")
+            return
+        
         self.fill_with_fallback(
             input_file=input_file,
             output_file=output_file,
@@ -382,6 +388,77 @@ class CreateSeabedTerrainLayerEngine():
     #   PHASE 2: PARALLEL PROCESSING OF INDIVIDUAL RASTERS
     # ==============================================================================
 
+    def generate_neighborhood_statistics(self, file_path:Path, size: int) -> None:
+        """
+        Calculates focal mean and standard deviation for a given raster file
+        and saves them as new .tif files.
+        """
+
+        base_name = file_path.stem  # e.g., "bathy_2004"
+        out_dir = file_path.parent
+        
+        out_sd = out_dir / f"{base_name}_sd{size}.tif"
+        out_mean = out_dir / f"{base_name}_mean{size}.tif"
+
+        if os.path.exists(out_sd):
+            print(f"Output files already exist, skipping: {out_sd.name} and {out_mean.name}")
+            return 
+        
+        rds = rioxarray.open_rasterio(file_path, chunks=True).isel(band=0)
+        
+        # Create the rolling window (kernel)
+        # 'center=True' mimics the R 'focal' behavior
+        window = rds.rolling(dim_x=size, dim_y=size, center=True)
+        
+        # Calculate focal mean and standard deviation
+        r_mean = window.mean()
+        r_sd = window.std()
+        
+        r_mean.rio.to_raster(out_mean, driver="GTiff", compress="LZW")
+        r_sd.rio.to_raster(out_sd, driver="GTiff", compress="LZW")
+        
+        return f"Processed neighborhood for: {file_path.name}"
+
+    def create_delta_rasters_py(self, file_group: dict) -> list[str]:
+        """
+        Calculates the 'delta' (change) between consecutive years for a
+        given state variable.
+        """
+        
+        var_name = file_group['var']
+        files = file_group['files']
+        
+        # Sort files by year (key=lambda x: x['year'])
+        sorted_files = sorted(files, key=lambda x: x['year'])
+        
+        # Iterate through consecutive pairs of files
+        # (e.g., (2004, 2006), (2006, 2008), ...)
+        results = []
+        for i in range(len(sorted_files) - 1):
+            file_t0_info = sorted_files[i]
+            file_t1_info = sorted_files[i+1]
+            
+            y0 = file_t0_info['year']
+            y1 = file_t1_info['year']
+    
+            out_dir = file_t0_info['path'].parent
+            out_file = out_dir / f"delta_{var_name}_{y0}_{y1}.tif"
+
+            if os.path.exists(out_file):
+                print(f"Output files already exist, skipping: {out_file.name}")
+                return 
+            
+            r_t0 = rioxarray.open_rasterio(file_t0_info['path'], chunks=True).isel(band=0)
+            r_t1 = rioxarray.open_rasterio(file_t1_info['path'], chunks=True).isel(band=0)
+            
+            # Calculate delta (t1 - t0)
+            delta = r_t1 - r_t0
+            
+            delta.rio.to_raster(out_file, driver="GTiff", compress="LZW")
+            results.append(f"Created delta: {out_file.name}")
+                
+        return results
+
     def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir) -> str:
         """
         Main function to process one bathymetry raster using a pre-computed dictionary.
@@ -392,69 +469,68 @@ class CreateSeabedTerrainLayerEngine():
         return: Status message indicating success or failure.
         """
         
-        try:
-            base_name = os.path.splitext(os.path.basename(bathy_path))[0]
-            output_dir = os.path.join(get_config_item('TERRAIN', 'OUTPUTS'), 'BTM_outputs')
-            
-            # Determine the year and load the correct dictionary
-            # TODO this might need to be adjusted based on actual file naming conventions
-            year = 'bt_bathy' # default for generic name
-            match = re.search(r'(\d{4})', base_name)
-            if match:
-                year = match.group(1)
-                
-            dict_path = os.path.join(dictionary_dir, f"dictionary_{year}.csv")
-            if not os.path.exists(dict_path):
-                raise FileNotFoundError(f"Dictionary not found for year {year} at {dict_path}")
-            
-            unique_dictionary = pd.read_csv(dict_path)
-            
-            print(f"\n--- Starting processing for: {base_name} (using '{year}' dictionary) ---")
+        base_name = os.path.splitext(os.path.basename(bathy_path))[0]
+        output_dir = os.path.join(get_config_item('TERRAIN', 'OUTPUTS'), 'BTM_outputs')
 
-            with rasterio.open(bathy_path) as src:
-                bathy_array = src.read(1)
-                bathy_array[bathy_array == src.nodata] = np.nan
-                profile = src.profile
-                cell_size = src.res[0]
-
-            print("  - Generating derivatives...")
-            slope, rugosity = self.calculate_slope_and_tri(bathy_array, cell_size)
-            bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
-            bpi_broad = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
-            bpi_fine_std = self.standardize_raster_array(bpi_fine)
-            bpi_broad_std = self.standardize_raster_array(bpi_broad)
+        classification_file = os.path.join(output_dir, base_name + "_terrain_classification.tif")
+        if os.path.exists(classification_file):
+            print(f"Output files already exist, skipping: {base_name}")
+            return 
+        
+        # Determine the year and load the correct dictionary
+        # TODO this might need to be adjusted based on actual file naming conventions
+        year = 'bt_bathy' # default for generic name
+        match = re.search(r'(\d{4})', base_name)
+        if match:
+            year = match.group(1)
             
-            print("  - Classifying terrain...")
-            classified_array = np.zeros_like(bathy_array, dtype=np.uint8)
-            
-            for index, rule in unique_dictionary.iterrows():
-                matches = (
-                    (bpi_broad_std >= rule['BroadBPI_Lower']) & (bpi_broad_std <= rule['BroadBPI_Upper']) &
-                    (bpi_fine_std >= rule['FineBPI_Lower']) & (bpi_fine_std <= rule['FineBPI_Upper']) &
-                    (slope >= rule['Slope_Lower']) & (slope <= rule['Slope_Upper'])
-                )
-                classified_array[matches & (classified_array == 0)] = rule['Class_ID']
-                
-            print("  - Saving output files...")
-            outputs = {
-                "_slope.tif": slope, "_rugosity_tri.tif": rugosity,
-                "_bpi_fine_std.tif": bpi_fine_std, "_bpi_broad_std.tif": bpi_broad_std,
-                "_terrain_classification.tif": classified_array
-            }
-            
-            for suffix, data_array in outputs.items():
-                out_path = os.path.join(output_dir, base_name + suffix)
-                profile.update(dtype=data_array.dtype.name, nodata=np.nan, count=1)
-                with rasterio.open(out_path, 'w', **profile) as dst:
-                    dst.write(data_array.astype(profile['dtype']), 1)
+        dict_path = os.path.join(dictionary_dir, f"dictionary_{year}.csv")
+        if not os.path.exists(dict_path):
+            raise FileNotFoundError(f"Dictionary not found for year {year} at {dict_path}")
+        
+        unique_dictionary = pd.read_csv(dict_path)
+        
+        print(f"\n--- Starting processing for: {base_name} (using '{year}' dictionary) ---")
 
-            print(f"  - Successfully processed and saved all products for {base_name}")
-            return f"Success: {bathy_path}"
+        with rasterio.open(bathy_path) as src:
+            bathy_array = src.read(1)
+            bathy_array[bathy_array == src.nodata] = np.nan
+            profile = src.profile
+            cell_size = src.res[0]
 
-        except Exception as e:
-            error_msg = f"FAILED to process {bathy_path}: {e}"
-            print(error_msg)
-            return error_msg
+        print("  - Generating derivatives...")
+        slope, rugosity = self.calculate_slope_and_tri(bathy_array, cell_size)
+        bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
+        bpi_broad = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
+        bpi_fine_std = self.standardize_raster_array(bpi_fine)
+        bpi_broad_std = self.standardize_raster_array(bpi_broad)
+        
+        print("  - Classifying terrain...")
+        classified_array = np.zeros_like(bathy_array, dtype=np.uint8)
+        
+        for index, rule in unique_dictionary.iterrows():
+            matches = (
+                (bpi_broad_std >= rule['BroadBPI_Lower']) & (bpi_broad_std <= rule['BroadBPI_Upper']) &
+                (bpi_fine_std >= rule['FineBPI_Lower']) & (bpi_fine_std <= rule['FineBPI_Upper']) &
+                (slope >= rule['Slope_Lower']) & (slope <= rule['Slope_Upper'])
+            )
+            classified_array[matches & (classified_array == 0)] = rule['Class_ID']
+            
+        print("  - Saving output files...")
+        outputs = {
+            "_slope.tif": slope, "_rugosity_tri.tif": rugosity,
+            "_bpi_fine_std.tif": bpi_fine_std, "_bpi_broad_std.tif": bpi_broad_std,
+            "_terrain_classification.tif": classified_array
+        }
+        
+        for suffix, data_array in outputs.items():
+            out_path = os.path.join(output_dir, base_name + suffix)
+            profile.update(dtype=data_array.dtype.name, nodata=np.nan, count=1)
+            with rasterio.open(out_path, 'w', **profile) as dst:
+                dst.write(data_array.astype(profile['dtype']), 1)
+
+        print(f"  - Successfully processed and saved all products for {base_name}")
+        return f"Success: {bathy_path}"
 
     # ==============================================================================
     #   MAIN ORCHESTRATION SCRIPT
@@ -462,7 +538,7 @@ class CreateSeabedTerrainLayerEngine():
     def process(self) -> None:
         """Main function to find all bathy files and process them in parallel."""
 
-        client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
+        client = Client(n_workers=4, threads_per_worker=2, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
 
         main_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
@@ -494,10 +570,6 @@ class CreateSeabedTerrainLayerEngine():
             [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
             if f.endswith(('.tif', '.tiff')) and 'bluetopo' in f]
         )
-        
-        if not bathy_files_to_process:
-            print("No bathymetry files found to process. Exiting.")
-            return
 
         print(f"Found {len(bathy_files_to_process)} bathymetry files to process.")
 
@@ -513,6 +585,61 @@ class CreateSeabedTerrainLayerEngine():
             tasks.append(task)
             
         dask.compute(*tasks)
+
+        #### run until here, then below needs some testing
+
+        STATE_VARS = ["bathy", "slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification"]
+        NEIGHBORHOOD_SIZE = 3
+        FILE_PATTERN = re.compile(rf"({'|'.join(STATE_VARS)})_(\d{{4}})\.tif$")
+        WORKING_DIR = get_config_item('TERRAIN', 'OUTPUTS')
+
+        print(f"Starting raster processing in: {WORKING_DIR}")
+        print(f"Finding files for: {', '.join(STATE_VARS)}")
+        
+        # Find all .tif files and group them by state variable
+        state_files_map = defaultdict(list)
+        all_state_files_to_process = []
+
+        for f in WORKING_DIR.glob("*.tif"):
+            match = FILE_PATTERN.search(f.name)
+            if match:
+                var_name = match.group(1)
+                year = int(match.group(2))
+                
+                file_info = {'path': f, 'year': year}
+                state_files_map[var_name].append(file_info)
+                all_state_files_to_process.append(f)
+                
+        print(f"Found {len(all_state_files_to_process)} rasters for neighborhood stats.")
+        print(f"Found {len(state_files_map)} variable groups for delta calculation.")
+        
+        # --- Job 1: Process Neighborhood Stats in Parallel ---
+        print(f"\nRunning neighborhood stats processing ({NEIGHBORHOOD_SIZE}x{NEIGHBORHOOD_SIZE}) with {N_JOBS} jobs...")
+        
+        delayed_tasks = [
+            delayed(self.generate_neighborhood_statistics)(file_path, NEIGHBORHOOD_SIZE)
+            for file_path in all_state_files_to_process
+        ]
+
+        # neighborhood_results, = compute(delayed_tasks)
+
+        # --- Job 2: Create Delta Rasters in Parallel ---
+        # We need to pass the dict for each variable group
+        delta_groups = [{'var': var_name, 'files': files} for var_name, files in state_files_map.items() if len(files) > 1]
+        
+        print(f"\nRunning delta raster creation for {len(delta_groups)} variable groups")
+
+        delayed_tasks = [
+            delayed(self.create_delta_rasters_py)(group)
+            for group in delta_groups
+        ]
+
+        # delta_results, = compute(delayed_tasks)
+        
+        # print("\n--- Delta Results ---")
+        # for res_list in delta_results:
+        #     for res in res_list:
+        #         print(res)
         
         print("\n--- Processing Complete ---")
                     

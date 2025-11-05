@@ -26,10 +26,18 @@ class CreateHurricaneLayerEngine(Engine):
     def __init__(self):
         super().__init__()
         self.year_ranges = [
+            (1998, 2004),
             (2004, 2006),
-            (2006, 2010),
+            (2006, 2007),
+            (2007, 2010),
             (2010, 2015),
-            (2015, 2022)]
+            (2014, 2022),
+            (2016, 2017),
+            (2017, 2018),
+            (2018, 2019),
+            (2020, 2022),
+            (2022, 2024)
+        ]
         self.hurricane_data_path = pathlib.Path(get_config_item('HURRICANE', 'GPKG_PATH'))
         self.sediment_data = None
         self.txt_data_path = pathlib.Path(get_config_item('HURRICANE', 'DATA_PATH'))
@@ -224,7 +232,7 @@ class CreateHurricaneLayerEngine(Engine):
         """
 
         gdf = self.convert_text_to_gpkg()
-        gdf = gdf[gdf['year'] >= 2004]
+        gdf = gdf[gdf['year'] >= 1998]
         gdf = gdf.to_crs('EPSG:32617')  # WGS 84 UTM 17N
 
         
@@ -364,7 +372,6 @@ class CreateHurricaneLayerEngine(Engine):
         """
 
         input_raster_folder = get_config_item('HURRICANE', 'RASTER_PATH')
-        os.makedirs(input_raster_folder, exist_ok=True)
         mask_raster_path = get_config_item('MASK', 'MASK_PRED_PATH')
         
         target_resolution = 100.0
@@ -451,6 +458,8 @@ class CreateHurricaneLayerEngine(Engine):
             self.save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs)
             print(f"Cumulative raster for year {year_folder} saved to {output_path}.")
 
+        print("Cumulative raster generation complete.")
+
     def get_corner_points(self, quarter_circle, quadrant)-> list:
         """Get the corner points of a quarter circle polygon based on the quadrant.
 
@@ -480,8 +489,13 @@ class CreateHurricaneLayerEngine(Engine):
         grouped = gdf.groupby(['name', 'year'])
 
         for (name, year), group in grouped:
-            output_folder = pathlib.Path(get_config_item('HURRICANE', 'RASTER_PATH'))
+            output_folder = pathlib.Path(get_config_item('HURRICANE', 'RASTER_PATH')) / str(year)
             os.makedirs(output_folder, exist_ok=True)
+            raster_file = output_folder / f"{name}_{year}.tif"
+            
+            if raster_file.exists():
+                print(f"Skipping {raster_file.name}, already exists.")
+                continue  
 
             minx, miny, maxx, maxy = group.total_bounds
             width = int(np.ceil((maxx - minx) / resolution))
@@ -498,8 +512,6 @@ class CreateHurricaneLayerEngine(Engine):
                     transform=transform,
                     fill=np.nan, 
                 )
-
-            raster_file = os.path.join(output_folder, f"{name}_{year}.tif")
 
             raster_data = gaussian_filter(raster_data, sigma=3)
 
@@ -542,7 +554,10 @@ class CreateHurricaneLayerEngine(Engine):
         return data
 
     def run(self):
-        """Entrypoint for processing the Hurricane layer"""
+        """Entrypoint for processing the Hurricane layer
+        HURDAT2 data before 2004 does not have wind radii information.
+        Run time is 1.25 hours on the remote desktop.
+        """
 
         self.download_hurricane_data()    
         self.create_line_layer()

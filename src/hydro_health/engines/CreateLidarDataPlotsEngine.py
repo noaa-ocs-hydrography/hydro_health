@@ -178,7 +178,7 @@ class CreateLidarDataPlotsEngine():
             if os.path.isdir(base_folder):
                 for folder_name in os.listdir(base_folder):
                     potential_path = os.path.join(base_folder, folder_name)
-                    if os.path.isdir(potential_path) and f'_{unique_id}' in folder_name:
+                    if os.path.isdir(potential_path) and year_from_filename in folder_name and f'_{unique_id}' in folder_name:
                         metadata_path = os.path.join(potential_path, 'metadata.txt')
                         acquisition_date = self.extract_date_from_metadata(metadata_path)
                         if acquisition_date:
@@ -575,7 +575,7 @@ class CreateLidarDataPlotsEngine():
             pixel_area_m2 = abs(global_transform.a * global_transform.e)
             overlap_area_km2 = (overlapping_pixels * pixel_area_m2) / 1e6
             
-            if mode == 'all' and overlap_area_km2 < 10 or overlap_percentage < 1:
+            if mode == 'all' and overlap_area_km2 < 10:
                 continue
 
             overlap_text = f"Overlap: {overlap_area_km2:.0f} km$^2$ ({overlap_percentage:.1f}%)"
@@ -653,7 +653,7 @@ class CreateLidarDataPlotsEngine():
         extent_type = "Individual" if use_individual_extent else "Global"
         suptitle = f"{mode.capitalize().replace('_', ' ')} Year Differences ({extent_type} Extent)"
         if mode == 'all':
-            suptitle = f"All Year Differences >= 10 km2 or 1% Overlap ({extent_type} Extent)"
+            suptitle = f"All Year Differences >= 10 km2 ({extent_type} Extent)"
         
         output_filename = f'{mode}_year_differences_{extent_type.lower()}_extent.png'
         dpi = 600 if use_individual_extent else 1200
