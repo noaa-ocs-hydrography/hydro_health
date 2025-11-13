@@ -82,8 +82,6 @@ def download_gpkg(url, gpkg_output, layer_name):
 
     gdf.to_file(gpkg_output, layer=layer_name, driver='GPKG')
     gdf.to_file(channel_path, driver='ESRI Shapefile', encoding='utf-8')
-    # print(gdf.columns)
-
 
 def download_usace_data():
     urls = [('https://ndc.ops.usace.army.mil/dis/placement-locations/{year}.json',
@@ -150,8 +148,6 @@ def create_job_locations_gpkg():
                             geometry=gpd.points_from_xy(locations_df['longitude'], locations_df['latitude']))  
     gdf.set_crs(crs="EPSG:4326", inplace=True)
     gdf_reprojected = gdf.to_crs("EPSG:4269")
-
-    print(gdf_reprojected.columns)
     
     gdf_reprojected.to_file(dredge_output, layer='point_locations', driver="GPKG")    
 
@@ -170,13 +166,14 @@ def caculate_frequency_data():
 
     result_gdf = polygon_gdf.merge(aggregate_years, left_index=True, right_on='index_right', how='left')
     result_gdf = result_gdf[['geometry', 'years']]
-    # print(result_gdf.head(5))
 
     result_gdf['years'] = result_gdf['years'].apply(lambda x: x if isinstance(x, list) else [])
     result_gdf['count_1994_2003'] = result_gdf['years'].apply(lambda x: count_years(x, 1994, 2003))
     result_gdf['count_2004_2013'] = result_gdf['years'].apply(lambda x: count_years(x, 2004, 2013))
     result_gdf['count_2014_2023'] = result_gdf['years'].apply(lambda x: count_years(x, 2014, 2023))
     result_gdf['count_all_years'] = result_gdf['years'].apply(lambda x: count_years(x, 1994, 2023))
+    result_gdf['years'] = result_gdf['years'].apply(lambda x: ", ".join(map(str, x)))
+
     result_gdf.to_file(dredge_output, layer='frequency_data', driver='GPKG')
 
 def dissolve_by_featurename():
@@ -222,10 +219,10 @@ def count_years(years, start_year, end_year):
 #     clipped_gdf = gpd.clip(gdf_to_clip, gdf_clip)
 #     clipped_gdf.to_file(dredge_output, layer='dredge_extent_clipped', driver='GPKG')
 
-# get_all_dredge_data()
-# download_usace_data()
+get_all_dredge_data()
+download_usace_data()
 create_job_locations_gpkg()
-# dissolve_by_featurename()
-# caculate_frequency_data()
+dissolve_by_featurename()
+caculate_frequency_data()
 # clip_survey_with_harbours()
 # clip_harbour_data()
