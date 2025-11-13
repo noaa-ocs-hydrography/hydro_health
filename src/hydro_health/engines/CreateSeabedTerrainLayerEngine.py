@@ -490,7 +490,7 @@ class CreateSeabedTerrainLayerEngine():
         
         unique_dictionary = pd.read_csv(dict_path)
         
-        print(f"\n--- Starting processing for: {base_name} (using '{year}' dictionary) ---")
+        print(f"\n--- Processing {base_name} (using '{year}' dictionary) ---")
 
         with rasterio.open(bathy_path) as src:
             bathy_array = src.read(1)
@@ -498,14 +498,14 @@ class CreateSeabedTerrainLayerEngine():
             profile = src.profile
             cell_size = src.res[0]
 
-        print("  - Generating derivatives...")
+        # print("  - Generating derivatives...")
         slope, rugosity = self.calculate_slope_and_tri(bathy_array, cell_size)
         bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
         bpi_broad = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
         bpi_fine_std = self.standardize_raster_array(bpi_fine)
         bpi_broad_std = self.standardize_raster_array(bpi_broad)
         
-        print("  - Classifying terrain...")
+        # print("  - Classifying terrain...")
         classified_array = np.zeros_like(bathy_array, dtype='float32')
         
         for index, rule in unique_dictionary.iterrows():
@@ -516,7 +516,6 @@ class CreateSeabedTerrainLayerEngine():
             )
             classified_array[matches & (classified_array == 0)] = rule['Class_ID']
             
-        print("  - Saving output files...")
         outputs = {
             "_slope.tif": slope, "_rugosity_tri.tif": rugosity,
             "_bpi_fine_std.tif": bpi_fine_std, "_bpi_broad_std.tif": bpi_broad_std,
@@ -529,7 +528,6 @@ class CreateSeabedTerrainLayerEngine():
             with rasterio.open(out_path, 'w', **profile) as dst:
                 dst.write(data_array.astype(profile['dtype']), 1)
 
-        print(f"  - Successfully processed and saved all products for {base_name}")
         return f"Success: {bathy_path}"
 
     # ==============================================================================
