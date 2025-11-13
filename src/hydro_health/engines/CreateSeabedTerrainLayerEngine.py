@@ -10,7 +10,7 @@ import rioxarray
 import xarray as xr
 from dask.distributed import Client, print
 from dask import delayed, compute
-from scipy.ndimage import binary_erosion, generic_filter
+from scipy.ndimage import binary_erosion, generic_filter, uniform_filter
 import itertools
 from pathlib import Path
 from collections import defaultdict
@@ -506,7 +506,7 @@ class CreateSeabedTerrainLayerEngine():
         bpi_broad_std = self.standardize_raster_array(bpi_broad)
         
         print("  - Classifying terrain...")
-        classified_array = np.zeros_like(bathy_array, dtype=np.uint8)
+        classified_array = np.zeros_like(bathy_array, dtype='float32')
         
         for index, rule in unique_dictionary.iterrows():
             matches = (
@@ -547,7 +547,7 @@ class CreateSeabedTerrainLayerEngine():
         input_dir = get_config_item('TERRAIN', 'INPUT_DIR')
         filled_dir = get_config_item('TERRAIN', 'FILLED_DIR')
 
-        keywords_to_exclude = ['tsm', 'hurricane', 'bluetopo']
+        keywords_to_exclude = ['tsm', 'hurr', 'sed', 'bluetopo']
         lidar_data_paths = [
             os.path.join(input_dir, f)
             for f in os.listdir(input_dir)
@@ -562,7 +562,6 @@ class CreateSeabedTerrainLayerEngine():
         dask.compute(*tasks)
 
         # --- 2. FIND ALL BATHY FILES TO PROCESS ---
-        # Lidar filles files
         bathy_files_to_process = [os.path.join(filled_dir, f) for f in os.listdir(filled_dir)]
 
         # Adding Blutopo files to the lists
