@@ -214,8 +214,3 @@ class BlueTopoEngine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
 
-    def write_message(self, message: str, output_folder: str|pathlib.Path) -> None:
-        """Write a message to the main logfile in the output folder"""
-
-        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
-            writer.write(message + '\n')
