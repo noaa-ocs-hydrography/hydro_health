@@ -11,4 +11,5 @@ inputs/lookups/hydro_health.config
 !inputs/lookups/
 !inputs/run_configs/
 !inputs/Master_grids.gpkg
+!inputs/ER3_Grids.gpkg
 !inputs/drawn_polygons.geojson
