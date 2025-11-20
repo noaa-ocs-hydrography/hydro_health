@@ -185,7 +185,7 @@ class RasterVRTEngine(Engine):
 
 
     def write_crs_to_raster(self, geotiff_raster: rxr.rioxarray, geotiff_srs: osr.SpatialReference) -> rxr.rioxarray:
-        """Obtain the horizontal CRS of a compound CRS andd write it to the raster"""
+        """Obtain the horizontal CRS of a compound CRS and write it to the raster"""
 
         proj_json = json.loads(geotiff_srs.ExportToPROJJSON())
         crs_name = proj_json['components'][0]['name']
