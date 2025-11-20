@@ -7,7 +7,6 @@ import pathlib
 from pathlib import Path
 import yaml
 
-import dask
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -29,20 +28,7 @@ class ModelDataPreProcessor():
     """Class for parallel preprocessing all model data"""
 
     def __init__(self):
-        self.year_ranges = [
-            (1998, 2004),
-            (2004, 2006),
-            (2006, 2007),
-            (2007, 2010),
-            (2010, 2015),
-            (2014, 2022),
-            (2016, 2017),
-            (2017, 2018),
-            (2018, 2019),
-            (2020, 2022),
-            (2022, 2024)
-        ]
-        
+        super().__init__()
         self.predictors = [
             'year_t',
             'year_t1',
@@ -69,9 +55,9 @@ class ModelDataPreProcessor():
             'delta_rugosity',
             'delta_slope',
             'delta_terrain_classification',
-            'hurr_count_2004_2006',
-            'hurr_strength_2004_2006',
-            'tsm_2004_2006',
+            'hurr_count_{year_pair}',
+            'hurr_strength_{year_pair}',
+            'tsm_{year_pair}',
             'grain_size_layer',
             'prim_sed_layer',
             'survey_end_date'
@@ -85,6 +71,8 @@ class ModelDataPreProcessor():
         :param str data_type: Specifies the type of data being processed either "prediction" or "training"
         """        
 
+        print(f" - Clipping {data_type} rasters by tile...")
+
         sub_grid_gpkg = pathlib.Path(get_config_item('MODEL', f'{data_type.upper()}_SUB_GRIDS'))
         sub_grids = gpd.read_file(sub_grid_gpkg)
         
@@ -95,6 +83,9 @@ class ModelDataPreProcessor():
 
         for _, sub_grid in sub_grids.iterrows():
             tile_name = sub_grid['tile_id'] 
+
+            if 'BH4SD56H' not in tile_name:
+                continue
             output_folder = os.path.join(output_dir, tile_name)
 
             # Delay each part separately
@@ -212,17 +203,21 @@ class ModelDataPreProcessor():
             output_path = os.path.join(prediction_out, file.name)
             prediction_tasks.append(dask.delayed(self.process_prediction_raster)(input_path, mask_future_pred, output_path))
 
-        dask.compute(*prediction_tasks)  
+        # dask.compute(*prediction_tasks)  
 
-        engine = CreateSeabedTerrainLayerEngine()
-        engine.process()
+        # engine = CreateSeabedTerrainLayerEngine()
+        # engine.process()
         
         training_out = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
         existing_outputs = {f.name for f in training_out.glob("*") if f.suffix.lower() in ['.tif', '.tiff']}
 
         training_files = [
             f for f in prediction_out.rglob("*")
-            if f.suffix.lower() in ['.tif', '.tiff'] and f.name not in existing_outputs
+            if (
+                f.suffix.lower() in ['.tif', '.tiff'] and
+                f.name not in existing_outputs and not
+                ('mosaic' in f.name and 'filled' not in f.name)  # <-- This is the new logic
+            )
         ]
 
         print(f"Total training files found (excluding already processed): {len(training_files)}")
@@ -267,13 +262,11 @@ class ModelDataPreProcessor():
 
         self.parallel_processing_rasters(preprocessed_dir, mask_future_pred, mask_future_train)
 
-        # input_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
-        # output_dir_pred = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
-        # output_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
+        input_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
+        output_dir_pred = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
+        output_dir_train = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
 
-        # print(" - Clipping prediction rasters by tile...")
         # self.clip_rasters_by_tile(raster_dir=processed_dir, output_dir=output_dir_pred, data_type="prediction")
-        # print(" - Clipping training rasters by tile...")
         # self.clip_rasters_by_tile(raster_dir=input_dir_train, output_dir=output_dir_train, data_type="training")
     
         client.close()
@@ -563,6 +556,7 @@ class ModelDataPreProcessor():
         """
         
         sub_tile_name = sub_grid['tile_id']
+        #TODO prob need the name changes here
         static_data = ['sed_size_raster', 'sed_type_raster', 'tsm_mean', 'hurricane']
         clipped_data = []
 

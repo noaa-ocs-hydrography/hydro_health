@@ -25,19 +25,6 @@ class CreateHurricaneLayerEngine(Engine):
 
     def __init__(self):
         super().__init__()
-        self.year_ranges = [
-            (1998, 2004),
-            (2004, 2006),
-            (2006, 2007),
-            (2007, 2010),
-            (2010, 2015),
-            (2014, 2022),
-            (2016, 2017),
-            (2017, 2018),
-            (2018, 2019),
-            (2020, 2022),
-            (2022, 2024)
-        ]
         self.hurricane_data_path = pathlib.Path(get_config_item('HURRICANE', 'GPKG_PATH'))
         self.sediment_data = None
         self.txt_data_path = pathlib.Path(get_config_item('HURRICANE', 'DATA_PATH'))

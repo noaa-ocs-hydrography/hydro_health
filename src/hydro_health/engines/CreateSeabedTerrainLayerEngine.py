@@ -17,13 +17,28 @@ from collections import defaultdict
 from joblib import Parallel, delayed
 
 from hydro_health.helpers.tools import get_config_item
+# from hydro_health.engines.Engine import Engine
 
 
 class CreateSeabedTerrainLayerEngine():
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
     def __init__(self):
-        pass
+        super().__init__()
+        self.year_ranges = [
+            (1998, 2004),
+            (2004, 2006),
+            (2006, 2007),
+            (2007, 2010),
+            (2010, 2015),
+            (2014, 2022),
+            (2016, 2017),
+            (2017, 2018),
+            (2018, 2019),
+            (2020, 2022),
+            (2022, 2024)
+        ]
+
 
     def focal_fill_block(self, block: np.ndarray, w=3) -> np.ndarray:
         """
@@ -127,7 +142,7 @@ class CreateSeabedTerrainLayerEngine():
         da.rio.write_transform(ds.rio.transform(), inplace=True)
         
         da.rio.write_nodata(nodata, inplace=True)
-        da.rio.to_raster(output_file)
+        da.rio.to_raster(output_file, compress='LZW')
         print(f"Filled raster written to: {output_file}")
 
     def run_gap_fill(self, input_file, output_dir, max_iters) -> None:
@@ -308,28 +323,47 @@ class CreateSeabedTerrainLayerEngine():
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
 
+        valid_years = {year for year_pair in self.year_ranges for year in year_pair}
+        print(valid_years)    
+
         # 1. Group files by year using regex to find 4-digit years
         year_groups = {}
         for f in all_files:
-            match = re.search(r'(\d{4})', os.path.basename(f))
-            if match:
+            match = re.search(r'((?:19|20)\d{2})', os.path.basename(f))
+
+            if match and int(match.group(1)) in valid_years:
                 year = match.group(1)
                 if year not in year_groups:
                     year_groups[year] = []
                 year_groups[year].append(f)
         
-        # Handle the generic 'bt.bathy.tif' case
-        generic_bathy = [f for f in all_files if 'bt.bathy' in os.path.basename(f)]
+        # Handle the generic 'BLueTopo.tif' case
+        generic_bathy = [f for f in all_files if 'BlueTopo' in os.path.basename(f)]
         if generic_bathy:
-            year_groups['bt_bathy'] = generic_bathy
-
+            year_groups['BlueTopo'] = generic_bathy
         # 2. Process each year group
         for year, files in year_groups.items():
             print(f"\n  - Processing group: {year} ({len(files)} files found)")
-            
-            # Take a subset of files to sample from for efficiency
-            files_to_sample = files if len(files) <= max_sample_files else np.random.choice(files, max_sample_files, replace=False)
-            
+
+            # 1. Get sizes for all files (stored as tuples to avoid hitting disk twice)
+            # Format: [(filepath, size), (filepath, size), ...]
+            file_data = [(f, os.path.getsize(f)) for f in files]
+
+            # 2. Calculate the 30th percentile threshold
+            # We extract just the sizes to do the math
+            all_sizes = [x[1] for x in file_data]
+            size_threshold = np.percentile(all_sizes, 30)
+
+            # 3. Create a pool of only the smallest 30% of files
+            # We filter the original list based on the calculated threshold
+            small_files_pool = [x[0] for x in file_data if x[1] <= size_threshold]
+
+            # 4. Apply your sampling logic to this specific pool
+            files_to_sample = (
+                small_files_pool 
+                if len(small_files_pool) <= max_sample_files 
+                else list(np.random.choice(small_files_pool, max_sample_files, replace=False))
+            )
             # 3. Collect samples from the subset of files
             all_samples = {'slope': [], 'bpi_fine_std': [], 'bpi_broad_std': []}
             
@@ -388,11 +422,13 @@ class CreateSeabedTerrainLayerEngine():
     #   PHASE 2: PARALLEL PROCESSING OF INDIVIDUAL RASTERS
     # ==============================================================================
 
-    def generate_neighborhood_statistics(self, file_path:Path, size: int) -> None:
+    def generate_neighborhood_statistics(self, file_path:Path) -> None:
         """
         Calculates focal mean and standard deviation for a given raster file
         and saves them as new .tif files.
         """
+
+        size = 3  # Fixed neighborhood size
 
         base_name = file_path.stem  # e.g., "bathy_2004"
         out_dir = file_path.parent
@@ -480,13 +516,15 @@ class CreateSeabedTerrainLayerEngine():
         # Determine the year and load the correct dictionary
         # TODO this might need to be adjusted based on actual file naming conventions
         year = 'bt_bathy' # default for generic name
-        match = re.search(r'(\d{4})', base_name)
+        match = re.search(r'((?:19|20)\d{2})', base_name)
         if match:
             year = match.group(1)
+            print(year)
             
         dict_path = os.path.join(dictionary_dir, f"dictionary_{year}.csv")
         if not os.path.exists(dict_path):
-            raise FileNotFoundError(f"Dictionary not found for year {year} at {dict_path}")
+            print(f"Dictionary not found for year {year} at {dict_path} for {base_name}")
+            return None
         
         unique_dictionary = pd.read_csv(dict_path)
         
@@ -524,7 +562,14 @@ class CreateSeabedTerrainLayerEngine():
         
         for suffix, data_array in outputs.items():
             out_path = os.path.join(output_dir, base_name + suffix)
-            profile.update(dtype=data_array.dtype.name, nodata=np.nan, count=1)
+                    
+            profile.update(
+                dtype=data_array.dtype.name, 
+                nodata=np.nan, 
+                count=1,
+                compress='LZW' 
+            )
+            
             with rasterio.open(out_path, 'w', **profile) as dst:
                 dst.write(data_array.astype(profile['dtype']), 1)
 
@@ -553,26 +598,27 @@ class CreateSeabedTerrainLayerEngine():
         ]        
 
         tasks = []
-        for file in lidar_data_paths:
-            task = dask.delayed(self.run_gap_fill(file, filled_dir, max_iters=3))
-            tasks.append(task)
+        # for file in lidar_data_paths:
+        #     task = dask.delayed(self.run_gap_fill(file, filled_dir, max_iters=3))
+        #     tasks.append(task)
             
-        dask.compute(*tasks)
+        # dask.compute(*tasks)
 
         # --- 2. FIND ALL BATHY FILES TO PROCESS ---
         bathy_files_to_process = [os.path.join(filled_dir, f) for f in os.listdir(filled_dir)]
 
-        # Adding Blutopo files to the lists
-        bathy_files_to_process.extend(
-            [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
-            if f.endswith(('.tif', '.tiff')) and 'bluetopo' in f]
-        )
+        # # Adding Blutopo files to the lists
+        # bathy_files_to_process.extend(
+        #     [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
+        #     if f.endswith(('.tif', '.tiff')) and 'BlueTopo' in f]
+        # )
 
         print(f"Found {len(bathy_files_to_process)} bathymetry files to process.")
 
+        # TODO best radii might need changed if different eco region
         best_radii = {'fine': (8, 32), 'broad': (80, 240)}
         # --- 3. RUN PHASE 1: PRE-COMPUTE DICTIONARIES ---
-        self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
+        # self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
         # --- 4. RUN PHASE 2: PARALLEL CLASSIFICATION ---
         print("\n--- PHASE 2: Parallel Processing of terrain products")
@@ -585,8 +631,7 @@ class CreateSeabedTerrainLayerEngine():
 
         #### run until here, then below needs some testing
 
-        STATE_VARS = ["bathy", "slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification"]
-        NEIGHBORHOOD_SIZE = 3
+        STATE_VARS = ["filled", "slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification"]
         FILE_PATTERN = re.compile(rf"({'|'.join(STATE_VARS)})_(\d{{4}})\.tif$")
         WORKING_DIR = get_config_item('TERRAIN', 'OUTPUTS')
 
@@ -611,10 +656,9 @@ class CreateSeabedTerrainLayerEngine():
         print(f"Found {len(state_files_map)} variable groups for delta calculation.")
         
         # --- Job 1: Process Neighborhood Stats in Parallel ---
-        print(f"\nRunning neighborhood stats processing ({NEIGHBORHOOD_SIZE}x{NEIGHBORHOOD_SIZE}) with {N_JOBS} jobs...")
         
         delayed_tasks = [
-            delayed(self.generate_neighborhood_statistics)(file_path, NEIGHBORHOOD_SIZE)
+            delayed(self.generate_neighborhood_statistics)(file_path)
             for file_path in all_state_files_to_process
         ]
 

@@ -23,6 +23,7 @@ class HydroHealthCredentialsError(Exception):
 
 class HydroHealthConfig:
     def __init__(self):
+        super().__init__()
         self.config_path = INPUTS / 'lookups' / 'hydro_health.config'
         self.username = None
         self.password = None
@@ -293,14 +294,10 @@ class CreateTSMLayerEngine(Engine):
     def run(self)-> None:
         """Entrypoint for processing the TSM layer
         1.25 hours to run. This doesn't include full download time.
+        No data available prior to 2002.
         """
 
-        try:
-            self.download_tsm_data()
-        except HydroHealthCredentialsError as e:
-            print(f"Failed to start engine: {e}")
-            return
-
+        # self.download_tsm_data()
         self.create_rasters()
 
         for start_year, end_year in self.year_ranges:    

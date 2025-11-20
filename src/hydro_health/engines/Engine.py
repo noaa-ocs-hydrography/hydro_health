@@ -27,6 +27,19 @@ class Engine:
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
         self.cluster = None
         self.client = None
+        self.year_ranges = [
+            (1998, 2004),
+            (2004, 2006),
+            (2006, 2007),
+            (2007, 2010),
+            (2010, 2015),
+            (2014, 2022),
+            (2016, 2017),
+            (2017, 2018),
+            (2018, 2019),
+            (2020, 2022),
+            (2022, 2024)
+        ]
 
     # def __init__(self):
     #     # set up logging
