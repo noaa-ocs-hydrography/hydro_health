@@ -1,5 +1,4 @@
 import pathlib
-import geopandas as gpd
 import rioxarray as rxr
 import rasterio
 import json
@@ -129,10 +128,19 @@ class RasterVRTEngine(Engine):
                 raster_wgs84 = geotiff_path.parents[0] / f'{geotiff_path.stem}_wgs84.tif'
                 rasterio_wgs84 = rasterio.crs.CRS.from_epsg(4326)
                 with rxr.open_rasterio(old_geotiff) as geotiff_raster:
-                    custom_crs = True if geotiff_srs.GetName() == 'unknown' else False
-                    if custom_crs:  # Obtain EPSG and redefine raster CRS
-                        print(f' - defining compound CRS by horiz. CRS: {geotiff_path}')
-                        geotiff_raster = self.write_crs_to_raster(geotiff_raster, geotiff_srs)
+                    srs_json = json.loads(geotiff_srs.ExportToPROJJSON())
+
+                    # Check for problematic compound CRS
+                    try:
+                        name = srs_json['components'][0]['name']
+                        if '+' in name:
+                            # Obtain EPSG and redefine raster CRS
+                            print(f' - defining compound CRS by horiz. CRS: {geotiff_path}')
+                            geotiff_raster = self.write_crs_to_raster(geotiff_raster, geotiff_srs)
+                    except (KeyError, IndexError, TypeError):
+                        # pass for missing keys, empty array, or no + sign
+                        pass
+                        
                     wgs84_geotiff_raster = geotiff_raster.rio.reproject(rasterio_wgs84)
                     wgs84_geotiff_raster.rio.to_raster(raster_wgs84)
 

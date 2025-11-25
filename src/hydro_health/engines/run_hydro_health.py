@@ -55,7 +55,10 @@ def run_hydro_health(config_name: str) -> None:
         print(f'Script has been run {len(config["runtimes"])} time(s)')
         # load ecoregions from config for remote run
         param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if env == 'remote' else ''
-        print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
+        if param_lookup['eco_regions'].valueAsText:
+            print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
+        else:
+            print(f"Running Hydro Health for custom area")
         tiles = tools.get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:

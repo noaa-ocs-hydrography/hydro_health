@@ -6,7 +6,11 @@ import shutil
 import geopandas as gpd
 import os
 import sys
+import json
+import rasterio
+import rioxarray as rxr
 
+from osgeo import gdal, osr, ogr
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -108,9 +112,99 @@ class LAZConversionEngine(Engine):
             print(f' - deleting {self.laz_folders[index]}')
             del self.laz_folders[index]
 
+    def check_compound_crs(self, input_file) -> pathlib.Path:
+        """Reset LAS horizontal CRS if compound, like DEM issue"""
+
+        pipeline_json = {
+            "pipeline": [
+                {
+                    "type": "readers.las", 
+                    "filename": str(input_file), 
+                    "count": 0
+                }
+            ]
+        }
+        output_pickle_file = input_file.parents[0] / f'{input_file.stem}_srs.pkl'
+        with open(output_pickle_file, 'wb') as picklish:
+            pickle.dump(pipeline_json, picklish)
+        try:
+            subprocess.call(
+                [
+                    "conda",
+                    "run",
+                    "-p",
+                    pathlib.Path.home() / r"AppData\Local\ESRI\conda\envs\pdal-workshop",
+                    "python",
+                    HELPERS / 'pdal_separate_script.py',
+                    str(output_pickle_file),
+                    'Return metadata'
+                ]
+            )
+            with open(output_pickle_file, 'rb') as picklish:
+                srs_json = pickle.load(picklish)
+            output_pickle_file.unlink()
+        except Exception as e:
+            print(f'Failure: {e}')
+
+        try:
+            name = srs_json['components'][0]['name']
+            if '+' in name:
+                # Obtain EPSG and redefine raster CRS
+                print(f' - defining compound CRS by horiz. CRS: {input_file}')
+                self.write_crs_to_dataset(input_file, srs_json)
+        except (KeyError, IndexError, TypeError):
+            # pass for missing keys, empty array, or no + sign
+            pass
+
+        return input_file
+
+    def write_crs_to_dataset(self, input_file: pathlib.Path, srs_json: str) -> rxr.rioxarray:
+        """Obtain the horizontal CRS of a compound CRS and write it to the dataset in place"""
+
+        crs_name = srs_json['components'][0]['name']
+        horizontal_name = crs_name.split(' + ')[0]  # Will this always work for compound CRS?
+        clean_horiz_name = horizontal_name.lower().strip()
+        epsg = [crs.code for crs in self.all_crs if crs.name.lower() == clean_horiz_name][0]
+        old_laz_file = output_pickle_file = input_file.parents[0] / f'{input_file.stem}_old.laz'
+        input_file.rename(old_laz_file)
+        pipeline_json = {
+            "pipeline": [
+                {
+                    "type": "readers.las",
+                    "filename": old_laz_file
+                },
+                {
+                    "type": "writers.las",
+                    "filename": input_file,
+                    "a_srs": f"EPSG:{epsg}",  # THIS SMASHES THE OLD SRS!
+                    "forward": "all"       # Keep the other metadata, just not the SRS!
+                }
+            ]
+        }
+        output_pickle_file = input_file.parents[0] / f'{input_file.stem}_temp.pkl'
+        with open(output_pickle_file, 'wb') as picklish:
+            pickle.dump(pipeline_json, picklish)
+        try:
+            subprocess.call(
+                [
+                    "conda",
+                    "run",
+                    "-p",
+                    pathlib.Path.home() / r"AppData\Local\ESRI\conda\envs\pdal-workshop",
+                    "python",
+                    HELPERS / 'pdal_separate_script.py',
+                    str(output_pickle_file)
+                ]
+            )
+            output_pickle_file.unlink()
+            old_laz_file.unlink()
+        except Exception as e:
+            print(f'Failure: {e}')
+
     def convert_laz_file(self, input_file) -> None:
         """Convert an individual LAZ file with threading"""
 
+        input_file = self.check_compound_crs(input_file)
         output_file = input_file.parents[0] / f'{input_file.stem}.tif'
         pipeline_json = {
             "pipeline": [
@@ -146,7 +240,7 @@ class LAZConversionEngine(Engine):
         except Exception as e:
             print(f'Failure: {e}')
             return False
-    
+
     def download_intersected_datasets(self, param_inputs) -> None:
         """Parallel process spatial filter and download of datasets"""
 
@@ -191,7 +285,7 @@ class LAZConversionEngine(Engine):
         for ecoregion in ecoregions:
             ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
             for laz_folder in self.laz_folders:
-                 self.download_intersected_datasets([ecoregion_tile_gdf, list(laz_folder.rglob('*.shp'))[0], outputs])
+                self.download_intersected_datasets([ecoregion_tile_gdf, list(laz_folder.rglob('*.shp'))[0], outputs])
 
     def run(self, tiles: gpd.GeoDataFrame, outputs: str) -> None:
         """Main entry point for converting LAZ data"""
