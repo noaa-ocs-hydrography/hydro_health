@@ -95,7 +95,7 @@ def check_parquet_alignment(path1: str, path2: str, value_col: str) -> bool:
 
     param str path1: File path to the first GeoParquet file.
     param str path2: File path to the second GeoParquet file.
-    param str value_col: The column name whose values will be compared (e.g., 'z_value').
+    param str value_col: The column name whose values will be compared (e.g., 'sed_type_raster_100m').
     return: True if coordinates and values match (within tolerance), False otherwise.
     """
     cols_to_load = ['X', 'Y', value_col]
@@ -134,9 +134,10 @@ def check_parquet_alignment(path1: str, path2: str, value_col: str) -> bool:
     mismatch_count = np.count_nonzero(~np.isclose(v1, v2))
     
     percent_mismatch = (mismatch_count / total_valid_cells) * 100
+    percent_match = 100 - percent_mismatch
     
     print(f"\n--- GeoParquet Comparison Results for '{value_col}' ---")
-    print(f"Percentage of non-matching values (by coordinate): {percent_mismatch:.6f}%")
+    print(f"Percentage of non-matching values (by coordinate): {percent_match:.2f}%")
 
     if percent_mismatch > 0:
         diff_vals = v1 - v2
@@ -157,7 +158,7 @@ def main():
     # Set file paths and the column to compare for GeoParquet files
     file_path_1 = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles\BH4SD56H_1\BH4SD56H_1_training_clipped_data.parquet"
     file_path_2 = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles\BH4SD56H_1\BH4SD56H_1_prediction_clipped_data.parquet"
-    parquet_value_column = "z_value" # Column to compare if files are parquet
+    parquet_value_column = "sed_size_raster_100m" # Column to compare if files are parquet
 
     ext1 = os.path.splitext(file_path_1)[1].lower()
     ext2 = os.path.splitext(file_path_2)[1].lower()

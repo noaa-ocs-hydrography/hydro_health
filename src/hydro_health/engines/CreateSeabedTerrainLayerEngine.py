@@ -14,7 +14,12 @@ from scipy.ndimage import binary_erosion, generic_filter, uniform_filter
 import itertools
 from pathlib import Path
 from collections import defaultdict
-from joblib import Parallel, delayed
+import re
+from pathlib import Path
+from typing import List, Dict, Optional
+import dask
+import rioxarray
+
 
 from hydro_health.helpers.tools import get_config_item
 # from hydro_health.engines.Engine import Engine
@@ -24,6 +29,9 @@ class CreateSeabedTerrainLayerEngine():
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
     def __init__(self):
+        self.input_dir = Path(get_config_item('TERRAIN', 'FILLED_DIR'))
+        self.output_dir = Path(get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR'))
+        self.target_vars = ["terrain", "slope"]
         super().__init__()
         self.year_ranges = [
             (1998, 2004),
@@ -427,7 +435,7 @@ class CreateSeabedTerrainLayerEngine():
         Calculates focal mean and standard deviation for a given raster file
         and saves them as new .tif files.
         """
-
+        print(f"Calculating neighborhood statistics for: {file_path.name}")
         size = 3  # Fixed neighborhood size
 
         base_name = file_path.stem  # e.g., "bathy_2004"
@@ -436,64 +444,287 @@ class CreateSeabedTerrainLayerEngine():
         out_sd = out_dir / f"{base_name}_sd{size}.tif"
         out_mean = out_dir / f"{base_name}_mean{size}.tif"
 
-        if os.path.exists(out_sd):
-            print(f"Output files already exist, skipping: {out_sd.name} and {out_mean.name}")
+        if os.path.exists(out_sd) or 'mean' in file_path.name:
+            print(f"Output files already exist, skipping: {out_sd.name}")
             return 
+        
+        if os.path.exists(out_mean) or 'sd3' in file_path.name:
+            print(f"Output files already exist, skipping: {out_mean.name}")
+            return
         
         rds = rioxarray.open_rasterio(file_path, chunks=True).isel(band=0)
         
         # Create the rolling window (kernel)
         # 'center=True' mimics the R 'focal' behavior
-        window = rds.rolling(dim_x=size, dim_y=size, center=True)
-        
+        window = rds.rolling(x=size, y=size, center=True)
+
         # Calculate focal mean and standard deviation
         r_mean = window.mean()
         r_sd = window.std()
         
         r_mean.rio.to_raster(out_mean, driver="GTiff", compress="LZW")
         r_sd.rio.to_raster(out_sd, driver="GTiff", compress="LZW")
-        
-        return f"Processed neighborhood for: {file_path.name}"
 
-    def create_delta_rasters_py(self, file_group: dict) -> list[str]:
+    def load_and_average(self, paths: List[Path]) -> xr.DataArray:
+        """Loads a list of rasters and returns the mean array.
+           Uses skipna=True to ensure valid data is averaged even if some layers have NoData.
         """
-        Calculates the 'delta' (change) between consecutive years for a
-        given state variable.
-        """
+        # masked=True converts the file's NoData value (e.g., -9999) to np.nan
+        das = [rioxarray.open_rasterio(p, chunks=None, masked=True).isel(band=0) for p in paths]
         
-        var_name = file_group['var']
-        files = file_group['files']
+        if len(das) == 1:
+            return das[0]
         
-        # Sort files by year (key=lambda x: x['year'])
-        sorted_files = sorted(files, key=lambda x: x['year'])
+        combined = xr.concat(das, dim="merge_dim")
         
-        # Iterate through consecutive pairs of files
-        # (e.g., (2004, 2006), (2006, 2008), ...)
-        results = []
-        for i in range(len(sorted_files) - 1):
-            file_t0_info = sorted_files[i]
-            file_t1_info = sorted_files[i+1]
+        # CRITICAL FIX: skipna=True ensures we calculate a 'nanmean'.
+        # If Pixel A is 10.0 in file1 and NaN in file2, the result is 10.0 (not NaN).
+        averaged = combined.mean(dim="merge_dim", keep_attrs=True, skipna=True)
+        
+        # Explicitly write CRS as 'mean' operation can sometimes drop it
+        if das[0].rio.crs:
+            averaged.rio.write_crs(das[0].rio.crs, inplace=True)
             
-            y0 = file_t0_info['year']
-            y1 = file_t1_info['year']
-    
-            out_dir = file_t0_info['path'].parent
-            out_file = out_dir / f"delta_{var_name}_{y0}_{y1}.tif"
+        return averaged
 
-            if os.path.exists(out_file):
-                print(f"Output files already exist, skipping: {out_file.name}")
-                return 
+    @dask.delayed
+    def process_delta_task(self, paths_t0: List[Path], paths_t1: List[Path], out_path: Path) -> str:
+        """Calculates delta between two sets of file paths.
+           Executes as a single synchronous unit of work on the worker.
+        """
+        if out_path.exists():
+            return f"Skipped (Exists): {out_path.name}"
+
+        try:
+            # 1. Load data into memory (NumPy arrays)
+            da_t0 = self.load_and_average(paths_t0)
+            da_t1 = self.load_and_average(paths_t1)
+
+            # 2. Alignment Check
+            # Using reproject_match on in-memory arrays is simpler and safer than on dask arrays
+            # However, if you are CERTAIN grids are identical, you can skip this to save time.
+            # We keep it here to fix your 'bounds' error from earlier.
+            if da_t0.rio.bounds() != da_t1.rio.bounds():
+                 da_t1 = da_t1.rio.reproject_match(da_t0)
+
+            # 3. Calculate Delta
+            delta = da_t1 - da_t0
+
+            # 4. Restore Metadata
+            delta.rio.write_crs(da_t0.rio.crs, inplace=True)
+            delta.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
+
+            # 5. Write to disk
+            # We use 'tiled=True' here for the output format, but the calculation happened in RAM
+            delta.rio.to_raster(
+                out_path,
+                driver="GTiff",
+                compress="LZW",
+                tiled=True,
+                windowed=True
+            )
+            return f"Created: {out_path.name}"
+
+        except Exception as e:
+            return f"Error on {out_path.name}: {str(e)}"
+
+    def _get_tile_id(self, filename: str) -> Optional[str]:
+            """Extracts the 8-character alphanumeric Tile ID.
+            Handles IDs surrounded by underscores (e.g., _BH4Q958G_).
+            Ignores 8-digit dates (e.g., 20240917).
+            """
+            # Look for exactly 8 uppercase letters or digits
+            # We use findall to get EVERY match in the string
+            candidates = re.findall(r"[A-Z0-9]{8}", filename)
             
-            r_t0 = rioxarray.open_rasterio(file_t0_info['path'], chunks=True).isel(band=0)
-            r_t1 = rioxarray.open_rasterio(file_t1_info['path'], chunks=True).isel(band=0)
+            for cand in candidates:
+                # Return the first candidate that is NOT purely numbers
+                # (This filters out dates like '20240917' but keeps 'BH4Q958G')
+                if not cand.isdigit():
+                    return cand
+                    
+            return None
+
+    def _get_year(self, filename: str) -> Optional[int]:
+        """Extracts the 4-digit year.
+           param str filename: Input filename.
+           return: Integer year or None.
+        """
+        pattern = r"(?P<year>199\d|20[0-2]\d)"
+        match = re.search(pattern, filename)
+        return int(match.group("year")) if match else None
+
+    def _get_variable_type(self, filename: str) -> Optional[str]:
+        """Determines if file matches target variables.
+           param str filename: Input filename.
+           return: Variable name ('terrain' or 'slope') or None.
+        """
+        # Assumes self.target_vars is defined in your class __init__
+        fname_lower = filename.lower()
+        for var in self.target_vars:
+            if var in fname_lower:
+                return var
+        return None
+
+    def group_files(self) -> Dict:
+        """Groups files by Tile and Variable, then by Year.
+           return: Nested dictionary structure: dict[tile_id][variable][year] = [List of Paths]
+        """
+        groups = {}
+
+        print(len(list(self.input_dir.rglob("*.tif"))))
+
+
+        # Assumes self.input_dir is defined in your class __init__
+        for f_path in list(self.input_dir.rglob("*.tif")):
+            f_name = f_path.name
             
-            # Calculate delta (t1 - t0)
-            delta = r_t1 - r_t0
-            
-            delta.rio.to_raster(out_file, driver="GTiff", compress="LZW")
-            results.append(f"Created delta: {out_file.name}")
+            print(f_name)
+            tile_id = self._get_tile_id(f_name)
+            print(tile_id)
+            year = self._get_year(f_name)
+            print(year)
+            var = self._get_variable_type(f_name)
+            print(var)  
+
+            if tile_id and year and var:
+                if tile_id not in groups:
+                    groups[tile_id] = {}
+                if var not in groups[tile_id]:
+                    groups[tile_id][var] = {}
+                if year not in groups[tile_id][var]:
+                    groups[tile_id][var][year] = []
                 
-        return results
+                groups[tile_id][var][year].append(f_path)
+        
+        return groups
+
+    def process_delta_rasters(self):
+        """Executes the delta processing pipeline.
+           return: None
+        """
+        # Assumes self.year_ranges and self.output_dir are defined in your class __init__
+        groups = self.group_files()
+        delayed_tasks = []
+
+        print(f"Scanning complete. Found groups for {len(groups)} tiles.")
+
+        for tile_id, var_dict in groups.items():
+            for var, year_map in var_dict.items():
+                
+                for y0, y1 in self.year_ranges:
+                    if y0 in year_map and y1 in year_map:
+                        
+                        paths_t0 = year_map[y0]
+                        paths_t1 = year_map[y1]
+                        
+                        if len(paths_t0) > 1:
+                            print(f"  [Info] Averaging {len(paths_t0)} datasets for {tile_id} - Year {y0} ({var})")
+                        
+                        if len(paths_t1) > 1:
+                            print(f"  [Info] Averaging {len(paths_t1)} datasets for {tile_id} - Year {y1} ({var})")
+
+                        out_name = f"delta_{tile_id}_{y0}_{y1}_{var}.tif"
+                        out_path = self.output_dir / out_name
+                        
+                        task = self.process_delta_task(paths_t0, paths_t1, out_path)
+                        delayed_tasks.append(task)
+
+        if not delayed_tasks:
+            print("No matching year pairs found.")
+            return
+
+        print(f"Queued {len(delayed_tasks)} delta calculations. Computing...")
+        
+        results = dask.compute(*delayed_tasks)
+        
+        for res in results:
+            print(res)
+
+    def group_files_simple(self) -> Dict:
+        """Groups files strictly by Tile ID and Year.
+           Used for the batch averaging process.
+           return: dict[tile_id][year] = [List of Paths]
+        """
+        groups = {}
+        
+        # Ensure input_dir is a Path object
+        input_path = Path(self.input_dir)
+
+        for f_path in input_path.glob("*.tif"):
+            f_name = f_path.name
+            
+            tile_id = self._get_tile_id(f_name)
+            year = self._get_year(f_name)
+
+            if tile_id and year:
+                if tile_id not in groups:
+                    groups[tile_id] = {}
+                if year not in groups[tile_id]:
+                    groups[tile_id][year] = []
+                
+                groups[tile_id][year].append(f_path)
+        
+        return groups
+
+    @dask.delayed
+    def process_combination_task(self, paths: List[Path], out_path: Path) -> str:
+        """Loads one or more rasters, averages them, and saves to new name.
+           Handles both single files (copy/format) and multiple files (average).
+        """
+        if out_path.exists():
+            return f"Skipped (Exists): {out_path.name}"
+
+        try:
+            # Reuses your existing robust load logic (in-memory, no chunks)
+            da_avg = self.load_and_average(paths)
+            
+            # Ensure spatial dimensions are set correctly before writing
+            da_avg.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True, compress='LZW')
+
+            da_avg.rio.to_raster(
+                out_path,
+                driver="GTiff",
+                compress="LZW",
+                tiled=True,
+                windowed=True
+            )
+            return f"Created: {out_path.name}"
+            
+        except Exception as e:
+            return f"Error on {out_path.name}: {str(e)}"
+
+    def run_bathy_combination(self):
+        """Orchestrates the finding, averaging, and renaming of bathy files."""
+        groups = self.group_files_simple()
+        delayed_tasks = []
+
+        print(f"Scanning complete. Found groups for {len(groups)} tiles.")
+
+        for tile_id, year_map in groups.items():
+            for year, paths in year_map.items():
+                
+                # Naming Convention: combined_bathy_{tileid}_{year}.tif
+                out_name = f"combined_bathy_{tile_id}_{year}.tif"
+                out_path = self.output_dir / out_name
+                
+                # Optional: Logging for averaging vs single file
+                if len(paths) > 1:
+                    print(f"  [Info] Averaging {len(paths)} files for {out_name}")
+                
+                task = self.process_combination_task(paths, out_path)
+                delayed_tasks.append(task)
+
+        if not delayed_tasks:
+            print("No matching files found to process.")
+            return
+
+        print(f"Queued {len(delayed_tasks)} combination tasks. Computing...")
+        
+        results = dask.compute(*delayed_tasks)
+        
+        for res in results:
+            print(res)
 
     def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir) -> str:
         """
@@ -514,7 +745,6 @@ class CreateSeabedTerrainLayerEngine():
             return 
         
         # Determine the year and load the correct dictionary
-        # TODO this might need to be adjusted based on actual file naming conventions
         year = 'bt_bathy' # default for generic name
         match = re.search(r'((?:19|20)\d{2})', base_name)
         if match:
@@ -537,7 +767,8 @@ class CreateSeabedTerrainLayerEngine():
             cell_size = src.res[0]
 
         # print("  - Generating derivatives...")
-        slope, rugosity = self.calculate_slope_and_tri(bathy_array, cell_size)
+        if "slope" not in base_name.lower():
+            slope, rugosity = self.calculate_slope_and_tri(bathy_array, cell_size)
         bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
         bpi_broad = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
         bpi_fine_std = self.standardize_raster_array(bpi_fine)
@@ -607,11 +838,18 @@ class CreateSeabedTerrainLayerEngine():
         # --- 2. FIND ALL BATHY FILES TO PROCESS ---
         bathy_files_to_process = [os.path.join(filled_dir, f) for f in os.listdir(filled_dir)]
 
-        # # Adding Blutopo files to the lists
-        # bathy_files_to_process.extend(
-        #     [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
-        #     if f.endswith(('.tif', '.tiff')) and 'BlueTopo' in f]
-        # )
+        # Adding Blutopo files to the lists
+        bathy_files_to_process.extend(
+            [os.path.join(input_dir, f) for f in os.listdir(input_dir) 
+            if f.endswith(('.tif', '.tiff')) and 'BlueTopo' in f]
+        )
+
+        vars_to_exclude = ["unc","slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification", "survey_end_date"]
+
+        bathy_files_to_process = [
+            f for f in bathy_files_to_process 
+            if not any(v in os.path.basename(f) for v in vars_to_exclude)
+        ]
 
         print(f"Found {len(bathy_files_to_process)} bathymetry files to process.")
 
@@ -627,42 +865,52 @@ class CreateSeabedTerrainLayerEngine():
             task = dask.delayed(self.generate_terrain_products_python)(bathy_file, best_radii, dictionary_output_dir)
             tasks.append(task)
             
-        dask.compute(*tasks)
+        # dask.compute(*tasks)
 
-        #### run until here, then below needs some testing
-
-        STATE_VARS = ["filled", "slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification"]
-        FILE_PATTERN = re.compile(rf"({'|'.join(STATE_VARS)})_(\d{{4}})\.tif$")
         WORKING_DIR = get_config_item('TERRAIN', 'OUTPUTS')
+        STATE_VARS = ["filled", "slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification"]
+
 
         print(f"Starting raster processing in: {WORKING_DIR}")
         print(f"Finding files for: {', '.join(STATE_VARS)}")
         
-        # Find all .tif files and group them by state variable
         state_files_map = defaultdict(list)
         all_state_files_to_process = []
 
-        for f in WORKING_DIR.glob("*.tif"):
+        WORKING_DIR = Path(WORKING_DIR)
+
+        valid_years = {str(year) for year_pair in self.year_ranges for year in year_pair}
+
+        year_pattern_str = "|".join(valid_years)
+        var_pattern_str = "|".join(STATE_VARS)
+
+        FILE_PATTERN = re.compile(rf".*?_({year_pattern_str})\d*?_.*_({var_pattern_str}).*?$")
+
+        for f in WORKING_DIR.rglob("*.tif"):
             match = FILE_PATTERN.search(f.name)
             if match:
-                var_name = match.group(1)
-                year = int(match.group(2))
-                
+                year = int(match.group(1))
+                var_name = match.group(2)
+
                 file_info = {'path': f, 'year': year}
+                
+                if var_name not in state_files_map:
+                    state_files_map[var_name] = []
+                    
                 state_files_map[var_name].append(file_info)
                 all_state_files_to_process.append(f)
                 
-        print(f"Found {len(all_state_files_to_process)} rasters for neighborhood stats.")
+        print(f"Found {len(set(all_state_files_to_process))} rasters for neighborhood stats.")
         print(f"Found {len(state_files_map)} variable groups for delta calculation.")
         
         # --- Job 1: Process Neighborhood Stats in Parallel ---
-        
+        delayed_tasks = []
         delayed_tasks = [
-            delayed(self.generate_neighborhood_statistics)(file_path)
-            for file_path in all_state_files_to_process
+            dask.delayed(self.generate_neighborhood_statistics)(file_path)
+            for file_path in set(all_state_files_to_process)
         ]
 
-        # neighborhood_results, = compute(delayed_tasks)
+        # dask.compute(*delayed_tasks)
 
         # --- Job 2: Create Delta Rasters in Parallel ---
         # We need to pass the dict for each variable group
@@ -670,12 +918,8 @@ class CreateSeabedTerrainLayerEngine():
         
         print(f"\nRunning delta raster creation for {len(delta_groups)} variable groups")
 
-        delayed_tasks = [
-            delayed(self.create_delta_rasters_py)(group)
-            for group in delta_groups
-        ]
-
-        # delta_results, = compute(delayed_tasks)
+        # self.process_delta_rasters()
+        self.run_bathy_combination()
         
         # print("\n--- Delta Results ---")
         # for res_list in delta_results:

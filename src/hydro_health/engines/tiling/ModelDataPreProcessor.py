@@ -197,16 +197,16 @@ class ModelDataPreProcessor():
 
         print(f"Total prediction files found (excluding already processed): {len(prediction_files)} out of {file_count}")
 
-        prediction_tasks = []
-        for file in prediction_files:
-            input_path = os.path.join(input_directory, file)
-            output_path = os.path.join(prediction_out, file.name)
-            prediction_tasks.append(dask.delayed(self.process_prediction_raster)(input_path, mask_future_pred, output_path))
+        # prediction_tasks = []
+        # for file in prediction_files:
+        #     input_path = os.path.join(input_directory, file)
+        #     output_path = os.path.join(prediction_out, file.name)
+        #     prediction_tasks.append(dask.delayed(self.process_prediction_raster)(input_path, mask_future_pred, output_path))
 
         # dask.compute(*prediction_tasks)  
 
-        # engine = CreateSeabedTerrainLayerEngine()
-        # engine.process()
+        engine = CreateSeabedTerrainLayerEngine()
+        engine.process()
         
         training_out = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
         existing_outputs = {f.name for f in training_out.glob("*") if f.suffix.lower() in ['.tif', '.tiff']}
@@ -271,69 +271,66 @@ class ModelDataPreProcessor():
     
         client.close()
 
-    def process_prediction_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8)-> None:
-        """ Reprojects, resamples, and crops a raster to a target CRS, resolution, and extent
+    def process_prediction_raster(self, raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8) -> None:
+        """ Reprojects, resamples, and crops a raster to a target CRS, resolution, and extent """  
 
-        :param str raster_path: path to the raster file
-        :param gdf mask_gdf: GeoDataFrame containing the mask geometries
-        :param str output_path: path to save the processed raster
-        :param str target_crs: target coordinate reference system (default is "EPSG:32617")
-        :param int target_res: target resolution in meters (default is 8)
-        :return: None
-        """  
-
-        has_valid_data = False
-        with rasterio.open(raster_path) as src:
-            src_nodata = src.nodata 
-            
-            # Iterate over blocks to avoid loading all data into memory
-            for ji, window in src.block_windows(1):
-                
-                # Read the block, masking the nodata values
-                # This creates a NumPy MaskedArray
-                data_block = src.read(1, window=window, masked=True)
-                
-                # .count() returns the number of *valid* (unmasked) pixels
-                if data_block.count() > 0:
-                    has_valid_data = True
-                    break # Found valid data, no need to check other blocks
-
+        # 1. Setup names first so they exist even if the Try block fails immediately
         raster_name = os.path.basename(str(raster_path)).lower()
-        if not has_valid_data:
-            print(f'Skipping {raster_name}: No valid data found.')
-            return 
-
-        keywords = ["tsm", "sed", "hurricane"] 
-        
-        print(f'Processing prediction file {raster_name}...')
-
-        should_crop = any(keyword in raster_name.lower() for keyword in keywords)
-
         in_memory_cutline = f'/vsimem/cutline_{raster_name}.geojson'   
 
-        mask_gdf.to_file(in_memory_cutline, driver='GeoJSON')
+        # START THE SAFETY NET
+        try:
+            # --- Existing Logic Starts Here ---
+            has_valid_data = False
+            with rasterio.open(raster_path) as src:
+                src_nodata = src.nodata 
+                
+                for ji, window in src.block_windows(1):
+                    data_block = src.read(1, window=window, masked=True)
+                    if data_block.count() > 0:
+                        has_valid_data = True
+                        break 
 
-        gdal.Warp(
-            output_path,
-            str(raster_path),
-            dstSRS=target_crs,
-            xRes=target_res,
-            yRes=target_res,
-            cutlineDSName=in_memory_cutline,
-            cropToCutline=should_crop, 
-            resampleAlg='bilinear',
-            srcNodata=src_nodata,
-            dstNodata=np.nan,
-            creationOptions=['TILED=YES', 'COMPRESS=LZW', 'BIGTIFF=YES'],
-            multithread=True,
-            warpMemoryLimit=2048,
-            warpOptions=['CUTLINE_ALL_TOUCHED=TRUE']
-        )
+            if not has_valid_data:
+                print(f'Skipping {raster_name}: No valid data found.')
+                return 
 
-        src = None
+            keywords = ["tsm", "sed", "hurricane"] 
+            print(f'Processing prediction file {raster_name}...')
 
-        if os.path.exists(in_memory_cutline):
-            gdal.Unlink(in_memory_cutline)
+            should_crop = any(keyword in raster_name.lower() for keyword in keywords)
+
+            mask_gdf.to_file(in_memory_cutline, driver='GeoJSON')
+
+            gdal.Warp(
+                output_path,
+                str(raster_path),
+                dstSRS=target_crs,
+                xRes=target_res,
+                yRes=target_res,
+                cutlineDSName=in_memory_cutline,
+                cropToCutline=should_crop, 
+                resampleAlg='bilinear',
+                srcNodata=src_nodata,
+                dstNodata=np.nan,
+                creationOptions=['TILED=YES', 'COMPRESS=LZW', 'BIGTIFF=YES'],
+                multithread=True,
+                warpMemoryLimit=2048,
+                warpOptions=['CUTLINE_ALL_TOUCHED=TRUE']
+            )
+            # --- Existing Logic Ends Here ---
+
+        # 2. Catch CRASHES (Corruption, Read Errors, etc.)
+        except Exception as e:
+            # This runs if rasterio fails to open, or GDAL crashes during warp
+            print(f"⚠️ ERROR: Could not process {raster_name}. File may be corrupted.")
+            print(f"   Details: {e}")
+            return # Exits this function, but does not stop your main loop
+
+        # 3. Cleanup (Always runs to prevent memory leaks)
+        finally:
+            if os.path.exists(in_memory_cutline):
+                gdal.Unlink(in_memory_cutline)
 
     def process_training_raster(self, raster_path, mask_future_train, output_path)-> None:
         """ Process a training raster by clipping it with a mask GeoDataFrame and saving the output.
