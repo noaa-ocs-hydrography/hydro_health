@@ -125,10 +125,31 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
         blue_topo_folder = ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
         bluetopo_grids = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
         data_folder = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / data_type
-        vrt_files = list(data_folder.glob('*.vrt'))
+        all_vrt_files = list(data_folder.glob('*.vrt'))
+
+        config_path = INPUTS / 'lookups' / 'ER_3_lidar_data_config.yaml'
+        with open(config_path, 'r') as f:
+            config_data = yaml.safe_load(f)
+
+        # TODO does this filtering work as intended?
+        datasets_to_check = config_data.get('EcoRegion-3', {})
+
+        excluded_providers = {
+            key for key, data in datasets_to_check.items()
+            if data.get('use') is False
+        }
+
+        vrt_files = [
+            vrt for vrt in all_vrt_files
+            if not any(provider in vrt.name for provider in excluded_providers)
+        ]
+
+        print(f'Processing {len(vrt_files)} {data_type} VRT files for {ecoregion.stem}')
+
         for vrt in vrt_files:
+            print(f'Processing VRT: {vrt}')
             vrt_ds = gdal.Open(str(vrt))
-            vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[3:])
+            vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[2:])
             vrt_tile_index = list(vrt_data_folder.rglob('*_dis.shp'))[0]
             shp_driver = ogr.GetDriverByName('ESRI Shapefile')
             vrt_tile_index_shp = shp_driver.Open(vrt_tile_index, 0)

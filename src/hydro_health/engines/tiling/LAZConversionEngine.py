@@ -115,6 +115,11 @@ class LAZConversionEngine(Engine):
         pipeline_json = {
             "pipeline": [
                 {"type": "readers.las", "filename": str(input_file)},
+                # Filter for BOTH Ground and Seafloor points
+                {
+                    "type": "filters.range",
+                    "limits": "Classification[2:2], Classification[40:40]" 
+                },
                 {
                     "type": "writers.gdal",
                     "gdaldriver": "GTiff",
@@ -175,7 +180,7 @@ class LAZConversionEngine(Engine):
         for ecoregion in ecoregions:
             print(f'Processing LAZ files for {ecoregion}')
             digital_coast_folder = pathlib.Path(outputs) / ecoregion /  get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-            self.laz_folders = [folder for folder in digital_coast_folder.glob('**/laz') if 'unused_providers' not in str(folder)]
+            self.laz_folders = [folder for folder in digital_coast_folder.glob('**/laz') if 'unused_providers' not in str(folder) and 'USGS_NASA_2002_6303' in str(folder)]
 
     def print_async_results(self, results: list[str], output_folder: str) -> None:
         """Consolidate result printing"""
