@@ -6,6 +6,9 @@ import shutil
 import multiprocessing as mp
 import pandas as pd
 import geopandas as gpd
+import yaml
+from pathlib import Path
+from typing import List
 
 from osgeo import ogr, osr, gdal
 
@@ -159,11 +162,15 @@ class RasterMaskEngine(Engine):
         for ecoregion in ecoregions:
             if ecoregion.stem in approved_files:
                 for tile_index_path in approved_files[ecoregion.stem]:
-                    tile_index = gpd.read_file(tile_index_path).dissolve()
+                    print(f' - {tile_index_path}')
+
                     dissolved_tile_index = tile_index_path.parents[0] / pathlib.Path(tile_index_path.stem + '_dis.shp')
                     if dissolved_tile_index.exists():
-                        dissolved_tile_index.unlink()
+                    #     dissolved_tile_index.unlink()
+                        print(f'   -> Skipping, {dissolved_tile_index.name} already exists.')
+                        continue  # Skip to the next file in the loop
                     # Some providers are in NAD83(NSRS2007)
+                    tile_index = gpd.read_file(tile_index_path).dissolve()
                     tile_index.to_crs("EPSG:4326").to_file(dissolved_tile_index)
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
@@ -173,7 +180,20 @@ class RasterMaskEngine(Engine):
         for ecoregion in ecoregions:
             digital_coast = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if digital_coast.is_dir():
-                json_files = [folder for folder in digital_coast.rglob('feature.json') if 'unused_providers' not in str(folder)]
+                config_path = INPUTS / 'lookups' / 'ER_3_lidar_data_config.yaml'
+                with open(config_path, 'r') as f:
+                    config = yaml.safe_load(f)
+
+                excluded_providers = [
+                    key for key, value in config.items() if value.get('use') is False
+                ]
+
+                json_files = [
+                    folder for folder in digital_coast.rglob('feature.json')
+                    if 'unused_providers' not in str(folder) and not any(
+                        provider in str(folder) for provider in excluded_providers
+                    )
+                ]
                 for file in json_files:
                     if ecoregion.stem not in approved_files:
                         approved_files[ecoregion.stem] = []
@@ -181,6 +201,8 @@ class RasterMaskEngine(Engine):
                     tile_index_shps = list(parent_project.rglob('*index*.shp'))
                     if tile_index_shps:
                         approved_files[ecoregion.stem].append(tile_index_shps[0])
+
+        print(f' - Approved area files: {approved_files}')                
         return approved_files
 
     def get_transformation(self) -> osr.CoordinateTransformation:
