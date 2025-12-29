@@ -2,6 +2,7 @@ import pathlib
 import geopandas as gpd
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
+from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
@@ -23,6 +24,13 @@ def run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, outputs:str) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     engine = BlueTopoEngine()
+    engine.run(tiles, outputs)
+
+
+def run_bluetopo_s3_tile_engine(tiles: gpd.GeoDataFrame,  outputs:str) -> None:
+    """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
+
+    engine = BlueTopoS3Engine()
     engine.run(tiles, outputs)
 
 
@@ -48,7 +56,7 @@ def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
 
 
 def run_metadata_engine(outputs:str) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
+    """Entry point for parallel processing of provider metadata"""
 
     ecoregions = [file_path.stem for file_path in pathlib.Path(outputs).rglob('ER_*') if file_path.is_dir()]
     engine = MetadataEngine()
