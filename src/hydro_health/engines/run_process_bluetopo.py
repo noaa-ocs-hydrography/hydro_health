@@ -36,7 +36,6 @@ if __name__ == '__main__':
     print(f'Total Runtime: {end - start}') # Florida-West - 640.7945353984833 seconds or 10.67990892330806 minutes, 7.23GB, 727 folders, 1454 files
     found_bluetopo_files = []
     for tiff_file in pathlib.Path(param_lookup['output_directory'].valueAsText).rglob('*.tiff'):
-        print(str(tiff_file))
         if 'BlueTopo' in str(tiff_file):
             found_bluetopo_files.append(tiff_file)
     if found_bluetopo_files:
