@@ -31,7 +31,8 @@ def _download_tile_index(param_inputs: list[list]) -> None:
 
     engine = DigitalCoastEngine()
 
-    if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link or 'laz' in download_link):
+    # TODO Removed laz download until HH 2.0
+    if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link):  # or 'laz' in download_link):
         _, data_file = download_link.replace('/index.html', '').split('.com')
         lidar_bucket = engine.get_bucket()
         for obj_summary in lidar_bucket.objects.filter(Prefix=f"{data_file[1:]}"):
