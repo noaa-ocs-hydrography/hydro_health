@@ -20,18 +20,18 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
-def run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, outputs:str) -> None:
+def run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
-    engine = BlueTopoEngine()
-    engine.run(tiles, outputs)
+    engine = BlueTopoEngine(param_lookup)
+    engine.run(tiles)
 
 
-def run_bluetopo_s3_tile_engine(tiles: gpd.GeoDataFrame,  outputs:str) -> None:
+def run_bluetopo_s3_tile_engine(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict]) -> None:
     """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
 
-    engine = BlueTopoS3Engine()
-    engine.run(tiles, outputs)
+    engine = BlueTopoS3Engine(param_lookup)
+    engine.run(tiles)
 
 
 def run_raster_mask_engine(outputs:str) -> None:

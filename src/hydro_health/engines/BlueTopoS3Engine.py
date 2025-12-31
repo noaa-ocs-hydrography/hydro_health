@@ -35,19 +35,15 @@ def _process_tile(param_inputs: list[list]) -> None:
     """
 
     # outputs folder available for logging
-    s3_output_bucket, outputs, s3_prefix, tile_id, ecoregion_id = param_inputs
-
+    param_lookup, s3_output_bucket, tile_id, ecoregion_id = param_inputs
+    
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = pathlib.Path(temp_dir)
 
-        engine = BlueTopoS3Engine()
+        engine = BlueTopoS3Engine(param_lookup)
 
-        # 1. DOWNLOAD (Updated to save to temp_path)
         tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id)
-        
         if tiff_file_path:
-            # 2. PROCESS (Your existing logic runs locally on the temp drive)
-            # No changes needed to these methods!
             engine.create_survey_end_date_tiff(tiff_file_path)
             mb_tiff_file = engine.rename_multiband(tiff_file_path)
             engine.multiband_to_singleband(mb_tiff_file, band=1)
@@ -57,19 +53,14 @@ def _process_tile(param_inputs: list[list]) -> None:
             engine.create_slope(tiff_file_path)
             engine.create_rugosity(tiff_file_path)
 
-            # 3. UPLOAD (Sync the temp folder results back to S3)
-            # We assume anything left in the temp folder is a result we want.
-            engine.upload_directory_to_s3(
-                local_dir=temp_path, 
-                bucket_name=s3_output_bucket, 
-                s3_prefix=f"{s3_prefix}/{ecoregion_id}/{tile_id}"
-            )
+            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id)
 
 class BlueTopoS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self):
+    def __init__(self, param_lookup):
         super().__init__()
+        self.param_lookup = param_lookup
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
@@ -150,26 +141,26 @@ class BlueTopoS3Engine(Engine):
         """
 
         nbs_bucket = self.get_bucket()
-        output_tile_path = None
+        output_tile_path = False
         
-        # TODO Determine the destination subfolder structure inside the temp dir
-        # e.g., /tmp/xyz/US4NC/BlueTopo/...
-        
+        output_folder = self.param_lookup['output_directory'].valueAsText
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            # We flatten the path structure slightly for the temp dir processing
-            # or keep it if your processing logic relies on specific parent folder structures.
             file_name = pathlib.Path(obj_summary.key).name
-            local_file = temp_folder / file_name
+            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / file_name
+            # Store the path to the tile, not the xml
+            if current_file.suffix == '.tiff':
+                if current_file.exists():
+                    self.write_message(f'Skipping: {current_file.name}', output_folder)
+                    return output_tile_path
+                output_tile_path = current_file
+            tile_folder = current_file.parents[0]
+            self.write_message(f'Downloading: {current_file.name}', output_folder)
+            tile_folder.mkdir(parents=True, exist_ok=True)   
             
-            if local_file.suffix == '.tiff':
-                output_tile_path = local_file
-            
-            # Download to the temp directory
-            # No need to check if exists, because temp dir is always empty on start
-            nbs_bucket.download_file(obj_summary.key, str(local_file))
+            nbs_bucket.download_file(obj_summary.key, str(current_file))
             
         return output_tile_path
-
+    
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
@@ -216,15 +207,15 @@ class BlueTopoS3Engine(Engine):
             if result:
                 self.write_message(result, output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
         print('Downloading BlueTopo Datasets')
 
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         self.setup_dask()
-        param_inputs = [[outputs, output_bucket, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+        param_inputs = [[self.param_lookup, output_bucket, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         future_tiles = self.client.map(_process_tile, param_inputs)
         tile_results = self.client.gather(future_tiles)
-        self.print_async_results(tile_results, outputs)
+        self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
         self.close_dask()
 
         # log all tiles using tile_gdf
@@ -243,19 +234,15 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
 
-    def upload_directory_to_s3(self, local_dir: pathlib.Path, bucket_name: str, s3_prefix: str) -> None:
+    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:
         """
-        Walks the temporary directory and uploads all generated files to S3.
+        Upload all tiff files to s3 for current tile
         """
-        s3_client = boto3.client('s3') # Use standard client for uploads
+        s3_client = boto3.client('s3')
         
-        for root, dirs, files in os.walk(local_dir):
-            for file in files:
-                local_path = os.path.join(root, file)
-                
-                # Construct the S3 key
-                # This puts the file at: s3://bucket/prefix/filename.tiff
-                s3_key = f"{s3_prefix}/{file}"
-                
-                print(f"Uploading {file} to s3://{bucket_name}/{s3_key}")
-                s3_client.upload_file(local_path, bucket_name, s3_key)
+        for tiff_file in tile_folder.glob('*.tiff'):
+            ecoregion_index = tiff_file.parts.index(ecoregion_id)
+            s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
+            self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
+            s3_client.upload_file(str(tiff_file), bucket_name, str(s3_path))
+

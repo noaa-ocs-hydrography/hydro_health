@@ -5,6 +5,7 @@ import os
 import re
 import requests
 import geopandas as gpd
+import dask
 
 from osgeo import osr, gdal
 from dask.distributed import Client, LocalCluster
@@ -145,7 +146,9 @@ class Engine:
     def setup_dask(self, processes=True) -> None:
         """Create Dask objects outside of init"""
 
-        self.cluster = LocalCluster(processes=processes)
+        if self.param_lookup['env'] == 'aws':
+            dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
+        self.cluster = LocalCluster(processes=processes, n_workers=2, threads_per_worker=1)
         self.client = Client(self.cluster)
         # print(self.client.dashboard_link)
 

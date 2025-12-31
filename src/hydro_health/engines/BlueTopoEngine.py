@@ -28,11 +28,11 @@ set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 def _process_tile(param_inputs: list[list]) -> None:
     """Static function for pickling that handles processing of a single tile"""
 
-    output_folder, tile_id, ecoregion_id = param_inputs
+    param_lookup, tile_id, ecoregion_id = param_inputs
 
-    engine = BlueTopoEngine()
+    engine = BlueTopoEngine(param_lookup)
 
-    tiff_file_path = engine.download_nbs_tile(output_folder, tile_id, ecoregion_id)
+    tiff_file_path = engine.download_nbs_tile(tile_id, ecoregion_id)
     if tiff_file_path:
         engine.create_survey_end_date_tiff(tiff_file_path)
         mb_tiff_file = engine.rename_multiband(tiff_file_path)
@@ -47,8 +47,9 @@ def _process_tile(param_inputs: list[list]) -> None:
 class BlueTopoEngine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self):
+    def __init__(self, param_lookup):
         super().__init__()
+        self.param_lookup = param_lookup
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
@@ -122,10 +123,11 @@ class BlueTopoEngine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, output_folder: str, tile_id: str, ecoregion_id: str) -> pathlib.Path:
+    def download_nbs_tile(self, tile_id: str, ecoregion_id: str) -> pathlib.Path:
         """Download all NBS files for a single tile"""
 
         nbs_bucket = self.get_bucket()
+        output_folder = self.param_lookup['output_directory'].valueAsText
         output_pathlib = pathlib.Path(output_folder)
         output_tile_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
@@ -188,14 +190,14 @@ class BlueTopoEngine(Engine):
             if result:
                 self.write_message(result, output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
         print('Downloading BlueTopo Datasets')
 
         self.setup_dask()
-        param_inputs = [[outputs, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+        param_inputs = [[self.param_lookup, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         future_tiles = self.client.map(_process_tile, param_inputs)
         tile_results = self.client.gather(future_tiles)
-        self.print_async_results(tile_results, outputs)
+        self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
         self.close_dask()
 
         # log all tiles using tile_gdf
