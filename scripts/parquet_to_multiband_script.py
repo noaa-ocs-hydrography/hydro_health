@@ -6,7 +6,7 @@ from rasterio.transform import from_origin
 
 # Load GeoParquet
 # combined = gpd.read_parquet(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles\BH4QK58C_4\BH4QK58C_4_training_clipped_data.parquet")
-combined = gpd.read_parquet(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles\BH4S555N_1\BH4S555N_1_prediction_clipped_data.parquet")
+combined = gpd.read_parquet(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles\BH4SD56H_1\BH4SD56H_1_training_clipped_data.parquet")
 
 # Verify CRS
 crs = combined.crs
@@ -22,7 +22,7 @@ height = int(np.ceil((bounds[3] - bounds[1]) / resolution))
 
 # Origin is upper-left corner
 transform = from_origin(bounds[0], bounds[3], resolution, resolution)
-columns_to_exclude = ['X', 'Y', 'FID', 'geometry']
+columns_to_exclude = ['X', 'Y', 'geometry']
 band_columns = combined.columns.drop(columns_to_exclude)
 print(combined)
 # print(combined['b.change.2006_2010'])  # Display first few rows of band columns for verification
@@ -59,7 +59,7 @@ for col in band_columns:
 bands_stack = np.stack(band_arrays)
 
 # Output path for raster
-raster_output_path = r"C:\Users\aubrey.mccutchan\Desktop\prediction_output_multiband.tif"  # replace with your desired path
+raster_output_path = r"C:\Users\aubrey.mccutchan\Documents\prediction_output_multiband.tif"  # replace with your desired path
 
 # Save as multiband GeoTIFF
 with rasterio.open(

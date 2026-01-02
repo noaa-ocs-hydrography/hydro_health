@@ -16,7 +16,6 @@ from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
 
-INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
