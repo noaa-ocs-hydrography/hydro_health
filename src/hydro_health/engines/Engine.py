@@ -148,7 +148,7 @@ class Engine:
 
         if self.param_lookup['env'] == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
-        self.cluster = LocalCluster(processes=processes, n_workers=6, threads_per_worker=1)
+        self.cluster = LocalCluster(processes=processes, n_workers=4, threads_per_worker=2)
         self.client = Client(self.cluster)
         # print(self.client.dashboard_link)
 
