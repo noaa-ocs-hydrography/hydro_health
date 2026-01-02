@@ -27,11 +27,19 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
-    else:
+    elif env == 'remote':
         param_lookup = {
             'input_directory': tools.Param(''),
             'output_directory': tools.Param(tools.get_config_item('SHARED', 'OUTPUT_FOLDER')),
             'eco_regions': tools.Param(''),
+            'env': env
+        }
+    else:
+        param_lookup = {
+            'input_directory': tools.Param(''),
+            'output_directory': tools.Param(str(OUTPUTS)),
+            'eco_regions': tools.Param(''),
+            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
     return param_lookup
@@ -59,7 +67,7 @@ def run_hydro_health(config_name: str) -> None:
         tiles = tools.get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
-                runners.run_bluetopo_tile_engine(tiles, param_lookup['output_directory'].valueAsText)
+                runners.run_bluetopo_tile_engine(tiles, param_lookup)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup['output_directory'].valueAsText)
             # TODO Removed laz download until HH 2.0
@@ -78,7 +86,7 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
                 runners.run_tsm_layer_engine()
             elif step["tool"] == "run_hurricane_layer_engine" and step["run"]:
-                runners.run_hurricane_layer_engine  
+                runners.run_hurricane_layer_engine()
     update_config_runtime(config_path, config)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60}")

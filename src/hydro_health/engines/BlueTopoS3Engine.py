@@ -1,6 +1,9 @@
 """Class for processing everything for a single tile"""
 
+import tempfile
 import boto3
+import os
+import pathlib
 import os
 import rasterio
 
@@ -26,25 +29,33 @@ set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
 def _process_tile(param_inputs: list[list]) -> None:
-    """Static function for pickling that handles processing of a single tile"""
+    """
+    Static function that handles processing of a single tile.
+    Refactored for S3-to-S3 workflow using ephemeral storage.
+    """
 
-    param_lookup, tile_id, ecoregion_id = param_inputs
+    # outputs folder available for logging
+    param_lookup, s3_output_bucket, tile_id, ecoregion_id = param_inputs
+    
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = pathlib.Path(temp_dir)
 
-    engine = BlueTopoEngine(param_lookup)
+        engine = BlueTopoS3Engine(param_lookup)
 
-    tiff_file_path = engine.download_nbs_tile(tile_id, ecoregion_id)
-    if tiff_file_path:
-        engine.create_survey_end_date_tiff(tiff_file_path)
-        mb_tiff_file = engine.rename_multiband(tiff_file_path)
-        engine.multiband_to_singleband(mb_tiff_file, band=1)
-        engine.multiband_to_singleband(mb_tiff_file, band=2)
-        mb_tiff_file.unlink() # delete the original multiband file
-        engine.set_ground_to_nodata(tiff_file_path)
-        engine.create_slope(tiff_file_path)
-        engine.create_rugosity(tiff_file_path)
+        tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id)
+        if tiff_file_path:
+            engine.create_survey_end_date_tiff(tiff_file_path)
+            mb_tiff_file = engine.rename_multiband(tiff_file_path)
+            engine.multiband_to_singleband(mb_tiff_file, band=1)
+            engine.multiband_to_singleband(mb_tiff_file, band=2)
+            mb_tiff_file.unlink() 
+            engine.set_ground_to_nodata(tiff_file_path)
+            engine.create_slope(tiff_file_path)
+            engine.create_rugosity(tiff_file_path)
 
+            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id)
 
-class BlueTopoEngine(Engine):
+class BlueTopoS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
     def __init__(self, param_lookup):
@@ -123,15 +134,19 @@ class BlueTopoEngine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, tile_id: str, ecoregion_id: str) -> pathlib.Path:
-        """Download all NBS files for a single tile"""
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str) -> pathlib.Path:
+        """
+        Modified to accept a pathlib.Path object for output_folder 
+        and download to that specific local path.
+        """
 
         nbs_bucket = self.get_bucket()
-        output_folder = self.param_lookup['output_directory'].valueAsText
-        output_pathlib = pathlib.Path(output_folder)
         output_tile_path = False
+        
+        output_folder = self.param_lookup['output_directory'].valueAsText
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            current_file = output_pathlib / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
+            file_name = pathlib.Path(obj_summary.key).name
+            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / file_name
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
                 if current_file.exists():
@@ -141,9 +156,11 @@ class BlueTopoEngine(Engine):
             tile_folder = current_file.parents[0]
             self.write_message(f'Downloading: {current_file.name}', output_folder)
             tile_folder.mkdir(parents=True, exist_ok=True)   
-            nbs_bucket.download_file(obj_summary.key, current_file)
+            
+            nbs_bucket.download_file(obj_summary.key, str(current_file))
+            
         return output_tile_path
-
+    
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
 
@@ -193,8 +210,9 @@ class BlueTopoEngine(Engine):
     def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
         print('Downloading BlueTopo Datasets')
 
+        output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         self.setup_dask()
-        param_inputs = [[self.param_lookup, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+        param_inputs = [[self.param_lookup, output_bucket, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         future_tiles = self.client.map(_process_tile, param_inputs)
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
@@ -215,4 +233,16 @@ class BlueTopoEngine(Engine):
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
+
+    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:
+        """
+        Upload all tiff files to s3 for current tile
+        """
+        s3_client = boto3.client('s3')
+        
+        for tiff_file in tile_folder.glob('*.tiff'):
+            ecoregion_index = tiff_file.parts.index(ecoregion_id)
+            s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
+            self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
+            s3_client.upload_file(str(tiff_file), bucket_name, str(s3_path))
 

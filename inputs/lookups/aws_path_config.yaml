@@ -46,6 +46,7 @@ SHARED:
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_FOLDER: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run
+  OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 TERRAIN:
   INPUT_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed
   FILLED_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs
