@@ -1,213 +1,187 @@
 import rasterio
 import numpy as np
-import geopandas as gpd
 import pandas as pd
 import os
-from typing import Tuple
+import sys
 
-# --- Raster Alignment Functions ---
+# --- RASTER FUNCTIONS ---
 
-def check_raster_alignment(path1: str, path2: str) -> bool:
-    """Checks if two GeoTIFFs have the same extent, CRS, and shape.
-    param str path1: File path to the first GeoTIFF.
-    param str path2: File path to the second GeoTIFF.
-    return: True if extent, CRS, and shape match, False otherwise.
+def compare_rasters(path1: str, path2: str):
     """
-    with rasterio.open(path1) as ds1:
-        with rasterio.open(path2) as ds2:
-
-            is_aligned = True
-
-            if ds1.bounds != ds2.bounds:
-                print(f"Error: Extents do not match.")
-                is_aligned = False
-
-            if ds1.crs != ds2.crs:
-                print(f"Error: Coordinate Reference Systems do not match.")
-                is_aligned = False
-
-            if ds1.shape != ds2.shape:
-                print(f"Error: Raster dimensions (shape) do not match.")
-                is_aligned = False
-
-            return is_aligned
-
-def compare_cell_values(path1: str, path2: str) -> Tuple[np.ndarray, float]:
-    """Calculates cell-by-cell difference and percentage of non-matching cells.
-    param str path1: File path to the first GeoTIFF.
-    param str path2: File path to the second GeoTIFF.
-    return: A tuple (diff_array, percent_mismatch).
-             diff_array: 2D numpy array (float) of (raster1 - raster2).
-             percent_mismatch: float percentage of differing cells.
+    Performs a two-stage check on GeoTIFFs:
+    1. Grid Alignment (CRS, Bounds, Shape)
+    2. Cell Values (Pixel-by-pixel comparison)
     """
-    with rasterio.open(path1) as ds1:
-        with rasterio.open(path2) as ds2:
+    print(f"\n--- Comparing Rasters ---")
+    print(f"File 1: {os.path.basename(path1)}")
+    print(f"File 2: {os.path.basename(path2)}")
 
-            data1 = ds1.read(1).astype(float)
-            data2 = ds2.read(1).astype(float)
+    with rasterio.open(path1) as ds1, rasterio.open(path2) as ds2:
+        
+        # --- STAGE 1: GRID ALIGNMENT ---
+        print("\n[Stage 1] Checking Grid Alignment...")
+        
+        # Check 1: CRS
+        if ds1.crs != ds2.crs:
+            print(f"Error: CRS mismatch.\n   F1: {ds1.crs}\n   F2: {ds2.crs}")
+            return
+        
+        # Check 2: Dimensions (Shape)
+        if ds1.shape != ds2.shape:
+            print(f"Error: Shape mismatch (Height/Width).\n   F1: {ds1.shape}\n   F2: {ds2.shape}")
+            return
+        
+        # Check 3: Borders (Bounds) - Rounded to 6 decimals to allow for tiny float diffs
+        b1 = [round(x, 6) for x in ds1.bounds]
+        b2 = [round(x, 6) for x in ds2.bounds]
+        if b1 != b2:
+            print(f"Error: Spatial Bounds (Borders) do not match.")
+            print(f"   F1: {b1}")
+            print(f"   F2: {b2}")
+            return
+            
+        print("Success: Grids align perfectly (CRS, Shape, and Bounds match).")
 
-            ndv1 = ds1.nodata
-            ndv2 = ds2.nodata
+        # --- STAGE 2: VALUE COMPARISON ---
+        print("\n[Stage 2] Checking Cell Values...")
+        
+        data1 = ds1.read(1).astype(float)
+        data2 = ds2.read(1).astype(float)
+        
+        # Standardize NoData to np.nan for comparison
+        if ds1.nodata is not None:
+            data1[data1 == ds1.nodata] = np.nan
+        if ds2.nodata is not None:
+            data2[data2 == ds2.nodata] = np.nan
 
-            if ndv1 is not None:
-                mask1 = (data1 == ndv1)
-            else:
-                mask1 = np.zeros_like(data1, dtype=bool)
+        # Compare values (equal_nan=True allows NaN==NaN to pass)
+        # We use a small tolerance (atol=1e-5) for floating point numbers
+        mismatch_mask = ~np.isclose(data1, data2, equal_nan=True, atol=1e-5)
+        mismatch_count = np.count_nonzero(mismatch_mask)
+        
+        if mismatch_count == 0:
+            print("Success: All cell values match exactly.")
+        else:
+            total = data1.size
+            percent = (mismatch_count / total) * 100
+            print(f"Failure: Values differ in {mismatch_count} cells ({percent:.4f}%).")
+            
+            # Show stats of differences
+            diffs = data1[mismatch_mask] - data2[mismatch_mask]
+            print(f"   Max Difference: {np.nanmax(diffs)}")
+            print(f"   Mean Difference: {np.nanmean(diffs)}")
 
-            if ndv2 is not None:
-                mask2 = (data2 == ndv2)
-            else:
-                mask2 = np.zeros_like(data2, dtype=bool)
 
-            nan_mask1 = np.isnan(data1)
-            nan_mask2 = np.isnan(data2)
+# --- PARQUET FUNCTIONS ---
 
-            combined_nodata_mask = mask1 | mask2 | nan_mask1 | nan_mask2
-
-            valid_mask = ~combined_nodata_mask
-
-            total_valid_cells = np.count_nonzero(valid_mask)
-
-            if total_valid_cells == 0:
-                print("Warning: No valid cells (all cells are nodata or nan).")
-                return (np.full_like(data1, np.nan), 0.0)
-
-            data1_valid = data1[valid_mask]
-            data2_valid = data2[valid_mask]
-
-            mismatch_count = np.count_nonzero(~np.isclose(data1_valid, data2_valid))
-
-            percent_mismatch = (mismatch_count / total_valid_cells) * 100
-
-            diff_array = data1 - data2
-
-            diff_array[combined_nodata_mask] = np.nan
-
-            return (diff_array, percent_mismatch)
-
-# --- GeoParquet Alignment Functions ---
-
-def check_parquet_alignment(path1: str, path2: str, value_col: str) -> bool:
-    """Checks if two GeoParquet files have the same X/Y coordinates and a specific value column.
-    
-    This function prioritizes comparison of 'X' and 'Y' columns, assuming they represent 
-    the point coordinates, and compares the values in the target value_col.
-
-    param str path1: File path to the first GeoParquet file.
-    param str path2: File path to the second GeoParquet file.
-    param str value_col: The column name whose values will be compared (e.g., 'sed_type_raster_100m').
-    return: True if coordinates and values match (within tolerance), False otherwise.
+def compare_parquets(path1: str, path2: str, value_col: str):
     """
-    cols_to_load = ['X', 'Y', value_col]
+    Performs a two-stage check on GeoParquet:
+    1. Grid Alignment (Row counts, Bounding Box, Exact X/Y Coordinate matching)
+    2. Cell Values (Comparing the specific value column)
+    """
+    print(f"\n--- Comparing Parquet Files ---")
+    print(f"File 1: {os.path.basename(path1)}")
+    print(f"File 2: {os.path.basename(path2)}")
+    print(f"Target Column: {value_col}")
+
+    # Explicit column check list
+    cols = ['X', 'Y', value_col]
     
     try:
-        df1 = pd.read_parquet(path1, columns=cols_to_load)
-        df2 = pd.read_parquet(path2, columns=cols_to_load)
-    except KeyError as e:
-        print(f"Error: One or both GeoParquet files is missing required column(s): {e}")
-        return False
-    
-    is_aligned = True
-        
+        # We attempt to load only the required columns.
+        # If the column is missing, this will fail immediately.
+        df1 = pd.read_parquet(path1, columns=cols)
+        df2 = pd.read_parquet(path2, columns=cols)
+    except Exception as e:
+        # Check if the error is related to missing columns
+        error_msg = str(e).lower()
+        if "not in the index" in error_msg or "field not found" in error_msg:
+            print(f"Error: The specific column '{value_col}' (or X/Y) was not found in one of the files.")
+            print(f"Details: {e}")
+        else:
+            print(f"Error: Could not read parquet files. {e}")
+        return
+
+    # --- STAGE 1: GRID ALIGNMENT ---
+    print("\n[Stage 1] Checking Grid Alignment...")
+
+    # Check 1: Row Counts
     if len(df1) != len(df2):
-        print(f"Error: Number of records do not match ({len(df1)} vs {len(df2)}).")
-        return False
+        print(f"Error: Row count mismatch ({len(df1)} vs {len(df2)}).")
+        return
 
-    sort_cols = ['X', 'Y']
-    df1 = df1.sort_values(by=sort_cols, ignore_index=True)
-    df2 = df2.sort_values(by=sort_cols, ignore_index=True)
+    # Check 2: Borders (Bounding Box)
+    # This ensures the overall area is the same before we check individual points
+    bbox1 = [df1.X.min(), df1.X.max(), df1.Y.min(), df1.Y.max()]
+    bbox2 = [df2.X.min(), df2.X.max(), df2.Y.min(), df2.Y.max()]
+    
+    # Use allclose for float safety
+    if not np.allclose(bbox1, bbox2, atol=1e-6):
+        print(f"Error: Borders (Extent) do not match.")
+        print(f"   F1: {bbox1}")
+        print(f"   F2: {bbox2}")
+        return
 
-    # Coordinate comparison (alignment check)
-    x_match = np.allclose(df1['X'], df2['X'])
-    y_match = np.allclose(df1['Y'], df2['Y'])
+    print("   -> Borders match. Sorting data to check internal grid...")
+
+    # Sort both dataframes by coordinates to align them row-by-row
+    df1 = df1.sort_values(by=['X', 'Y'], ignore_index=True)
+    df2 = df2.sort_values(by=['X', 'Y'], ignore_index=True)
+
+    # Check 3: Internal Coordinates (The actual Grid)
+    # This ensures that point 1 in File A is spatially identical to point 1 in File B
+    x_match = np.allclose(df1['X'], df2['X'], atol=1e-6)
+    y_match = np.allclose(df1['Y'], df2['Y'], atol=1e-6)
 
     if not x_match or not y_match:
-        print(f"Error: X/Y coordinates do not match after sorting.")
-        is_aligned = False
+        print("Error: Internal grid misalignment. The X/Y coordinates do not match row-for-row.")
+        return
+    
+    print("Success: Grid alignment verified (Borders and all X/Y coordinates match).")
 
-    # Value comparison
+    # --- STAGE 2: VALUE COMPARISON ---
+    print("\n[Stage 2] Checking Values...")
+
     v1 = df1[value_col].to_numpy()
     v2 = df2[value_col].to_numpy()
-    
-    total_valid_cells = len(v1)
-    
-    mismatch_count = np.count_nonzero(~np.isclose(v1, v2))
-    
-    percent_mismatch = (mismatch_count / total_valid_cells) * 100
-    percent_match = 100 - percent_mismatch
-    
-    print(f"\n--- GeoParquet Comparison Results for '{value_col}' ---")
-    print(f"Percentage of non-matching values (by coordinate): {percent_match:.2f}%")
 
-    if percent_mismatch > 0:
-        diff_vals = v1 - v2
-        min_diff = np.nanmin(diff_vals)
-        max_diff = np.nanmax(diff_vals)
-        mean_diff = np.nanmean(diff_vals)
-        print(f"  Min difference: {min_diff}")
-        print(f"  Max difference: {max_diff}")
-        print(f"  Mean difference: {mean_diff}")
+    # Check matches (NaN == NaN is considered a match here)
+    mismatch_mask = ~np.isclose(v1, v2, equal_nan=True, atol=1e-5)
+    mismatch_count = np.count_nonzero(mismatch_mask)
 
-    return is_aligned and (percent_mismatch == 0.0)
+    if mismatch_count == 0:
+        print(f"Success: All values in '{value_col}' match exactly.")
+    else:
+        total = len(v1)
+        percent = (mismatch_count / total) * 100
+        print(f"Failure: Values differ in {mismatch_count} rows ({percent:.4f}%).")
+        
+        diffs = v1[mismatch_mask] - v2[mismatch_mask]
+        print(f"   Max Difference: {np.nanmax(diffs)}")
+        print(f"   Mean Difference: {np.nanmean(diffs)}")
 
-# --- Main Execution ---
 
 def main():
-    """Main execution function to compare two geospatial files."""
+    # --- CONFIGURATION ---
+    # Update these paths to your actual files
+    f1 = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles\BH4SD56H_1\BH4SD56H_1_training_clipped_data.parquet"
+    f2 = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles\BH4SD56H_1\BH4SD56H_1_prediction_clipped_data.parquet"
+    parquet_col = "combined1_bathy_BH4SD56H_2017"
 
-    # Set file paths and the column to compare for GeoParquet files
-    file_path_1 = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles\BH4SD56H_1\BH4SD56H_1_training_clipped_data.parquet"
-    file_path_2 = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles\BH4SD56H_1\BH4SD56H_1_prediction_clipped_data.parquet"
-    parquet_value_column = "sed_size_raster_100m" # Column to compare if files are parquet
+    # --- RUNNER ---
+    if not os.path.exists(f1) or not os.path.exists(f2):
+        print("Error: Files not found.")
+        return
 
-    ext1 = os.path.splitext(file_path_1)[1].lower()
-    ext2 = os.path.splitext(file_path_2)[1].lower()
+    ext1 = os.path.splitext(f1)[1].lower()
     
-    print(f"Comparing '{file_path_1}' and '{file_path_2}'...")
-    print("---")
-
-    if ext1 == '.tiff' and ext2 == '.tiff':
-        
-        # Raster Comparison Pipeline
-        print("Detected GeoTIFF files for comparison.")
-        print("Checking alignment (extent, CRS, shape)...")
-        if not check_raster_alignment(file_path_1, file_path_2):
-            print("\nAnalysis stopped: Rasters are not aligned.")
-            return
-
-        print("Rasters are aligned.")
-        print("---")
-
-        print("Calculating cell-by-cell differences...")
-        diff_array, percent_mismatch = compare_cell_values(file_path_1, file_path_2)
-
-        print(f"\n--- Comparison Results ---")
-        print(f"Percentage of non-matching cells: {percent_mismatch:.6f}%")
-
-        if percent_mismatch > 0:
-            min_diff = np.nanmin(diff_array)
-            max_diff = np.nanmax(diff_array)
-            mean_diff = np.nanmean(diff_array)
-
-            print(f"  Min difference: {min_diff}")
-            print(f"  Max difference: {max_diff}")
-            print(f"  Mean difference: {mean_diff}")
-
-    elif ext1 == '.parquet' and ext2 == '.parquet':
-        
-        # GeoParquet Comparison Pipeline
-        print(f"Detected GeoParquet files for comparison on column '{parquet_value_column}'.")
-        print("Checking alignment (X/Y coordinates) and value match...")
-        
-        if not check_parquet_alignment(file_path_1, file_path_2, parquet_value_column):
-            print("\nAnalysis stopped: GeoParquet files are not aligned or values do not match.")
-            return
-
-        print("GeoParquet files are aligned and values match (within tolerance).")
-
+    if ext1 in ['.tif', '.tiff']:
+        compare_rasters(f1, f2)
+    elif ext1 == '.parquet':
+        compare_parquets(f1, f2, parquet_col)
     else:
-        print(f"Error: File types '{ext1}' and '{ext2}' are not both .tiff or both .parquet.")
-
+        print("Unsupported file extension.")
 
 if __name__ == "__main__":
     main()
