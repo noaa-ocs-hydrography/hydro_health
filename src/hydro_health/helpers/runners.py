@@ -2,6 +2,7 @@ import pathlib
 import geopandas as gpd
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
+from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
@@ -19,11 +20,27 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
-def run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, outputs:str) -> None:
+def run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
-    engine = BlueTopoEngine()
-    engine.run(tiles, outputs)
+    if param_lookup['env'] in ['local', 'remote']:
+        run_bluetopo_tile_engine_local(tiles, param_lookup)
+    else:
+        run_bluetopo_tile_engine_s3(tiles, param_lookup)
+
+
+def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+    """Entry point for parallel processing of BlueTopo tiles"""
+
+    engine = BlueTopoEngine(param_lookup)
+    engine.run(tiles)
+
+
+def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict]) -> None:
+    """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
+
+    engine = BlueTopoS3Engine(param_lookup)
+    engine.run(tiles)
 
 
 def run_raster_mask_engine(outputs:str) -> None:
@@ -48,7 +65,7 @@ def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
 
 
 def run_metadata_engine(outputs:str) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
+    """Entry point for parallel processing of provider metadata"""
 
     ecoregions = [file_path.stem for file_path in pathlib.Path(outputs).rglob('ER_*') if file_path.is_dir()]
     engine = MetadataEngine()
