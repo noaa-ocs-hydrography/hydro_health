@@ -238,6 +238,7 @@ class BlueTopoS3Engine(Engine):
         """
         Upload all tiff files to s3 for current tile
         """
+        
         s3_client = boto3.client('s3')
         
         for tiff_file in tile_folder.glob('*.tiff'):
