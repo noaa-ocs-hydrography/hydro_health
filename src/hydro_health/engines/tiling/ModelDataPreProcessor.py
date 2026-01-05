@@ -89,7 +89,8 @@ class ModelDataPreProcessor:
             return set()
 
     def process(self) -> None:
-        """Main function to process model data."""        
+        """Main function to process model data."""     
+        # TODO use the base engine function for this, change the memory limit for AWS
         client = Client(
             n_workers=4, 
             threads_per_worker=2, 
@@ -117,10 +118,8 @@ class ModelDataPreProcessor:
                 output_dir=self.training_tiles_dir, 
                 data_type="training"
             )
-
-            print("\nStarting Long Format Transformation...")
             
-            # self.batch_long_format_transformation(base_dir=self.training_tiles_dir, mode="training")
+            self.batch_long_format_transformation(base_dir=self.training_tiles_dir, mode="training")
 
         finally:
             client.close()
@@ -130,7 +129,6 @@ class ModelDataPreProcessor:
         
         input_directory = pathlib.Path(input_directory)
         
-        # Ensure the uncombined directory exists
         self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
                 
         existing_pred_outputs = {
@@ -462,7 +460,9 @@ class ModelDataPreProcessor:
 
     def batch_long_format_transformation(self, base_dir: pathlib.Path, mode: Literal["training", "prediction"]):
         """Orchestrator for transforming wide tiles to long year-pair format."""
-        print(f"\nStarting Dask Transformation Batch: {mode}")
+
+        print("Starting Long Format Transformation...")
+        print(f"Starting Dask Transformation Batch: {mode}")
 
         base_dir = pathlib.Path(base_dir)
         file_suffix = f"_{mode}_clipped_data.parquet"
