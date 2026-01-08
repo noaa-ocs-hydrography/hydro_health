@@ -58,7 +58,7 @@ def _process_tile(param_inputs: list[list]) -> None:
 class BlueTopoS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self, param_lookup):
+    def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
 
@@ -235,9 +235,7 @@ class BlueTopoS3Engine(Engine):
         raster_ds = None
 
     def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:
-        """
-        Upload all tiff files to s3 for current tile
-        """
+        """Upload all tiff files to s3 for current tile"""
         
         s3_client = boto3.client('s3')
         

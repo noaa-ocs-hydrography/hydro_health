@@ -9,6 +9,11 @@ import geopandas as gpd
 import pathlib
 import os
 import sys
+import tempfile
+import numpy as np
+import logging
+import platform
+import shapely
 
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
@@ -20,8 +25,18 @@ from botocore import UNSIGNED
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
-set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+
+if platform.system() == 'Windows':
+    set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
+
 os.environ['SHAPE_RESTORE_SHX'] = 'YES'  # Reruns are throwing fiona DriverError for .SHX, line 60
+
+# RedHat UTF encodings
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["LC_ALL"] = "en_US.UTF-8"
+os.environ["LANG"] = "en_US.UTF-8"
+
+logging.getLogger("pyproj").setLevel(logging.ERROR)
 
 
 def _download_tile_index(param_inputs: list[list]) -> None:
@@ -29,7 +44,7 @@ def _download_tile_index(param_inputs: list[list]) -> None:
 
     download_link, provider_folder, param_lookup, outputs = param_inputs
 
-    engine = DigitalCoastEngine(param_lookup)
+    engine = DigitalCoastS3Engine(param_lookup)
 
     # TODO Removed laz download until HH 2.0
     if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link):  # or 'laz' in download_link):
@@ -54,17 +69,24 @@ def _download_tile_index(param_inputs: list[list]) -> None:
 def _download_intersected_datasets(param_inputs: list[list]) -> None:
     """Parallel process spatial filter and download of datasets"""
 
-    tile_gdf, shp_path, param_lookup, outputs = param_inputs
+    tile_gdf, shp_path, outputs, param_lookup = param_inputs
 
-    engine = DigitalCoastEngine(param_lookup)
+    engine = DigitalCoastS3Engine(param_lookup)
 
-    shp_df = gpd.read_file(shp_path).to_crs(4326)
+    shp_df = gpd.read_file(shp_path, engine="pyogrio")
+    shp_df['geometry'] = shp_df.geometry.make_valid()
+    shp_df = shp_df.to_crs(4326)
+
     shp_df.columns = shp_df.columns.str.lower()  # make url column all lowercase
     if 'tile' in shp_df.columns:
         # drop previous tile merged column
         shp_df.drop('tile', axis=1, inplace=True)
-    df_joined = shp_df.sjoin(df=tile_gdf, how='left')
-    df_joined.to_file(shp_path, driver='ESRI Shapefile', encoding='utf-8')
+    df_joined = shp_df.sjoin(df=tile_gdf, how='inner')
+
+    if 'index_right' in df_joined.columns:
+        df_joined = df_joined.rename(columns={'index_right': 'idx_right'})
+    shp_df = None
+    df_joined.to_file(shp_path, driver='ESRI Shapefile')
     if df_joined['url'].any():
         df_joined = df_joined.loc[df_joined['tile'].notnull()]
         shp_folder = shp_path.parents[0]
@@ -97,7 +119,7 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
             except requests.exceptions.ConnectionError:
                 engine.write_message(f'Timeout error: {cleansed_url}', outputs)
                 continue
-
+                
             if intersected_response.status_code == 200:
                 with open(output_file, 'wb') as file:
                     file.write(intersected_response.content)
@@ -108,14 +130,14 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
         return f'- No intersect: {shp_path.stem}'
         
 
-class DigitalCoastEngine(Engine):
+class DigitalCoastS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
     def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def breakup_cudem(self, digital_coast_folder) -> None:
+    def breakup_cudem(self, digital_coast_folder: pathlib.Path) -> None:
         """Create unique year folders for CUDEM data"""
 
         cudem_folders = digital_coast_folder.glob('NOAA_NCEI_0*')
@@ -149,7 +171,7 @@ class DigitalCoastEngine(Engine):
             # Delete old CUDEM folder
             shutil.rmtree(folder)
 
-    def check_tile_index_areas(self, digital_coast_folder, outputs) -> None:
+    def check_tile_index_areas(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Exclude any small area surveys"""
 
         self.write_message(f'Checking area size of tileindex files', outputs)
@@ -163,6 +185,7 @@ class DigitalCoastEngine(Engine):
                 self.write_message(f' - provider too small: {total_area} - {shp_path}', outputs)
                 move_providers.append(shp_path.parents[2])
         for provider in move_providers:
+            # TODO do we want to keep unused_providers folder in S3?  It will be deleted with Temp Directory
             unused_provider_folder = digital_coast_folder / 'unused_providers'
             if not unused_provider_folder.exists():
                 unused_provider_folder.mkdir()
@@ -185,14 +208,14 @@ class DigitalCoastEngine(Engine):
                         self.write_message(f' - removing empty provider: {provider_folder}', outputs)
                         shutil.rmtree(provider_folder)
 
-    def download_support_files(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
+    def download_support_files(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str, digital_coast_folder: pathlib.Path, temp_digital_coast_outputs: pathlib.Path, outputs: pathlib.Path) -> None:
         """Download tile_index shapefiles"""
 
-        self.write_message('Download Support Files', outputs)
+        print('Download Support Files')
         ecoregion_geom_strings = self.get_ecoregion_geometry_strings(tile_gdf, ecoregion)
 
         for geometry_coords in ecoregion_geom_strings:
-            tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
+            tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, str(temp_digital_coast_outputs))  # TODO return all object keys
             bulk_download_params = [[link_dict['link'], link_dict['provider_path'], self.param_lookup, outputs] for link_dict in tile_index_links if link_dict['label'] == 'Bulk Download']
             future_tiles = self.client.map(_download_tile_index, bulk_download_params)
             _ = self.client.gather(future_tiles)
@@ -216,6 +239,7 @@ class DigitalCoastEngine(Engine):
 
         for result in results:
             if result:
+                # print('Result:', result)
                 self.write_message(f'Result: {result}', output_folder)
 
     def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
@@ -227,15 +251,19 @@ class DigitalCoastEngine(Engine):
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
-                digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-                # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
                 ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
-                self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
-                self.check_tile_index_areas(digital_coast_folder, outputs)
-                self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
-                if digital_coast_folder.exists():
-                    self.delete_unused_folder(digital_coast_folder, outputs)
-                self.breakup_cudem(digital_coast_folder)
+
+                with tempfile.TemporaryDirectory() as temp_dir:
+                    temp_digital_coast_outputs = pathlib.Path(temp_dir)
+                    digital_coast_folder = temp_digital_coast_outputs / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                    self.download_support_files(ecoregion_tile_gdf, ecoregion, digital_coast_folder, temp_digital_coast_outputs, outputs)
+                    self.check_tile_index_areas(digital_coast_folder, outputs)
+                    self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
+                    if digital_coast_folder.exists():
+                        self.delete_unused_folder(digital_coast_folder, outputs)
+                    self.breakup_cudem(digital_coast_folder)
+                    self.upload_files_to_s3(digital_coast_folder, ecoregion)
+
         self.close_dask()
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
@@ -243,17 +271,28 @@ class DigitalCoastEngine(Engine):
 
         self.write_message('Downloading elevation datasets', outputs)
         tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(folder)]
-        param_inputs = [[ecoregion_tile_gdf, shp_path, self.param_lookup, outputs] for shp_path in tile_index_shapefiles]
+        param_inputs = [[ecoregion_tile_gdf, shp_path, outputs, self.param_lookup] for shp_path in tile_index_shapefiles]
         future_tiles = self.client.map(_download_intersected_datasets, param_inputs)
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, outputs)
 
-    def unzip_all_files(self, output_folder: str) -> None:
+    def unzip_all_files(self, output_folder: pathlib.Path) -> None:
         """Unzip all zip files in a folder"""
 
-        for zipped_file in pathlib.Path(output_folder).rglob('*.zip'):
+        for zipped_file in output_folder.rglob('*.zip'):
             with zipfile.ZipFile(zipped_file, 'r') as zipped:
                 zipped.extractall(str(zipped_file.parents[0]))
             # Delete zip file after extract
             zipped_file.unlink()
+
+    def upload_files_to_s3(self, digital_coast_folder: pathlib.Path, ecoregion_id: str) -> None:
+        """Upload all tiff files to s3 for current tile"""
+        
+        s3_client = boto3.client('s3')
+        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        for found_file in digital_coast_folder.rglob('*'):
+            if not found_file.is_dir():
+                s3_prefix = "/".join(found_file.parts[3:])
+                self.write_message(f'Uploading {found_file} to {s3_prefix}', self.param_lookup['output_directory'].valueAsText)
+                s3_client.upload_file(str(found_file), bucket_name, str(s3_prefix))
 

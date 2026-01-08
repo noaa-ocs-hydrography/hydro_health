@@ -4,6 +4,7 @@ import geopandas as gpd
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
+from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
@@ -50,11 +51,27 @@ def run_raster_mask_engine(outputs:str) -> None:
     engine.run(outputs)
 
 
-def run_digital_coast_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
+def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+    """Entry point for parallel processing of Digital Coast data"""
+
+    if param_lookup['env'] in ['local', 'remote']:
+        run_digital_coast_engine_local(tiles, param_lookup)
+    else:
+        run_digital_coast_engine_s3(tiles, param_lookup)
+
+
+def run_digital_coast_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
     """Entry point for parallel proccessing of Digital Coast data"""
     
-    engine = DigitalCoastEngine()
-    engine.run(tiles, outputs)
+    engine = DigitalCoastEngine(param_lookup)
+    engine.run(tiles)
+
+
+def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+    """Entry point for parallel proccessing of Digital Coast data on AWS VM"""
+    
+    engine = DigitalCoastS3Engine(param_lookup)
+    engine.run(tiles)
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:

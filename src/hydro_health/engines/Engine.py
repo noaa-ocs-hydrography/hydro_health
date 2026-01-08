@@ -92,7 +92,7 @@ class Engine:
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON
-            output_json = pathlib.Path(output_folder_path) / 'feature.json'
+            output_json = output_folder_path / 'feature.json'
             external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
             feature['attributes']['ExternalProviderLink'] = external_provider_links
             with open(output_json, 'w') as writer:
