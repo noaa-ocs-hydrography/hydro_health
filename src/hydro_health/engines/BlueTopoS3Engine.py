@@ -145,8 +145,7 @@ class BlueTopoS3Engine(Engine):
         
         output_folder = self.param_lookup['output_directory'].valueAsText
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            file_name = pathlib.Path(obj_summary.key).name
-            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / file_name
+            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
                 if current_file.exists():

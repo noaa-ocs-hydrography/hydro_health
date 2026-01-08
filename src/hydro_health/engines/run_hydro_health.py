@@ -69,7 +69,7 @@ def run_hydro_health(config_name: str) -> None:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
-                runners.run_digital_coast_engine(tiles, param_lookup['output_directory'].valueAsText)
+                runners.run_digital_coast_engine(tiles, param_lookup)
             # TODO Removed laz download until HH 2.0
             # elif step["tool"] == "run_laz_conversion_engine" and step["run"]:
             #     runners.run_laz_conversion_engine(tiles, param_lookup['output_directory'].valueAsText)
