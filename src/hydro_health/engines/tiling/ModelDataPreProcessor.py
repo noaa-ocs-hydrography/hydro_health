@@ -6,6 +6,10 @@ import pathlib
 import yaml
 import warnings
 from typing import List, Tuple, Literal
+from pathlib import Path
+from rasterio.features import shapes
+from shapely.geometry import shape
+import s3fs
 
 import geopandas as gpd
 import numpy as np
@@ -16,7 +20,7 @@ from dask.distributed import Client
 from osgeo import gdal
 from shapely.geometry import Point, box
 
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_environment
 from hydro_health.engines.CreateSeabedTerrainLayerEngine import CreateSeabedTerrainLayerEngine
 
 os.environ["GDAL_CACHEMAX"] = "64"
@@ -29,23 +33,7 @@ class ModelDataPreProcessor:
         self.target_crs = "EPSG:32617"
         self.target_res = 8
 
-        self.mask_prediction_pq = pathlib.Path(get_config_item('MASK', 'PREDICTION_MASK_PQ'))
-        self.mask_training_pq = pathlib.Path(get_config_item('MASK', 'TRAINING_MASK_PQ'))
-        self.preprocessed_dir = pathlib.Path(get_config_item('MODEL', 'PREPROCESSED_DIR'))
-        
-        self.prediction_out_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
-        self.training_out_dir = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
-        
-        self.training_tiles_dir = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
-        self.prediction_tiles_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
-        
-        # Directory for uncombined mosaic files
-        self.uncombined_lidar_dir = pathlib.Path(r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\uncombined_lidar_tifs")
-
-        self.subgrid_paths = {
-            'training': pathlib.Path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS')),
-            'prediction': pathlib.Path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'))
-        }
+        self.fs = s3fs.S3FileSystem(anon=False)
 
         self.static_patterns = ['sed_size_raster', 'sed_type_raster', 'tsm_mean', 'hurr']
         
@@ -61,6 +49,37 @@ class ModelDataPreProcessor:
         self.re_flowdir = re.compile(r"flowdir")
 
         self.excluded_keys = self._load_exclusion_config()
+        self.is_aws = (get_environment() == 'aws')
+
+    def create_file_paths(self):
+        if get_environment() == 'remote':
+            self.mask_prediction_pq = pathlib.Path(get_config_item('MASK', 'PREDICTION_MASK_PQ'))
+            self.mask_training_pq = pathlib.Path(get_config_item('MASK', 'TRAINING_MASK_PQ'))
+            self.preprocessed_dir = pathlib.Path(get_config_item('MODEL', 'PREPROCESSED_DIR'))
+            self.prediction_out_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
+            self.training_out_dir = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
+            self.training_tiles_dir = pathlib.Path(get_config_item('MODEL', 'TRAINING_TILES_DIR'))
+            self.prediction_tiles_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'))
+            self.uncombined_lidar_dir = pathlib.Path(get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR'))
+            self.subgrid_paths = {
+                'training': pathlib.Path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS')),
+                'prediction': pathlib.Path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'))
+            }
+
+        elif get_environment() == 'aws':
+            bucket = get_config_item('S3', 'BUCKET_NAME')
+            self.mask_prediction_pq = f"s3://{bucket}/{get_config_item('MASK', 'PREDICTION_MASK_PQ')}"
+            self.mask_training_pq = f"s3://{bucket}/{get_config_item('MASK', 'TRAINING_MASK_PQ')}"
+            self.preprocessed_dir = f"s3://{bucket}/{get_config_item('MODEL', 'PREPROCESSED_DIR')}"
+            self.prediction_out_dir = f"s3://{bucket}/{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')}"
+            self.training_out_dir = f"s3://{bucket}/{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR')}"
+            self.training_tiles_dir = f"s3://{bucket}/{get_config_item('MODEL', 'TRAINING_TILES_DIR')}"
+            self.prediction_tiles_dir = f"s3://{bucket}/{get_config_item('MODEL', 'PREDICTION_TILES_DIR')}"
+            self.uncombined_lidar_dir = f"s3://{bucket}/{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR')}"
+            self.subgrid_paths = {
+                'training': f"s3://{bucket}/{get_config_item('MODEL', 'TRAINING_SUB_GRIDS')}",
+                'prediction': f"s3://{bucket}/{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS')}"
+            }
 
     def _load_exclusion_config(self) -> set:
         """Loads dataset exclusion keys from YAML config."""
@@ -98,6 +117,23 @@ class ModelDataPreProcessor:
         )
         print(f"Dask Dashboard: {client.dashboard_link}")
 
+        # Setup paths for raster conversion based on env
+        pred_mask_path = get_config_item('MASK', 'MASK_PRED_PATH')
+        train_mask_path = get_config_item('MASK', 'MASK_TRAINING_PATH')
+        
+        if not self.is_aws:
+            pred_mask_path = pathlib.Path(pred_mask_path)
+            train_mask_path = pathlib.Path(train_mask_path)
+
+        self.raster_to_spatial_df(pred_mask_path, process_type='prediction')
+        self.raster_to_spatial_df(train_mask_path, process_type='training')
+
+        self.create_file_paths()
+
+        # Create subgrids requires mask_gdf paths. Ensure they are initialized
+        self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_dir=self.subgrid_paths['prediction'], process_type = 'prediction')
+        self.create_subgrids(mask_gdf=self.mask_training_pq, output_dir=self.subgrid_paths['training'], process_type = 'training')
+
         try:
             mask_pred_gdf = gpd.read_parquet(self.mask_prediction_pq)
             mask_future_pred = client.scatter(mask_pred_gdf.unary_union, broadcast=True)
@@ -127,46 +163,72 @@ class ModelDataPreProcessor:
     def parallel_processing_rasters(self, input_directory, mask_future_pred, mask_future_train) -> None:
         """Process prediction and training rasters in parallel using Dask."""
         
-        input_directory = pathlib.Path(input_directory)
-        
-        self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
-                
+        if not self.is_aws:
+            input_directory = pathlib.Path(input_directory)
+            self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
+        # AWS: s3fs handles "mkdir" implicitly by object existence
+
+        # --- 1. Identify Existing Outputs ---
+        # Get existing prediction outputs
+        potential_files = (
+            [pathlib.Path(f) for f in self.fs.glob(f"{self.prediction_out_dir}/*")]
+            if self.is_aws 
+            else list(self.prediction_out_dir.glob("*"))
+        )
         existing_pred_outputs = {
-            f.name for f in self.prediction_out_dir.glob("*") 
+            f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
 
-        # Also check uncombined directory for existing files to avoid re-processing
+        # Get existing uncombined outputs
+        potential_files = (
+            [pathlib.Path(f) for f in self.fs.glob(f"{self.uncombined_lidar_dir}/*")]
+            if self.is_aws
+            else list(self.uncombined_lidar_dir.glob("*"))
+        )
         existing_uncombined_outputs = {
-            f.name for f in self.uncombined_lidar_dir.glob("*") 
+            f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
         
         all_existing_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
         
-        # Explicitly exclude these folders from the search
+        # --- 2. Gather Prediction Inputs ---
         excluded_folders = {'lidar_filled_tifs', 'uncombined_lidar_tifs'}
 
+        potential_files = (
+            [pathlib.Path(f) for f in self.fs.glob(f"{input_directory}/**/*") if f.lower().endswith(('.tif', '.tiff'))]
+            if self.is_aws
+            else [f for f in input_directory.rglob("*") if f.suffix.lower() in {'.tif', '.tiff'}]
+        )
+    
         prediction_files = [
-            f for f in input_directory.rglob("*")
-            if f.suffix.lower() in {'.tif', '.tiff'}
-            and f.name not in all_existing_outputs
+            f for f in potential_files
+            if f.name not in all_existing_outputs
             and not any(key in f.name for key in self.excluded_keys)
             and not any(folder in f.parts for folder in excluded_folders)
         ]
 
         print(f"Processing {len(prediction_files)} prediction files (Skipping {len(all_existing_outputs)} existing)...")
 
+        # --- 3. Queue Prediction Tasks ---
         prediction_tasks = []
         for file_path in prediction_files:
-            # Route files with 'mosaic' in the name to the uncombined directory
-            if "mosaic" in file_path.name.lower():
-                output_path = self.uncombined_lidar_dir / file_path.name
+            # Handle Path Joining (AWS String vs Local Path)
+            if self.is_aws:
+                # AWS S3 Path Construction
+                base_out = self.uncombined_lidar_dir if "mosaic" in file_path.name.lower() else self.prediction_out_dir
+                output_path = f"{base_out.rstrip('/')}/{file_path.name}"
+                # Add s3:// for input reading
+                input_str = f"s3://{file_path.as_posix()}"
             else:
-                output_path = self.prediction_out_dir / file_path.name
-            
+                # Local Path Construction
+                base_out = self.uncombined_lidar_dir if "mosaic" in file_path.name.lower() else self.prediction_out_dir
+                output_path = base_out / file_path.name
+                input_str = str(file_path)
+
             task = dask.delayed(self.process_prediction_raster)(
-                str(file_path), 
+                input_str, 
                 mask_future_pred, 
                 str(output_path)
             )
@@ -182,17 +244,34 @@ class ModelDataPreProcessor:
         engine = CreateSeabedTerrainLayerEngine()
         engine.process()
 
-        self.training_out_dir.mkdir(parents=True, exist_ok=True)
+        if not self.is_aws:
+            self.training_out_dir.mkdir(parents=True, exist_ok=True)
+
+        # --- 4. Gather Training Inputs (from Prediction Outputs) ---
+        # Check what is already processed in training dir
+        potential_files = (
+            [pathlib.Path(f) for f in self.fs.glob(f"{self.training_out_dir}/*")]
+            if self.is_aws
+            else list(self.training_out_dir.glob("*"))
+        )
+
         existing_train_outputs = {
-            f.name for f in self.training_out_dir.glob("*") 
+            f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
-        
+
+        # Candidate files are in prediction_out_dir
+        potential_files = (
+            [pathlib.Path(f) for f in self.fs.glob(f"{self.prediction_out_dir}/*")]
+            if self.is_aws
+            else list(self.prediction_out_dir.glob("*"))
+        )
+
         training_candidates = [
-            f for f in self.prediction_out_dir.rglob("*")
+            f for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         ]
-        
+
         training_files = [
             f for f in training_candidates
             if f.name not in existing_train_outputs
@@ -201,12 +280,18 @@ class ModelDataPreProcessor:
 
         print(f"Processing {len(training_files)} training files (Skipping {len(existing_train_outputs)} existing)...")
 
+        # --- 5. Queue Training Tasks ---
         training_tasks = []
         for file_path in training_files:
-            output_path = self.training_out_dir / file_path.name
+            if self.is_aws:
+                output_path = f"{self.training_out_dir.rstrip('/')}/{file_path.name}"
+                input_str = f"s3://{file_path.as_posix()}"
+            else:
+                output_path = self.training_out_dir / file_path.name
+                input_str = str(file_path)
             
             task = dask.delayed(self.process_training_raster)(
-                str(file_path), 
+                input_str, 
                 mask_future_train, 
                 str(output_path)
             )
@@ -221,6 +306,11 @@ class ModelDataPreProcessor:
     def process_prediction_raster(self, raster_path, mask_union, output_path) -> None:
         """Reprojects, resamples, and crops a raster for prediction."""
         raster_name = pathlib.Path(raster_path).name.lower()
+        
+        # Ensure S3 prefix if needed
+        if self.is_aws and not str(raster_path).startswith('s3://'):
+            raster_path = f"s3://{str(raster_path).lstrip('/')}"
+
         try:
             with rasterio.open(raster_path) as src:
                 src_nodata = src.nodata
@@ -244,8 +334,12 @@ class ModelDataPreProcessor:
 
     def process_training_raster(self, raster_path, mask_union, output_path) -> None:
         """Process a training raster by clipping it with a mask."""
-        raster_path = pathlib.Path(raster_path)
-        raster_name = raster_path.name.lower()
+        raster_path_obj = pathlib.Path(raster_path)
+        raster_name = raster_path_obj.name.lower()
+
+        # Ensure S3 prefix if needed
+        if self.is_aws and not str(raster_path).startswith('s3://'):
+            raster_path = f"s3://{str(raster_path).lstrip('/')}"
 
         try:
             with rasterio.open(raster_path) as src:
@@ -270,7 +364,21 @@ class ModelDataPreProcessor:
 
     def _warp_to_cutline(self, src_path, dst_path, mask_geometry, **kwargs):
         """Helper to handle GDAL Warp boilerplate and in-memory cutlines."""
-        raster_name = os.path.basename(src_path)
+        
+        # --- 1. PREPARE PATHS FOR GDAL ---
+        src_str = str(src_path)
+        dst_str = str(dst_path)
+
+        # If AWS, strip s3:// if present, then prepend /vsis3/
+        if self.is_aws:
+            if src_str.startswith('s3://'): src_str = src_str.replace('s3://', '')
+            if dst_str.startswith('s3://'): dst_str = dst_str.replace('s3://', '')
+            
+            if not src_str.startswith('/vsis3/'): src_str = f"/vsis3/{src_str}"
+            if not dst_str.startswith('/vsis3/'): dst_str = f"/vsis3/{dst_str}"
+
+        # --- 2. SETUP CUTLINE ---
+        raster_name = os.path.basename(src_str)
         in_memory_cutline = f'/vsimem/cutline_{os.getpid()}_{hash(raster_name)}.geojson'
         
         try:
@@ -280,12 +388,14 @@ class ModelDataPreProcessor:
             print(f"Error creating cutline for {raster_name}: {e}")
             return
 
+        # --- 3. CONFIGURE WARP ---
         warp_opts = {
             'cutlineDSName': in_memory_cutline,
             'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'],
             'creationOptions': ['TILED=YES', 'COMPRESS=LZW', 'BIGTIFF=YES'],
             'multithread': True,
             'warpMemoryLimit': 2048,
+            'resampleAlg': 'bilinear'
         }
         
         if 'dst_crs' in kwargs: warp_opts['dstSRS'] = kwargs.pop('dst_crs')
@@ -295,15 +405,11 @@ class ModelDataPreProcessor:
         if 'src_nodata' in kwargs: warp_opts['srcNodata'] = kwargs.pop('src_nodata')
         if 'dst_nodata' in kwargs: warp_opts['dstNodata'] = kwargs.pop('dst_nodata')
         
-        if 'resampleAlg' not in kwargs: warp_opts['resampleAlg'] = 'bilinear'
-
+        # --- 4. EXECUTE WARP ---
         try:
-            gdal.Warp(dst_path, src_path, **warp_opts)
+            gdal.Warp(dst_str, src_str, **warp_opts)
         except Exception as e:
-            print(f"Error during gdal.Warp for {raster_name}: {e}")
-            if os.path.exists(dst_path):
-                try: os.remove(dst_path)
-                except OSError: pass
+            print(f"GDAL Warp failed for {src_str}: {e}")
         finally:
             gdal.Unlink(in_memory_cutline)
 
@@ -316,7 +422,16 @@ class ModelDataPreProcessor:
             print(f"Error: No subgrid path defined for {data_type}")
             return
 
-        sub_grids = gpd.read_file(sub_grid_path)
+        # Ensure reading works on AWS
+        sub_grid_read_path = sub_grid_path
+        if self.is_aws and not str(sub_grid_path).startswith('s3://'):
+             sub_grid_read_path = f"s3://{str(sub_grid_path).lstrip('/')}"
+        
+        try:
+             sub_grids = gpd.read_file(sub_grid_read_path)
+        except Exception as e:
+             print(f"Error reading subgrids from {sub_grid_read_path}: {e}")
+             return
         
         print(f"Number of tiles: {sub_grids.shape[0]}")
         
@@ -326,20 +441,30 @@ class ModelDataPreProcessor:
 
             if "BH4SD56H" not in tile_name:
                 continue
-            output_folder = pathlib.Path(output_dir) / tile_name
+            
+            # Handle Path Joining
+            if self.is_aws:
+                output_folder = f"{str(output_dir).rstrip('/')}/{tile_name}"
+            else:
+                output_folder = pathlib.Path(output_dir) / tile_name
 
             gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, raster_dir)
             ungridded_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, raster_dir)
             
             tasks.append(
-                self.save_combined_data(gridded_task, ungridded_task, output_folder, data_type, tile_id=tile_name)
+                self.save_combined_data(gridded_task, ungridded_task, str(output_folder), data_type, tile_id=tile_name)
             )
 
         results_list = dask.compute(*tasks)
 
         print("Combining results...")
         final_results_df = pd.concat(results_list, ignore_index=True)
-        output_csv_path = pathlib.Path(output_dir).parent / f"year_pair_nan_counts_{data_type}.csv"
+        
+        if self.is_aws:
+             output_csv_path = f"{str(output_dir).rstrip('/')}/../year_pair_nan_counts_{data_type}.csv"
+        else:
+             output_csv_path = pathlib.Path(output_dir).parent / f"year_pair_nan_counts_{data_type}.csv"
+        
         final_results_df.to_csv(output_csv_path, index=False, na_rep='NA')
         print(f"Stats saved to: {output_csv_path}")
 
@@ -347,17 +472,29 @@ class ModelDataPreProcessor:
         """Process gridded rasters for a single tile."""
 
         original_tile = sub_grid['original_tile']
-        
-        raster_dir = pathlib.Path(raster_dir)
+                
+        # Handle AWS vs Local file listing
+        if self.is_aws:
+            # Use raw string for glob on AWS
+            raster_dir_str = str(raster_dir).rstrip('/')
+            potential_files = [pathlib.Path(f) for f in self.fs.glob(f"{raster_dir_str}/**/*")]
+        else:
+            raster_dir_path = pathlib.Path(raster_dir)
+            potential_files = list(raster_dir_path.rglob("*"))
+
         raster_files = [
-            f for f in raster_dir.rglob("*") 
-            if f.suffix in {'.tif', '.tiff'} and original_tile in f.name
+            f for f in potential_files
+            if f.suffix.lower() in {'.tif', '.tiff'} 
+            and original_tile in f.name
         ]
 
         tile_extent = sub_grid.geometry.bounds
         dfs = []
         for file in raster_files:
-            df = self._extract_raster_to_df(file, tile_extent)
+            # Add prefix if AWS
+            file_str = f"s3://{file.as_posix()}" if self.is_aws else str(file)
+            
+            df = self._extract_raster_to_df(file_str, tile_extent)
             if not df.empty:
                 dfs.append(df)
         
@@ -381,15 +518,24 @@ class ModelDataPreProcessor:
     def subtile_process_ungridded(self, sub_grid, raster_dir) -> pd.DataFrame:
         """Process ungridded rasters for a single tile."""
 
-        raster_dir = pathlib.Path(raster_dir)
+        if not self.is_aws:
+            raster_dir = pathlib.Path(raster_dir)
+
         dfs = []
         tile_extent = sub_grid.geometry.bounds
 
         for pattern in self.static_patterns:
-            for file in raster_dir.rglob(f"*{pattern}*.tif"):
-                 df = self._extract_raster_to_df(file, tile_extent)
-                 if not df.empty:
-                     dfs.append(df)
+            if self.is_aws:
+                raster_dir_str = str(raster_dir).rstrip('/')
+                # glob returns strings, add s3:// prefix
+                current_files = [f"s3://{f}" for f in self.fs.glob(f"{raster_dir_str}/**/*{pattern}*.tif")]
+            else:
+                current_files = list(raster_dir.rglob(f"*{pattern}*.tif"))
+
+            for file in current_files:
+                df = self._extract_raster_to_df(str(file), tile_extent)
+                if not df.empty:
+                    dfs.append(df)
 
         if not dfs:
             return pd.DataFrame()
@@ -433,17 +579,25 @@ class ModelDataPreProcessor:
         if gridded_df is None or gridded_df.empty:
             return pd.DataFrame()
 
-        output_folder = pathlib.Path(output_folder)
-        output_folder.mkdir(parents=True, exist_ok=True)
-        
-        output_path = output_folder / f"{tile_id}_{data_type}_clipped_data.parquet"
+        # Handle Directory Creation
+        if not self.is_aws:
+            output_folder_path = pathlib.Path(output_folder)
+            output_folder_path.mkdir(parents=True, exist_ok=True)
+            output_path = output_folder_path / f"{tile_id}_{data_type}_clipped_data.parquet"
+            save_path = str(output_path)
+        else:
+            # AWS S3 (no mkdir needed)
+            output_folder = str(output_folder).rstrip('/')
+            save_path = f"s3://{output_folder}/{tile_id}_{data_type}_clipped_data.parquet"
+            # Strip extra s3:// if double added
+            if save_path.startswith("s3://s3://"): save_path = save_path.replace("s3://s3://", "s3://")
 
         if ungridded_df is not None and not ungridded_df.empty:
             combined = pd.merge(gridded_df, ungridded_df, on=['X', 'Y'], how='left')
         else:
             combined = gridded_df
 
-        combined.to_parquet(output_path, engine="pyarrow", index=False)
+        combined.to_parquet(save_path, engine="pyarrow", index=False)
         return self.create_nan_stats_csv(combined, tile_id)
 
     def create_nan_stats_csv(self, df, tile_id) -> pd.DataFrame:
@@ -458,15 +612,20 @@ class ModelDataPreProcessor:
             new_row[f"{year_pair}_nan_percent"] = round(df[col].isna().mean() * 100, 2)
         return pd.DataFrame([new_row])
 
-    def batch_long_format_transformation(self, base_dir: pathlib.Path, mode: Literal["training", "prediction"]):
+    def batch_long_format_transformation(self, base_dir, mode: Literal["training", "prediction"]):
         """Orchestrator for transforming wide tiles to long year-pair format."""
 
         print("Starting Long Format Transformation...")
         print(f"Starting Dask Transformation Batch: {mode}")
 
-        base_dir = pathlib.Path(base_dir)
         file_suffix = f"_{mode}_clipped_data.parquet"
-        files_to_process = list(base_dir.rglob(f"*{file_suffix}"))
+
+        # Fix: Convert base_dir to Path only on Local
+        if self.is_aws:
+            base_dir_str = str(base_dir).rstrip('/')
+            files_to_process = [pathlib.Path(f) for f in self.fs.glob(f"{base_dir_str}/**/*{file_suffix}")]
+        else:
+            files_to_process = list(pathlib.Path(base_dir).rglob(f"*{file_suffix}"))
 
         if not files_to_process:
             print("No files found for transformation.")
@@ -474,10 +633,15 @@ class ModelDataPreProcessor:
 
         print(f"Queueing {len(files_to_process)} tiles...")
 
-        tasks = [
-            dask.delayed(self._transform_tile_task)(str(fp), mode) 
-            for fp in files_to_process
-        ]
+        tasks = []
+        for fp in files_to_process:
+            # Format path for passing to worker
+            if self.is_aws:
+                file_str = f"s3://{fp.as_posix()}"
+            else:
+                file_str = str(fp)
+            
+            tasks.append(dask.delayed(self._transform_tile_task)(file_str, mode))
 
         results = dask.compute(*tasks)
 
@@ -583,7 +747,11 @@ class ModelDataPreProcessor:
             final_cols = [c for c in final_cols if c in pair_gdf.columns]
             
             out_name = f"{tile_name}_{pair_name}_long.parquet"
-            out_path = os.path.join(output_dir, out_name)
+            # Join paths carefully
+            if output_dir.startswith("s3://"):
+                out_path = f"{output_dir.rstrip('/')}/{out_name}"
+            else:
+                out_path = os.path.join(output_dir, out_name)
             
             pair_gdf[final_cols].to_parquet(out_path, index=None)
             saved_files.append(out_name)
@@ -619,7 +787,11 @@ class ModelDataPreProcessor:
             pair_gdf = gdf[final_cols].drop_duplicates()
             
             out_name = f"{tile_name}_{pair_name}_prediction_long.parquet"
-            out_path = os.path.join(output_dir, out_name)
+            # Join paths carefully
+            if output_dir.startswith("s3://"):
+                out_path = f"{output_dir.rstrip('/')}/{out_name}"
+            else:
+                out_path = os.path.join(output_dir, out_name)
             
             pair_gdf.to_parquet(out_path, index=None)
             saved_files.append(out_name)
@@ -654,3 +826,78 @@ class ModelDataPreProcessor:
         meta["year"] = meta["colname"].str.slice(-4).astype(int)
         meta["var_base"] = meta["colname"].str.replace(self.re_year_suffix, "", regex=True)
         return meta
+    
+    def raster_to_spatial_df(self, raster_path, process_type)-> gpd.GeoDataFrame:
+        """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries."""   
+
+        print(f'Creating {process_type} mask data frame..')
+
+        # FIX: Ensure rasterio has s3:// if needed
+        open_path = str(raster_path)
+        if self.is_aws and not open_path.startswith('s3://'):
+             open_path = f"s3://{open_path}"
+
+        with rasterio.open(open_path) as src:
+            mask = src.read(1, out_dtype='uint8')
+
+            if process_type == 'prediction':
+                valid_mask = mask == 1
+            elif process_type == 'training':
+                valid_mask = mask == 2
+
+            shapes_gen = shapes(mask, valid_mask, transform=src.transform)  
+
+            gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
+            gdf = gdf.to_crs("EPSG:32617")   
+
+            # FIX: Output path handling
+            masks_dir_conf = get_config_item('MASK', 'MASKS_DIR')
+            
+            if self.is_aws:
+                bucket = get_config_item('S3', 'BUCKET_NAME')
+                mask_path = f"s3://{bucket}/{masks_dir_conf}/{process_type}_mask.parquet"
+            else:
+                masks_dir = Path(masks_dir_conf)
+                mask_path = masks_dir / f"{process_type}_mask.parquet"
+
+            gdf.to_parquet(str(mask_path))
+
+            return gdf
+        
+    def create_subgrids(self, mask_gdf, output_dir, process_type)-> None:
+        """ Create subgrids layer by intersecting grid tiles with the mask geometries"""        
+        
+        # Ensure we read the parquet from S3 properly
+        mask_gdf_path = str(mask_gdf)
+        if self.is_aws and not mask_gdf_path.startswith('s3://'):
+             mask_gdf_path = f"s3://{mask_gdf_path}"
+
+        grid_gpkg = get_config_item('MODEL', 'SUBGRIDS')
+        
+        # Handle AWS Path for subgrids
+        if self.is_aws and not str(grid_gpkg).startswith('s3://'):
+             bucket = get_config_item('S3', 'BUCKET_NAME')
+             # Assuming config only has key, not full s3 path. Adjust if config has full path.
+             grid_gpkg = f"s3://{bucket}/{grid_gpkg}" if not str(grid_gpkg).startswith('s3://') else grid_gpkg
+
+        print(f"Preparing {process_type} sub-grids...")
+
+        mask_gdf_df = gpd.read_parquet(mask_gdf_path)
+        combined_geometry = mask_gdf_df.unary_union
+        mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
+
+        sub_grids = gpd.read_file(grid_gpkg, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
+
+        intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
+        intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
+        
+        # Output handling
+        if self.is_aws:
+             output_path = f"{str(output_dir).rstrip('/')}/{process_type}_intersecting_subgrids.gpkg"
+        else:
+             output_path = os.path.join(output_dir, f"{process_type}_intersecting_subgrids.gpkg")
+
+        intersecting_sub_grids.to_file(output_path, driver="GPKG") 
+
+        return
+    
