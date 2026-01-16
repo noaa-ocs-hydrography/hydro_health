@@ -92,7 +92,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['env'] == 'local' or param_lookup['env'] == 'aws':
+    if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)

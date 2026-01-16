@@ -62,7 +62,7 @@ def run_hydro_health(config_name: str) -> None:
         config = yaml.safe_load(lookup)
         print(f'Script has been run {len(config["runtimes"])} time(s)')
         # load ecoregions from config for remote run
-        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if env == 'remote' else ''
+        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if env in ['remote', 'aws'] else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
         tiles = tools.get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
