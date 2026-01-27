@@ -100,10 +100,11 @@ class MetadataEngine:
 
         return geometry_coords
 
-    def run(self, ecoregions: list[str], outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
         print('Downloading Metadata Datasets')
+        ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
             digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'

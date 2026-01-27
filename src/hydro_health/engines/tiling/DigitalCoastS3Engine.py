@@ -119,6 +119,7 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
                 continue
                 
             if intersected_response.status_code == 200:
+                # TODO The Solution: Calculate the MD5 hash of your BytesIO content before uploading. Compare it against the ETag of the current version in S3. If they match, skip the upload.
                 output_object = BytesIO(intersected_response.content)
                 ecoregion_folder = output_file.parents[8]
                 s3_prefix = str(output_file.relative_to(ecoregion_folder)).replace("\\", "/")
@@ -141,7 +142,7 @@ class DigitalCoastS3Engine(Engine):
         """Create unique year folders for CUDEM data"""
 
         s3_files = s3fs.S3FileSystem()
-        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
         cudem_folders = s3_files.glob(f"{digital_coast_path}/NOAA_NCEI_0*")
         for folder in cudem_folders:
             year_tifs = defaultdict(list)
@@ -243,7 +244,7 @@ class DigitalCoastS3Engine(Engine):
         nbs_bucket = s3.Bucket(get_config_item('DIGITALCOAST', 'BUCKET'))
         return nbs_bucket
 
-    def print_async_results(self, results: list[str], output_folder: str) -> None:
+    def print_async_results(self, results: list[str], output_folder: str = None) -> None:
         """Consolidate result printing"""
 
         for result in results:
@@ -293,7 +294,10 @@ class DigitalCoastS3Engine(Engine):
 
                         # Upload tile_index files
                         for provider_shp in current_files:
-                            self.upload_files_to_s3(provider_shp.parents[0])
+                            provider_path_parts = provider_shp.parts
+                            digital_coast_index = provider_path_parts.index('DigitalCoast')
+                            provider_folder = pathlib.Path(*provider_path_parts[:digital_coast_index + 2])
+                            self.upload_files_to_s3(provider_folder)
 
                 self.breakup_cudem(ecoregion)
         self.close_dask()
@@ -322,7 +326,7 @@ class DigitalCoastS3Engine(Engine):
 
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        s3_client.upload_fileobj(file_object, bucket_name, s3_prefix)
+        s3_client.upload_fileobj(file_object, bucket_name, f'testing/{s3_prefix}')
 
     def upload_files_to_s3(self, provider_folder: pathlib.Path) -> None:
         """Upload all tiff files to s3 for current tile"""
@@ -331,11 +335,6 @@ class DigitalCoastS3Engine(Engine):
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for found_file in provider_folder.rglob('*'):
             if found_file.is_file():
-                s3_prefix = "/".join(found_file.parts[3:])
-                ecoregion_folder = provider_folder.parents[7]
-                s3_prefix = str(found_file.relative_to(ecoregion_folder)).replace("\\", "/")
+                s3_prefix = "testing/" + "/".join(found_file.parts[3:])
                 print(f'Uploading {found_file} to {s3_prefix}')
-                s3_client.upload_file(str(found_file), bucket_name, str(s3_prefix))
-            else:
-                print(f'No files found for: {provider_folder}')
-
+                s3_client.upload_file(str(found_file), bucket_name, s3_prefix)

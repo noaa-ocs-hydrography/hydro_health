@@ -242,5 +242,5 @@ class BlueTopoS3Engine(Engine):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
             s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(tiff_file), bucket_name, str(s3_path))
+            s3_client.upload_file(str(tiff_file), bucket_name, f'testing/{str(s3_path)}')
 

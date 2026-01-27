@@ -6,6 +6,7 @@ from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
+from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
@@ -51,6 +52,20 @@ def run_raster_mask_engine(outputs:str) -> None:
     engine.run(outputs)
 
 
+# def run_raster_mask_local(outputs:str) -> None:
+#     """Create prediction and training masks for found ecoregions"""
+
+#     engine = RasterMaskEngine()
+#     engine.run(outputs)
+
+
+# def run_raster_mask_s3(outputs:str) -> None:
+#     """Create prediction and training masks for found ecoregions"""
+
+#     engine = RasterMaskS3Engine()
+#     engine.run(outputs)
+
+
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
     """Entry point for parallel processing of Digital Coast data"""
 
@@ -81,12 +96,15 @@ def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
     engine.run(tiles, outputs)
 
 
-def run_metadata_engine(outputs:str) -> None:
+def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
     """Entry point for parallel processing of provider metadata"""
 
-    ecoregions = [file_path.stem for file_path in pathlib.Path(outputs).rglob('ER_*') if file_path.is_dir()]
-    engine = MetadataEngine()
-    engine.run(ecoregions, outputs)
+    if param_lookup['env'] in ['local', 'remote']:
+        engine = MetadataEngine()
+    else:
+        engine = MetadataS3Engine()
+    outputs = param_lookup['output_directory'].valueAsText
+    engine.run(tiles, outputs)
 
 
 def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
