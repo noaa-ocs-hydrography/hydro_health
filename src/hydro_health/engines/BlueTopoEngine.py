@@ -47,7 +47,7 @@ def _process_tile(param_inputs: list[list]) -> None:
 class BlueTopoEngine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self, param_lookup):
+    def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
 

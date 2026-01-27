@@ -52,8 +52,8 @@ def upload_tif_files_via_pro(folder_path, folder_name):
                 print(f"Failed to upload {file_name}. Error: {e}")
 
 
-LOCAL_FOLDER = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\ER3_NOAA_AGO_Files\Pilot_Model_Files\Input_data\problem_files"
-FOLDER_NAME = "ER3_Input_Data"
+LOCAL_FOLDER = r"N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model1\Coding_outputs\Prediction_data_grid_tiles\_POST_PROCESS"
+FOLDER_NAME = "ER3_Model_Outputs"
 
 
 if __name__ == "__main__":

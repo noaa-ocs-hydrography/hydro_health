@@ -5,7 +5,8 @@ HH_MODEL = pathlib.Path(__file__).parents[2]
 
 import sys
 sys.path.append(str(HH_MODEL))
-from hydro_health.helpers.tools import process_digital_coast_files, get_ecoregion_tiles, Param, create_raster_vrt, get_ecoregion_folders
+from hydro_health.helpers.tools import get_ecoregion_tiles, Param, get_ecoregion_folders
+from hydro_health.helpers.runners import run_digital_coast_engine, run_raster_vrt_engine
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -20,8 +21,10 @@ if __name__ == '__main__':
         'input_directory': Param(''),
         'output_directory': Param(str(OUTPUTS)),
         # 'eco_regions': Param('ER_3-Florida-West;'),
-        'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson'))
+        'eco_regions': Param(''),
+        'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
         # 'drawn_polygon': Param('')
+        'env': 'local'
     }
 
     log_file_path = pathlib.Path(param_lookup['output_directory'].valueAsText) / 'log_prints.txt'
@@ -34,9 +37,9 @@ if __name__ == '__main__':
     tiles = get_ecoregion_tiles(param_lookup)
     print(f'Selected tiles: {tiles.shape[0]}')
     start = time.time()
-    process_digital_coast_files(tiles, param_lookup['output_directory'].valueAsText)
+    run_digital_coast_engine(tiles, param_lookup)
     for ecoregion in get_ecoregion_folders(param_lookup):
-        create_raster_vrt(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast')
+        run_raster_vrt_engine(param_lookup)
 
         digital_coast_data = pathlib.Path(param_lookup['output_directory'].valueAsText) / ecoregion / 'DigitalCoast'
         if digital_coast_data.exists():

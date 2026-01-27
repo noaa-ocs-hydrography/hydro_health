@@ -58,7 +58,7 @@ def _process_tile(param_inputs: list[list]) -> None:
 class BlueTopoS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
-    def __init__(self, param_lookup):
+    def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
 
@@ -145,8 +145,7 @@ class BlueTopoS3Engine(Engine):
         
         output_folder = self.param_lookup['output_directory'].valueAsText
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            file_name = pathlib.Path(obj_summary.key).name
-            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / file_name
+            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
                 if current_file.exists():
@@ -235,9 +234,7 @@ class BlueTopoS3Engine(Engine):
         raster_ds = None
 
     def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:
-        """
-        Upload all tiff files to s3 for current tile
-        """
+        """Upload all tiff files to s3 for current tile"""
         
         s3_client = boto3.client('s3')
         
@@ -245,5 +242,5 @@ class BlueTopoS3Engine(Engine):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
             s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(tiff_file), bucket_name, str(s3_path))
+            s3_client.upload_file(str(tiff_file), bucket_name, f'testing/{str(s3_path)}')
 

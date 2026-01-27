@@ -62,19 +62,19 @@ def run_hydro_health(config_name: str) -> None:
         config = yaml.safe_load(lookup)
         print(f'Script has been run {len(config["runtimes"])} time(s)')
         # load ecoregions from config for remote run
-        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if env == 'remote' else ''
+        param_lookup['eco_regions'].value = ';'.join(config['ecoregions']) if env in ['remote', 'aws'] else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
         tiles = tools.get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
-                runners.run_digital_coast_engine(tiles, param_lookup['output_directory'].valueAsText)
+                runners.run_digital_coast_engine(tiles, param_lookup)
             # TODO Removed laz download until HH 2.0
             # elif step["tool"] == "run_laz_conversion_engine" and step["run"]:
             #     runners.run_laz_conversion_engine(tiles, param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_metadata_engine" and step["run"]:
-                runners.run_metadata_engine(param_lookup['output_directory'].valueAsText)
+                runners.run_metadata_engine(tiles, param_lookup)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
                 runners.run_raster_vrt_engine(param_lookup, skip_existing=False)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:

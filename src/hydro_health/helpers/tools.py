@@ -92,17 +92,15 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
-    if param_lookup['env'] == 'local' or param_lookup['env'] == 'aws':
+    if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
-        make_ecoregion_folders(selected_ecoregions, output_folder)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
     else:
         # get eco region from shapefile that matches drop down choices
         eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
         eco_regions = [region.split('-')[0] for region in eco_regions]
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
-        make_ecoregion_folders(selected_ecoregions, output_folder)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
     mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
