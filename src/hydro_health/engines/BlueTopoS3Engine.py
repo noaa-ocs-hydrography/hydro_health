@@ -67,14 +67,14 @@ class BlueTopoS3Engine(Engine):
 
         rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
         rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
-        gdal.DEMProcessing(rugosity_file_path, tiff_file_path, 'Roughness')
+        gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
 
     def create_slope(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a slope raster from the DEM"""
 
         slope_name = str(tiff_file_path.stem) + '_slope.tiff'
         slope_file_path = tiff_file_path.parents[0] / slope_name
-        gdal.DEMProcessing(slope_file_path, tiff_file_path, 'slope')
+        gdal.DEMProcessing(str(slope_file_path), str(tiff_file_path), 'slope')
 
     def create_survey_end_date_tiff(self, tiff_file_path: pathlib.Path) -> None:
         """Create survey end date tiffs from contributor band values in the XML file."""        
@@ -185,8 +185,8 @@ class BlueTopoS3Engine(Engine):
         singleband_tile_name = tiff_file_path.parents[0] / output_name
 
         gdal.Translate(
-            singleband_tile_name,
-            tiff_file_path,
+            str(singleband_tile_name),
+            str(tiff_file_path),
             bandList=[band],
             creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
             callback=gdal.TermProgress_nocb
@@ -225,7 +225,7 @@ class BlueTopoS3Engine(Engine):
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
         """Set positive elevation to no data value"""
 
-        raster_ds = gdal.Open(tiff_file_path, gdal.GA_Update)
+        raster_ds = gdal.Open(str(tiff_file_path), gdal.GA_Update)
         no_data = -999999
         raster_array = raster_ds.ReadAsArray()
         meters_array = np.where(raster_array < 0, raster_array, no_data)
@@ -237,10 +237,9 @@ class BlueTopoS3Engine(Engine):
         """Upload all tiff files to s3 for current tile"""
         
         s3_client = boto3.client('s3')
-        
-        for tiff_file in tile_folder.glob('*.tiff'):
+        for tiff_file in tile_folder.glob('*'):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
             s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(tiff_file), bucket_name, f'testing/{str(s3_path)}')
+            s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
 
