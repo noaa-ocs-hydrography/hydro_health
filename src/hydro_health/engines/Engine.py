@@ -150,7 +150,17 @@ class Engine:
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
         self.cluster = LocalCluster(processes=processes, n_workers=6, threads_per_worker=2)
         self.client = Client(self.cluster)
+        self.set_proj_path()
         # print(self.client.dashboard_link)
+
+    def set_proj_path(self):
+        """Load proj.db path to resolve mismatch"""
+
+        conda_prefix = sys.prefix
+        proj_path = os.path.join(conda_prefix, 'share', 'proj')
+        os.environ['PROJ_LIB'] = proj_path
+        # For newer PROJ versions, also set PROJ_DATA
+        os.environ['PROJ_DATA'] = proj_path
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""

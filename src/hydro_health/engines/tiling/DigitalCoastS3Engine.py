@@ -10,10 +10,8 @@ import pathlib
 import os
 import sys
 import tempfile
-import numpy as np
 import logging
 import platform
-import shapely
 import s3fs
 
 from multiprocessing import set_executable

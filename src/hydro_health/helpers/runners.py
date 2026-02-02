@@ -14,6 +14,7 @@ from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
+from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
 from hydro_health.helpers.tools import get_ecoregion_folders
 
@@ -109,8 +110,11 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> No
 
 def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
-
-    engine = RasterVRTEngine()
+    
+    if param_lookup['env'] in ['local', 'remote']:
+        engine = RasterVRTEngine(param_lookup)
+    else:
+        engine = RasterVRTS3Engine(param_lookup)
     for ecoregion in get_ecoregion_folders(param_lookup):
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
