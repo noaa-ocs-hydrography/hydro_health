@@ -175,7 +175,8 @@ def _process_tile(param_inputs: list[list]) -> None:
         tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id)
         if tiff_file_path:
             engine.create_survey_end_date_tiff(tiff_file_path)
-            engine.create_catzoc(tiff_file_path)
+            engine.create_catzoc_all(tiff_file_path)
+            engine.create_catzoc_latest(tiff_file_path)
             mb_tiff_file = engine.rename_multiband(tiff_file_path)
             engine.multiband_to_singleband(mb_tiff_file, band=1)
             engine.multiband_to_singleband(mb_tiff_file, band=2)
@@ -194,7 +195,89 @@ class BlueTopoS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def create_catzoc(self, tiff_file_path: pathlib.Path) -> None:
+    def create_catzoc_all(self, tiff_file_path: pathlib.Path) -> None:
+        """
+        Generate a CATZOC score raster of unique values for each survey area
+        """
+
+        with rasterio.open(tiff_file_path) as src:
+            contributor_band_values = src.read(3)
+            transform = src.transform
+            nodata = src.nodata 
+            width, height = src.width, src.height  
+
+        xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
+        tree = etree.parse(xml_file_path)
+        root = tree.getroot()
+
+        contributor_band_xml = root.xpath("//PAMRasterBand[Description='Contributor']")
+        rows = contributor_band_xml[0].xpath(".//GDALRasterAttributeTable/Row")
+        rat_node = root.find(".//GDALRasterAttributeTable")
+        field_names = [f.find('Name').text for f in rat_node.findall('FieldDefn')]
+
+        table_data = []
+        for row in rows:  # Can sort rows and then use the last index range or no loop
+            row_data = {field_names[i]: f_val.text for i, f_val in enumerate(row.findall('F'))}
+            data = {
+                "value": float(row_data.get('value')),
+                'start_date': (
+                    datetime.strptime(row_data.get('survey_date_start'), "%Y-%m-%d").date() 
+                    if row_data.get('survey_date_start') != "N/A" 
+                    else None
+                ),
+                "end_date": (
+                    datetime.strptime(row_data.get('survey_date_end'), "%Y-%m-%d").date() 
+                    if row_data.get('survey_date_end') != "N/A" 
+                    else None
+                ),
+                'from_filename': row_data.get('source_survey_id'),
+                'feat_detect': bool(int(row_data.get('significant_features', 0))),
+                'feat_least_depth': bool(int(row_data.get('feature_least_depth', 0))),
+                'complete_coverage': bool(int(row_data.get('bathy_coverage', 0))),
+                'horiz_uncert_fixed': float(row_data.get('horizontal_uncert_fixed', 0)),
+                'horiz_uncert_vari': float(row_data.get('horizontal_uncert_var', 0)),
+                'vert_uncert_fixed': float(row_data.get('vertical_uncert_fixed', 0)),
+                'vert_uncert_vari': float(row_data.get('vertical_uncert_var', 0)),
+                'interpolated': ".interpolated" in row_data.get('source_survey_id', '').lower()
+            }
+            if data['start_date'] or data['end_date']:
+                table_data.append(data)
+
+        # Add CATZOC necessary columns
+        for meta in table_data:
+            # self.write_message(f"dates: {meta['start_date']}, {meta['end_date']}", self.param_lookup['output_directory'].valueAsText)
+            ss_score = supersession(meta)
+            meta['supersession_score'] = ss_score
+            meta['catzoc'] = catzoc(meta)
+            today = date.today()
+            meta['catzoc_decay'] = decay(meta, today)
+
+        attribute_table_df = pd.DataFrame(table_data)
+
+        decay_mapping = attribute_table_df[['value', 'catzoc_decay']].drop_duplicates()
+        reclass_matrix = decay_mapping.to_numpy()
+        reclass_dict = {row[0]: row[1] for row in reclass_matrix}
+
+        reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
+        reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
+
+        survey_date_file_path = tiff_file_path.parents[1] / f'{tiff_file_path.stem}_catzoc_decay_all.tiff'
+        with rasterio.open(
+            survey_date_file_path,
+            "w",
+            driver="GTiff",
+            count=1,
+            width=width,
+            height=height,
+            dtype=rasterio.float32,
+            compress="lzw",
+            crs=src.crs,
+            transform=transform,
+            nodata=nodata,
+        ) as dst:
+            dst.write(reclassified_band, 1)
+
+    def create_catzoc_latest(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a CATZOC score raster using the most recent survey date"""
 
         with rasterio.open(tiff_file_path) as src:
@@ -244,21 +327,21 @@ class BlueTopoS3Engine(Engine):
         today = date.today()
         most_recent_survey['supersession_score'] = supersession(most_recent_survey)
         most_recent_survey['catzoc'] = catzoc(most_recent_survey)
-        catzoc_decay = decay(most_recent_survey, today)
+        most_recent_survey['catzoc_decay'] = decay(most_recent_survey, today)
 
-        output_folder = self.param_lookup['output_directory'].valueAsText
-        self.write_message(f"  Raw Score: {most_recent_survey['supersession_score']:.2f}", output_folder)
-        self.write_message(f"  Decayed Score: {catzoc_decay:.2f}", output_folder)
-        self.write_message(f"  CATZOC Category: {most_recent_survey['catzoc']}", output_folder)
+        # output_folder = self.param_lookup['output_directory'].valueAsText
+        # self.write_message(f"  Raw Score: {most_recent_survey['supersession_score']:.2f}", output_folder)
+        # self.write_message(f"  Decayed Score: {catzoc_decay:.2f}", output_folder)
+        # self.write_message(f"  CATZOC Category: {most_recent_survey['catzoc']}", output_folder)
 
         if nodata is not None and np.isnan(nodata):
             is_nodata = np.isnan(contributor_band_values)
         else:
             is_nodata = (contributor_band_values == nodata)
 
-        reclassified_band = np.where(is_nodata, nodata, catzoc_decay).astype(np.float32)
+        reclassified_band = np.where(is_nodata, nodata, most_recent_survey['catzoc_decay']).astype(np.float32)
 
-        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay.tiff'
+        survey_date_file_path = tiff_file_path.parents[1] / f'{tiff_file_path.stem}_catzoc_decay_latest.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",

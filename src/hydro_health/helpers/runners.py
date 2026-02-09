@@ -116,6 +116,7 @@ def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
     else:
         engine = RasterVRTS3Engine(param_lookup)
     for ecoregion in get_ecoregion_folders(param_lookup):
+        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
             engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)

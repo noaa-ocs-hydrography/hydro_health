@@ -35,7 +35,8 @@ def _process_tile(param_inputs: list[list]) -> None:
     tiff_file_path = engine.download_nbs_tile(tile_id, ecoregion_id)
     if tiff_file_path:
         engine.create_survey_end_date_tiff(tiff_file_path)
-        engine.create_catzoc(tiff_file_path)
+        engine.create_catzoc_all(tiff_file_path)
+        engine.create_catzoc_latest(tiff_file_path)
         mb_tiff_file = engine.rename_multiband(tiff_file_path)
         engine.multiband_to_singleband(mb_tiff_file, band=1)
         engine.multiband_to_singleband(mb_tiff_file, band=2)
@@ -54,7 +55,6 @@ class BlueTopoEngine(Engine):
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path) -> None:
         """
-        THIS IS NOT USED
         Generate a CATZOC score raster of unique values for each survey area
         """
 
@@ -98,26 +98,28 @@ class BlueTopoEngine(Engine):
                 'vert_uncert_vari': float(row_data.get('vertical_uncert_var', 0)),
                 'interpolated': ".interpolated" in row_data.get('source_survey_id', '').lower()
             }
-            table_data.append(data)
+            if data['start_date'] or data['end_date']:
+                table_data.append(data)
 
         # Add CATZOC necessary columns
         for meta in table_data:
+            # self.write_message(f"dates: {meta['start_date']}, {meta['end_date']}", self.param_lookup['output_directory'].valueAsText)
             ss_score = supersession(meta)
             meta['supersession_score'] = ss_score
             meta['catzoc'] = catzoc(meta)
             today = date.today()
-            meta['decay_ss'] = decay(meta, today)
+            meta['catzoc_decay'] = decay(meta, today)
 
         attribute_table_df = pd.DataFrame(table_data)
 
-        decay_mapping = attribute_table_df[['value', 'decay_ss']].drop_duplicates()
+        decay_mapping = attribute_table_df[['value', 'catzoc_decay']].drop_duplicates()
         reclass_matrix = decay_mapping.to_numpy()
         reclass_dict = {row[0]: row[1] for row in reclass_matrix}
 
         reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
         reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
 
-        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay_all.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -133,7 +135,7 @@ class BlueTopoEngine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def create_catzoc(self, tiff_file_path: pathlib.Path) -> None:
+    def create_catzoc_latest(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a CATZOC score raster using the most recent survey date"""
 
         with rasterio.open(tiff_file_path) as src:
@@ -183,21 +185,21 @@ class BlueTopoEngine(Engine):
         today = date.today()
         most_recent_survey['supersession_score'] = supersession(most_recent_survey)
         most_recent_survey['catzoc'] = catzoc(most_recent_survey)
-        catzoc_decay = decay(most_recent_survey, today)
+        most_recent_survey['catzoc_decay'] = decay(most_recent_survey, today)
 
-        output_folder = self.param_lookup['output_directory'].valueAsText
-        self.write_message(f"  Raw Score: {most_recent_survey['supersession_score']:.2f}", output_folder)
-        self.write_message(f"  Decayed Score: {catzoc_decay:.2f}", output_folder)
-        self.write_message(f"  CATZOC Category: {most_recent_survey['catzoc']}", output_folder)
+        # output_folder = self.param_lookup['output_directory'].valueAsText
+        # self.write_message(f"  Raw Score: {most_recent_survey['supersession_score']:.2f}", output_folder)
+        # self.write_message(f"  Decayed Score: {catzoc_decay:.2f}", output_folder)
+        # self.write_message(f"  CATZOC Category: {most_recent_survey['catzoc']}", output_folder)
 
         if nodata is not None and np.isnan(nodata):
             is_nodata = np.isnan(contributor_band_values)
         else:
             is_nodata = (contributor_band_values == nodata)
 
-        reclassified_band = np.where(is_nodata, nodata, catzoc_decay).astype(np.float32)
+        reclassified_band = np.where(is_nodata, nodata, most_recent_survey['catzoc_decay']).astype(np.float32)
 
-        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay_latest.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -296,9 +298,9 @@ class BlueTopoEngine(Engine):
             current_file = output_pathlib / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
-                if current_file.exists():
-                    self.write_message(f'Skipping: {current_file.name}', output_folder)
-                    return output_tile_path
+                # if current_file.exists():
+                #     self.write_message(f'Skipping: {current_file.name}', output_folder)
+                #     return output_tile_path
                 output_tile_path = current_file
             tile_folder = current_file.parents[0]
             self.write_message(f'Downloading: {current_file.name}', output_folder)

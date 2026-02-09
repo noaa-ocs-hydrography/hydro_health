@@ -22,6 +22,10 @@ class RasterVRTEngine(Engine):
             'uncertainty': '*_unc.tiff',
             'slope': '*_slope.tiff',
             'rugosity': '*_rugosity.tiff',
+            'catzoc_score_all': '*score_all.tiff',
+            'catzoc_score_latest': '*score_latest.tiff',
+            'catzoc_decay_all': '*decay_all.tiff',
+            'catzoc_decay_latest': '*decay_latest.tiff',
             'NCMP': '*.tif'
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
