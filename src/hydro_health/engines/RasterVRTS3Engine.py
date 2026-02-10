@@ -13,27 +13,59 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 
-def _process_single_bluetopo(params: list[str|pathlib.Path]) -> list[str, pathlib.Path, str]:
-    """Parallel process downloading Bluetopo for VRT"""
+def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
+    """Parallel process creating a Warped VRT for BlueTopo directly from S3"""
 
-    geotiff_prefix, temp_dir_str = params
-    temp_output_path = pathlib.Path(temp_dir_str)
-    geotiff_stem = str(pathlib.Path(geotiff_prefix.split('/')[-1]).stem) + '.tif'
+    geotiff_prefix, s3_bucket, _ = params
 
-    # Use /vsis3/ for direct S3 streaming via GDAL
-    geotiff_ds = gdal.Open(f'/vsis3/{geotiff_prefix}')
-    temp_geotiff = temp_output_path / geotiff_stem
+    gdal.UseExceptions()
+    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
+    gdal.SetConfigOption('AWS_S3_ENDPOINT', 's3.amazonaws.com')
     
-    # Copy to local temp storage for VRT construction later
-    gdal.GetDriverByName('GTiff').CreateCopy(str(temp_geotiff), geotiff_ds)
+    geotiff_stem = str(pathlib.Path(geotiff_prefix).stem)
+    gdal_geotiff_path = f'/vsis3/{geotiff_prefix}'
     
-    projection_wkt = geotiff_ds.GetProjection()
-    spatial_ref = osr.SpatialReference(wkt=projection_wkt)
-    crs_code = spatial_ref.GetAuthorityCode('DATUM')
-    
-    geotiff_ds = None
-    return crs_code, temp_geotiff, projection_wkt
+    with tempfile.NamedTemporaryFile(suffix=f"_{geotiff_stem}.vrt", delete=False) as tmp:
+        local_vrt_path = tmp.name
 
+    src_ds = None
+    try:
+        src_ds = gdal.Open(gdal_geotiff_path)
+        if src_ds is None:
+            raise FileNotFoundError(f"GDAL could not open {gdal_geotiff_path}")
+            
+        warp_options = {
+            'format': 'VRT',
+            'dstSRS': 'EPSG:4326',
+            'resampleAlg': gdal.GRA_Bilinear
+        }
+
+        # Create the local VRT XML
+        warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, **warp_options)
+            
+        projection_wkt = warped_vrt_ds.GetProjection()
+        spatial_ref = osr.SpatialReference(wkt=projection_wkt)
+        datum_code = spatial_ref.GetAuthorityCode('DATUM')
+        warped_vrt_ds = None 
+        
+        geotiff_parent = '/'.join(geotiff_prefix.split('/')[1:-1])
+        s3_vrt_key = f"{geotiff_parent}/{geotiff_stem}.vrt"
+        
+        # Upload the individual VRT to S3
+        s3_client = boto3.client('s3')
+        s3_client.upload_file(local_vrt_path, s3_bucket, s3_vrt_key)
+        final_s3_vrt_path = f"/vsis3/{s3_bucket}/{s3_vrt_key}"
+
+        clean_key = f"{datum_code}"
+
+        return clean_key, final_s3_vrt_path, projection_wkt
+
+    except Exception as e:
+        raise RuntimeError(f'_process_single_bluetopo failed: {geotiff_prefix} - {str(e)}')
+    finally:
+        src_ds = None
+        if os.path.exists(local_vrt_path):
+            os.remove(local_vrt_path)
 
 def _process_single_digitalcoast(params: list) -> list[str, str, str]:
     """Parallel process creating a Warped VRT for DigitalCoast"""
@@ -88,7 +120,7 @@ def _process_single_digitalcoast(params: list) -> list[str, str, str]:
         datum_code = spatial_ref.GetAuthorityCode('DATUM') or "Unknown"
         warped_vrt_ds = None 
         
-        # Upload to S3
+        # Upload the individual VRT to S3
         geotiff_parent = '/'.join(geotiff_prefix.split('/')[1:-1])
         s3_vrt_key = f"{geotiff_parent}/{geotiff_stem}.vrt"
         s3_client = boto3.client('s3')
@@ -127,28 +159,25 @@ class RasterVRTS3Engine(Engine):
     def build_output_vrts(self, output_prefix: str, file_type: str, output_geotiffs: dict, temp_output_path: pathlib.Path) -> None:
         """Create main Master VRT file from individual S3 VRTs"""
         
-        # Set GDAL configs
         gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
         gdal.SetConfigOption('AWS_S3_ENDPOINT', 's3.amazonaws.com')
+        gdal.SetConfigOption('GDAL_VRT_ENABLE_REPROJECTION', 'YES')
 
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
         for crs_key, tile_dict in output_geotiffs.items():
             vrt_tiles = tile_dict['tiles'] 
-            master_vrt_local = temp_output_path / f'mosaic_{file_type}_{crs_key}.vrt'
-            vrt_ds = gdal.BuildVRT(str(master_vrt_local), vrt_tiles)
-
-            vrt_ds = None 
-
-            # Ensure the file was actually created
-            if not master_vrt_local.exists():
-                print(f"ERROR: Failed to create Master VRT at {master_vrt_local}")
+            vrt_filename = temp_output_path / f'mosaic_{file_type}_{crs_key}.vrt'
+            gdal.BuildVRT(str(vrt_filename), vrt_tiles)
+  
+            if not vrt_filename.exists():
+                print(f"ERROR: Failed to create Master VRT at {vrt_filename}")
                 continue
 
-            s3_prefix = f'{output_prefix}/{master_vrt_local.name}'
-            print(f'Uploading Master VRT: {master_vrt_local.name} to {s3_prefix}')
-            s3_client.upload_file(str(master_vrt_local), bucket_name, s3_prefix)
+            s3_prefix = f'{output_prefix}/{vrt_filename.name}'
+            print(f'Uploading Master VRT: {vrt_filename.name} to {s3_prefix}')
+            s3_client.upload_file(str(vrt_filename), bucket_name, s3_prefix)
 
     def create_raster_vrts(self, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
         """Create an output VRT from found .tif files"""
@@ -158,14 +187,14 @@ class RasterVRTS3Engine(Engine):
         s3_files = s3fs.S3FileSystem()
         if data_type == 'BlueTopo':
             if skip_existing:
-                if s3_files.glob(f'{output_prefix}/mosaic_{data_type}*.vrt'):
-                    print(f'- skipping Bluetopo {data_type}')
+                if s3_files.glob(f'{output_prefix}/mosaic_{file_type}*.vrt'):
+                    print(f'- skipping Bluetopo {file_type}')
                     return
 
             geotiffs = s3_files.glob(f"{output_prefix}/**/{self.glob_lookup[file_type]}")
+            output_geotiffs = self.get_bluetopo_tifs(geotiffs)
             with tempfile.TemporaryDirectory() as temp_dir:
                 temp_output_path = pathlib.Path(temp_dir) 
-                output_geotiffs = self.get_bluetopo_tifs(temp_output_path, geotiffs)
                 self.build_output_vrts(output_prefix_folder, file_type, output_geotiffs, temp_output_path)
         else:
             provider_folders = s3_files.glob(f"{output_prefix}/*")
@@ -181,20 +210,21 @@ class RasterVRTS3Engine(Engine):
                     temp_output_path = pathlib.Path(temp_dir) 
                     self.build_output_vrts(output_prefix_folder, file_type, output_geotiffs, temp_output_path)
 
-    def get_bluetopo_tifs(self, temp_output_path: pathlib.Path, geotiffs: list[pathlib.Path]) -> dict[str]:
+    def get_bluetopo_tifs(self, geotiffs: list[pathlib.Path]) -> dict[str]:
         """Dask processing to build BlueTopo tifs"""
-
-        task_params = [(gtif, str(temp_output_path)) for gtif in geotiffs]
         
-        futures = self.client.map(_process_single_bluetopo, task_params)
+        s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        params = [(gtif, s3_bucket, None) for gtif in geotiffs]
+
+        futures = self.client.map(_process_single_bluetopo, params)
         results = self.client.gather(futures)
 
         output_geotiffs = {}
-        for crs_code, local_path, wkt in results:
+        for crs_code, s3_path, wkt in results:
             clean_key = str(crs_code).replace('/', '').replace(' ', '_')
             if clean_key not in output_geotiffs:
                 output_geotiffs[clean_key] = {'crs': osr.SpatialReference(wkt=wkt), 'tiles': []}
-            output_geotiffs[clean_key]['tiles'].append(local_path)
+            output_geotiffs[clean_key]['tiles'].append(s3_path)
             
         return output_geotiffs
 
