@@ -150,7 +150,7 @@ class RasterMaskS3Engine(Engine):
                     s3_folder = "/".join(tile_index_path.split('/')[:-1])
                     digital_coast_path = "/".join(tile_index_path.split('/')[2:-1])
                     file_stem = pathlib.Path(tile_index_path).stem
-                    print(f"- downloading tile index components for {file_stem}...")
+                    print(f"- downloading {file_stem}...")
                     for s3_file in s3_files.ls(s3_folder):
                         if file_stem in s3_file:
                             local_file = temp_folder / digital_coast_path / pathlib.Path(s3_file).name
@@ -208,12 +208,10 @@ class RasterMaskS3Engine(Engine):
 
         for ecoregion in ecoregions:
             digital_coast_folder = temp_folder / ecoregion.stem / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-            print(f'digital coast: {digital_coast_folder}')
             if digital_coast_folder.is_dir():
                 dissolved_shapefiles = digital_coast_folder.rglob('*_dis.shp')
                 merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
                 training_data_outlines = temp_folder / ecoregion.stem / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
-                print(f'- saving training outlines: {training_data_outlines}')
                 merged_training_ds.to_file(training_data_outlines)
 
     def print_async_results(self, results: list[str], output_folder: str) -> None:
