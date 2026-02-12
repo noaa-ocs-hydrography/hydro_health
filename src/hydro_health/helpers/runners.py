@@ -9,6 +9,7 @@ from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
+from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
@@ -46,25 +47,15 @@ def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dic
     engine.run(tiles)
 
 
-def run_raster_mask_engine(outputs:str) -> None:
+def run_raster_mask_engine(param_lookup:dict[dict]) -> None:
     """Create prediction and training masks for found ecoregions"""
 
-    engine = RasterMaskEngine()
+    outputs = param_lookup['output_directory'].valueAsText
+    if param_lookup['env'] in ['local', 'remote']:
+        engine = RasterMaskEngine()
+    else:
+        engine = RasterMaskS3Engine()
     engine.run(outputs)
-
-
-# def run_raster_mask_local(outputs:str) -> None:
-#     """Create prediction and training masks for found ecoregions"""
-
-#     engine = RasterMaskEngine()
-#     engine.run(outputs)
-
-
-# def run_raster_mask_s3(outputs:str) -> None:
-#     """Create prediction and training masks for found ecoregions"""
-
-#     engine = RasterMaskS3Engine()
-#     engine.run(outputs)
 
 
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:

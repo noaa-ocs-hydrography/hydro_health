@@ -98,8 +98,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
     else:
         # get eco region from shapefile that matches drop down choices
-        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
-        eco_regions = [region.split('-')[0] for region in eco_regions]
+        eco_regions = param_lookup['eco_regions'].valueAsText   #.replace("'", "").split(';')
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
