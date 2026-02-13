@@ -1,0 +1,27 @@
+# Risk Normalization: Bounds of Risk Parameters
+
+'''
+# The bounds of the risk parameter are normalized by the number of consequence and likelihood parameters
+# contributing to the risk at any given location. The bounds of the likelihood and consequence parameters 
+# were defined as outlined below:
+
+# Likelihood Parameters
+# Traffic Density: Model Bounds (notes: can not differenciate between no AIS data because no boats and no AIS data because outside of bounds of AIS transponder, assuming all AIS boats detected because no mechanism/data to differenciate between the two)
+# Known Hazards: CATZOC B bounds clipped to ENC bounds buffered by 2 nautical miles (note: 2 nm buffer is because source ENC points were buffered by 2 nm)
+# Groundings: Model Bounds
+# Depth: ENC Bounds (unbuffered; notes: used depth raster because depth raster limited to ENC bounds)
+# CATZOC: Model Bounds (notes: all areas within model extents were assigned a CATZOC value, if no CATZOC value, assigned CATZOC = 6 (5 in model binning))
+# Reported Errors: ENC Bounds buffered by 4 nautical miles (note: 4 nm buffer is because source ENC points were buffered by 4 nm)
+
+# Consequence Parameters
+# Passenger Search and Rescue: Passenger Vessel Present Raster (note: only considered risk to passenger vessel if passenger vessel transiting in the area)
+# Non-Passenger Search and Rescue: Model Bounds (note: areas where vessels not transitting were still factored into model, but only received a non-pass SAR consequence value if > 600 nm from SAR station). 
+# Damage to Ship: SBDARE Bounds 
+# Tanker Reefs: ENC Bounds buffered by 20 nautical miles (note: 2 nm buffer is because source ENC points were buffered by 2 nautical miles. Areas outside of this extent were not assigned a Tanker Reefs Consequence value).
+# Non-Tanker Reefs: Model Bounds (notes: Although dataset is limited to ENC bounds, a non-tanker transiting anywhere within the model extents is at least assigned a non-tanker reef consequence value of "0")
+# Tanker Sanctuaries: Model Bounds (notes: comprehensive dataset)
+# Non-Tankers Sanctuaries: Model Bounds (notes: comprehensive dataset)
+# Ports: Model Bounds 
+
+# Risk is normalized by taking the log base 5 of the Risk term and dividing by (1 + log base 5 (Number of Consequence Terms) + (Number of Likelihood Terms))
+'''
