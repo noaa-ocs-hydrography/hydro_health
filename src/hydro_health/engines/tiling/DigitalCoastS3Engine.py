@@ -333,6 +333,6 @@ class DigitalCoastS3Engine(Engine):
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for found_file in provider_folder.rglob('*'):
             if found_file.is_file():
-                s3_prefix = "testing/" + "/".join(found_file.parts[3:])
+                s3_prefix = "/".join(found_file.parts[3:])
                 print(f'Uploading {found_file} to {s3_prefix}')
-                s3_client.upload_file(str(found_file), bucket_name, s3_prefix)
+                s3_client.upload_file(str(found_file), bucket_name, f'testing/{s3_prefix}')

@@ -175,8 +175,8 @@ def _process_tile(param_inputs: list[list]) -> None:
         tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id)
         if tiff_file_path:
             engine.create_survey_end_date_tiff(tiff_file_path)
-            engine.create_catzoc_all(tiff_file_path)
-            engine.create_catzoc_latest(tiff_file_path)
+            # engine.create_catzoc_all(tiff_file_path)
+            # engine.create_catzoc_latest(tiff_file_path)
             mb_tiff_file = engine.rename_multiband(tiff_file_path)
             engine.multiband_to_singleband(mb_tiff_file, band=1)
             engine.multiband_to_singleband(mb_tiff_file, band=2)
@@ -536,4 +536,4 @@ class BlueTopoS3Engine(Engine):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
             s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
+            s3_client.upload_file(str(tiff_file), bucket_name, f'testing/{str(s3_path)}')

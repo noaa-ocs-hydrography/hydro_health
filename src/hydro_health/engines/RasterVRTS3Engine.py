@@ -182,8 +182,8 @@ class RasterVRTS3Engine(Engine):
     def create_raster_vrts(self, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
         """Create an output VRT from found .tif files"""
 
-        output_prefix = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_type}"
-        output_prefix_folder = f"{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_type}"
+        output_prefix = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_type}"
+        output_prefix_folder = f"testing/{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_type}"
         s3_files = s3fs.S3FileSystem()
         if data_type == 'BlueTopo':
             if skip_existing:

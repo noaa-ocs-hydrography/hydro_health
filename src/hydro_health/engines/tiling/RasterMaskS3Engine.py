@@ -70,7 +70,7 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     target_ds = None # Flush to disk
 
     # Upload to S3
-    s3_key = f"{ecoregion.stem}/{get_config_item('MASK', 'SUBFOLDER')}/{prediction_mask_name}"
+    s3_key = f"testing/{ecoregion.stem}/{get_config_item('MASK', 'SUBFOLDER')}/{prediction_mask_name}"
     s3_client.upload_file(str(local_path), bucket, s3_key)
 
     mem_ds = None
@@ -124,7 +124,7 @@ def _create_training_mask(param_inputs: list[list]):
 
         # Upload final training mask to S3
         s3_client = boto3.client('s3')
-        s3_key = f"{ecoregion.stem}/{mask_subfolder}/training_mask_{ecoregion.stem}.tif"
+        s3_key = f"testing/{ecoregion.stem}/{mask_subfolder}/training_mask_{ecoregion.stem}.tif"
         s3_client.upload_file(str(training_file), bucket, s3_key)
 
         # CLEANUP: Delete the local .tif files now that they are safely on S3
