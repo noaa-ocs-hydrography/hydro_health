@@ -75,7 +75,7 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
         make_ecoregion_folders(selected_ecoregions, output_folder)
     else:
         # get eco region from shapefile that matches drop down choices
-        eco_regions = param_lookup['eco_regions'].valueAsText.replace("'", "").split(';')
+        eco_regions = param_lookup['eco_regions'].value
         eco_regions = [region.split('-')[0] for region in eco_regions]
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
         make_ecoregion_folders(selected_ecoregions, output_folder)

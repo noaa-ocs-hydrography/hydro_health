@@ -83,8 +83,6 @@ def _create_training_mask(param_inputs: list[list]):
     temp_folder, ecoregion = param_inputs
 
     mask_subfolder = get_config_item('MASK', 'SUBFOLDER')
-    
-    
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
     prediction_file = temp_folder / ecoregion.stem / mask_subfolder / f'prediction_mask_{ecoregion.stem}.tif'
@@ -132,8 +130,10 @@ def _create_training_mask(param_inputs: list[list]):
             prediction_file.unlink()
         if training_file.exists():
             training_file.unlink()
-            
-        print(f' - Processed: {ecoregion.stem}')
+        
+        return f' - Processed: {ecoregion.stem}'
+    else:
+        return f' - Mask files missing: {ecoregion.stem}'
 
 
 class RasterMaskS3Engine(Engine):
@@ -150,24 +150,23 @@ class RasterMaskS3Engine(Engine):
                     s3_folder = "/".join(tile_index_path.split('/')[:-1])
                     digital_coast_path = "/".join(tile_index_path.split('/')[2:-1])
                     file_stem = pathlib.Path(tile_index_path).stem
-                    print(f"- downloading {file_stem}...")
                     for s3_file in s3_files.ls(s3_folder):
                         if file_stem in s3_file:
-                            local_file = temp_folder / digital_coast_path / pathlib.Path(s3_file).name
+                            local_file = temp_folder / ecoregion.stem / digital_coast_path / pathlib.Path(s3_file).name
                             s3_files.get(s3_file, str(local_file))
                     
-                    local_shp = temp_folder / digital_coast_path/  f"{file_stem}.shp"
+                    local_shp = temp_folder / ecoregion.stem / digital_coast_path/  f"{file_stem}.shp"
                     if not local_shp.exists():
                         print(f"Error: Could not find {local_shp} after download.")
                         continue
                         
                     tile_index = gpd.read_file(str(local_shp))
                     
-                    print(f" - dissolving {file_stem}...")
+                    print(f" - {file_stem}...")
                     dissolved_tile_index = tile_index.dissolve().to_crs("EPSG:4326")
                     
                     dissolved_filename = f"{file_stem}_dis"
-                    local_out_path = temp_folder / digital_coast_path / f"{dissolved_filename}.shp"
+                    local_out_path = temp_folder / ecoregion.stem / digital_coast_path / f"{dissolved_filename}.shp"
                     dissolved_tile_index.to_file(local_out_path, driver='ESRI Shapefile')
                     
                     # upload local dissolved file to S3
