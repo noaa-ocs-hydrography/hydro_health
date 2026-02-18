@@ -357,7 +357,7 @@ class BlueTopoEngine(Engine):
     def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
         print('Downloading BlueTopo Datasets')
 
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         param_inputs = [[self.param_lookup, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         future_tiles = self.client.map(_process_tile, param_inputs)
         tile_results = self.client.gather(future_tiles)

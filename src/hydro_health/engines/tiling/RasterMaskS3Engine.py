@@ -24,11 +24,11 @@ INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 def _create_prediction_mask(param_inputs: list[list]) -> None:
     """Create, upload, and retain the prediction mask locally for the training step"""
 
-    temp_folder, ecoregion = param_inputs
+    temp_folder, ecoregion, param_lookup = param_inputs
 
     s3_client = boto3.client('s3')
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-    engine = RasterMaskS3Engine()
+    engine = RasterMaskS3Engine(param_lookup)
 
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(str(gpkg))
@@ -137,8 +137,9 @@ def _create_training_mask(param_inputs: list[list]):
 
 
 class RasterMaskS3Engine(Engine):
-    def __init__(self):
+    def __init__(self, param_lookup):
         super().__init__()
+        self.param_lookup = param_lookup
 
     def dissolve_tile_index_shapefiles(self, approved_files, ecoregions, temp_folder) -> None:
         """Dissolve tile index shapefiles by buffering through local temp storage"""
@@ -223,7 +224,7 @@ class RasterMaskS3Engine(Engine):
     def run(self, outputs: str) -> None:
         ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
         print('Creating prediction masks')
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         with tempfile.TemporaryDirectory() as tmpdir:
             temp_folder = pathlib.Path(tmpdir)
             self.process_prediction_masks(ecoregions, temp_folder, outputs)
@@ -240,7 +241,7 @@ class RasterMaskS3Engine(Engine):
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], temp_folder: pathlib.Path, outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
 
-        future_tiles = self.client.map(_create_prediction_mask, [[temp_folder, ecoregion] for ecoregion in ecoregions])
+        future_tiles = self.client.map(_create_prediction_mask, [[temp_folder, ecoregion, self.param_lookup] for ecoregion in ecoregions])
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, outputs)
 

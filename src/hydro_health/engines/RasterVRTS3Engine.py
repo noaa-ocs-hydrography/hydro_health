@@ -248,7 +248,7 @@ class RasterVRTS3Engine(Engine):
         return output_geotiffs
     
     def run(self, _: str, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         self.create_raster_vrts(file_type, ecoregion, data_type, skip_existing)
         self.close_dask()
 

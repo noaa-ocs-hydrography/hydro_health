@@ -145,13 +145,14 @@ class Engine:
         file.write(output_projection.ExportToWkt())
         file.close()
 
-    def setup_dask(self, processes=True) -> None:
+    def setup_dask(self, env, processes=True) -> None:
         """Create Dask objects outside of init"""
 
-        dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
+        if env == 'aws':
+            dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
+            self.set_proj_path()
         self.cluster = LocalCluster(processes=processes, n_workers=6, threads_per_worker=2)
         self.client = Client(self.cluster)
-        self.set_proj_path()
         # print(self.client.dashboard_link)
 
     def set_proj_path(self):

@@ -52,9 +52,9 @@ def run_raster_mask_engine(param_lookup:dict[dict]) -> None:
 
     outputs = param_lookup['output_directory'].valueAsText
     if param_lookup['env'] in ['local', 'remote']:
-        engine = RasterMaskEngine()
+        engine = RasterMaskEngine(param_lookup)
     else:
-        engine = RasterMaskS3Engine()
+        engine = RasterMaskS3Engine(param_lookup)
     engine.run(outputs)
 
 

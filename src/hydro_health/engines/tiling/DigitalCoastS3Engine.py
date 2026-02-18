@@ -257,7 +257,7 @@ class DigitalCoastS3Engine(Engine):
         outputs = self.param_lookup['output_directory'].valueAsText
         provider_log = pathlib.Path(outputs) / "processed_providers.log"
         provider_log.touch(exist_ok=True) # Ensure file exists
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
