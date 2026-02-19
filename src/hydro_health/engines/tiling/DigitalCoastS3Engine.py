@@ -10,10 +10,8 @@ import pathlib
 import os
 import sys
 import tempfile
-import numpy as np
 import logging
 import platform
-import shapely
 import s3fs
 
 from multiprocessing import set_executable
@@ -259,7 +257,7 @@ class DigitalCoastS3Engine(Engine):
         outputs = self.param_lookup['output_directory'].valueAsText
         provider_log = pathlib.Path(outputs) / "processed_providers.log"
         provider_log.touch(exist_ok=True) # Ensure file exists
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
@@ -335,6 +333,6 @@ class DigitalCoastS3Engine(Engine):
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for found_file in provider_folder.rglob('*'):
             if found_file.is_file():
-                s3_prefix = "testing/" + "/".join(found_file.parts[3:])
+                s3_prefix = "/".join(found_file.parts[3:])
                 print(f'Uploading {found_file} to {s3_prefix}')
-                s3_client.upload_file(str(found_file), bucket_name, s3_prefix)
+                s3_client.upload_file(str(found_file), bucket_name, f'testing/{s3_prefix}')

@@ -9,11 +9,13 @@ from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
+from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
+from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
 from hydro_health.helpers.tools import get_ecoregion_folders
 
@@ -45,25 +47,15 @@ def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dic
     engine.run(tiles)
 
 
-def run_raster_mask_engine(outputs:str) -> None:
+def run_raster_mask_engine(param_lookup:dict[dict]) -> None:
     """Create prediction and training masks for found ecoregions"""
 
-    engine = RasterMaskEngine()
+    outputs = param_lookup['output_directory'].valueAsText
+    if param_lookup['env'] in ['local', 'remote']:
+        engine = RasterMaskEngine(param_lookup)
+    else:
+        engine = RasterMaskS3Engine(param_lookup)
     engine.run(outputs)
-
-
-# def run_raster_mask_local(outputs:str) -> None:
-#     """Create prediction and training masks for found ecoregions"""
-
-#     engine = RasterMaskEngine()
-#     engine.run(outputs)
-
-
-# def run_raster_mask_s3(outputs:str) -> None:
-#     """Create prediction and training masks for found ecoregions"""
-
-#     engine = RasterMaskS3Engine()
-#     engine.run(outputs)
 
 
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
@@ -109,9 +101,13 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> No
 
 def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
-
-    engine = RasterVRTEngine()
+    
+    if param_lookup['env'] in ['local', 'remote']:
+        engine = RasterVRTEngine(param_lookup)
+    else:
+        engine = RasterVRTS3Engine(param_lookup)
     for ecoregion in get_ecoregion_folders(param_lookup):
+        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
             engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)

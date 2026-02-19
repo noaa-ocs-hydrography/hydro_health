@@ -18,10 +18,11 @@ mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
-def _create_prediction_mask(ecoregion: pathlib.Path) -> None:
+def _create_prediction_mask(param_inputs: list[list]) -> None:
     """Create prediction mask for current ecoregion"""
 
-    engine = RasterMaskEngine()
+    ecoregion, param_lookup = param_inputs
+    engine = RasterMaskEngine(param_lookup)
 
     # Project EcoRegions_50m to UTM
     gpkg = INPUTS / 'Master_Grids.gpkg'
@@ -54,56 +55,28 @@ def _create_prediction_mask(ecoregion: pathlib.Path) -> None:
 
             output_layer.CreateFeature(output_feature)
             output_feature = None
-
-    # Build output UTM raster
+    
+    xmin, xmax, ymin, ymax = output_layer.GetExtent()
     pixel_size = 8
-    nodata = 0
-    output_layer.ResetReading()
-    in_memory = ogr.GetDriverByName('Memory')
-    for feature in output_layer:
-        feature_json = json.loads(feature.ExportToJson())
-        ecoregion_id = feature_json['properties']['EcoRegion']
-        # Create in memory layer and single polygon
-        in_memory_ds = in_memory.CreateDataSource(f'output_layer_{ecoregion_id}')
-        in_memory_layer = in_memory_ds.CreateLayer(f'poly_{ecoregion_id}', srs=output_layer.GetSpatialRef(), geom_type=ogr.wkbPolygon)
-        temp_feature = ogr.Feature(in_memory_layer.GetLayerDefn())
+    x_res = int((xmax - xmin) / pixel_size)
+    y_res = int((ymax - ymin) / pixel_size)
 
-        geometry = feature.GetGeometryRef().ExportToWkt()
-        polygon = ogr.CreateGeometryFromWkt(geometry)
-        temp_feature.SetGeometry(polygon)
-        in_memory_layer.CreateFeature(temp_feature)
+    # Use the ecoregion path to store the file permanently for now
+    prediction_mask_name = f"prediction_mask_{ecoregion.stem}.tif"
+    mask_path = ecoregion / get_config_item('MASK', 'SUBFOLDER') / prediction_mask_name
+    mask_path.parents[0].mkdir(parents=True, exist_ok=True)
 
-        xmin, xmax, ymin, ymax = in_memory_layer.GetExtent()
-        x_res = int((xmax - xmin) / pixel_size)
-        y_res = int((ymax - ymin) / pixel_size)
+    target_ds = gdal.GetDriverByName("GTiff").Create(
+        str(mask_path), x_res, y_res, 1, gdal.GDT_Byte,
+        options=["COMPRESS=LZW", "TILED=YES", "NUM_THREADS=ALL_CPUS"]
+    )
+    target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
+    target_ds.SetProjection(output_srs.ExportToWkt())
+    target_ds.GetRasterBand(1).SetNoDataValue(0)
 
-        mask_path = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'prediction_mask_{ecoregion_id}.tif'
-        mask_path.parents[0].mkdir(parents=True, exist_ok=True)
-        with gdal.GetDriverByName("GTiff").Create(
-            str(mask_path),
-            x_res,
-            y_res,
-            1,
-            gdal.GDT_Byte,
-            options=["COMPRESS=LZW", f"NUM_THREADS=ALL_CPUS"],
-        ) as target_ds:
-            target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
-            srs = osr.SpatialReference()
-            srs.ImportFromEPSG(32617)
-            target_ds.SetProjection(srs.ExportToWkt())
-            band = target_ds.GetRasterBand(1)
-            band.SetNoDataValue(nodata)
-            gdal.RasterizeLayer(target_ds, [1], in_memory_layer, burn_values=[1])
-
-        in_memory_layer = None
-        in_memory_ds = None
-        temp_feature = None
-        target_ds = None
+    gdal.RasterizeLayer(target_ds, [1], output_layer, burn_values=[1])
+    target_ds = None # Flush to disk
     gpkg_ds = None
-    output_ds = None
-    in_memory_driver = None
-    in_memory = None
-    output_srs = None
 
 
 def _create_training_mask(ecoregion):
@@ -143,8 +116,9 @@ def _create_training_mask(ecoregion):
 
 
 class RasterMaskEngine(Engine):
-    def __init__(self):
+    def __init__(self, param_lookup):
         super().__init__()
+        self.param_lookup = param_lookup
 
     def delete_intermediate_files(self, outputs) -> None:
         """Delete any intermediate shapefiles"""
@@ -214,7 +188,7 @@ class RasterMaskEngine(Engine):
     def run(self, outputs: str) -> None:
         ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
         print('Creating prediction masks')
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         self.process_prediction_masks(ecoregions, outputs)
         approved_files = self.get_approved_area_files(ecoregions)
         print(f' - Found files for ecoregions: {list(approved_files.keys())}')
@@ -230,7 +204,7 @@ class RasterMaskEngine(Engine):
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
 
-        future_tiles = self.client.map(_create_prediction_mask, ecoregions)
+        future_tiles = self.client.map(_create_prediction_mask, [[ecoregion, self.param_lookup] for ecoregion in ecoregions])
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, outputs)
 

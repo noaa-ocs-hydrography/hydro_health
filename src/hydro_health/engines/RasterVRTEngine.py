@@ -14,13 +14,18 @@ from hydro_health.engines.Engine import Engine
 class RasterVRTEngine(Engine):
     """Class for handling VRT creation of BlueTopo and DigitalCoast datasets"""
 
-    def __init__(self) -> None:
+    def __init__(self, param_lookup) -> None:
         super().__init__()
+        self.param_lookup = param_lookup
         self.glob_lookup = {
             'elevation': '*[0-9].tiff',
             'uncertainty': '*_unc.tiff',
             'slope': '*_slope.tiff',
             'rugosity': '*_rugosity.tiff',
+            'catzoc_score_all': '*score_all.tiff',
+            'catzoc_score_latest': '*score_latest.tiff',
+            'catzoc_decay_all': '*decay_all.tiff',
+            'catzoc_decay_latest': '*decay_latest.tiff',
             'NCMP': '*.tif'
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
@@ -191,7 +196,6 @@ class RasterVRTEngine(Engine):
     
     def run(self, output_folder: str, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
         self.create_raster_vrts(output_folder, file_type, ecoregion, data_type, skip_existing)
-
 
     def write_crs_to_raster(self, geotiff_raster: rxr.rioxarray, geotiff_srs: osr.SpatialReference) -> rxr.rioxarray:
         """Obtain the horizontal CRS of a compound CRS and write it to the raster"""

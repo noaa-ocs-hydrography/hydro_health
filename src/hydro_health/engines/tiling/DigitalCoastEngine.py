@@ -223,7 +223,7 @@ class DigitalCoastEngine(Engine):
 
         print('Downloading Digital Coast Datasets')
         outputs = self.param_lookup['output_directory'].valueAsText
-        self.setup_dask()
+        self.setup_dask(self.param_lookup['env'])
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
