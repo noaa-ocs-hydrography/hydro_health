@@ -1,8 +1,11 @@
 import yaml
 import pathlib
 import geopandas as gpd
-import rioxarray as rxr
-import rasterio
+import s3fs
+import os
+import tempfile
+import json
+import time
 
 from socket import gethostname
 from osgeo import gdal, osr, ogr
@@ -113,7 +116,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     return tiles
 
 
-def grid_digital_coast_files(outputs: str, data_type: str) -> None:
+def grid_local_digital_coast_files(outputs: str) -> None:
     """Process for gridding Digital Coast files to BlueTopo grid"""
 
     print('Gridding Digital Coast files to BlueTopo grids')
@@ -123,7 +126,7 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
     for ecoregion in ecoregions:
         blue_topo_folder = ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
         bluetopo_grids = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
-        data_folder = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / data_type
+        data_folder = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
         vrt_files = list(data_folder.glob('*.vrt'))
         for vrt in vrt_files:
             vrt_ds = gdal.Open(str(vrt))
@@ -168,6 +171,145 @@ def grid_digital_coast_files(outputs: str, data_type: str) -> None:
             vrt_ds = None
     gpkg_ds = None
     blue_topo_layer = None
+
+
+def grid_s3_digital_coast_files() -> None:
+    """Process for gridding Digital Coast files to BlueTopo grid using GeoPandas and s3fs"""
+
+    # All of these seem necessary for writing to S3
+    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'BASEDIR')
+    gdal.SetConfigOption('CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE', 'YES')
+    gdal.SetConfigOption('CPL_VSIL_S3_WRITE_SUPPORT', 'YES')
+    gdal.SetConfigOption('GDAL_HTTP_TIMEOUT', '120') 
+    gdal.SetConfigOption('GDAL_PAM_ENABLED', 'NO')
+    gdal.SetConfigOption('AWS_REGION', 'us-east-2')
+    gdal.SetConfigOption('GDAL_VSI_S3_CHUNK_SIZE', '64') # 64 MB chunks
+    gdal.SetConfigOption('CPL_VSIL_S3_USE_PRE_SIGNED_URL', 'YES')
+    gdal.SetConfigOption('GDAL_VSI_CACHE', 'NO')
+    gdal.UseExceptions()
+
+    s3_files = s3fs.S3FileSystem()
+    
+    print('Gridding Digital Coast files to BlueTopo grids')
+    bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+    
+    master_grids_path = str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
+    tiles_layer_name = get_config_item('SHARED', 'TILES')
+    blue_topo_gdf = gpd.read_file(master_grids_path, layer=tiles_layer_name)
+
+    ecoregions = s3_files.glob(f"{bucket_name}/testing/ER_*")
+    for ecoregion_prefix in ecoregions:
+        bluetopo_subfolder = get_config_item('BLUETOPO', 'SUBFOLDER')
+        blue_topo_search = f"{ecoregion_prefix}/{bluetopo_subfolder}/BlueTopo/"
+        bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
+        
+        digital_coast_subfolder = get_config_item('DIGITALCOAST', 'SUBFOLDER')
+        vrt_files = s3_files.glob(f"{ecoregion_prefix}/{digital_coast_subfolder}/DigitalCoast/*.vrt")
+        for vrt_s3_path in vrt_files:
+            vrt_stem = vrt_s3_path.split('/')[-1].replace('.vrt', '')
+            vsi_vrt_path = f"/vsis3/{vrt_s3_path}"
+            
+            try:
+                vrt_ds = gdal.Open(vsi_vrt_path)
+                vrt_projection = vrt_ds.GetProjection()
+            except Exception as e:
+                print(f" - Error opening VRT {vsi_vrt_path}: {e}")
+                continue
+            
+            vrt_data_suffix = '_'.join(vrt_stem.split('_')[3:])
+            vrt_parent = vrt_s3_path.rsplit('/', 1)[0]
+            shp_search_path = f"{vrt_parent}/{vrt_data_suffix}/**/*_dis.shp"
+            shp_matches = s3_files.glob(shp_search_path)
+            
+            if not shp_matches:
+                vrt_ds = None
+                continue
+            
+            try:
+                # Only downloading shp works for upload process to S3
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    s3_shp_full = shp_matches[0]
+                    s3_base = s3_shp_full.rsplit('.', 1)[0]
+                    local_base = os.path.join(tmpdir, "tileindex")
+                    
+                    for ext in ['.shp', '.shx', '.dbf', '.prj']:
+                        s3_target = f"{s3_base}{ext}"
+                        if s3_files.exists(s3_target):
+                            s3_files.get(s3_target, f"{local_base}{ext}")
+                    
+                    dissolve_gdf = gpd.read_file(f"{local_base}.shp")
+                    if dissolve_gdf.crs != blue_topo_gdf.crs:
+                        dissolve_gdf = dissolve_gdf.to_crs(blue_topo_gdf.crs)
+                    
+                    dissolve_geom = dissolve_gdf.union_all() 
+
+                intersecting_tiles = blue_topo_gdf[
+                    (blue_topo_gdf['tile'].isin(bluetopo_grids)) & 
+                    (blue_topo_gdf.intersects(dissolve_geom))
+                ]
+
+                for _, tile_row in intersecting_tiles.iterrows():
+                    folder_name = tile_row['tile']
+                    tiled_sub = get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER')
+                    output_prefix = f"{ecoregion_prefix}/{tiled_sub}/{folder_name}/{vrt_stem}_{folder_name}.tiff"
+                    
+                    if s3_files.exists(output_prefix):
+                        print(f' - Skipping {vrt_stem}_{folder_name}.tiff')
+                        continue
+
+                    print(f' - Creating local {vrt_stem}_{folder_name}.tiff')
+                    
+                    with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as tmp_file:
+                        local_tmp_path = tmp_file.name
+
+                    in_memory_geojson = f"/vsimem/cutline_{folder_name}.json"
+                    
+                    try:
+                        # Use geojson to create cutline polygon
+                        tile_geojson = {
+                            "type": "FeatureCollection",
+                            "features": [{
+                                "type": "Feature",
+                                "geometry": tile_row.geometry.__geo_interface__,
+                                "properties": {"tile": folder_name}
+                            }]
+                        }
+                        gdal.FileFromMemBuffer(in_memory_geojson, json.dumps(tile_geojson))
+                        
+                        gdal.ErrorReset()
+                        dest_ds = gdal.Warp(
+                            local_tmp_path,
+                            vsi_vrt_path,
+                            format='GTiff',
+                            cutlineDSName=in_memory_geojson, 
+                            cropToCutline=True,
+                            dstNodata=-9999,
+                            srcSRS=vrt_projection,
+                            dstSRS=vrt_projection,
+                            creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "NUM_THREADS=ALL_CPUS"]
+                        )
+                        
+                        if dest_ds is not None:
+                            dest_ds.FlushCache()
+                            dest_ds = None # Explicitly close local file
+                            s3_files.put(local_tmp_path, output_prefix)
+                            print(f" - Successfully uploaded: {output_prefix}")
+                        else:
+                            print(f" - Warp failed for {folder_name}: {gdal.GetLastErrorMsg()}")
+
+                    except Exception as e:
+                        print(f'   ! Failure on {vrt_stem}_{folder_name}: {e}')
+                    
+                    finally:
+                        if os.path.exists(local_tmp_path):
+                            os.remove(local_tmp_path)
+                        gdal.Unlink(in_memory_geojson)
+                        dest_ds = None
+            except Exception as e:
+                print(f" - Critical error processing shapefile for {vrt_stem}: {e}")
+            
+            finally:
+                vrt_ds = None 
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):

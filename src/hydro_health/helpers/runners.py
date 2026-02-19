@@ -17,7 +17,7 @@ from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayer
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
-from hydro_health.helpers.tools import get_ecoregion_folders
+from hydro_health.helpers.tools import get_ecoregion_folders, grid_local_digital_coast_files, grid_s3_digital_coast_files
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -79,6 +79,15 @@ def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict
     
     engine = DigitalCoastS3Engine(param_lookup)
     engine.run(tiles)
+
+
+def run_grid_digital_coast(param_lookup: dict[dict]) -> None:
+    """Entry poiint for gridding DigitalCoast tiles to BlueTopo polygons"""
+
+    if param_lookup['env'] in ['local', 'remote']:
+        grid_local_digital_coast_files(param_lookup['output_directory'].valueAsText)
+    else:
+        grid_s3_digital_coast_files()
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
