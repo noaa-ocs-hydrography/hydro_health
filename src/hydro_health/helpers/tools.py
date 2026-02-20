@@ -256,12 +256,9 @@ def grid_s3_digital_coast_files() -> None:
                     if s3_files.exists(output_prefix):
                         print(f' - Skipping {vrt_stem}_{folder_name}.tiff')
                         continue
-
-                    print(f' - Creating local {vrt_stem}_{folder_name}.tiff')
                     
                     with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as tmp_file:
                         local_tmp_path = tmp_file.name
-
                     in_memory_geojson = f"/vsimem/cutline_{folder_name}.json"
                     
                     try:
