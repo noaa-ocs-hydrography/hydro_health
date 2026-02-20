@@ -215,13 +215,6 @@ class RasterMaskS3Engine(Engine):
                 training_data_outlines = temp_folder / ecoregion.stem / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
                 merged_training_ds.to_file(training_data_outlines)
 
-    def print_async_results(self, results: list[str], output_folder: str) -> None:
-        """Consolidate result printing"""
-
-        for result in results:
-            if result:
-                self.write_message(f'Result: {result}', output_folder)  
-
     def run(self, outputs: str) -> None:
         ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
         print('Creating prediction masks')

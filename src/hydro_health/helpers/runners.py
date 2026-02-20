@@ -11,13 +11,14 @@ from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
+from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
-from hydro_health.helpers.tools import get_ecoregion_folders, grid_local_digital_coast_files, grid_s3_digital_coast_files
+from hydro_health.helpers.tools import get_ecoregion_folders
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
@@ -84,10 +85,8 @@ def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict
 def run_grid_digital_coast(param_lookup: dict[dict]) -> None:
     """Entry poiint for gridding DigitalCoast tiles to BlueTopo polygons"""
 
-    if param_lookup['env'] in ['local', 'remote']:
-        grid_local_digital_coast_files(param_lookup['output_directory'].valueAsText)
-    else:
-        grid_s3_digital_coast_files()
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run()
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
