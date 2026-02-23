@@ -23,6 +23,7 @@ class HydroHealthCredentialsError(Exception):
 
 class HydroHealthConfig:
     def __init__(self):
+        super().__init__()
         self.config_path = INPUTS / 'lookups' / 'hydro_health.config'
         self.username = None
         self.password = None
@@ -56,10 +57,19 @@ class CreateTSMLayerEngine(Engine):
     def __init__(self):
         super().__init__()
         self.year_ranges = [
+            (1998, 2004),
             (2004, 2006),
-            (2006, 2010),
+            (2006, 2007),
+            (2007, 2010),
             (2010, 2015),
-            (2015, 2022)]
+            (2014, 2022),
+            (2016, 2017),
+            (2017, 2018),
+            (2018, 2019),
+            (2020, 2022),
+            (2022, 2024)
+        ]
+
         creds = HydroHealthConfig()
         self.username = creds.username
         self.password = creds.password
@@ -89,7 +99,7 @@ class CreateTSMLayerEngine(Engine):
         crs = "EPSG:4326"
         nodata_val = np.nan
 
-        for year in range(2004, 2025):
+        for year in range(1998, 2025):
             print(f'Processing year: {year}')
             nc_files = [f for f in os.listdir(self.output_folder) if f"L3m_{year}" in f and f.endswith('.nc')]
             if not nc_files:
@@ -148,6 +158,7 @@ class CreateTSMLayerEngine(Engine):
 
     def download_recursive(self, ftp, current_dir)-> None:
         """Recursively download files from the FTP server
+        20020423-20020430 is first recorded date for the TSM data
 
         :param str ftp: FTP connection 
         :param str current_dir: current directory on the FTP server
@@ -156,11 +167,12 @@ class CreateTSMLayerEngine(Engine):
         try:
             ftp.cwd(current_dir)
             normalized = current_dir.lower().strip('/')
+            
+            # '*/1998/*', '*/1999/*', '*/2000/*', '*/2001/*', '*/2002/*', '*/2003/*',
 
             skip_patterns = (
                 '*meris/*', '*viirsn*', '*seawifs*', '*modis*',
                 '*viirsj1*', '*meris4rp*', '*olcib*',
-                '*/1998/*', '*/1999/*', '*/2000/*', '*/2001/*', '*/2002/*', '*/2003/*',
                 '*/month/*', '*/day/*', '*/track/*',
                 '*/olcia/*/2019/*', '*/olcia/*/2020/*', '*/olcia/*/2021/*',
                 '*/olcia/*/2022/*', '*/olcia/*/2023/*', '*/olcia/*/2024/*', '*/olcia/*/2025/*'
@@ -280,14 +292,12 @@ class CreateTSMLayerEngine(Engine):
         print(f"Averaged raster saved to {output_path}.")
 
     def run(self)-> None:
-        """Entrypoint for processing the TSM layer"""
+        """Entrypoint for processing the TSM layer
+        1.25 hours to run. This doesn't include full download time.
+        No data available prior to 2002.
+        """
 
-        try:
-            self.download_tsm_data()
-        except HydroHealthCredentialsError as e:
-            print(f"Failed to start engine: {e}")
-            return
-
+        # self.download_tsm_data()
         self.create_rasters()
 
         for start_year, end_year in self.year_ranges:    
