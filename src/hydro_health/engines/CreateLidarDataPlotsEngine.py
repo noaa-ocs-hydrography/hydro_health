@@ -5,28 +5,33 @@ import numpy as np
 import geopandas as gpd
 import yaml
 import pathlib
+import io
+import glob
+import s3fs
+from itertools import combinations
 
 from shapely.geometry import shape
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
-from itertools import combinations
 
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 from rasterio.features import shapes
-from rasterio.warp import calculate_default_transform, reproject
+from rasterio.warp import calculate_default_transform, reproject 
 
 import dask
 from dask.distributed import Client, print
 
-import glob
-
 from osgeo import gdal
 
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_environment
 
+# Ensure GDAL env vars are set
 os.environ['GDAL_MEM_ENABLE_OPEN'] = 'YES'
+os.environ["GDAL_CACHEMAX"] = "64"
+# Required to allow GDAL to write directly to S3 via /vsis3/
+os.environ['CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE'] = 'YES'
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs' / 'lookups'
 
@@ -37,6 +42,28 @@ class CreateLidarDataPlotsEngine():
         super().__init__()
         self.config = None
         self.year_datasets = None
+        self.fs = s3fs.S3FileSystem(anon=False)
+        self.is_aws = (get_environment() == 'aws')
+
+    def _get_s3_path(self, path):
+        """Helper to ensure path has s3:// prefix if on AWS"""
+        if self.is_aws:
+            path_str = str(path).replace('\\', '/')
+            if not path_str.startswith('s3://'):
+                return f"s3://{path_str.lstrip('/')}"
+            return path_str
+        return str(path)
+
+    def _get_gdal_path(self, path):
+        """Helper to convert path to GDAL VSI format if on AWS"""
+        path_str = str(path)
+        if self.is_aws:
+            path_str = path_str.replace('\\', '/')
+            if path_str.startswith('s3://'):
+                path_str = path_str.replace('s3://', '')
+            if not path_str.startswith('/vsis3/'):
+                path_str = f"/vsis3/{path_str.lstrip('/')}"
+        return path_str
 
     def calculateExtent(self, paths, target_crs) -> tuple:
         """
@@ -45,27 +72,32 @@ class CreateLidarDataPlotsEngine():
         param str target_crs: Target coordinate reference system (e.g., 'EPSG:3857').
         return: Affine transform, extent (left, right, bottom, top), and shape (height, width) of the common grid.
         """
-
         local_left, local_bottom, local_right, local_top = np.inf, np.inf, -np.inf, -np.inf
         reference_res = None
 
         for path in paths:
-            with rasterio.open(path) as src:
-                transform, width, height = calculate_default_transform(
-                    src.crs, target_crs, src.width, src.height, *src.bounds)
-                
-                left, top = transform.c, transform.f
-                right = left + width * transform.a
-                bottom = top + height * transform.e
+            # Rasterio handles s3:// paths automatically if environment is set up
+            # Ensure path has s3:// prefix if AWS
+            open_path = self._get_s3_path(path)
+            
+            try:
+                with rasterio.open(open_path) as src:
+                    transform, width, height = calculate_default_transform(
+                        src.crs, target_crs, src.width, src.height, *src.bounds)
+                    
+                    left, top = transform.c, transform.f
+                    right = left + width * transform.a
+                    bottom = top + height * transform.e
 
-                local_left = min(local_left, left)
-                local_bottom = min(local_bottom, bottom)
-                local_right = max(local_right, right)
-                local_top = max(local_top, top)
+                    local_left = min(local_left, left)
+                    local_bottom = min(local_bottom, bottom)
+                    local_right = max(local_right, right)
+                    local_top = max(local_top, top)
 
-                if reference_res is None:
-                    # Use the resolution of the first raster as the reference
-                    reference_res = (abs(transform.a), abs(transform.e))
+                    if reference_res is None:
+                        reference_res = (abs(transform.a), abs(transform.e))
+            except Exception as e:
+                print(f"Error calculating extent for {open_path}: {e}")
 
         if reference_res is None:
             return None, None, None
@@ -84,19 +116,26 @@ class CreateLidarDataPlotsEngine():
         param str metadata_path: Path to the metadata file.
         return list: Date(s) found in the metadata file.
         """
-
         try:
-            with open(metadata_path, 'r') as f:
-                content = f.read()
-                date_matches_ym = re.findall(r'(?:19|20)\d{2}-\d{2}', content)
-                if date_matches_ym:
-                    return sorted(list(set(date_matches_ym)))
+            content = ""
+            if self.is_aws:
+                # Use s3fs to read from S3
+                s3_path = metadata_path.replace("s3://", "").replace('\\', '/')
+                with self.fs.open(s3_path, 'r') as f:
+                    content = f.read()
+            else:
+                with open(metadata_path, 'r') as f:
+                    content = f.read()
 
-                date_matches_y = re.findall(r'(?:19|20)\d{2}', content)
-                if date_matches_y:
-                    return sorted(list(set(date_matches_y)))
+            date_matches_ym = re.findall(r'(?:19|20)\d{2}-\d{2}', content)
+            if date_matches_ym:
+                return sorted(list(set(date_matches_ym)))
 
-                return 'Missing'
+            date_matches_y = re.findall(r'(?:19|20)\d{2}', content)
+            if date_matches_y:
+                return sorted(list(set(date_matches_y)))
+
+            return 'Missing'
         except FileNotFoundError:
             pass
         except Exception as e:
@@ -115,53 +154,74 @@ class CreateLidarDataPlotsEngine():
         param int dpi: DPI for saving the figure.
         return: None
         """
-
         if im is not None and im.get_array() is not None and im.get_array().count() > 0:
             cbar = fig.colorbar(im, ax=axes.ravel().tolist())
             cbar.set_label(cbar_label, fontsize=8, rotation=270, labelpad=20)
 
-        # Added a legend for the new 'Overlap Area' outline
         legend_lines = [
             Line2D([0], [0], color='black', lw=0.5, label='Mask Outline'),
             Line2D([0], [0], color='gray', lw=0.5, label='50m Isobath'),
-            Line2D([0], [0], color='red', lw=1.5, label='Overlap Area') # New legend entry
+            Line2D([0], [0], color='red', lw=1.5, label='Overlap Area')
         ]
         fig.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.05), fancybox=True, shadow=True, ncol=1, fontsize=2)
         
         plt.suptitle(suptitle, fontsize=16, fontweight='bold')
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        plt.savefig(output_path, dpi=dpi, format='png', bbox_inches='tight')
+        
+        if self.is_aws:
+            # Save to buffer and upload to S3
+            buf = io.BytesIO()
+            plt.savefig(buf, dpi=dpi, format='png', bbox_inches='tight')
+            buf.seek(0)
+            
+            s3_out = output_path.replace("s3://", "").replace('\\', '/')
+            with self.fs.open(s3_out, 'wb') as f:
+                f.write(buf.read())
+            buf.close()
+        else:
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            plt.savefig(output_path, dpi=dpi, format='png', bbox_inches='tight')
+        
         plt.close(fig)
         print(f"Plot saved to: {output_path}")
 
     def getYearDatasets(self, input_folder, config) -> dict:
         year_datasets = {}
-        import re
-
         filename_pattern = re.compile(r'(.+?)(?:_(\d{4}))?(?:_(\d+))?_resampled\.tif', re.IGNORECASE)
         
-        base_folder = os.path.dirname(input_folder)
-        base_folder = os.path.join(base_folder, 'DigitalCoast')
+        # Determine base folder for DigitalCoast metadata
+        if self.is_aws:
+            # Assuming structure: bucket/path/to/Resampled -> bucket/path/to/DigitalCoast
+            # Strip trailing slash and force forward slashes
+            input_folder_str = str(input_folder).replace('\\', '/').rstrip('/')
+            
+            # Use string splitting to get parent instead of os.path.dirname to prevent backslash injection
+            parent_folder = input_folder_str.replace("s3://", "").rsplit('/', 1)[0]
+            base_folder = f"{parent_folder}/DigitalCoast"
+            
+            # List files using s3fs
+            files_list = self.fs.ls(input_folder_str.replace("s3://", ""))
+            
+            # fs.ls returns full paths, extract filenames (use split instead of os.path.basename)
+            filenames = [f.replace('\\', '/').split('/')[-1] for f in files_list]
+        else:
+            base_folder = os.path.dirname(input_folder)
+            base_folder = os.path.join(base_folder, 'DigitalCoast')
+            filenames = [f for f in os.listdir(input_folder) if f.endswith('.tif')]
 
-        for filename in os.listdir(input_folder):
+        for filename in filenames:
             if not filename.endswith('.tif'):
                 continue
 
-            # --- CORRECTED FILTERING LOGIC ---
-            # This new block checks if any component in the filename is flagged for skipping.
             should_skip = False
             for config_key, dataset_settings in config.items():
-                # Check if a key from the config (e.g., "USGS_1885_9562") is part of the filename.
                 if config_key in filename:
-                    # If the component is found, check its 'use' flag.
                     if dataset_settings and dataset_settings.get('use') is False:
                         print(f"INFO: Skipping '{filename}' due to config for component '{config_key}'.")
                         should_skip = True
-                        break # Found a reason to skip, no need to check other keys.
+                        break 
             
             if should_skip:
-                continue # Skip to the next file.
-            # --- END OF CORRECTION ---
+                continue
 
             match = filename_pattern.search(filename)
             if not match:
@@ -175,16 +235,36 @@ class CreateLidarDataPlotsEngine():
                 dataset_name = dataset_info.split('_')[-1]
             
             acquisition_date = None
-            if os.path.isdir(base_folder):
-                for folder_name in os.listdir(base_folder):
-                    potential_path = os.path.join(base_folder, folder_name)
-                    if os.path.isdir(potential_path) and year_from_filename in folder_name and f'_{unique_id}' in folder_name:
-                        metadata_path = os.path.join(potential_path, 'metadata.txt')
-                        acquisition_date = self.extract_date_from_metadata(metadata_path)
-                        if acquisition_date:
-                            break
+            
+            # Metadata search logic
+            if self.is_aws:
+                # Check if base_folder exists in S3
+                if self.fs.exists(base_folder):
+                    # List directories in base_folder
+                    subfolders = self.fs.ls(base_folder)
+                    for folder_path in subfolders:
+                        # Extract folder name properly for AWS paths
+                        folder_name = folder_path.replace('\\', '/').split('/')[-1]
+                        
+                        # Check logic matches local
+                        if year_from_filename in folder_name and f'_{unique_id}' in folder_name:
+                            metadata_path = f"s3://{folder_path}/metadata.txt"
+                            acquisition_date = self.extract_date_from_metadata(metadata_path)
+                            if acquisition_date:
+                                break
+                else:
+                    print(f"Warning: Base folder 's3://{base_folder}' not found.")
             else:
-                print(f"Warning: Base folder '{base_folder}' not found. Cannot search for metadata.")
+                if os.path.isdir(base_folder):
+                    for folder_name in os.listdir(base_folder):
+                        potential_path = os.path.join(base_folder, folder_name)
+                        if os.path.isdir(potential_path) and year_from_filename in folder_name and f'_{unique_id}' in folder_name:
+                            metadata_path = os.path.join(potential_path, 'metadata.txt')
+                            acquisition_date = self.extract_date_from_metadata(metadata_path)
+                            if acquisition_date:
+                                break
+                else:
+                    print(f"Warning: Base folder '{base_folder}' not found.")
             
             grouping_year = year_from_filename if year_from_filename else 'No Year Found'
             title_str = year_from_filename if year_from_filename else 'Date Not in Filename'
@@ -192,8 +272,17 @@ class CreateLidarDataPlotsEngine():
             if grouping_year not in year_datasets:
                 year_datasets[grouping_year] = []
             
+            # Construct full path
+            if self.is_aws:
+                input_folder_clean = str(input_folder).replace('\\', '/')
+                full_path = f"{input_folder_clean.rstrip('/')}/{filename}"
+                # Ensure s3 prefix
+                if not full_path.startswith("s3://"): full_path = f"s3://{full_path}"
+            else:
+                full_path = os.path.join(input_folder, filename)
+
             year_datasets[grouping_year].append({
-                'path': os.path.join(input_folder, filename),
+                'path': full_path,
                 'dataset_name': dataset_name,
                 'date': acquisition_date,
                 'title': title_str
@@ -202,6 +291,8 @@ class CreateLidarDataPlotsEngine():
         return year_datasets
     
     def load_config(self, config_path, ecoregion_key):
+        # Config loading assumes local file usually (in container)
+        # If config needs to be loaded from S3, add logic here
         if not os.path.exists(config_path):
             print(f"Warning: Config file not found at '{config_path}'. No filtering will be applied.")
             return {}
@@ -221,18 +312,24 @@ class CreateLidarDataPlotsEngine():
         param str shp_path: Path to the shapefile for coastline plotting.
         return: None
         """
-
         if not self.year_datasets:
             print("No raster files found.")
             return
 
         target_crs = 'EPSG:3857'
-        shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
+        
+        # Handle shapefile path
+        shp_read_path = self._get_s3_path(shp_path)
+        shp_gdf = gpd.read_file(shp_read_path).to_crs(target_crs)
         
         all_raster_paths = [ds['path'] for year in self.year_datasets for ds in self.year_datasets[year]]
-        common_transform, common_extent, common_shape = self.calculateExtent(all_raster_paths + [mask_path], target_crs)
         
-        mask_reproj, mask_nodata = self.reprojectToGrid(mask_path, common_transform, common_shape, target_crs, Resampling.nearest)
+        # Ensure mask path has s3 prefix
+        mask_read_path = self._get_s3_path(mask_path)
+        
+        common_transform, common_extent, common_shape = self.calculateExtent(all_raster_paths + [mask_read_path], target_crs)
+        
+        mask_reproj, mask_nodata = self.reprojectToGrid(mask_read_path, common_transform, common_shape, target_crs, Resampling.nearest)
         mask_boolean_global = mask_reproj != mask_nodata
         mask_geometries_global = [shape(geom) for geom, val in shapes(mask_boolean_global.astype(np.uint8), transform=common_transform) if val > 0]
 
@@ -241,7 +338,7 @@ class CreateLidarDataPlotsEngine():
             reprojected_data, nodata = self.reprojectToGrid(path, common_transform, common_shape, target_crs)
             combined_mask = np.logical_or.reduce((
                     reprojected_data == nodata, 
-                    ~mask_boolean_global, # or ~mask_boolean_global_scope for the other function
+                    ~mask_boolean_global, 
                     reprojected_data >= 0
                 ))
             masked_data = np.ma.array(reprojected_data, mask=combined_mask)
@@ -268,7 +365,6 @@ class CreateLidarDataPlotsEngine():
             for j, dataset in enumerate(self.year_datasets[year]):
                 destination, nodata = self.reprojectToGrid(dataset['path'], common_transform, common_shape, target_crs)
 
-                # Update the current_area_mask to exclude values >= 0
                 current_area_mask = np.logical_and(destination != nodata, destination < 0)
                 final_area_mask = np.logical_or(final_area_mask, current_area_mask)
                 
@@ -277,15 +373,13 @@ class CreateLidarDataPlotsEngine():
                     x, y = geom.exterior.xy
                     ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
                 
-                # The legend label includes the acquisition date if available
                 date_str = f" ({dataset['date']})" if dataset.get('date') else ""
                 label_text = f"{dataset['dataset_name']}{date_str}"
                 legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
                 
-                # The display_mask is now simpler since the >= 0 values are already handled
                 display_mask = np.logical_or.reduce((
                     destination == nodata, 
-                    ~mask_boolean_global, # or ~mask_boolean_local for the other function
+                    ~mask_boolean_global,
                     destination >= 0
                 ))
                 masked_destination = np.ma.array(destination, mask=display_mask)
@@ -313,7 +407,15 @@ class CreateLidarDataPlotsEngine():
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
 
-        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Global Extent)", os.path.join(output_folder, 'year_plots_global_extent.png'), 1200)
+        # Handle Output Path for S3 or Local
+        if self.is_aws:
+            output_folder_clean = str(output_folder).replace('\\', '/')
+            output_file_path = f"{output_folder_clean.rstrip('/')}/year_plots_global_extent.png"
+            if not output_file_path.startswith("s3://"): output_file_path = f"s3://{output_file_path}"
+        else:
+            output_file_path = os.path.join(output_folder, 'year_plots_global_extent.png')
+
+        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Global Extent)", output_file_path, 1200)
 
     def plot_rasters_by_year_individual(self, input_folder, output_folder, mask_path, shp_path) -> None:
         """
@@ -324,17 +426,18 @@ class CreateLidarDataPlotsEngine():
         param str shp_path: Path to the shapefile for coastline plotting.
         return: None
         """
-
         if not self.year_datasets:
             print("No raster files found.")
             return
 
         target_crs = 'EPSG:3857'
-        shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
+        shp_read_path = self._get_s3_path(shp_path)
+        shp_gdf = gpd.read_file(shp_read_path).to_crs(target_crs)
+        mask_read_path = self._get_s3_path(mask_path)
         
         all_raster_paths = [ds['path'] for year in self.year_datasets for ds in self.year_datasets[year]]
-        global_transform, _, global_shape = self.calculateExtent(all_raster_paths + [mask_path], target_crs)
-        mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_path, global_transform, global_shape, target_crs, Resampling.nearest)
+        global_transform, _, global_shape = self.calculateExtent(all_raster_paths + [mask_read_path], target_crs)
+        mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_read_path, global_transform, global_shape, target_crs, Resampling.nearest)
         mask_boolean_global_scope = mask_reproj_global != mask_nodata_global
         
         global_min, global_max = np.inf, -np.inf
@@ -364,9 +467,9 @@ class CreateLidarDataPlotsEngine():
         for i, year in enumerate(sorted_years):
             ax = axes[i]
             year_paths = [ds['path'] for ds in self.year_datasets[year]]
-            local_transform, local_extent, local_shape = self.calculateExtent(year_paths + [mask_path], target_crs)
+            local_transform, local_extent, local_shape = self.calculateExtent(year_paths + [mask_read_path], target_crs)
             
-            mask_reproj_local, mask_nodata_local = self.reprojectToGrid(mask_path, local_transform, local_shape, target_crs, Resampling.nearest)
+            mask_reproj_local, mask_nodata_local = self.reprojectToGrid(mask_read_path, local_transform, local_shape, target_crs, Resampling.nearest)
             mask_boolean_local = mask_reproj_local != mask_nodata_local
             mask_geometries_local = [shape(geom) for geom, val in shapes(mask_boolean_local.astype(np.uint8), transform=local_transform) if val > 0]
             
@@ -402,7 +505,6 @@ class CreateLidarDataPlotsEngine():
             pixel_area_m2 = abs(local_transform.a * local_transform.e)
             total_area_km2 = (valid_pixels * pixel_area_m2) / 1e6
             
-            # Use the 'title' field from the dataset dictionary for the subplot title
             subplot_title = self.year_datasets[year][0]['title']
             ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.0f} km$^2$", fontsize=8)
             
@@ -412,7 +514,14 @@ class CreateLidarDataPlotsEngine():
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
 
-        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Individual Extent)", os.path.join(output_folder, 'year_plots_individual_extent.png'), 600)
+        if self.is_aws:
+            output_folder_clean = str(output_folder).replace('\\', '/')
+            output_file_path = f"{output_folder_clean.rstrip('/')}/year_plots_individual_extent.png"
+            if not output_file_path.startswith("s3://"): output_file_path = f"s3://{output_file_path}"
+        else:
+            output_file_path = os.path.join(output_folder, 'year_plots_individual_extent.png')
+
+        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Individual Extent)", output_file_path, 600)
     
     def process_single_vrt(self, vrt_file, output_dir, x_res, y_res, resampling_method, creation_options, warpOptions, multithread) -> None:
         """
@@ -420,19 +529,36 @@ class CreateLidarDataPlotsEngine():
         """
         
         try:
-            base_name = os.path.basename(vrt_file)
-            output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
+            if self.is_aws:
+                # Use standard string manipulation for S3 paths to prevent os.path from adding backslashes
+                base_name = str(vrt_file).replace('\\', '/').split('/')[-1]
+                output_dir_clean = str(output_dir).replace('\\', '/')
+                output_filename = f"{output_dir_clean.rstrip('/')}/{base_name.replace('.vrt', '_resampled.tif')}"
+                if not output_filename.startswith("s3://"): output_filename = f"s3://{output_filename}"
+                
+                # Convert to GDAL VSI paths
+                gdal_input = self._get_gdal_path(vrt_file)
+                gdal_output = self._get_gdal_path(output_filename)
+                
+                # Check existence using s3fs
+                exists = self.fs.exists(output_filename.replace("s3://", ""))
+            else:
+                base_name = os.path.basename(vrt_file)
+                output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
+                gdal_input = vrt_file
+                gdal_output = output_filename
+                exists = os.path.exists(output_filename)
 
-            # Check if the output file already exists. If so, skip processing.
-            if os.path.exists(output_filename):
-                skip_message = f"Output file {output_filename} already exists. Skipping."
+            if exists:
+                skip_message = f"Output file {output_filename} already exists. Skipping {vrt_file}."
                 print(skip_message)
+                return
 
-            print(f"Processing {base_name}...")
+            print(f"Resampling: {vrt_file} -> {output_filename}")
 
             gdal.Warp(
-                output_filename,
-                vrt_file,
+                gdal_output,
+                gdal_input,
                 xRes=x_res,
                 yRes=y_res,
                 resampleAlg=resampling_method,
@@ -441,7 +567,7 @@ class CreateLidarDataPlotsEngine():
                 multithread=multithread     
             )
 
-            print(f"Successfully resampled and saved to {output_filename}")
+            print(f"Successfully resampled {vrt_file} to {output_filename}")
         except Exception as e:
             print(f"Error processing {vrt_file}: {e}")
 
@@ -455,8 +581,10 @@ class CreateLidarDataPlotsEngine():
         param object resampling_method: Resampling method from rasterio.enums.Resampling.
         return: Reprojected raster data as a NumPy array and the nodata value.
         """
+        # Ensure path is S3 compatible for Rasterio
+        open_path = self._get_s3_path(path)
 
-        with rasterio.open(path) as src:
+        with rasterio.open(open_path) as src:
             destination = np.zeros(shape, dtype=src.dtypes[0])
             reproject(
                 source=rasterio.band(src, 1),
@@ -474,7 +602,6 @@ class CreateLidarDataPlotsEngine():
         """
         Resample all .vrt files in the input directory in parallel using Dask
         and save them to the output directory.
-
         param x_res: Horizontal resolution for resampling
         param y_res: Vertical resolution for resampling
         param resampling_method: Resampling method to use (e.g., 'bilinear', 'cubic')
@@ -483,22 +610,43 @@ class CreateLidarDataPlotsEngine():
         input_dir = get_config_item("LIDAR_PLOTS", "INPUT_VRTS")
         output_dir = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
 
-        os.makedirs(output_dir, exist_ok=True)
+        if self.is_aws:
+            bucket = get_config_item('S3', 'BUCKET_NAME')
+            
+            # Prepend bucket to directories for s3fs globbing and saving
+            input_dir_clean = str(input_dir).replace('\\', '/').replace("s3://", "")
+            if not input_dir_clean.startswith(bucket):
+                input_dir_s3 = f"{bucket}/{input_dir_clean.lstrip('/')}"
+            else:
+                input_dir_s3 = input_dir_clean
+                
+            output_dir_clean = str(output_dir).replace('\\', '/').replace("s3://", "")
+            if not output_dir_clean.startswith(bucket):
+                output_dir = f"s3://{bucket}/{output_dir_clean.lstrip('/')}"
+            else:
+                output_dir = f"s3://{output_dir_clean}"
 
-        creation_options = [
-            "COMPRESS=LZW",
-            "TILED=YES",
-            "BIGTIFF=YES"
-        ]
-
-        vrt_files = glob.glob(os.path.join(input_dir, "*.vrt"))
+            # glob returns list of bucket/path/file.vrt
+            vrt_files = [f"s3://{f}" for f in self.fs.glob(f"{input_dir_s3}/*.vrt")]
+            # No makedirs needed for S3
+        else:
+            os.makedirs(output_dir, exist_ok=True)
+            vrt_files = glob.glob(os.path.join(input_dir, "*.vrt"))
 
         if not vrt_files:
-            print(f"No .vrt files found in {input_dir}")
+            search_path = input_dir_s3 if self.is_aws else input_dir
+            print(f"No .vrt files found in {search_path}")
             return
 
         print(f"Found {len(vrt_files)} VRT files to process.")
         print(f"Unique items in vrt_files: {len(set(vrt_files))}")
+
+        creation_options = [
+            "COMPRESS=LZW",
+            "TILED=YES",
+            "BIGTIFF=YES",
+            "NUM_THREADS=ALL_CPUS" # Moved NUM_THREADS here from warpOptions
+        ]
 
         tasks = []
 
@@ -510,12 +658,12 @@ class CreateLidarDataPlotsEngine():
                 y_res,
                 resampling_method,
                 creation_options,
-                warpOptions=["NUM_THREADS=ALL_CPUS"],
+                warpOptions=[], # Cleaned out the unused warp option that threw the warning
                 multithread=True
             )
             tasks.append(task)
 
-        # dask.compute(*tasks)
+        dask.compute(*tasks)
         print("All vrts have been resampled.")
 
     def plot_difference(self, input_folder, output_folder, mask_path, shp_path, mode, use_individual_extent=False) -> None:
@@ -537,12 +685,15 @@ class CreateLidarDataPlotsEngine():
         year_datasets_map = {year: data[0]['path'] for year, data in self.year_datasets.items()}
 
         target_crs = 'EPSG:3857'
-        shp_gdf = gpd.read_file(shp_path).to_crs(target_crs)
+        shp_read_path = self._get_s3_path(shp_path)
+        shp_gdf = gpd.read_file(shp_read_path).to_crs(target_crs)
+        mask_read_path = self._get_s3_path(mask_path)
+        
         sorted_years = sorted(year_datasets_map.keys())
         
-        all_paths = list(year_datasets_map.values()) + [mask_path]
+        all_paths = list(year_datasets_map.values()) + [mask_read_path]
         global_transform, global_extent, global_shape = self.calculateExtent(all_paths, target_crs)
-        mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_path, global_transform, global_shape, target_crs, Resampling.nearest)
+        mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_read_path, global_transform, global_shape, target_crs, Resampling.nearest)
         mask_boolean_global = mask_reproj_global != mask_nodata_global
         
         reprojected_global = {}
@@ -601,11 +752,11 @@ class CreateLidarDataPlotsEngine():
             ax = axes[i]
             
             if use_individual_extent:
-                local_transform, local_extent, local_shape = self.calculateExtent([data_dict['path1'], data_dict['path2'], mask_path], target_crs)
+                local_transform, local_extent, local_shape = self.calculateExtent([data_dict['path1'], data_dict['path2'], mask_read_path], target_crs)
                 
                 data1, nodata1 = self.reprojectToGrid(data_dict['path1'], local_transform, local_shape, target_crs)
                 data2, nodata2 = self.reprojectToGrid(data_dict['path2'], local_transform, local_shape, target_crs)
-                mask_reproj, mask_nodata = self.reprojectToGrid(mask_path, local_transform, local_shape, target_crs, Resampling.nearest)
+                mask_reproj, mask_nodata = self.reprojectToGrid(mask_read_path, local_transform, local_shape, target_crs, Resampling.nearest)
                 
                 mask_boolean = mask_reproj != mask_nodata
                 # Add conditions to mask pixels where either dataset has a value >= 0
@@ -624,7 +775,7 @@ class CreateLidarDataPlotsEngine():
             else:
                 diff = reprojected_global[data_dict['year2']] - reprojected_global[data_dict['year1']]
                 im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=0)
-                # --- ADD THIS CODE BLOCK ---
+                
                 # Create a mask of the valid overlap area
                 overlap_mask = ~np.ma.mask_or(reprojected_global[data_dict['year1']].mask, reprojected_global[data_dict['year2']].mask)
 
@@ -637,7 +788,7 @@ class CreateLidarDataPlotsEngine():
                 for geom in overlap_geometries:
                     x, y = geom.exterior.xy
                     ax.plot(x, y, color='red', linewidth=1.5, zorder=12, label='Overlap Area')
-                # --- END OF ADDED CODE ---
+                
                 mask_boolean = mask_reproj_global != mask_nodata_global
                 mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=global_transform) if val > 0]
                 self.setupSubplot(ax, shp_gdf, global_extent)
@@ -657,38 +808,52 @@ class CreateLidarDataPlotsEngine():
         
         output_filename = f'{mode}_year_differences_{extent_type.lower()}_extent.png'
         dpi = 600 if use_individual_extent else 1200
-        self.finalizeFigure(fig, axes, im_diff, 'Difference (m)', suptitle, os.path.join(output_folder, output_filename), dpi)
+        
+        if self.is_aws:
+            output_folder_clean = str(output_folder).replace('\\', '/')
+            output_file_path = f"{output_folder_clean.rstrip('/')}/{output_filename}"
+            if not output_file_path.startswith("s3://"): output_file_path = f"s3://{output_file_path}"
+        else:
+            output_file_path = os.path.join(output_folder, output_filename)
+
+        self.finalizeFigure(fig, axes, im_diff, 'Difference (m)', suptitle, output_file_path, dpi)
 
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
-        # client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
-        # print(f"Dask Dashboard: {client.dashboard_link}")
+        client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
+        print(f"Dask Dashboard: {client.dashboard_link}")
         
-        # self.resample_vrt_files()
+        self.resample_vrt_files()
 
-        # client.close()
-
-        raster_folder = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
-        plot_output_folder = get_config_item("LIDAR_PLOTS", "PLOT_OUTPUTS")
-        mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
-        shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
+        client.close()
+        
+        if self.is_aws:
+            bucket = get_config_item('S3', 'BUCKET_NAME')
+            raster_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'RESAMPLED_VRTS')}".replace('\\', '/')
+            plot_output_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'PLOT_OUTPUTS')}".replace('\\', '/')
+            mask_path = f"s3://{bucket}/{get_config_item('MASK', 'MASK_TRAINING_PATH')}".replace('\\', '/')
+            shp_path = f"s3://{bucket}/{get_config_item('MASK', 'COAST_BOUNDARY_PATH')}".replace('\\', '/')
+        else:
+            raster_folder = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
+            plot_output_folder = get_config_item("LIDAR_PLOTS", "PLOT_OUTPUTS") 
+            mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
+            shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
+            
         config_path = INPUTS / 'ER_3_lidar_data_config.yaml'
 
-
-        self.config = self.load_config(config_path, 'EcoRegion-3')
+        self.config = self.load_config(config_path, 'EcoRegion-3') 
         self.year_datasets = self.getYearDatasets(raster_folder, self.config)
-        print(self.year_datasets)
+        print(self.year_datasets) 
 
         self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
-        # self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
+        self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
 
-        # self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-        # self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
         self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-        # self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
-
+        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
 
         print("Lidar Data Plots processing complete.")
 
@@ -713,3 +878,4 @@ class CreateLidarDataPlotsEngine():
         yticks = ax.get_yticks()
         ax.set_xticklabels([f'{val/1000:.1f}' for val in xticks], fontsize=4)
         ax.set_yticklabels([f'{val/1000:.1f}' for val in yticks], fontsize=4)
+        

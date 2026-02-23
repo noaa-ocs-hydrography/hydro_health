@@ -55,6 +55,8 @@ class ModelDataPreProcessor:
         if get_environment() == 'remote':
             self.mask_prediction_pq = pathlib.Path(get_config_item('MASK', 'PREDICTION_MASK_PQ'))
             self.mask_training_pq = pathlib.Path(get_config_item('MASK', 'TRAINING_MASK_PQ'))
+            self.pred_mask_path = pathlib.Path(get_config_item('MASK', 'MASK_PRED_PATH'))
+            self.train_mask_path = pathlib.Path(get_config_item('MASK', 'MASK_TRAINING_PATH'))
             self.preprocessed_dir = pathlib.Path(get_config_item('MODEL', 'PREPROCESSED_DIR'))
             self.prediction_out_dir = pathlib.Path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'))
             self.training_out_dir = pathlib.Path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'))
@@ -70,6 +72,8 @@ class ModelDataPreProcessor:
             bucket = get_config_item('S3', 'BUCKET_NAME')
             self.mask_prediction_pq = f"s3://{bucket}/{get_config_item('MASK', 'PREDICTION_MASK_PQ')}"
             self.mask_training_pq = f"s3://{bucket}/{get_config_item('MASK', 'TRAINING_MASK_PQ')}"
+            self.pred_mask_path = f"s3://{bucket}/{get_config_item('MASK', 'MASK_PRED_PATH')}"
+            self.train_mask_path = f"s3://{bucket}/{get_config_item('MASK', 'MASK_TRAINING_PATH')}"
             self.preprocessed_dir = f"s3://{bucket}/{get_config_item('MODEL', 'PREPROCESSED_DIR')}"
             self.prediction_out_dir = f"s3://{bucket}/{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')}"
             self.training_out_dir = f"s3://{bucket}/{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR')}"
@@ -111,35 +115,30 @@ class ModelDataPreProcessor:
         """Main function to process model data."""     
         # TODO use the base engine function for this, change the memory limit for AWS
         client = Client(
-            n_workers=4, 
+            n_workers=8, 
             threads_per_worker=2, 
             memory_limit="32GB"
         )
         print(f"Dask Dashboard: {client.dashboard_link}")
 
-        # Setup paths for raster conversion based on env
-        pred_mask_path = get_config_item('MASK', 'MASK_PRED_PATH')
-        train_mask_path = get_config_item('MASK', 'MASK_TRAINING_PATH')
-        
-        if not self.is_aws:
-            pred_mask_path = pathlib.Path(pred_mask_path)
-            train_mask_path = pathlib.Path(train_mask_path)
-
-        self.raster_to_spatial_df(pred_mask_path, process_type='prediction')
-        self.raster_to_spatial_df(train_mask_path, process_type='training')
-
         self.create_file_paths()
 
-        # Create subgrids requires mask_gdf paths. Ensure they are initialized
-        self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_dir=self.subgrid_paths['prediction'], process_type = 'prediction')
-        self.create_subgrids(mask_gdf=self.mask_training_pq, output_dir=self.subgrid_paths['training'], process_type = 'training')
+        # self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
+        # self.raster_to_spatial_df(self.train_mask_path, process_type='training')
+
+        input("Press Enter to continue...")
+
+        self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_dir=self.subgrid_paths['prediction'], process_type='prediction')
+        self.create_subgrids(mask_gdf=self.mask_training_pq, output_dir=self.subgrid_paths['training'], process_type='training')
+
+        input("Press Enter to continue...")
 
         try:
             mask_pred_gdf = gpd.read_parquet(self.mask_prediction_pq)
-            mask_future_pred = client.scatter(mask_pred_gdf.unary_union, broadcast=True)
+            mask_future_pred = client.scatter(mask_pred_gdf.union_all, broadcast=True)
 
             mask_train_gdf = gpd.read_parquet(self.mask_training_pq)
-            mask_future_train = client.scatter(mask_train_gdf.unary_union, broadcast=True)
+            mask_future_train = client.scatter(mask_train_gdf.union_all, broadcast=True)
 
             self.parallel_processing_rasters(self.preprocessed_dir, mask_future_pred, mask_future_train)
 
@@ -832,10 +831,7 @@ class ModelDataPreProcessor:
 
         print(f'Creating {process_type} mask data frame..')
 
-        # FIX: Ensure rasterio has s3:// if needed
         open_path = str(raster_path)
-        if self.is_aws and not open_path.startswith('s3://'):
-             open_path = f"s3://{open_path}"
 
         with rasterio.open(open_path) as src:
             mask = src.read(1, out_dtype='uint8')
@@ -850,7 +846,6 @@ class ModelDataPreProcessor:
             gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
             gdf = gdf.to_crs("EPSG:32617")   
 
-            # FIX: Output path handling
             masks_dir_conf = get_config_item('MASK', 'MASKS_DIR')
             
             if self.is_aws:
@@ -859,6 +854,8 @@ class ModelDataPreProcessor:
             else:
                 masks_dir = Path(masks_dir_conf)
                 mask_path = masks_dir / f"{process_type}_mask.parquet"
+
+            print(f"Saving {process_type} mask GeoDataFrame to: {mask_path}")    
 
             gdf.to_parquet(str(mask_path))
 
@@ -869,21 +866,14 @@ class ModelDataPreProcessor:
         
         # Ensure we read the parquet from S3 properly
         mask_gdf_path = str(mask_gdf)
-        if self.is_aws and not mask_gdf_path.startswith('s3://'):
-             mask_gdf_path = f"s3://{mask_gdf_path}"
+        print(f"----- Reading mask GeoDataFrame from: {mask_gdf_path}")
 
         grid_gpkg = get_config_item('MODEL', 'SUBGRIDS')
         
-        # Handle AWS Path for subgrids
-        if self.is_aws and not str(grid_gpkg).startswith('s3://'):
-             bucket = get_config_item('S3', 'BUCKET_NAME')
-             # Assuming config only has key, not full s3 path. Adjust if config has full path.
-             grid_gpkg = f"s3://{bucket}/{grid_gpkg}" if not str(grid_gpkg).startswith('s3://') else grid_gpkg
-
         print(f"Preparing {process_type} sub-grids...")
 
-        mask_gdf_df = gpd.read_parquet(mask_gdf_path)
-        combined_geometry = mask_gdf_df.unary_union
+        mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=self.fs if self.is_aws else None)
+        combined_geometry = mask_gdf_df.union_all()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
         sub_grids = gpd.read_file(grid_gpkg, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
