@@ -82,10 +82,10 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_raster_mask_engine(param_lookup)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 runners.run_grid_digital_coast(param_lookup)
-            elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
-                runners.run_sediment_layer_engine()
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
                 runners.run_tsm_layer_engine()
+            elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
+                runners.run_sediment_layer_engine()
             elif step["tool"] == "run_hurricane_layer_engine" and step["run"]:
                 runners.run_hurricane_layer_engine()
     update_config_runtime(config_path, config)
