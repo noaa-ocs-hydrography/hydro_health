@@ -90,7 +90,7 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_hurricane_layer_engine()
     update_config_runtime(config_path, config)
     end = time.time()
-    print(f"Total Runtime: {(end - start) / 60}")
+    print(f"Total Runtime: {(end - start) / 60} minutes")
     for ecoregion in pathlib.Path(param_lookup['output_directory'].valueAsText).glob('ER_*'):
         bluetopo_path = pathlib.Path(ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo')
         if bluetopo_path.is_dir():
