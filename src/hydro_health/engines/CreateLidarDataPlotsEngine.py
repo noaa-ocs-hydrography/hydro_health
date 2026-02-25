@@ -532,13 +532,17 @@ class CreateLidarDataPlotsEngine():
             if self.is_aws:
                 # Use standard string manipulation for S3 paths to prevent os.path from adding backslashes
                 base_name = str(vrt_file).replace('\\', '/').split('/')[-1]
+                resampled_base_name = base_name.replace('.vrt', '_resampled.tif')
                 output_dir_clean = str(output_dir).replace('\\', '/')
-                output_filename = f"{output_dir_clean.rstrip('/')}/{base_name.replace('.vrt', '_resampled.tif')}"
+                output_filename = f"{output_dir_clean.rstrip('/')}/{resampled_base_name}"
                 if not output_filename.startswith("s3://"): output_filename = f"s3://{output_filename}"
                 
                 # Convert to GDAL VSI paths
                 gdal_input = self._get_gdal_path(vrt_file)
-                gdal_output = self._get_gdal_path(output_filename)
+                
+                # Use local EC2 temporary file instead of direct vsis3 write
+                # This completely bypasses the S3 5GB single-part upload limit!
+                gdal_output = f"/tmp/{resampled_base_name}"
                 
                 # Check existence using s3fs
                 exists = self.fs.exists(output_filename.replace("s3://", ""))
@@ -554,7 +558,7 @@ class CreateLidarDataPlotsEngine():
                 print(skip_message)
                 return
 
-            print(f"Resampling: {vrt_file} -> {output_filename}")
+            print(f"Resampling: {vrt_file}")
 
             gdal.Warp(
                 gdal_output,
@@ -567,9 +571,19 @@ class CreateLidarDataPlotsEngine():
                 multithread=multithread     
             )
 
+            if self.is_aws:
+                print(f"Uploading resampled file to S3: {output_filename}...")
+                # s3fs put() handles multipart uploads automatically, so large files will succeed
+                self.fs.put(gdal_output, output_filename.replace("s3://", ""))
+                # Delete the local temporary file from EC2 to free up space
+                os.remove(gdal_output)
+
             print(f"Successfully resampled {vrt_file} to {output_filename}")
         except Exception as e:
             print(f"Error processing {vrt_file}: {e}")
+            # Ensure the local temporary file is deleted even if the upload or GDAL process fails
+            if self.is_aws and 'gdal_output' in locals() and os.path.exists(gdal_output):
+                os.remove(gdal_output)
 
     def reprojectToGrid(self, path, transform, shape, target_crs, resampling_method=Resampling.bilinear) -> tuple:
         """
@@ -601,7 +615,7 @@ class CreateLidarDataPlotsEngine():
     def resample_vrt_files(self, x_res=0.0359/8, y_res=0.0359/8, resampling_method='nearest') -> None:
         """
         Resample all .vrt files in the input directory in parallel using Dask
-        and save them to the output directory.
+        and save them to the output directory. x_res=0.0359/8 ~ 500 meters
         param x_res: Horizontal resolution for resampling
         param y_res: Vertical resolution for resampling
         param resampling_method: Resampling method to use (e.g., 'bilinear', 'cubic')
@@ -628,7 +642,6 @@ class CreateLidarDataPlotsEngine():
 
             # glob returns list of bucket/path/file.vrt
             vrt_files = [f"s3://{f}" for f in self.fs.glob(f"{input_dir_s3}/*.vrt")]
-            # No makedirs needed for S3
         else:
             os.makedirs(output_dir, exist_ok=True)
             vrt_files = glob.glob(os.path.join(input_dir, "*.vrt"))
@@ -638,8 +651,7 @@ class CreateLidarDataPlotsEngine():
             print(f"No .vrt files found in {search_path}")
             return
 
-        print(f"Found {len(vrt_files)} VRT files to process.")
-        print(f"Unique items in vrt_files: {len(set(vrt_files))}")
+        print(f"Found {len(set(vrt_files))} VRT files to process.")
 
         creation_options = [
             "COMPRESS=LZW",
@@ -821,7 +833,7 @@ class CreateLidarDataPlotsEngine():
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
-        client = Client(n_workers=7, threads_per_worker=2, memory_limit="32GB")
+        client = Client(n_workers=4, threads_per_worker=1, memory_limit="32GB")
         print(f"Dask Dashboard: {client.dashboard_link}")
         
         self.resample_vrt_files()
@@ -878,4 +890,3 @@ class CreateLidarDataPlotsEngine():
         yticks = ax.get_yticks()
         ax.set_xticklabels([f'{val/1000:.1f}' for val in xticks], fontsize=4)
         ax.set_yticklabels([f'{val/1000:.1f}' for val in yticks], fontsize=4)
-        
