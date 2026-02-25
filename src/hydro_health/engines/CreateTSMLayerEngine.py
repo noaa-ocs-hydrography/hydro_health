@@ -286,7 +286,7 @@ class CreateTSMLayerEngine(Engine):
             ]
         else:
             s3_files = s3fs.S3FileSystem()
-            s3_tif_files = s3_files.ls(f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/{get_config_item("TSM", "SUBFOLDER")}')
+            s3_tif_files = s3_files.ls(f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/testing/ER_3/{get_config_item("TSM", "SUBFOLDER")}')
             raster_files = [
                 f'/vsis3/{f}' for f in s3_tif_files 
                 if f.endswith(".tif") and any(str(year) in f for year in range(start_year, end_year + 1))
