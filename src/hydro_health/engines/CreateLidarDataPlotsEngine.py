@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import warnings
 import numpy as np
 import geopandas as gpd
 import yaml
@@ -26,6 +27,9 @@ from dask.distributed import Client, print
 from osgeo import gdal
 
 from hydro_health.helpers.tools import get_config_item, get_environment
+
+# Suppress benign Matplotlib colormap overflow warnings caused by hidden masked array values
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="matplotlib.colors")
 
 # Ensure GDAL env vars are set
 os.environ['GDAL_MEM_ENABLE_OPEN'] = 'YES'
@@ -329,21 +333,30 @@ class CreateLidarDataPlotsEngine():
         
         common_transform, common_extent, common_shape = self.calculateExtent(all_raster_paths + [mask_read_path], target_crs)
         
+        # ADDED CHECK: Prevent crash if calculateExtent fails to read any file
+        if common_shape is None:
+            print("Error: Could not calculate global extent. Check paths, files existences, or AWS/S3 permissions.")
+            return
+
         mask_reproj, mask_nodata = self.reprojectToGrid(mask_read_path, common_transform, common_shape, target_crs, Resampling.nearest)
         mask_boolean_global = mask_reproj != mask_nodata
         mask_geometries_global = [shape(geom) for geom, val in shapes(mask_boolean_global.astype(np.uint8), transform=common_transform) if val > 0]
 
-        global_min, global_max = np.inf, -np.inf
+        global_min = np.inf
         for path in all_raster_paths:
             reprojected_data, nodata = self.reprojectToGrid(path, common_transform, common_shape, target_crs)
             combined_mask = np.logical_or.reduce((
                     reprojected_data == nodata, 
+                    reprojected_data < -10000, # Catch interpolated nodata artifacts
                     ~mask_boolean_global, 
                     reprojected_data >= 0
                 ))
             masked_data = np.ma.array(reprojected_data, mask=combined_mask)
             if masked_data.count() > 0:
                 global_min = min(global_min, masked_data.min())
+                
+        if global_min == np.inf:
+            global_min = -10  # Fallback to prevent crash if no valid data
 
         cmap = plt.colormaps['ocean'].copy()
         cmap.set_bad(color='white')
@@ -379,6 +392,7 @@ class CreateLidarDataPlotsEngine():
                 
                 display_mask = np.logical_or.reduce((
                     destination == nodata, 
+                    destination < -10000, # Catch interpolated nodata artifacts
                     ~mask_boolean_global,
                     destination >= 0
                 ))
@@ -437,20 +451,30 @@ class CreateLidarDataPlotsEngine():
         
         all_raster_paths = [ds['path'] for year in self.year_datasets for ds in self.year_datasets[year]]
         global_transform, _, global_shape = self.calculateExtent(all_raster_paths + [mask_read_path], target_crs)
+
+        # ADDED CHECK: Prevent crash if calculateExtent fails to read any file
+        if global_shape is None:
+            print("Error: Could not calculate global extent for individual plots. Skipping.")
+            return
+
         mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_read_path, global_transform, global_shape, target_crs, Resampling.nearest)
         mask_boolean_global_scope = mask_reproj_global != mask_nodata_global
         
-        global_min, global_max = np.inf, -np.inf
+        global_min = np.inf
         for path in all_raster_paths:
             reprojected_data, nodata = self.reprojectToGrid(path, global_transform, global_shape, target_crs)
             combined_mask = np.logical_or.reduce((
                     reprojected_data == nodata, 
+                    reprojected_data < -10000, # Catch interpolated nodata artifacts
                     ~mask_boolean_global_scope, 
                     reprojected_data >= 0
                 ))
             masked_data = np.ma.array(reprojected_data, mask=combined_mask)
             if masked_data.count() > 0:
                 global_min = min(global_min, masked_data.min())
+
+        if global_min == np.inf:
+            global_min = -10  # Fallback to prevent crash if no valid data
 
         cmap = plt.colormaps['ocean'].copy()
         cmap.set_bad(color='white')
@@ -469,6 +493,11 @@ class CreateLidarDataPlotsEngine():
             year_paths = [ds['path'] for ds in self.year_datasets[year]]
             local_transform, local_extent, local_shape = self.calculateExtent(year_paths + [mask_read_path], target_crs)
             
+            # ADDED CHECK: Prevent crash if year-specific datasets cannot be calculated
+            if local_shape is None:
+                print(f"Warning: Could not calculate extent for year {year}. Skipping this year.")
+                continue
+
             mask_reproj_local, mask_nodata_local = self.reprojectToGrid(mask_read_path, local_transform, local_shape, target_crs, Resampling.nearest)
             mask_boolean_local = mask_reproj_local != mask_nodata_local
             mask_geometries_local = [shape(geom) for geom, val in shapes(mask_boolean_local.astype(np.uint8), transform=local_transform) if val > 0]
@@ -491,9 +520,14 @@ class CreateLidarDataPlotsEngine():
                 label_text = f"{dataset['dataset_name']}{date_str}"
                 legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
                 
-                display_mask = np.logical_or(destination == nodata, ~mask_boolean_local)
+                display_mask = np.logical_or.reduce((
+                    destination == nodata, 
+                    destination < -10000, # Catch interpolated nodata artifacts
+                    ~mask_boolean_local,
+                    destination >= 0
+                ))
                 masked_destination = np.ma.array(destination, mask=display_mask)
-                im = ax.imshow(masked_destination, extent=local_extent, cmap=cmap, vmin=global_min, vmax=global_max)
+                im = ax.imshow(masked_destination, extent=local_extent, cmap=cmap, vmin=global_min, vmax=0)
 
             for geom in mask_geometries_local:
                 x, y = geom.exterior.xy
@@ -705,6 +739,12 @@ class CreateLidarDataPlotsEngine():
         
         all_paths = list(year_datasets_map.values()) + [mask_read_path]
         global_transform, global_extent, global_shape = self.calculateExtent(all_paths, target_crs)
+
+        # ADDED CHECK: Prevent crash if calculateExtent fails to read any file
+        if global_shape is None:
+            print("Error: Could not calculate global extent for diff plots. Skipping.")
+            return
+
         mask_reproj_global, mask_nodata_global = self.reprojectToGrid(mask_read_path, global_transform, global_shape, target_crs, Resampling.nearest)
         mask_boolean_global = mask_reproj_global != mask_nodata_global
         
@@ -712,7 +752,12 @@ class CreateLidarDataPlotsEngine():
         for year in sorted_years:
             data, nodata = self.reprojectToGrid(year_datasets_map[year], global_transform, global_shape, target_crs)
             # Add the 'data >= 0' condition to the mask
-            mask = np.logical_or.reduce((data == nodata, ~mask_boolean_global, data >= 0))
+            mask = np.logical_or.reduce((
+                data == nodata, 
+                data < -10000, # Catch interpolated nodata artifacts
+                ~mask_boolean_global, 
+                data >= 0
+            ))
             reprojected_global[year] = np.ma.array(data, mask=mask)
 
         global_diff_min, global_diff_max = np.inf, -np.inf
@@ -722,6 +767,9 @@ class CreateLidarDataPlotsEngine():
             if diff.count() > 0:
                 global_diff_min = min(global_diff_min, diff.min())
                 global_diff_max = max(global_diff_max, diff.max())
+
+        if global_diff_min == np.inf:
+            global_diff_min, global_diff_max = -10, 10
 
         year_pairs = list(combinations(sorted_years, 2)) if mode == 'all' else list(zip(sorted_years, sorted_years[1:]))
         
@@ -766,27 +814,34 @@ class CreateLidarDataPlotsEngine():
             if use_individual_extent:
                 local_transform, local_extent, local_shape = self.calculateExtent([data_dict['path1'], data_dict['path2'], mask_read_path], target_crs)
                 
+                # ADDED CHECK: Prevent crash if specific year datasets cannot be resolved
+                if local_shape is None:
+                    print(f"Warning: Could not calculate local extent for {data_dict['year1']} to {data_dict['year2']}. Skipping.")
+                    continue
+
                 data1, nodata1 = self.reprojectToGrid(data_dict['path1'], local_transform, local_shape, target_crs)
                 data2, nodata2 = self.reprojectToGrid(data_dict['path2'], local_transform, local_shape, target_crs)
                 mask_reproj, mask_nodata = self.reprojectToGrid(mask_read_path, local_transform, local_shape, target_crs, Resampling.nearest)
                 
                 mask_boolean = mask_reproj != mask_nodata
-                # Add conditions to mask pixels where either dataset has a value >= 0
+                # Add conditions to mask pixels where either dataset has a value >= 0 or nodata leakage
                 combined_mask = np.logical_or.reduce((
                     data1 == nodata1, 
+                    data1 < -10000,
                     data2 == nodata2, 
+                    data2 < -10000,
                     ~mask_boolean,
                     data1 >= 0,
                     data2 >= 0
                 ))
                 diff = np.ma.array(data2 - data1, mask=combined_mask)
                 
-                im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=0)
+                im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
                 mask_geometries = [shape(geom) for geom, val in shapes(mask_boolean.astype(np.uint8), transform=local_transform) if val > 0]
                 self.setupSubplot(ax, shp_gdf, local_extent)
             else:
                 diff = reprojected_global[data_dict['year2']] - reprojected_global[data_dict['year1']]
-                im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=0)
+                im_diff = ax.imshow(diff, extent=global_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
                 
                 # Create a mask of the valid overlap area
                 overlap_mask = ~np.ma.mask_or(reprojected_global[data_dict['year1']].mask, reprojected_global[data_dict['year2']].mask)
@@ -856,7 +911,6 @@ class CreateLidarDataPlotsEngine():
 
         self.config = self.load_config(config_path, 'EcoRegion-3') 
         self.year_datasets = self.getYearDatasets(raster_folder, self.config)
-        print(self.year_datasets) 
 
         self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
         self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
@@ -888,5 +942,10 @@ class CreateLidarDataPlotsEngine():
         
         xticks = ax.get_xticks()
         yticks = ax.get_yticks()
+        
+        # Explicitly set ticks before assigning tick labels to avoid Matplotlib warning
+        ax.set_xticks(xticks)
+        ax.set_yticks(yticks)
+        
         ax.set_xticklabels([f'{val/1000:.1f}' for val in xticks], fontsize=4)
         ax.set_yticklabels([f'{val/1000:.1f}' for val in yticks], fontsize=4)
