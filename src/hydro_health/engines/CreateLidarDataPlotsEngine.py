@@ -37,7 +37,9 @@ os.environ["GDAL_CACHEMAX"] = "64"
 # Required to allow GDAL to write directly to S3 via /vsis3/
 os.environ['CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE'] = 'YES'
 
+
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs' / 'lookups'
+
 
 class CreateLidarDataPlotsEngine():
     """Class to hold the logic for processing the Lidar Data Plots"""
@@ -49,8 +51,9 @@ class CreateLidarDataPlotsEngine():
         self.fs = s3fs.S3FileSystem(anon=False)
         self.is_aws = (get_environment() == 'aws')
 
-    def _get_s3_path(self, path):
+    def _get_s3_path(self, path: pathlib.Path) -> str:
         """Helper to ensure path has s3:// prefix if on AWS"""
+        
         if self.is_aws:
             path_str = str(path).replace('\\', '/')
             if not path_str.startswith('s3://'):
@@ -58,8 +61,9 @@ class CreateLidarDataPlotsEngine():
             return path_str
         return str(path)
 
-    def _get_gdal_path(self, path):
+    def _get_gdal_path(self, path: pathlib.Path) -> str:
         """Helper to convert path to GDAL VSI format if on AWS"""
+
         path_str = str(path)
         if self.is_aws:
             path_str = path_str.replace('\\', '/')
@@ -69,13 +73,14 @@ class CreateLidarDataPlotsEngine():
                 path_str = f"/vsis3/{path_str.lstrip('/')}"
         return path_str
 
-    def calculateExtent(self, paths, target_crs) -> tuple:
+    def calculateExtent(self, paths: list[pathlib.Path], target_crs: str) -> tuple:
         """
         Calculates a common extent for a list of raster files.
         param list paths: List of paths to raster files.
         param str target_crs: Target coordinate reference system (e.g., 'EPSG:3857').
         return: Affine transform, extent (left, right, bottom, top), and shape (height, width) of the common grid.
         """
+
         local_left, local_bottom, local_right, local_top = np.inf, np.inf, -np.inf, -np.inf
         reference_res = None
 
@@ -114,12 +119,13 @@ class CreateLidarDataPlotsEngine():
         
         return common_transform, common_extent, (dst_height, dst_width)
 
-    def extract_date_from_metadata(self, metadata_path) -> list:
+    def extract_date_from_metadata(self, metadata_path: str) -> list[str]:
         """
         Extracts the first date in YYYY-MM format from a metadata file.
         param str metadata_path: Path to the metadata file.
         return list: Date(s) found in the metadata file.
         """
+
         try:
             content = ""
             if self.is_aws:
@@ -156,8 +162,8 @@ class CreateLidarDataPlotsEngine():
         param str suptitle: Super title for the figure.
         param str output_path: Path to save the figure.
         param int dpi: DPI for saving the figure.
-        return: None
         """
+
         if im is not None and im.get_array() is not None and im.get_array().count() > 0:
             cbar = fig.colorbar(im, ax=axes.ravel().tolist())
             cbar.set_label(cbar_label, fontsize=8, rotation=270, labelpad=20)
@@ -188,24 +194,19 @@ class CreateLidarDataPlotsEngine():
         plt.close(fig)
         print(f"Plot saved to: {output_path}")
 
-    def getYearDatasets(self, input_folder, config) -> dict:
+    def getYearDatasets(self, input_folder: pathlib.Path, config: dict) -> dict:
+        """Obtain dictionary of datasets for all years"""
+
         year_datasets = {}
         filename_pattern = re.compile(r'(.+?)(?:_(\d{4}))?(?:_(\d+))?_resampled\.tif', re.IGNORECASE)
         
         # Determine base folder for DigitalCoast metadata
         if self.is_aws:
             # Assuming structure: bucket/path/to/Resampled -> bucket/path/to/DigitalCoast
-            # Strip trailing slash and force forward slashes
             input_folder_str = str(input_folder).replace('\\', '/').rstrip('/')
-            
-            # Use string splitting to get parent instead of os.path.dirname to prevent backslash injection
             parent_folder = input_folder_str.replace("s3://", "").rsplit('/', 1)[0]
             base_folder = f"{parent_folder}/DigitalCoast"
-            
-            # List files using s3fs
             files_list = self.fs.ls(input_folder_str.replace("s3://", ""))
-            
-            # fs.ls returns full paths, extract filenames (use split instead of os.path.basename)
             filenames = [f.replace('\\', '/').split('/')[-1] for f in files_list]
         else:
             base_folder = os.path.dirname(input_folder)
@@ -242,12 +243,9 @@ class CreateLidarDataPlotsEngine():
             
             # Metadata search logic
             if self.is_aws:
-                # Check if base_folder exists in S3
                 if self.fs.exists(base_folder):
-                    # List directories in base_folder
                     subfolders = self.fs.ls(base_folder)
                     for folder_path in subfolders:
-                        # Extract folder name properly for AWS paths
                         folder_name = folder_path.replace('\\', '/').split('/')[-1]
                         
                         # Check logic matches local
@@ -294,9 +292,10 @@ class CreateLidarDataPlotsEngine():
             
         return year_datasets
     
-    def load_config(self, config_path, ecoregion_key):
-        # Config loading assumes local file usually (in container)
-        # If config needs to be loaded from S3, add logic here
+    def load_config(self, ecoregion_key: str) -> dict:
+        """Load lidar config file"""
+
+        config_path = INPUTS / 'ER_3_lidar_data_config.yaml'
         if not os.path.exists(config_path):
             print(f"Warning: Config file not found at '{config_path}'. No filtering will be applied.")
             return {}
@@ -307,22 +306,20 @@ class CreateLidarDataPlotsEngine():
                 return {}
             return full_config.get(ecoregion_key, {})
 
-    def plot_rasters_by_year(self, input_folder, output_folder, mask_path, shp_path) -> None:
+    def plot_rasters_by_year(self, output_folder, mask_path, shp_path) -> None:
         """
         Plots individual raster datasets by year using a global extent.
-        param str input_folder: Folder containing the input raster files.
         param str output_folder: Folder to save the output plots.
         param str mask_path: Path to the mask raster file.
         param str shp_path: Path to the shapefile for coastline plotting.
-        return: None
         """
+
         if not self.year_datasets:
             print("No raster files found.")
             return
 
         target_crs = 'EPSG:3857'
         
-        # Handle shapefile path
         shp_read_path = self._get_s3_path(shp_path)
         shp_gdf = gpd.read_file(shp_read_path).to_crs(target_crs)
         
@@ -431,15 +428,14 @@ class CreateLidarDataPlotsEngine():
 
         self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Global Extent)", output_file_path, 1200)
 
-    def plot_rasters_by_year_individual(self, input_folder, output_folder, mask_path, shp_path) -> None:
+    def plot_rasters_by_year_individual(self, output_folder, mask_path, shp_path) -> None:
         """
         Plots individual raster datasets by year using individual extents.
-        param str input_folder: Folder containing the input raster files.
         param str output_folder: Folder to save the output plots.
         param str mask_path: Path to the mask raster file.
         param str shp_path: Path to the shapefile for coastline plotting.
-        return: None
         """
+
         if not self.year_datasets:
             print("No raster files found.")
             return
@@ -558,9 +554,7 @@ class CreateLidarDataPlotsEngine():
         self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Individual Extent)", output_file_path, 600)
     
     def process_single_vrt(self, vrt_file, output_dir, x_res, y_res, resampling_method, creation_options, warpOptions, multithread) -> None:
-        """
-        Processes a single VRT file. This function will be executed by a Dask worker.
-        """
+        """Processes a single VRT file. This function will be executed by a Dask worker."""
         
         try:
             if self.is_aws:
@@ -574,8 +568,7 @@ class CreateLidarDataPlotsEngine():
                 # Convert to GDAL VSI paths
                 gdal_input = self._get_gdal_path(vrt_file)
                 
-                # Use local EC2 temporary file instead of direct vsis3 write
-                # This completely bypasses the S3 5GB single-part upload limit!
+                # Use local EC2 temporary file instead of direct vsis3 write to bypasses the S3 5GB upload limit!
                 gdal_output = f"/tmp/{resampled_base_name}"
                 
                 # Check existence using s3fs
@@ -607,9 +600,7 @@ class CreateLidarDataPlotsEngine():
 
             if self.is_aws:
                 print(f"Uploading resampled file to S3: {output_filename}...")
-                # s3fs put() handles multipart uploads automatically, so large files will succeed
                 self.fs.put(gdal_output, output_filename.replace("s3://", ""))
-                # Delete the local temporary file from EC2 to free up space
                 os.remove(gdal_output)
 
             print(f"Successfully resampled {vrt_file} to {output_filename}")
@@ -619,7 +610,7 @@ class CreateLidarDataPlotsEngine():
             if self.is_aws and 'gdal_output' in locals() and os.path.exists(gdal_output):
                 os.remove(gdal_output)
 
-    def reprojectToGrid(self, path, transform, shape, target_crs, resampling_method=Resampling.bilinear) -> tuple:
+    def reprojectToGrid(self, path, transform, shape, target_crs, resampling_method=Resampling.bilinear) -> tuple[np.zeros, int]:
         """
         Reprojects a raster to a specified grid.
         param str path: Path to the input raster file.
@@ -627,11 +618,9 @@ class CreateLidarDataPlotsEngine():
         param tuple shape: (height, width) of the target grid.
         param str target_crs: Target coordinate reference system (e.g., 'EPSG:3857').
         param object resampling_method: Resampling method from rasterio.enums.Resampling.
-        return: Reprojected raster data as a NumPy array and the nodata value.
         """
-        # Ensure path is S3 compatible for Rasterio
-        open_path = self._get_s3_path(path)
 
+        open_path = self._get_s3_path(path)
         with rasterio.open(open_path) as src:
             destination = np.zeros(shape, dtype=src.dtypes[0])
             reproject(
@@ -712,16 +701,14 @@ class CreateLidarDataPlotsEngine():
         dask.compute(*tasks)
         print("All vrts have been resampled.")
 
-    def plot_difference(self, input_folder, output_folder, mask_path, shp_path, mode, use_individual_extent=False) -> None:
+    def plot_difference(self, output_folder, mask_path, shp_path, mode, use_individual_extent=False) -> None:
         """
         Calculates and plots raster differences for consecutive or all year pairs.
-        param str input_folder: Folder containing the input raster files.
         param str output_folder: Folder to save the output plots.
         param str mask_path: Path to the mask raster file.
         param str shp_path: Path to the shapefile for coastline plotting.
         param str mode: 'consecutive' for consecutive year differences, 'all' for all year pairs with >=5% overlap.
         param bool use_individual_extent: Whether to use individual extents for each subplot.
-        return: None
         """
 
         if not self.year_datasets or len(self.year_datasets) < 2:
@@ -906,20 +893,18 @@ class CreateLidarDataPlotsEngine():
             plot_output_folder = get_config_item("LIDAR_PLOTS", "PLOT_OUTPUTS") 
             mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
             shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
-            
-        config_path = INPUTS / 'ER_3_lidar_data_config.yaml'
 
-        self.config = self.load_config(config_path, 'EcoRegion-3') 
+        self.config = self.load_config('EcoRegion-3') 
         self.year_datasets = self.getYearDatasets(raster_folder, self.config)
 
-        self.plot_rasters_by_year(raster_folder, plot_output_folder, mask_path, shp_path)
-        self.plot_rasters_by_year_individual(raster_folder, plot_output_folder, mask_path, shp_path)
+        self.plot_rasters_by_year(plot_output_folder, mask_path, shp_path)
+        self.plot_rasters_by_year_individual(plot_output_folder, mask_path, shp_path)
 
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+        self.plot_difference(plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
+        self.plot_difference(plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-        self.plot_difference(raster_folder, plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+        self.plot_difference(plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
+        self.plot_difference(plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
 
         print("Lidar Data Plots processing complete.")
 
@@ -929,7 +914,6 @@ class CreateLidarDataPlotsEngine():
         param object ax: Matplotlib axes object.
         param object shp_gdf: GeoDataFrame containing the shapefile data.
         param tuple extent: (left, right, bottom, top) for setting axis limits.
-        return: None
         """
 
         shp_gdf.plot(ax=ax, color='none', edgecolor='gray', linewidth=0.5, zorder=11)
