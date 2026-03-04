@@ -6,11 +6,11 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables/Prediction/pre_processed/tiled
 HURRICANE:
-  COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
-  CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
-  DATA_PATH: ER_3/original_data_files/hurricane_data
-  GPKG_PATH: ER_3/original_data_files/hurricane_data/hurricane_data.gpkg
-  RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_rasters
+  COUNT_RASTER_PATH: original_data_files/hurricane_data/hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: original_data_files/hurricane_data/hurricane_cumulative_raster
+  DATA_PATH: original_data_files/hurricane_data
+  GPKG_PATH: original_data_files/hurricane_data/hurricane_data.gpkg
+  RASTER_PATH: original_data_files/hurricane_data/hurricane_rasters
   YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
 LIDAR_PLOTS:
   INPUT_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast
@@ -39,8 +39,8 @@ S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  DATA_PATH: ER_3/original_data_files/sediment_data
-  GPKG_PATH: ER_3/original_data_files/sediment_data/sediment_data.gpkg
+  DATA_PATH: original_data_files/sediment_data
+  GPKG_PATH: original_data_files/sediment_data/sediment_data.gpkg
   MASK_PATH: ER_3/prediction_masks/prediction.mask.UTM17_8m.tif
   RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
 SHARED:
@@ -59,6 +59,6 @@ TERRAIN:
   FILLED_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
   OUTPUTS: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs
 TSM:
-  DATA_PATH: ER_3/original_data_files/tsm_data/nc_files
-  MEAN_RASTER_PATH: ER_3/original_data_files/tsm_data/tsm_rasters/mean_rasters
+  DATA_PATH: original_data_files/tsm_data/nc_files
+  MEAN_RASTER_PATH: original_data_files/tsm_data/tsm_rasters/mean_rasters
   YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/TSM_year_pair_rasters
