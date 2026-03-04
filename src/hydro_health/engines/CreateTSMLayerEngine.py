@@ -3,12 +3,13 @@ import re
 import pathlib
 import fnmatch
 import datetime
-from ftplib import FTP
 import xarray as xr
 import numpy as np
 import rasterio
-from rasterio.transform import from_bounds
+import s3fs
 
+from ftplib import FTP
+from rasterio.transform import from_bounds
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
@@ -75,20 +76,16 @@ class CreateTSMLayerEngine(Engine):
         self.password = creds.password
         self.server = 'ftp.hermes.acri.fr'
         self.downloaded_files = []
-        self.output_folder = (
-            OUTPUTS / pathlib.Path(get_config_item("TSM", "DATA_PATH"))
-            if get_environment() == "local"
-            else pathlib.Path(get_config_item("TSM", "DATA_PATH"))
-        )
+        self.output_folder = OUTPUTS
         self.raster_path = (
-            OUTPUTS / pathlib.Path(get_config_item("TSM", "MEAN_RASTER_PATH"))
-            if get_environment() == "local"
-            else pathlib.Path(get_config_item("TSM", "MEAN_RASTER_PATH"))
+            OUTPUTS / 'ER_3' / get_config_item("TSM", "SUBFOLDER") / 'mean_rasters'
+            if get_environment() in ["local", 'remote']
+            else f"{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/ER_3/{get_config_item('TSM', 'SUBFOLDER')}/mean_rasters"
         )
         self.year_pair_path = (
-            OUTPUTS / pathlib.Path(get_config_item("TSM", "YEAR_PAIR_RASTER_PATH"))
-            if get_environment() == "local"
-            else pathlib.Path(get_config_item("TSM", "YEAR_PAIR_RASTER_PATH"))
+            OUTPUTS / 'ER_3' / get_config_item("TSM", "SUBFOLDER") / 'TSM_year_pair_rasters'
+            if get_environment() in ["local", 'remote']
+            else f"{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/ER_3/{get_config_item('TSM', 'SUBFOLDER')}/TSM_year_pair_rasters"
         )
 
     def create_rasters(self)-> None:
@@ -101,7 +98,12 @@ class CreateTSMLayerEngine(Engine):
 
         for year in range(1998, 2025):
             print(f'Processing year: {year}')
-            nc_files = [f for f in os.listdir(self.output_folder) if f"L3m_{year}" in f and f.endswith('.nc')]
+            if get_environment() in ['local', 'remote']:
+                nc_files = [f for f in os.listdir(self.output_folder) if f"L3m_{year}" in f and f.endswith('.nc')]
+            else:
+                s3_files = s3fs.S3FileSystem()
+                s3_tsm_files = s3_files.ls(f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/testing/ER_3/{get_config_item("TSM", "SUBFOLDER")}')
+                nc_files = [p for p in s3_tsm_files if f"L3m_{year}" in p and p.endswith('.nc')]
             if not nc_files:
                 print(f"  No NetCDF files found for {year}")
                 continue
@@ -110,7 +112,10 @@ class CreateTSMLayerEngine(Engine):
             valid_count = None
 
             for fname in nc_files:
-                path = self.output_folder / fname
+                if get_environment() in ['local', 'remote']:
+                    path = self.output_folder / fname
+                else:
+                    path = f's3://{fname}'
                 try:
                     ds = xr.open_dataset(path)
                     arr = ds['TSM_mean'].values.squeeze().astype(np.float32)
@@ -136,7 +141,10 @@ class CreateTSMLayerEngine(Engine):
                 annual_mean = running_sum / valid_count
             annual_mean[valid_count == 0] = nodata_val
 
-            out_path = self.raster_path / f"TSM_mean_{year}.tif"
+            if get_environment() in ['local', 'remote']:
+                out_path = self.raster_path / f"TSM_mean_{year}.tif"
+            else:
+                out_path = f'/vsis3/{self.raster_path / f"TSM_mean_{year}.tif"}'
             with rasterio.open(
                 out_path,
                 'w',
@@ -198,14 +206,24 @@ class CreateTSMLayerEngine(Engine):
                                 print(f"Skipping late OLCIA file: {name}")
                                 continue  
 
-                    local_path = self.output_folder / name
-                    self.output_folder.mkdir(parents=True, exist_ok=True)
-                    if not local_path.exists():
-                        print(local_path)
-                        print(f"Downloading {name} from {item_path}")
-                        with open(local_path, 'wb') as f:
-                            ftp.retrbinary(f'RETR {name}', f.write)
-                        self.downloaded_files.append(name)
+                    if get_environment() == 'aws':
+                        s3_files = s3fs.S3FileSystem()
+                        s3_prefix = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/testing/ER_3/{get_config_item("TSM", "SUBFOLDER")}/{name}'
+                        if not s3_files.exists(s3_prefix):
+                            print(s3_prefix)
+                            print(f"Downloading {name} from {item_path}")
+                            with s3_files.open(s3_prefix, 'wb') as writer:
+                                ftp.retrbinary(f'RETR {name}', writer.write)
+                            self.downloaded_files.append(name)
+                    else:
+                        local_path = self.output_folder / name
+                        self.output_folder.mkdir(parents=True, exist_ok=True)
+                        if not local_path.exists():
+                            print(local_path)
+                            print(f"Downloading {name} from {item_path}")
+                            with open(local_path, 'wb') as f:
+                                ftp.retrbinary(f'RETR {name}', f.write)
+                            self.downloaded_files.append(name)
 
         except Exception as e:
             print(f"Error accessing {current_dir}: {e}")
@@ -260,11 +278,19 @@ class CreateTSMLayerEngine(Engine):
         :param int end_year: last year in the range
         """        
 
-        raster_files = [
-            os.path.join(self.raster_path, f)
-            for f in os.listdir(self.raster_path)
-            if f.endswith(".tif") and any(str(year) in f for year in range(start_year, end_year + 1))
-        ]
+        if get_environment() in ['local', 'remote']:
+            raster_files = [
+                os.path.join(self.raster_path, f)
+                for f in os.listdir(self.raster_path)
+                if f.endswith(".tif") and any(str(year) in f for year in range(start_year, end_year + 1))
+            ]
+        else:
+            s3_files = s3fs.S3FileSystem()
+            s3_tif_files = s3_files.ls(f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/testing/ER_3/{get_config_item("TSM", "SUBFOLDER")}')
+            raster_files = [
+                f'/vsis3/{f}' for f in s3_tif_files 
+                if f.endswith(".tif") and any(str(year) in f for year in range(start_year, end_year + 1))
+            ]
 
         with rasterio.open(raster_files[0]) as src:
             meta = src.meta.copy()
@@ -285,7 +311,10 @@ class CreateTSMLayerEngine(Engine):
         with np.errstate(divide='ignore', invalid='ignore'):
             average_array = np.where(count_array > 0, sum_array / count_array, np.nan) 
 
-        output_path = os.path.join(self.year_pair_path, f'{start_year}_{end_year}_tsm_mean.tif')
+        if get_environment() in ['local', 'remote']:
+            output_path = os.path.join(self.year_pair_path, f'{start_year}_{end_year}_tsm_mean.tif')
+        else:
+            output_path = f'/vsis3/{self.year_pair_path}/{start_year}_{end_year}_tsm_mean.tif'
         with rasterio.open(output_path, "w", **meta) as dst:
             dst.write(average_array, 1)
 
@@ -297,7 +326,7 @@ class CreateTSMLayerEngine(Engine):
         No data available prior to 2002.
         """
 
-        # self.download_tsm_data()
+        self.download_tsm_data()
         self.create_rasters()
 
         for start_year, end_year in self.year_ranges:    

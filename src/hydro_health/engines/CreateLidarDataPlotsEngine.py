@@ -611,7 +611,7 @@ class CreateLidarDataPlotsEngine():
         output_dir = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
 
         if self.is_aws:
-            bucket = get_config_item('S3', 'BUCKET_NAME')
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             
             # Prepend bucket to directories for s3fs globbing and saving
             input_dir_clean = str(input_dir).replace('\\', '/').replace("s3://", "")
@@ -829,7 +829,7 @@ class CreateLidarDataPlotsEngine():
         client.close()
         
         if self.is_aws:
-            bucket = get_config_item('S3', 'BUCKET_NAME')
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             raster_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'RESAMPLED_VRTS')}".replace('\\', '/')
             plot_output_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'PLOT_OUTPUTS')}".replace('\\', '/')
             mask_path = f"s3://{bucket}/{get_config_item('MASK', 'MASK_TRAINING_PATH')}".replace('\\', '/')
