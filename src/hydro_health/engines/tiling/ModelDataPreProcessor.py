@@ -123,8 +123,8 @@ class ModelDataPreProcessor:
 
         self.create_file_paths()
 
-        # self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
-        # self.raster_to_spatial_df(self.train_mask_path, process_type='training')
+        self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
+        self.raster_to_spatial_df(self.train_mask_path, process_type='training')
 
         input("Press Enter to continue...")
 
