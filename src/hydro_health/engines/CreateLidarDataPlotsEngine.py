@@ -42,11 +42,75 @@ os.environ['CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE'] = 'YES'
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs' / 'lookups'
 
 
+def _process_all_vrts(params):
+    """Processes a single VRT file. This function will be executed by a Dask worker."""
+
+    vrt_file, output_dir, x_res, y_res, resampling_method, creation_options = params
+    
+    engine = CreateLidarDataPlotsEngine()
+
+    try:
+        if engine.is_aws:
+            # Use standard string manipulation for S3 paths to prevent os.path from adding backslashes
+            base_name = str(vrt_file).replace('\\', '/').split('/')[-1]
+            resampled_base_name = base_name.replace('.vrt', '_resampled.tif')
+            output_dir_clean = str(output_dir).replace('\\', '/')
+            output_filename = f"{output_dir_clean.rstrip('/')}/{resampled_base_name}"
+            if not output_filename.startswith("s3://"): output_filename = f"s3://{output_filename}"
+            
+            # Convert to GDAL VSI paths
+            gdal_input = engine._get_gdal_path(vrt_file)
+
+            # Use local EC2 temporary file instead of direct vsis3 write to bypasses the S3 5GB upload limit!
+            gdal_output = f"/tmp/{resampled_base_name}"
+            
+            # Check existence using s3fs
+            exists = engine.fs.exists(output_filename.replace("s3://", ""))
+        else:
+            base_name = os.path.basename(vrt_file)
+            output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
+            gdal_input = vrt_file
+            gdal_output = output_filename
+            exists = os.path.exists(output_filename)
+
+        if exists:
+            skip_message = f"Output file {output_filename} already exists. Skipping {vrt_file}."
+            print(skip_message)
+            return
+
+        print(f"Resampling: {vrt_file}")
+
+        gdal.Warp(
+            gdal_output,
+            gdal_input,
+            xRes=x_res,
+            yRes=y_res,
+            resampleAlg=resampling_method,
+            creationOptions=creation_options,
+            warpOptions=[],   
+            multithread=True    
+        )
+
+        if engine.is_aws:
+            print(f"Uploading resampled file to S3: {output_filename}...")
+            engine.fs.put(gdal_output, output_filename.replace("s3://", ""))
+            os.remove(gdal_output)
+
+        print(f"Successfully resampled {vrt_file} to {output_filename}")
+    except Exception as e:
+        print(f"Error processing {vrt_file}: {e}")
+        # Ensure the local temporary file is deleted even if the upload or GDAL process fails
+        if engine.is_aws and 'gdal_output' in locals() and os.path.exists(gdal_output):
+            os.remove(gdal_output)
+
+
 class CreateLidarDataPlotsEngine(Engine):
     """Class to hold the logic for processing the Lidar Data Plots"""
 
     def __init__(self):
+        super().__init__()
         self.config = None
+        self.client = None
         self.year_datasets = None
         self.fs = s3fs.S3FileSystem(anon=False)
         self.is_aws = (get_environment() == 'aws')
@@ -553,62 +617,62 @@ class CreateLidarDataPlotsEngine(Engine):
 
         self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Individual Extent)", output_file_path, 600)
     
-    def process_single_vrt(self, vrt_file, output_dir, x_res, y_res, resampling_method, creation_options, warpOptions, multithread) -> None:
-        """Processes a single VRT file. This function will be executed by a Dask worker."""
+    # def process_single_vrt(self, vrt_file, output_dir, x_res, y_res, resampling_method, creation_options, warpOptions, multithread) -> None:
+        # """Processes a single VRT file. This function will be executed by a Dask worker."""
         
-        try:
-            if self.is_aws:
-                # Use standard string manipulation for S3 paths to prevent os.path from adding backslashes
-                base_name = str(vrt_file).replace('\\', '/').split('/')[-1]
-                resampled_base_name = base_name.replace('.vrt', '_resampled.tif')
-                output_dir_clean = str(output_dir).replace('\\', '/')
-                output_filename = f"{output_dir_clean.rstrip('/')}/{resampled_base_name}"
-                if not output_filename.startswith("s3://"): output_filename = f"s3://{output_filename}"
+        # try:
+        #     if self.is_aws:
+        #         # Use standard string manipulation for S3 paths to prevent os.path from adding backslashes
+        #         base_name = str(vrt_file).replace('\\', '/').split('/')[-1]
+        #         resampled_base_name = base_name.replace('.vrt', '_resampled.tif')
+        #         output_dir_clean = str(output_dir).replace('\\', '/')
+        #         output_filename = f"{output_dir_clean.rstrip('/')}/{resampled_base_name}"
+        #         if not output_filename.startswith("s3://"): output_filename = f"s3://{output_filename}"
                 
-                # Convert to GDAL VSI paths
-                gdal_input = self._get_gdal_path(vrt_file)
+        #         # Convert to GDAL VSI paths
+        #         gdal_input = self._get_gdal_path(vrt_file)
                 
-                # Use local EC2 temporary file instead of direct vsis3 write to bypasses the S3 5GB upload limit!
-                gdal_output = f"/tmp/{resampled_base_name}"
+        #         # Use local EC2 temporary file instead of direct vsis3 write to bypasses the S3 5GB upload limit!
+        #         gdal_output = f"/tmp/{resampled_base_name}"
                 
-                # Check existence using s3fs
-                exists = self.fs.exists(output_filename.replace("s3://", ""))
-            else:
-                base_name = os.path.basename(vrt_file)
-                output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
-                gdal_input = vrt_file
-                gdal_output = output_filename
-                exists = os.path.exists(output_filename)
+        #         # Check existence using s3fs
+        #         exists = self.fs.exists(output_filename.replace("s3://", ""))
+        #     else:
+        #         base_name = os.path.basename(vrt_file)
+        #         output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
+        #         gdal_input = vrt_file
+        #         gdal_output = output_filename
+        #         exists = os.path.exists(output_filename)
 
-            if exists:
-                skip_message = f"Output file {output_filename} already exists. Skipping {vrt_file}."
-                print(skip_message)
-                return
+        #     if exists:
+        #         skip_message = f"Output file {output_filename} already exists. Skipping {vrt_file}."
+        #         print(skip_message)
+        #         return
 
-            print(f"Resampling: {vrt_file}")
+        #     print(f"Resampling: {vrt_file}")
 
-            gdal.Warp(
-                gdal_output,
-                gdal_input,
-                xRes=x_res,
-                yRes=y_res,
-                resampleAlg=resampling_method,
-                creationOptions=creation_options,
-                warpOptions=warpOptions,   
-                multithread=multithread     
-            )
+        #     gdal.Warp(
+        #         gdal_output,
+        #         gdal_input,
+        #         xRes=x_res,
+        #         yRes=y_res,
+        #         resampleAlg=resampling_method,
+        #         creationOptions=creation_options,
+        #         warpOptions=warpOptions,   
+        #         multithread=multithread     
+        #     )
 
-            if self.is_aws:
-                print(f"Uploading resampled file to S3: {output_filename}...")
-                self.fs.put(gdal_output, output_filename.replace("s3://", ""))
-                os.remove(gdal_output)
+        #     if self.is_aws:
+        #         print(f"Uploading resampled file to S3: {output_filename}...")
+        #         self.fs.put(gdal_output, output_filename.replace("s3://", ""))
+        #         os.remove(gdal_output)
 
-            print(f"Successfully resampled {vrt_file} to {output_filename}")
-        except Exception as e:
-            print(f"Error processing {vrt_file}: {e}")
-            # Ensure the local temporary file is deleted even if the upload or GDAL process fails
-            if self.is_aws and 'gdal_output' in locals() and os.path.exists(gdal_output):
-                os.remove(gdal_output)
+        #     print(f"Successfully resampled {vrt_file} to {output_filename}")
+        # except Exception as e:
+        #     print(f"Error processing {vrt_file}: {e}")
+        #     # Ensure the local temporary file is deleted even if the upload or GDAL process fails
+        #     if self.is_aws and 'gdal_output' in locals() and os.path.exists(gdal_output):
+        #         os.remove(gdal_output)
 
     def reprojectToGrid(self, path, transform, shape, target_crs, resampling_method=Resampling.bilinear) -> tuple[np.zeros, int]:
         """
@@ -683,22 +747,31 @@ class CreateLidarDataPlotsEngine(Engine):
             "NUM_THREADS=ALL_CPUS" # Moved NUM_THREADS here from warpOptions
         ]
 
-        tasks = []
-
-        for vrt_file in vrt_files:
-            task = dask.delayed(self.process_single_vrt)(
-                vrt_file,
+        vrt_params = [[vrt_file,
                 output_dir,
                 x_res,
                 y_res,
                 resampling_method,
-                creation_options,
-                warpOptions=[], # Cleaned out the unused warp option that threw the warning
-                multithread=True
-            )
-            tasks.append(task)
+                creation_options, 
+            ] for vrt_file in vrt_files ]
+        
+        future_tiles = self.client.map(_process_all_vrts, vrt_params)
+        _ = self.client.gather(future_tiles)
 
-        dask.compute(*tasks)
+        # for vrt_file in vrt_files:
+        #     task = self.client.delayed(self.process_single_vrt)(
+        #         vrt_file,
+        #         output_dir,
+        #         x_res,
+        #         y_res,
+        #         resampling_method,
+        #         creation_options,
+        #         warpOptions=[], # Cleaned out the unused warp option that threw the warning
+        #         multithread=True
+        #     )
+        #     tasks.append(task)
+
+        # self.client.compute(*tasks)
         print("All vrts have been resampled.")
 
     def plot_difference(self, output_folder, mask_path, shp_path, mode, use_individual_extent=False) -> None:
@@ -875,8 +948,15 @@ class CreateLidarDataPlotsEngine(Engine):
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
-        self.setup_dask(self.param_lookup['env'])
-        self.resample_vrt_files()   
+        self.setup_dask(get_environment(), memory_limit="16GB")
+
+        # self.client = Client(
+        #     n_workers=8, 
+        #     threads_per_worker=2, 
+        #     memory_limit="32GB"
+        # )
+
+        self.resample_vrt_files()
         self.close_dask()
 
         if self.is_aws:
