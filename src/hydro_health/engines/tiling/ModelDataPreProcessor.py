@@ -69,7 +69,7 @@ class ModelDataPreProcessor:
             }
 
         elif get_environment() == 'aws':
-            bucket = get_config_item('S3', 'BUCKET_NAME')
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             self.mask_prediction_pq = f"s3://{bucket}/{get_config_item('MASK', 'PREDICTION_MASK_PQ')}"
             self.mask_training_pq = f"s3://{bucket}/{get_config_item('MASK', 'TRAINING_MASK_PQ')}"
             self.pred_mask_path = f"s3://{bucket}/{get_config_item('MASK', 'MASK_PRED_PATH')}"
@@ -849,7 +849,7 @@ class ModelDataPreProcessor:
             masks_dir_conf = get_config_item('MASK', 'MASKS_DIR')
             
             if self.is_aws:
-                bucket = get_config_item('S3', 'BUCKET_NAME')
+                bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
                 mask_path = f"s3://{bucket}/{masks_dir_conf}/{process_type}_mask.parquet"
             else:
                 masks_dir = Path(masks_dir_conf)

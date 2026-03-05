@@ -9,7 +9,8 @@ from datetime import datetime
 HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
 
-from hydro_health.helpers import tools, runners
+from hydro_health.helpers import runners
+from hydro_health.helpers.tools import Param, get_config_item, get_environment, get_ecoregion_tiles
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / "inputs"
@@ -21,25 +22,25 @@ def get_env_param_lookup(env: str) -> dict[str]:
 
     if env == 'local':
         param_lookup = {
-            'input_directory': tools.Param(''),
-            'output_directory': tools.Param(str(OUTPUTS)),
-            'eco_regions': tools.Param(''),
-            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson')),
+            'input_directory': Param(''),
+            'output_directory': Param(str(OUTPUTS)),
+            'eco_regions': Param(''),
+            'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
     elif env == 'remote':
         param_lookup = {
-            'input_directory': tools.Param(''),
-            'output_directory': tools.Param(tools.get_config_item('SHARED', 'OUTPUT_FOLDER')),
-            'eco_regions': tools.Param(''),
+            'input_directory': Param(''),
+            'output_directory': Param(get_config_item('SHARED', 'OUTPUT_FOLDER')),
+            'eco_regions': Param(''),
             'env': env
         }
     else:
         param_lookup = {
-            'input_directory': tools.Param(''),
-            'output_directory': tools.Param(str(OUTPUTS)),
-            'eco_regions': tools.Param(''),
-            'drawn_polygon': tools.Param(str(INPUTS / 'drawn_polygons.geojson')),
+            'input_directory': Param(''),
+            'output_directory': Param(str(OUTPUTS)),
+            'eco_regions': Param(''),
+            'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
     return param_lookup
@@ -47,7 +48,7 @@ def get_env_param_lookup(env: str) -> dict[str]:
 
 def run_hydro_health(config_name: str) -> None:
     start = time.time()
-    env = tools.get_environment()
+    env = get_environment()
     print('Environment:', env)
     param_lookup = get_env_param_lookup(env)
 
@@ -64,7 +65,7 @@ def run_hydro_health(config_name: str) -> None:
         # load ecoregions from config for remote run
         param_lookup['eco_regions'].value = config['ecoregions'] if env in ['remote', 'aws'] else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
-        tiles = tools.get_ecoregion_tiles(param_lookup)
+        tiles = get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup)
@@ -80,18 +81,18 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
                 runners.run_raster_mask_engine(param_lookup)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
-                tools.grid_digital_coast_files(param_lookup['output_directory'].valueAsText, 'DigitalCoast')
-            elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
-                runners.run_sediment_layer_engine()
+                runners.run_grid_digital_coast(param_lookup)
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
                 runners.run_tsm_layer_engine()
+            elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
+                runners.run_sediment_layer_engine()
             elif step["tool"] == "run_hurricane_layer_engine" and step["run"]:
                 runners.run_hurricane_layer_engine()
     update_config_runtime(config_path, config)
     end = time.time()
-    print(f"Total Runtime: {(end - start) / 60}")
+    print(f"Total Runtime: {(end - start) / 60} minutes")
     for ecoregion in pathlib.Path(param_lookup['output_directory'].valueAsText).glob('ER_*'):
-        bluetopo_path = pathlib.Path(ecoregion / tools.get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo')
+        bluetopo_path = pathlib.Path(ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo')
         if bluetopo_path.is_dir():
             print(f'{ecoregion.stem} BlueTopo tiles:', len(next(os.walk(str(bluetopo_path)))[1]))
         else:

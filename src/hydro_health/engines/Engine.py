@@ -158,6 +158,13 @@ class Engine:
         file.write(output_projection.ExportToWkt())
         file.close()
 
+    def print_async_results(self, results: list[str], output_folder: str) -> None:
+        """Consolidate result printing"""
+
+        for result in results:
+            if result:
+                self.write_message(f'Result: {result}', output_folder)  
+
     def setup_dask(self, env, processes=True, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 

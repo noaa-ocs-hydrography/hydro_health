@@ -6,6 +6,7 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables/Prediction/pre_processed/tiled
 HURRICANE:
+  SUBFOLDER: original_data_files/tsm_data
   COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
   CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
   DATA_PATH: ER_3/original_data_files/hurricane_data
@@ -35,9 +36,8 @@ MODEL:
   TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
   UNCOMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/uncombined_lidar_tifs
-S3:
-  BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
+  SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
   DATA_PATH: ER_3/original_data_files/sediment_data
   GPKG_PATH: ER_3/original_data_files/sediment_data/sediment_data.gpkg
@@ -52,13 +52,10 @@ SHARED:
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
-  OUTPUT_FOLDER: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 TERRAIN:
   INPUT_DIR: ER_3/model_variables/Prediction/processed
   FILLED_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
   OUTPUTS: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs
 TSM:
-  DATA_PATH: ER_3/original_data_files/tsm_data/nc_files
-  MEAN_RASTER_PATH: ER_3/original_data_files/tsm_data/tsm_rasters/mean_rasters
-  YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/TSM_year_pair_rasters
+  SUBFOLDER: original_data_files/tsm_data

@@ -11,6 +11,7 @@ from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
+from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
@@ -79,6 +80,13 @@ def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict
     
     engine = DigitalCoastS3Engine(param_lookup)
     engine.run(tiles)
+
+
+def run_grid_digital_coast(param_lookup: dict[dict]) -> None:
+    """Entry poiint for gridding DigitalCoast tiles to BlueTopo polygons"""
+
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run()
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
