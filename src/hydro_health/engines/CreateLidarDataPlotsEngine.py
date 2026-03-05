@@ -26,6 +26,7 @@ from dask.distributed import Client, print
 
 from osgeo import gdal
 
+from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
 # Suppress benign Matplotlib colormap overflow warnings caused by hidden masked array values
@@ -39,11 +40,10 @@ os.environ['CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE'] = 'YES'
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs' / 'lookups'
 
-class CreateLidarDataPlotsEngine():
+class CreateLidarDataPlotsEngine(Engine):
     """Class to hold the logic for processing the Lidar Data Plots"""
 
     def __init__(self):
-        super().__init__()
         self.config = None
         self.year_datasets = None
         self.fs = s3fs.S3FileSystem(anon=False)
@@ -888,13 +888,10 @@ class CreateLidarDataPlotsEngine():
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
-        client = Client(n_workers=4, threads_per_worker=1, memory_limit="32GB")
-        print(f"Dask Dashboard: {client.dashboard_link}")
-        
-        self.resample_vrt_files()
+        self.setup_dask(self.param_lookup['env'])
+        self.resample_vrt_files()   
+        self.close_dask()
 
-        client.close()
-        
         if self.is_aws:
             bucket = get_config_item('S3', 'BUCKET_NAME')
             raster_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'RESAMPLED_VRTS')}".replace('\\', '/')
