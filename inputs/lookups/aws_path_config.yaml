@@ -19,7 +19,7 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
-  COAST_BOUNDARY_PATH: coastal_boundary_dataset/50m_isobath_polygon/50m_isobath_polygon.shp
+  COAST_BOUNDARY_PATH: ER_3/masks/50m_isobath_polygon.gpkg
   MASKS_DIR: ER_3/masks
   MASK_PRED_PATH: ER_3/masks/prediction_mask_ER_3.tif
   MASK_TRAINING_PATH: ER_3/masks/training_mask_ER_3.tif
