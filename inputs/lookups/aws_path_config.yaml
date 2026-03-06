@@ -39,10 +39,8 @@ MODEL:
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  DATA_PATH: ER_3/original_data_files/sediment_data
-  GPKG_PATH: ER_3/original_data_files/sediment_data/sediment_data.gpkg
-  MASK_PATH: ER_3/prediction_masks/prediction.mask.UTM17_8m.tif
-  RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
+  MASK_PATH: masks/prediction_mask_ER_3.tif
+  RASTER_PATH: model_variables/Prediction/pre_processed/sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
