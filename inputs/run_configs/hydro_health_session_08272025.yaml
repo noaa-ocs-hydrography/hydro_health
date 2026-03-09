@@ -12,9 +12,9 @@ steps:
 - tool: run_vrt_creation
   run: false
 - tool: run_raster_mask_engine
-  run: true
-- tool: grid_digital_coast_files
   run: false
+- tool: grid_digital_coast_files
+  run: true
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
