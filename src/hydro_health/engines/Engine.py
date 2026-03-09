@@ -63,10 +63,6 @@ class Engine:
             if text in feature_json['attributes']['provider_results_name']:
                 return True
         return False
-    
-    def check_logging(self) -> None:
-        if self.logged:
-            self.message(f'Check log: {self.log_path}')
 
     def cleansed_url(self, url: str) -> str:
         """Remove found illegal characters from URLs"""
@@ -133,20 +129,6 @@ class Engine:
                 geometry_coords.append(tile_wkt)
 
         return geometry_coords
-    
-    def log_error(self) -> None:
-        self.logger.error(gdal.GetLastErrorMsg())
-        if not self.logged:
-            self.logged = True
-    
-    def message(self, content:str) -> None:
-        """Wrap Arcpy for printing"""
-
-        if 'arcpy' in sys.modules:
-            module = __import__('arcpy')
-            getattr(module, 'AddMessage')(content)
-        else:
-            print(content)
 
     def make_esri_projection(self, file_name, epsg=4326):
         """Create an Esri .prj file for a shapefile"""
