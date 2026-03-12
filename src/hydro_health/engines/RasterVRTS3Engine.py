@@ -70,7 +70,7 @@ def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
 def _process_single_digitalcoast(params: list) -> list[str, str, str]:
     """Parallel process creating a Warped VRT for DigitalCoast"""
 
-    geotiff_prefix, s3_bucket, all_crs_info = params
+    geotiff_prefix, s3_bucket, all_crs_info, data_folder = params
 
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
     gdal.SetConfigOption('AWS_S3_ENDPOINT', 's3.amazonaws.com')
@@ -130,7 +130,10 @@ def _process_single_digitalcoast(params: list) -> list[str, str, str]:
         parts = geotiff_prefix.split('/')
         geotiff_folders = '/'.join(parts[1:])
         p_path = pathlib.Path(geotiff_folders)
-        provider = p_path.parents[2].name if 'dem' in geotiff_folders else p_path.parents[3].name
+        if data_folder:
+            provider = parts[-2]  # manual download provider name
+        else:
+            provider = p_path.parents[2].name if 'dem' in geotiff_folders else p_path.parents[3].name
         clean_key = f"{datum_code}_{provider}"
 
     finally:
@@ -179,11 +182,11 @@ class RasterVRTS3Engine(Engine):
             print(f'Uploading Master VRT: {vrt_filename.name} to {s3_prefix}')
             s3_client.upload_file(str(vrt_filename), bucket_name, s3_prefix)
 
-    def create_raster_vrts(self, file_type: str, ecoregion: str, data_type: str, skip_existing=False) -> None:
+    def create_raster_vrts(self, file_type: str, ecoregion: str, data_type: str, data_folder: False, skip_existing=False) -> None:
         """Create an output VRT from found .tif files"""
 
-        output_prefix = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_type}"
-        output_prefix_folder = f"testing/{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_type}"
+        output_prefix = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_folder if data_folder else data_type}"
+        output_prefix_folder = f"{ecoregion}/{get_config_item(data_type.upper(), 'SUBFOLDER')}/{data_folder if data_folder else data_type}"
         s3_files = s3fs.S3FileSystem()
         if data_type == 'BlueTopo':
             if skip_existing:
@@ -199,13 +202,15 @@ class RasterVRTS3Engine(Engine):
         else:
             provider_folders = s3_files.glob(f"{output_prefix}/*")
             for provider in provider_folders:
+                # provider full: ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/raw/DigitalCoast_manual_downloads/FallGCJ1233560_1998
+                # provider: FallGCJ1233560_1998
                 provider_name = provider.split("/")[-1]
                 if skip_existing:
                     if s3_files.glob(f'{output_prefix}/*{provider_name}.vrt'):
                         print(f'- skipping {provider_name}')
                         continue
                 geotiffs = s3_files.glob(f"{provider}/**/{self.glob_lookup[file_type]}")
-                output_geotiffs = self.get_digitalcoast_tifs(geotiffs)
+                output_geotiffs = self.get_digitalcoast_tifs(geotiffs, data_folder)
                 with tempfile.TemporaryDirectory() as temp_dir:
                     temp_output_path = pathlib.Path(temp_dir) 
                     self.build_output_vrts(output_prefix_folder, file_type, output_geotiffs, temp_output_path)
@@ -228,11 +233,11 @@ class RasterVRTS3Engine(Engine):
             
         return output_geotiffs
 
-    def get_digitalcoast_tifs(self, geotiffs: list) -> dict:
+    def get_digitalcoast_tifs(self, geotiffs: list, data_folder) -> dict:
         """Dask processing to build DigitalCoast tifs"""
 
         s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        task_params = [(geotiff, s3_bucket, self.all_crs) for geotiff in geotiffs]
+        task_params = [(geotiff, s3_bucket, self.all_crs, data_folder) for geotiff in geotiffs]
         futures = self.client.map(_process_single_digitalcoast, task_params)
         results = self.client.gather(futures)
 

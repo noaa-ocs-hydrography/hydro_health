@@ -408,11 +408,6 @@ EcoRegion-3:
     date: metadata.txt not found
     year: null
     note: Corrupted data. LAZ. Don't use, duplicate dataset like NOAA_NGS_2019_9708
-  NGSFL_2019:
-    use: True
-    date: null
-    year: null
-    note: Valid dataset, manual download   
   NGSFLtopobathyDEMIrmaJ1233606_2019:
     use: True
     date: null
