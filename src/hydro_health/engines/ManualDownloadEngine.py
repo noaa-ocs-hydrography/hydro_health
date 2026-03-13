@@ -22,6 +22,12 @@ class ManualDownloadEngine:
     def __init__(self, param_lookup) -> None:
         self.param_lookup = param_lookup
 
+    def process_grid_tiles(self) -> None:
+        """Tile manually downloaded VRT files to BlueTopo"""
+
+        engine = GridDigitalCoastEngine(self.param_lookup)
+        engine.run(manual_download=True)
+
     def process_masks(self) -> None:
         """Create masks with manual download additions"""
 
@@ -46,7 +52,7 @@ class ManualDownloadEngine:
     def run(self) -> None:
         # self.process_vrt()
         self.process_masks()
-        # Rerun Grid Tiling Engine
+        # self.process_grid_tiles()
         print('Done')
 
 if __name__ == '__main__':

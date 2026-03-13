@@ -165,40 +165,71 @@ class RasterMaskS3Engine(Engine):
         self.param_lookup = param_lookup
 
     def dissolve_tile_index_shapefiles(self, approved_files, ecoregions, temp_folder) -> None:
-        """Dissolve tile index shapefiles by buffering through local temp storage"""
+        """Dissolve tile index shapefiles based on TIF existence in S3"""
         
         s3_files = s3fs.S3FileSystem()
         for ecoregion in ecoregions:
             if ecoregion in approved_files:
                 for tile_index_path in approved_files[ecoregion]:
-                    provider_folder = "/".join(tile_index_path.split('/')[:-1])
+                    tileindex_parent_prefix = "/".join(tile_index_path.split('/')[:-1])
+                    
+                    try:
+                        all_s3_files = s3_files.ls(tileindex_parent_prefix)
+                        s3_tif_filenames = {pathlib.Path(f).name for f in all_s3_files if f.lower().endswith('.tif')}
+                    except Exception as e:
+                        print(f" - Error with tileindex parent prefix: {tileindex_parent_prefix}: {e}")
+                        continue
+
                     digital_coast_path = "/".join(tile_index_path.split('/')[2:-1])
                     shp_stem = tile_index_path.split('/')[-1][:-4]
-                    for s3_file in s3_files.ls(provider_folder):
+                    
+                    # Download shp components to local temp
+                    for s3_file in all_s3_files:
                         if shp_stem in s3_file and "_dis" not in s3_file:
                             local_file = temp_folder / ecoregion / digital_coast_path / pathlib.Path(s3_file).name
+                            local_file.parent.mkdir(parents=True, exist_ok=True)
                             s3_files.get(s3_file, str(local_file))
                     
-                    local_shp = temp_folder / ecoregion / digital_coast_path /  f"{shp_stem}.shp"
+                    local_shp = temp_folder / ecoregion / digital_coast_path / f"{shp_stem}.shp"
                     if not local_shp.exists():
-                        print(f"Error: Could not find {local_shp} after download.")
                         continue
                         
                     tile_index = gpd.read_file(str(local_shp))
                     
-                    print(f" - {shp_stem}...")
-                    dissolved_tile_index = tile_index.dissolve().to_crs("EPSG:4326")
-                    
-                    dissolved_filename = f"{shp_stem}_dis"
-                    local_out_path = temp_folder / ecoregion / digital_coast_path / f"{dissolved_filename}.shp"
-                    dissolved_tile_index.to_file(local_out_path, driver='ESRI Shapefile')
-                    
-                    # upload local dissolved file to S3
-                    digital_coast_temp_folder = temp_folder / ecoregion / digital_coast_path
-                    for local_file in digital_coast_temp_folder.glob(f"{dissolved_filename}.*"):
-                        s3_target = f"{provider_folder}/{local_file.name}"
-                        s3_files.put(str(local_file), s3_target)
-                        print(f" - uploaded: {s3_target}")
+                    # Find column with name of files
+                    possible_cols = ['filename', 'location']
+                    found_column = next((c for c in possible_cols if c in tile_index.columns), None)
+
+                    if found_column:
+                        def check_tif_on_s3(row):
+                            """Helper func to remove polygon if no tif"""
+                            val = row.get(found_column)
+                            if not val or str(val).lower() == 'nan':
+                                return False
+                                
+                            tif_name = pathlib.Path(str(val)).name
+                            if not tif_name.lower().endswith('.tif'):
+                                tif_name = f"{pathlib.Path(tif_name).stem}.tif"
+                            
+                            return tif_name in s3_tif_filenames
+
+                        # Remove polygons with no tif file
+                        tile_index = tile_index[tile_index.apply(check_tif_on_s3, axis=1)].copy()
+
+                    if not tile_index.empty:
+                        print(f" - Dissolving {shp_stem} with {len(tile_index)}")
+                        dissolved_tile_index = tile_index.dissolve().to_crs("EPSG:4326")
+                        
+                        dissolved_filename = f"{shp_stem}_dis"
+                        local_out_path = temp_folder / ecoregion / digital_coast_path / f"{dissolved_filename}.shp"
+                        dissolved_tile_index.to_file(local_out_path, driver='ESRI Shapefile')
+                        
+                        # Upload all shp parts
+                        for local_file in local_out_path.parent.glob(f"{dissolved_filename}.*"):
+                            s3_target = f"{tileindex_parent_prefix}/{local_file.name}"
+                            s3_files.put(str(local_file), s3_target)
+                    else:
+                        print(f" - No matching TIFs found in {tileindex_parent_prefix} for {shp_stem}")
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path], manual_downloads: bool):
         """Get list of intersected features from ecoregion tile index shapefile"""
@@ -239,11 +270,21 @@ class RasterMaskS3Engine(Engine):
         for ecoregion in ecoregions:
             digital_coast_folder = temp_folder / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             manual_downloads_folder = temp_folder / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast_manual_downloads'
-            if digital_coast_folder.is_dir() or manual_downloads_folder.is_dir():
-                dissolved_shapefiles = list(digital_coast_folder.rglob('*_dis.shp')) + list(manual_downloads_folder.rglob('*_dis.shp'))
+            
+            dissolved_shapefiles = []
+            if digital_coast_folder.is_dir():
+                dissolved_shapefiles.extend(list(digital_coast_folder.rglob('*_dis.shp')))
+            if manual_downloads_folder.is_dir():
+                dissolved_shapefiles.extend(list(manual_downloads_folder.rglob('*_dis.shp')))
+
+            if dissolved_shapefiles:
+                print(f" - Merging {len(dissolved_shapefiles)} dissolved shapefiles for {ecoregion}...")
                 merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
                 training_data_outlines = temp_folder / ecoregion / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
+                training_data_outlines.parent.mkdir(parents=True, exist_ok=True)
                 merged_training_ds.to_file(training_data_outlines)
+            else:
+                print(f" ! Warning: No valid dissolved shapefiles found for {ecoregion}. Skipping merge.")
 
     def run(self, outputs: str, manual_downloads=False) -> None:
         s3_files = s3fs.S3FileSystem()

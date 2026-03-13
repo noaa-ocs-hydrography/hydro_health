@@ -131,21 +131,52 @@ class RasterMaskEngine(Engine):
             file.unlink()
 
     def dissolve_tile_index_shapefiles(self, approved_files, ecoregions) -> None:
-        """Create dissolved single polygons to use as burn rasters"""
+        """Create dissolved single polygons to use as burn rasters, excluding missing TIFs"""
 
         for ecoregion in ecoregions:
             if ecoregion.stem in approved_files:
                 for tile_index_path in approved_files[ecoregion.stem]:
-                    print(f' - {tile_index_path}')
+                    print(f' - Checking index: {tile_index_path.name}')
 
-                    dissolved_tile_index = tile_index_path.parents[0] / pathlib.Path(tile_index_path.stem + '_dis.shp')
-                    if dissolved_tile_index.exists():
-                    #     dissolved_tile_index.unlink()
-                        print(f'   -> Skipping, {dissolved_tile_index.name} already exists.')
-                        continue  # Skip to the next file in the loop
-                    # Some providers are in NAD83(NSRS2007)
-                    tile_index = gpd.read_file(tile_index_path).dissolve()
-                    tile_index.to_crs("EPSG:4326").to_file(dissolved_tile_index)
+                    dissolved_tile_index_path = tile_index_path.parent / f"{tile_index_path.stem}_dis.shp"
+                    if dissolved_tile_index_path.exists():
+                        print(f' - Skipping: {dissolved_tile_index_path.name}')
+                        continue 
+
+                    tile_index = gpd.read_file(tile_index_path)
+                    initial_count = len(tile_index)
+
+                    possible_cols = ['filename', 'location']
+                    file_col = next((c for c in possible_cols if c in tile_index.columns), None)
+
+                    if file_col:
+                        def check_local_tif(row):
+                            val = str(row[file_col])
+                            if not val or val == 'None':
+                                return False
+                            
+                            tif_name = pathlib.Path(val).name
+                            if not tif_name.lower().endswith('.tif'):
+                                tif_name = f"{pathlib.Path(tif_name).stem}.tif"
+                            
+                            local_tif = tile_index_path.parent / tif_name
+                            return local_tif.exists()
+
+                        tile_index = tile_index[tile_index.apply(check_local_tif, axis=1)].copy()
+                        
+                        final_count = len(tile_index)
+                        if final_count < initial_count:
+                            print(f' - removed {initial_count - final_count} polygons with missing tiles.')
+                    else:
+                        print(f' - Warning: No filename/location column found in {tile_index_path.name}')
+
+                    # Dissolve only if we have remaining geometry
+                    if not tile_index.empty:
+                        print(f' - Dissolving {len(tile_index)} polygons...')
+                        dissolved_gdf = tile_index.dissolve().to_crs("EPSG:4326")
+                        dissolved_gdf.to_file(dissolved_tile_index_path)
+                    else:
+                        print(f'   -> Skipping {tile_index_path.name}: No local TIF files found.')
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
         """Get list of intersected features from ecoregion tile index shapefile"""
