@@ -11,7 +11,7 @@ EcoRegion-3:
     note: Need to review, which year to use? This dataset is a vertical slice that may not be useful
   FallGCJ1233560_1998:
     use: true
-    date: null
+    date: 1998
     year: null
     note: Valid dataset, manual download   
   NOAA_USGS_NASA_1998_22:
@@ -21,7 +21,7 @@ EcoRegion-3:
     note: Don't use, for some reason the extent is much smaller than the manual download
   USGS_2001:
     use: true
-    date: null
+    date: 2001
     year: null
     note: Valid dataset, manual download      
   USGS_2001_525:
@@ -51,22 +51,22 @@ EcoRegion-3:
     note: Resampled tif might need higher resolution
   PostIvan_2004:
     use: True
-    date: null
+    date: 2004
     year: null
     note: Valid dataset, manual download
   PreIvan_2004:
     use: True
-    date: null
+    date: 2004
     year: null
     note: Valid dataset, manual download
   postivannorthgulf_2004:
     use: True
-    date: null
+    date: 2004
     year: null
     note: Valid dataset, manual download  
   PostDennis_2005:
     use: false
-    date: null
+    date: 2005
     year: null
     note: Decided not to use. Valid dataset, manual download          
   USACE_USACE_NCMP_2005_29:
@@ -86,7 +86,7 @@ EcoRegion-3:
     note: Corrupted LAZ dataset
   PostWilma_2006:
     use: True
-    date: null
+    date: 2006
     year: null
     note: Valid dataset, manual download
   NPS_USGS_NASA_2007_522:
@@ -410,12 +410,12 @@ EcoRegion-3:
     note: Corrupted data. LAZ. Don't use, duplicate dataset like NOAA_NGS_2019_9708
   NGSFL_2019:
     use: True
-    date: null
+    date: '2019'
     year: null
     note: Valid dataset, manual download   
   NGSFLtopobathyDEMIrmaJ1233606_2019:
     use: True
-    date: null
+    date: '2019'
     year: null
     note: Valid dataset, manual download       
   NOAA_NCEI_2020_8483:
