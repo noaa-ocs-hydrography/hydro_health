@@ -17,8 +17,10 @@ INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
 def _create_prediction_mask(param_inputs: list) -> None:
-    """Creates the base ecoregion mask (Value 1)."""
+    """Creates the ecoregion prediction mask with (Value 1)."""
+
     ecoregion, wkt_geom = param_inputs
+
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
     mask_sub = get_config_item('MASK', 'SUBFOLDER')
     s3_key = f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
@@ -51,12 +53,20 @@ def _create_prediction_mask(param_inputs: list) -> None:
         out_ds = None 
         s3_client = boto3.client('s3', region_name='us-east-2')
         s3_client.upload_file(tmp_path, bucket, s3_key)
+    
+    return f' - uploaded prediction mask'
 
 
 def _create_training_mask(params: list) -> str:
-    ecoregion, s3_vrt_paths = params
+    """
+    Training mask logic that loads the 'mosaic' VRT files, 
+    reads the valid data areas and writes them to a geotiff to upload to S3
+    - VRT files are binary byte-based masks in CRS 32617
+    """
+
+    ecoregion, s3_vrt_paths, outputs = params
+    engine = Engine()
     
-    # RULE 1: Give GDAL some vitamins for the cloud
     gdal.UseExceptions()
     gdal.SetConfigOption('GDAL_INGESTED_BYTES_AT_OPEN', '32768')
     gdal.SetConfigOption('GDAL_HTTP_MAX_RETRY', '10')
@@ -66,9 +76,10 @@ def _create_training_mask(params: list) -> str:
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
     gdal.SetConfigOption('CHECK_DISK_FREE_SPACE', 'FALSE')
 
+    # EC2 /home directory has +100 GB of available storage
+    # previouse use of /tmp actually uses RAM, which limits storage to 16 GB
     scratch_dir = pathlib.Path.home() / f"gdal_scratch_{ecoregion}"
     scratch_dir.mkdir(exist_ok=True)
-    log_file = scratch_dir / f"progress_{ecoregion}.txt"
     
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
     mask_sub = get_config_item('MASK', 'SUBFOLDER')
@@ -96,14 +107,11 @@ def _create_training_mask(params: list) -> str:
 
         vsi_vrt_paths = [v.replace("s3://", "/vsis3/") for v in s3_vrt_paths]
 
-        for vrt_path in vsi_vrt_paths:
+        for i, vrt_path in enumerate(vsi_vrt_paths):
             vrt_name = pathlib.Path(vrt_path).stem 
-            with open(log_file, "a") as f:
-                f.write(f"{time.ctime()}: Starting {vrt_name}\n")
-            part_path = str(scratch_dir / f"part_{vrt_name}.tif")
-            print(f" - Nibbling on: {vrt_name}")
+            engine.write(f"{time.ctime()}: Starting {i+1} of {len(vsi_vrt_paths)} - {vrt_name}", outputs)
+            part_path = str(scratch_dir / f"part_{i+1}_{vrt_name}.tif")
             
-            # RULE 2: Retry the Warp. It's the most likely place to choke on /vsis3/
             success = False
             for attempt in range(3):
                 try:
@@ -117,7 +125,7 @@ def _create_training_mask(params: list) -> str:
                     success = True
                     break
                 except Exception as e:
-                    print(f"!!! Warp failed (attempt {attempt+1}): {e}. Hissing and retrying...")
+                    engine.write_message(f" - failed (attempt {attempt+1}): {e}", outputs)
                     time.sleep(10 * (attempt + 1))
             
             if not success:
@@ -126,14 +134,13 @@ def _create_training_mask(params: list) -> str:
             part_ds = gdal.Open(part_path)
             part_band = part_ds.GetRasterBand(1)
 
-            # RULE 3: Block processing with safety goggles
+            # Block process valid areas from current provider mosaic VRT to training local geotiff
             block_size = 2048 
             for y in range(0, rows, block_size):
                 win_y = min(block_size, rows - y)
                 for x in range(0, cols, block_size):
                     win_x = min(block_size, cols - x)
 
-                    # If ReadAsArray fails here, it's usually local disk or a corrupted Warp result
                     t_chunk = train_band.ReadAsArray(x, y, win_x, win_y)
                     p_chunk = part_band.ReadAsArray(x, y, win_x, win_y)
 
@@ -142,8 +149,7 @@ def _create_training_mask(params: list) -> str:
                         t_chunk[mask_indices] = 2
                         train_band.WriteArray(t_chunk, x, y)
             
-            with open(log_file, "a") as f:
-                f.write(f"{time.ctime()}: Finished {vrt_name} successfully.\n")
+            engine.write_message(f"{time.ctime()}: Finished {vrt_name}", outputs)
 
             part_ds = None 
             pathlib.Path(part_path).unlink()
@@ -157,10 +163,9 @@ def _create_training_mask(params: list) -> str:
         for f in scratch_dir.glob("*"): f.unlink()
         scratch_dir.rmdir()
         
-        return f"{ecoregion}: Success. The gremlins are fed and happy."
+        return f"{ecoregion}: Training mask finished."
 
     except Exception as e:
-        # Don't leave a mess!
         if scratch_dir.exists():
              print(f"Cleaning up failed run for {ecoregion}...")
         return f"{ecoregion}: Failed - {str(e)}"
@@ -171,7 +176,9 @@ class RasterMaskS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def find_provider_vrts(self, ecoregion, manual_downloads):
+    def find_provider_vrts(self, ecoregion, manual_downloads) -> list[str]:
+        """Obtain full list of DigitalCoast mosaic VRT files"""
+
         s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
@@ -198,22 +205,22 @@ class RasterMaskS3Engine(Engine):
         gdf_all = gpd.read_file(gpkg_path, layer='EcoRegions_50m').to_crs("EPSG:32617")
         gdf_filtered = gdf_all[gdf_all['EcoRegion'].isin(existing_ers)]
 
-        print("--- Stage 1: Prediction Masks ---")
+        self.write_message("Creating prediction mask", outputs)
         geom_payload = [[row['EcoRegion'], row['geometry'].wkt] for _, row in gdf_filtered.iterrows()]
         for payload in geom_payload:
             result = _create_prediction_mask(payload)
-            print(result)
+            self.write_message(result, outputs)
         
-        print("--- Stage 2: Training Masks ---")
+        self.write_message("Creating training mask", outputs)
         train_payload = []
         for _, row in gdf_filtered.iterrows():
             er = row['EcoRegion']
             vrts = self.find_provider_vrts(er, manual_downloads)
             standardized_vrts = [v if v.startswith('s3://') else f"s3://{v}" for v in vrts]
             if standardized_vrts:
-                train_payload.append([er, standardized_vrts])
+                train_payload.append([er, standardized_vrts, outputs])
         
         for training_payload in train_payload:
-            print('Starting:', training_payload[0])
+            self.write_message(f'Starting: {training_payload[0]}', outputs)
             result = _create_training_mask(training_payload)
-            print(result)
+            self.write_message(result, outputs)

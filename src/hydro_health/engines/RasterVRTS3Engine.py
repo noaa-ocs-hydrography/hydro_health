@@ -67,8 +67,9 @@ def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
         if os.path.exists(local_vrt_path):
             os.remove(local_vrt_path)
 
+
 def _process_single_digitalcoast(params: list) -> list[str, str, str]:
-    """Parallel process creating a Warped VRT for DigitalCoast"""
+    """Parallel process creating a Warped full-scale CRS:4326 VRT for DigitalCoast"""
 
     geotiff_prefix, s3_bucket, all_crs_info, data_folder = params
 
@@ -146,6 +147,7 @@ def _process_single_digitalcoast(params: list) -> list[str, str, str]:
 
 def _process_single_digitalcoast_mask(params: list) -> list[str, str, str]:
     """Parallel process creating a clean Binary Byte VRT for DigitalCoast"""
+
     geotiff_prefix, all_crs_info, s3_bucket, data_folder = params
 
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
@@ -166,7 +168,7 @@ def _process_single_digitalcoast_mask(params: list) -> list[str, str, str]:
         src_srs = src_ds.GetSpatialRef()
         src_srs_name = src_srs.GetName()
         
-        # --- CRS OVERRIDE LOGIC (Keep this, it's good!) ---
+        # ### compound CRS logic for previous LAZ conversion
         override_srs = None
         if '+' in src_srs_name:
             try:
@@ -183,20 +185,18 @@ def _process_single_digitalcoast_mask(params: list) -> list[str, str, str]:
         src_band = src_ds.GetRasterBand(1)
         nodata_val = src_band.GetNoDataValue()
 
-        # RULE: Output as Byte (0/1) in the Target Projection (32617)
+        # Output as Byte (0/1) in the Target Projection (32617)
         warp_options = {
             'format': 'VRT',
-            'outputType': gdal.GDT_Byte,  # lean 1-byte pixels
+            'outputType': gdal.GDT_Byte,
             'dstSRS': 'EPSG:32617',
             'srcSRS': override_srs if override_srs is not None else src_srs.ExportToWkt(),
             'resampleAlg': gdal.GRA_NearestNeighbour, # Critical for masks
             'srcNodata': nodata_val,
-            'dstNodata': 0 # Force "outside" or "nodata" areas to 0
+            'dstNodata': 0 # Force nodata to 0
         }
 
-        # Create the local VRT
-        # We NO LONGER loop through bands to set Offset/Scale. 
-        # We let the raw data pass through as bytes.
+        # local binary CRS:32617 VRT in /tmp
         warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, **warp_options)
         
         if warped_vrt_ds is None:
@@ -322,7 +322,11 @@ class RasterVRTS3Engine(Engine):
         return output_geotiffs
 
     def get_digitalcoast_tifs(self, geotiffs: list, data_folder) -> dict:
-        """Dask processing to build DigitalCoast tifs"""
+        """
+        NOT USED ANYMORE
+        Dask processing to build DigitalCoast tifs
+        - Builds VRT files in WGS84 of original geotiffs
+        """
 
         s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         task_params = [(geotiff, s3_bucket, self.all_crs, data_folder) for geotiff in geotiffs]
@@ -357,7 +361,6 @@ class RasterVRTS3Engine(Engine):
                     'crs': osr.SpatialReference(wkt=wkt), 
                     'tiles': []
                 }
-            # Use vsis3 for the Master VRT tiles
             vsi_path = s3_mask_path.replace("s3://", "/vsis3/")
             output_geotiffs[clean_key]['tiles'].append(vsi_path)
                 

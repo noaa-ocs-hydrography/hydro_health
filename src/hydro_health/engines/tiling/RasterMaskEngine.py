@@ -1,5 +1,4 @@
 
-import os
 import json
 import pathlib
 import shutil
@@ -8,7 +7,6 @@ import geopandas as gpd
 import yaml
 
 from osgeo import ogr, osr, gdal
-from math import floor, ceil
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
