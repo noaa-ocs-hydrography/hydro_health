@@ -147,15 +147,15 @@ class Engine:
             if result:
                 self.write_message(f'Result: {result}', output_folder)  
 
-    def setup_dask(self, env, processes=True, memory_limit="8GB") -> None:
+    def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
         if env == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
-        self.cluster = LocalCluster(processes=processes, n_workers=6, threads_per_worker=2, memory_limit=memory_limit)
+        self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
         self.client = Client(self.cluster)
-        # print(self.client.dashboard_link)
+        print(self.client.dashboard_link)
 
     def set_proj_path(self):
         """Load proj.db path to resolve mismatch"""

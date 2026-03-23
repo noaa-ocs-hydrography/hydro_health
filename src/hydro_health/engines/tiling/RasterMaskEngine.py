@@ -1,24 +1,23 @@
+
 import os
-import sys
 import json
 import pathlib
 import shutil
-import multiprocessing as mp
 import pandas as pd
 import geopandas as gpd
 import yaml
-from pathlib import Path
-from typing import List
 
 from osgeo import ogr, osr, gdal
+from math import floor, ceil
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
-mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+
 
 
 def _create_prediction_mask(param_inputs: list[list]) -> None:
@@ -69,9 +68,18 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     mask_path = ecoregion / get_config_item('MASK', 'SUBFOLDER') / prediction_mask_name
     mask_path.parents[0].mkdir(parents=True, exist_ok=True)
 
+    # Updated creation options for a sparse, tiny file
+    creation_options = [
+        "COMPRESS=LZW", 
+        "TILED=YES", 
+        "SPARSE_OK=YES", 
+        "NUM_THREADS=ALL_CPUS",
+        "INTERLEAVE=BAND"
+    ]
+
     target_ds = gdal.GetDriverByName("GTiff").Create(
         str(mask_path), x_res, y_res, 1, gdal.GDT_Byte,
-        options=["COMPRESS=LZW", "TILED=YES", "NUM_THREADS=ALL_CPUS"]
+        options=creation_options
     )
     target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
     target_ds.SetProjection(output_srs.ExportToWkt())
@@ -82,41 +90,119 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     gpkg_ds = None
 
 
-def _create_training_mask(ecoregion):
-    """Create training mask for current ecoregion"""
 
-    prediction_file = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'prediction_mask_{ecoregion.stem}.tif'
-    training_data_outline = ecoregion / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
-    if prediction_file.exists() and training_data_outline.exists():
-        training_file = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'training_mask_{ecoregion.stem}.tif'
-        shutil.copy(prediction_file, training_file)
-        training_ds = gdal.Open(str(training_file), gdal.GA_Update)
-        shp_driver = ogr.GetDriverByName("ESRI Shapefile")
-        training_data_outline_ds = shp_driver.Open(str(training_data_outline))
-        gdal.PushErrorHandler('CPLQuietErrorHandler')
-        training_mask_layer = training_data_outline_ds.GetLayer(0)
-        gpkg_driver = ogr.GetDriverByName("GPKG")
-        geopackage_ds = gpkg_driver.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
-        ecoregions_layer = geopackage_ds.GetLayer(get_config_item('SHARED', 'ECOREGIONS'))
-        ecoregions_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
+def _create_training_mask(ecoregion: pathlib.Path) -> str:
+    """
+    Create training mask using double-VRT lazy evaluation.
+    Uses GDAL Config Options to resolve nested relative VRT paths.
+    """
+    # 1. Path Setup - Use absolute paths for everything
+    mask_subfolder = (ecoregion / get_config_item('MASK', 'SUBFOLDER')).resolve()
+    prediction_file = mask_subfolder / f'prediction_mask_{ecoregion.stem}.tif'
+    training_file = mask_subfolder / f'training_mask_{ecoregion.stem}.tif'
+    digital_coast_folder = (ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast').resolve()
 
-        in_memory_driver = ogr.GetDriverByName("Memory")
-        clipped_training_mask_ds = in_memory_driver.CreateDataSource('clipped_training_mask')
-        clipped_training_mask_layer = clipped_training_mask_ds.CreateLayer(
-            "clipped_training_mask_layer",
-            geom_type=training_mask_layer.GetGeomType(),
-            srs=training_mask_layer.GetSpatialRef(),
+    # Find the provider VRT mosaics
+    provider_vrts = [str(f.absolute()) for f in digital_coast_folder.glob("mosaic_*.vrt")]
+
+    if not provider_vrts:
+        return f"{ecoregion.stem}: Skip - No VRTs found in {digital_coast_folder}"
+    if not prediction_file.exists():
+        return f"{ecoregion.stem}: Error - Prediction mask missing."
+
+    # 2. GDAL Configuration for Nested/Relative VRTs
+    gdal.UseExceptions()
+    gdal.SetCacheMax(512 * 1024 * 1024)
+    gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
+    
+    # CRITICAL: This tells GDAL how to resolve "<SourceFilename relativeToVRT='1'>" 
+    # when the VRT is opened from a different directory.
+    gdal.SetConfigOption('VRT_RELATIVE_FILENAMES', 'YES')
+    gdal.SetConfigOption('VRT_DEFAULT_REL_PATH', str(digital_coast_folder))
+
+    try:
+        # 3. Prepare Training File
+        if training_file.exists():
+            training_file.unlink()
+        shutil.copy(str(prediction_file), str(training_file))
+        
+        train_ds = gdal.Open(str(training_file), gdal.GA_Update)
+        train_band = train_ds.GetRasterBand(1)
+        
+        geo_t = train_ds.GetGeoTransform()
+        proj = train_ds.GetProjection()
+        cols, rows = train_ds.RasterXSize, train_ds.RasterYSize
+        
+        # 4. Create the Virtual Mosaic
+        # We pass the list of absolute paths to the provider VRTs
+        super_vrt = gdal.BuildVRT('', provider_vrts)
+
+        # 5. Warp to a Temporary VRT
+        temp_vrt_path = mask_subfolder / f"temp_warped_{ecoregion.stem}.vrt"
+        
+        warp_options = gdal.WarpOptions(
+            format='VRT',  
+            srcSRS='EPSG:4326', 
+            dstSRS=proj,
+            outputBounds=[geo_t[0], geo_t[3] + (rows * geo_t[5]), geo_t[0] + (cols * geo_t[1]), geo_t[3]],
+            xRes=geo_t[1],
+            yRes=abs(geo_t[5]),
+            resampleAlg=gdal.GRA_NearestNeighbour,
+            srcNodata=-9999
         )
-        training_mask_layer.Clip(ecoregions_layer, clipped_training_mask_layer)
+        
+        # We pass the in-memory super_vrt dataset object
+        warped_vrt_ds = gdal.Warp(str(temp_vrt_path), super_vrt, options=warp_options)
+        
+        if warped_vrt_ds is None:
+            return f"{ecoregion.stem}: Error - Warp failed to return dataset."
+            
+        mask_band = warped_vrt_ds.GetRasterBand(1)
 
-        gdal.RasterizeLayer(training_ds, [1], clipped_training_mask_layer, burn_values=[2])
-        print(f' - {ecoregion.stem}')
-        geopackage_ds = None
-        clipped_training_mask_ds = None
-        training_ds = None
-        shp_driver = None
-        training_data_outline_ds = None
+        # 6. Block Processing Loop
+        block_size = 2048 
+        burn_count_total = 0
 
+        for y in range(0, rows, block_size):
+            num_rows = min(block_size, rows - y)
+            for x in range(0, cols, block_size):
+                num_cols = min(block_size, cols - x)
+
+                # Read Windows
+                train_chunk = train_band.ReadAsArray(x, y, num_cols, num_rows)
+                mask_chunk = mask_band.ReadAsArray(x, y, num_cols, num_rows)
+
+                if train_chunk is None or mask_chunk is None:
+                    continue
+
+                # Burn logic: Valid mask data (not -9999 or 0) and prediction is AOI (1)
+                burn_idx = (mask_chunk > -9000) & (mask_chunk != 0) & (train_chunk == 1)
+                
+                if burn_idx.any():
+                    burn_count_total += int(burn_idx.sum())
+                    train_chunk[burn_idx] = 2
+                    train_band.WriteArray(train_chunk, x, y)
+
+        # 7. Finalize and Close Handles
+        train_band.FlushCache()
+        train_ds.FlushCache()
+        
+        # Explicitly kill objects to release file locks
+        train_band = None
+        train_ds = None
+        warped_vrt_ds = None
+        super_vrt = None 
+        
+        if temp_vrt_path.exists():
+            temp_vrt_path.unlink()
+
+        return f"{ecoregion.stem}: Success. {burn_count_total} pixels burned."
+
+    except Exception as e:
+        return f"{ecoregion.stem}: Critical Error - {str(e)}"
+    finally:
+        # Clean up config options
+        gdal.SetConfigOption('VRT_DEFAULT_REL_PATH', None)
 
 class RasterMaskEngine(Engine):
     def __init__(self, param_lookup):
@@ -243,12 +329,12 @@ class RasterMaskEngine(Engine):
         print('Creating prediction masks')
         self.setup_dask(self.param_lookup['env'])
         self.process_prediction_masks(ecoregions, outputs)
-        approved_files = self.get_approved_area_files(ecoregions)
-        print(f' - Found files for ecoregions: {list(approved_files.keys())}')
-        print('Dissolving tile index shapefiles')
-        self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
-        print('Merging all dissolved tile index shapfiles')
-        self.merge_dissolved_polygons(ecoregions)
+        # approved_files = self.get_approved_area_files(ecoregions)
+        # print(f' - Found files for ecoregions: {list(approved_files.keys())}')
+        # print('Dissolving tile index shapefiles')
+        # self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
+        # print('Merging all dissolved tile index shapfiles')
+        # self.merge_dissolved_polygons(ecoregions)
         print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.close_dask()
