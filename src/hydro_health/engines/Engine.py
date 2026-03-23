@@ -63,10 +63,6 @@ class Engine:
             if text in feature_json['attributes']['provider_results_name']:
                 return True
         return False
-    
-    def check_logging(self) -> None:
-        if self.logged:
-            self.message(f'Check log: {self.log_path}')
 
     def cleansed_url(self, url: str) -> str:
         """Remove found illegal characters from URLs"""
@@ -133,20 +129,6 @@ class Engine:
                 geometry_coords.append(tile_wkt)
 
         return geometry_coords
-    
-    def log_error(self) -> None:
-        self.logger.error(gdal.GetLastErrorMsg())
-        if not self.logged:
-            self.logged = True
-    
-    def message(self, content:str) -> None:
-        """Wrap Arcpy for printing"""
-
-        if 'arcpy' in sys.modules:
-            module = __import__('arcpy')
-            getattr(module, 'AddMessage')(content)
-        else:
-            print(content)
 
     def make_esri_projection(self, file_name, epsg=4326):
         """Create an Esri .prj file for a shapefile"""
@@ -158,13 +140,20 @@ class Engine:
         file.write(output_projection.ExportToWkt())
         file.close()
 
-    def setup_dask(self, env, processes=True) -> None:
+    def print_async_results(self, results: list[str], output_folder: str) -> None:
+        """Consolidate result printing"""
+
+        for result in results:
+            if result:
+                self.write_message(f'Result: {result}', output_folder)  
+
+    def setup_dask(self, env, processes=True, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
         if env == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
-        self.cluster = LocalCluster(processes=processes, n_workers=6, threads_per_worker=2)
+        self.cluster = LocalCluster(processes=processes, n_workers=6, threads_per_worker=2, memory_limit=memory_limit)
         self.client = Client(self.cluster)
         # print(self.client.dashboard_link)
 

@@ -171,10 +171,11 @@ class RasterMaskS3Engine(Engine):
                     dissolved_tile_index.to_file(local_out_path, driver='ESRI Shapefile')
                     
                     # upload local dissolved file to S3
-                    # for local_file in temp_folder.glob(f"{dissolved_filename}.*"):
-                    #     s3_target = f"{s3_folder}/{local_file.name}"
-                    #     s3.put(str(local_file), s3_target)
-                    #     print(f" - uploaded: {s3_target}")
+                    digital_coast_temp_folder = temp_folder / ecoregion.stem / digital_coast_path
+                    for local_file in digital_coast_temp_folder.glob(f"{dissolved_filename}.*"):
+                        s3_target = f"{s3_folder}/{local_file.name}"
+                        s3_files.put(str(local_file), s3_target)
+                        print(f" - uploaded: {s3_target}")
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
         """Get list of intersected features from ecoregion tile index shapefile"""
@@ -182,7 +183,7 @@ class RasterMaskS3Engine(Engine):
         approved_files = {}
         for ecoregion in ecoregions:
             s3_files = s3fs.S3FileSystem()
-            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion.stem}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion.stem}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
             json_files = s3_files.glob(f'{digital_coast_path}/**/feature.json')
             for file in json_files:
                 if ecoregion.stem not in approved_files:
@@ -213,13 +214,6 @@ class RasterMaskS3Engine(Engine):
                 merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
                 training_data_outlines = temp_folder / ecoregion.stem / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
                 merged_training_ds.to_file(training_data_outlines)
-
-    def print_async_results(self, results: list[str], output_folder: str) -> None:
-        """Consolidate result printing"""
-
-        for result in results:
-            if result:
-                self.write_message(f'Result: {result}', output_folder)  
 
     def run(self, outputs: str) -> None:
         ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]

@@ -6,11 +6,12 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables/Prediction/pre_processed/tiled
 HURRICANE:
-  COUNT_RASTER_PATH: original_data_files/hurricane_data/hurricane_count_raster
-  CUMULATIVE_RASTER_PATH: original_data_files/hurricane_data/hurricane_cumulative_raster
-  DATA_PATH: original_data_files/hurricane_data
-  GPKG_PATH: original_data_files/hurricane_data/hurricane_data.gpkg
-  RASTER_PATH: original_data_files/hurricane_data/hurricane_rasters
+  SUBFOLDER: original_data_files/tsm_data
+  COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
+  DATA_PATH: ER_3/original_data_files/hurricane_data
+  GPKG_PATH: ER_3/original_data_files/hurricane_data/hurricane_data.gpkg
+  RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_rasters
   YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
 LIDAR_PLOTS:
   INPUT_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast
@@ -18,7 +19,7 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
-  COAST_BOUNDARY_PATH: coastal_boundary_dataset/50m_isobath_polygon/50m_isobath_polygon.shp
+  COAST_BOUNDARY_PATH: ER_3/masks/50m_isobath_polygon.gpkg
   MASKS_DIR: ER_3/masks
   MASK_PRED_PATH: ER_3/masks/prediction_mask_ER_3.tif
   MASK_TRAINING_PATH: ER_3/masks/training_mask_ER_3.tif
@@ -38,11 +39,10 @@ MODEL:
 S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
+  SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  DATA_PATH: original_data_files/sediment_data
-  GPKG_PATH: original_data_files/sediment_data/sediment_data.gpkg
-  MASK_PATH: ER_3/prediction_masks/prediction.mask.UTM17_8m.tif
-  RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
+  MASK_PATH: masks/prediction_mask_ER_3.tif
+  RASTER_PATH: model_variables/Prediction/pre_processed/sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
@@ -52,7 +52,6 @@ SHARED:
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
-  OUTPUT_FOLDER: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 TERRAIN:
   COMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs

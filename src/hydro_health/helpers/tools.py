@@ -1,8 +1,11 @@
 import yaml
 import pathlib
 import geopandas as gpd
-import rioxarray as rxr
-import rasterio
+import s3fs
+import os
+import tempfile
+import json
+import time
 
 from socket import gethostname
 from osgeo import gdal, osr, ogr
@@ -118,84 +121,6 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     # tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
-
-
-def grid_digital_coast_files(outputs: str, data_type: str) -> None:
-    """Process for gridding Digital Coast files to BlueTopo grid"""
-
-    print('Gridding Digital Coast files to BlueTopo grids')
-    gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
-    blue_topo_layer = gpkg_ds.GetLayerByName(get_config_item('SHARED', 'TILES'))
-    ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
-    for ecoregion in ecoregions:
-        blue_topo_folder = ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
-        bluetopo_grids = [folder.stem for folder in blue_topo_folder.iterdir() if folder.is_dir()]
-        data_folder = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / data_type
-        all_vrt_files = list(data_folder.glob('*.vrt'))
-
-        config_path = INPUTS / 'lookups' / 'ER_3_lidar_data_config.yaml'
-        with open(config_path, 'r') as f:
-            config_data = yaml.safe_load(f)
-
-        # TODO does this filtering work as intended?
-        datasets_to_check = config_data.get('EcoRegion-3', {})
-
-        excluded_providers = {
-            key for key, data in datasets_to_check.items()
-            if data.get('use') is False
-        }
-
-        vrt_files = [
-            vrt for vrt in all_vrt_files
-            if not any(provider in vrt.name for provider in excluded_providers)
-        ]
-
-        print(f'Processing {len(vrt_files)} {data_type} VRT files for {ecoregion.stem}')
-
-        for vrt in vrt_files:
-            print(f'Processing VRT: {vrt}')
-            vrt_ds = gdal.Open(str(vrt))
-            vrt_data_folder = vrt.parents[0] / '_'.join(vrt.stem.split('_')[2:])
-            vrt_tile_index = list(vrt_data_folder.rglob('*_dis.shp'))[0]
-            shp_driver = ogr.GetDriverByName('ESRI Shapefile')
-            vrt_tile_index_shp = shp_driver.Open(vrt_tile_index, 0)
-            dissolve_layer = vrt_tile_index_shp.GetLayer(0)
-            dissolve_feature = dissolve_layer.GetFeature(0)  # have to keep reference to feature or it will garbage collect
-            dissolve_geom = dissolve_feature.GetGeometryRef()
-            blue_topo_layer.ResetReading()
-            for tile in blue_topo_layer:
-                # Clip VRT by current polygon
-                current_tile_geom = tile.GetGeometryRef()
-                folder_name = tile.GetField('tile')
-                if folder_name in bluetopo_grids:
-                    output_path = ecoregion / get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER') / folder_name
-                    output_clipped_vrt = output_path / f'{vrt.stem}_{folder_name}.tiff'
-                    if output_clipped_vrt.exists():
-                        print(f' - Skipping {output_clipped_vrt.name}')
-                        continue
-                    if current_tile_geom.Intersects(dissolve_geom):
-                        output_path.mkdir(parents=True, exist_ok=True)
-                        print(f' - Creating {output_clipped_vrt.name}')
-                        try:
-                            polygon = current_tile_geom.ExportToWkt()
-                            gdal.Warp(
-                                str(output_clipped_vrt),
-                                str(vrt),
-                                format='GTiff',
-                                cutlineDSName=polygon,
-                                cropToCutline=True,
-                                dstNodata=-9999,
-                                cutlineSRS=vrt_ds.GetProjection(),
-                                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
-                            )
-                        except Exception as e:
-                            print(f'failure: {vrt.name} - ', e)
-                    current_tile_geom = None
-            shp_driver = None
-            dissolve_layer = None
-            vrt_ds = None
-    gpkg_ds = None
-    blue_topo_layer = None
 
 
 def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
