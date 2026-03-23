@@ -21,7 +21,7 @@ import dask
 from dask.distributed import Client
 from osgeo import gdal
 from shapely.geometry import Point, box
-from upath import UPath  # <--- Imported universal_pathlib here
+from upath import UPath 
 
 from hydro_health.helpers.tools import get_config_item, get_environment
 from hydro_health.engines.CreateSeabedTerrainLayerEngine import CreateSeabedTerrainLayerEngine
@@ -41,6 +41,7 @@ class ModelDataPreProcessor:
     def __init__(self):
         self.target_crs = "EPSG:32617"
         self.target_res = 8
+        self.mode = "pilot"
 
         self.fs = s3fs.S3FileSystem(anon=False)
 
@@ -83,7 +84,7 @@ class ModelDataPreProcessor:
 
         self.preprocessed_subdirs = {
             'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO')}"),
-            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE')}"),
+            # 'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE')}"),
             'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR')}"),
             'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT')}"),
             'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM')}")
@@ -127,21 +128,18 @@ class ModelDataPreProcessor:
 
         self.create_file_paths()
 
-        # self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
-        # self.raster_to_spatial_df(self.train_mask_path, process_type='training')
+        self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
+        self.raster_to_spatial_df(self.train_mask_path, process_type='training')
 
         # input("Press Enter to continue...")
 
-        # self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_path=self.subgrid_paths['prediction'], process_type='prediction')
-        # self.create_subgrids(mask_gdf=self.mask_training_pq, output_path=self.subgrid_paths['training'], process_type='training')
+        self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_path=self.subgrid_paths['prediction'], process_type='prediction')
+        self.create_subgrids(mask_gdf=self.mask_training_pq, output_path=self.subgrid_paths['training'], process_type='training')
 
         try:
             mask_pred_gdf = gpd.read_parquet(str(self.mask_prediction_pq))
             mask_train_gdf = gpd.read_parquet(str(self.mask_training_pq))
 
-            # FIX: Create a single unioned Shapely geometry instead of passing a GeoDataFrame. 
-            # This prevents the "truth value of a Series is ambiguous" error in intersects()
-            # and properly formats the geometry for _warp_to_cutline.
             mask_pred_union = mask_pred_gdf.union_all()
             mask_train_union = mask_train_gdf.union_all()
 
@@ -177,37 +175,47 @@ class ModelDataPreProcessor:
             self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
 
         # --- 1. Identify Existing Outputs ---
-        # self.prediction_out_dir: pilot/model_variables/Prediction/processed
         potential_files = list(self.prediction_out_dir.rglob("*"))
         existing_pred_outputs = {
             f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
-        print(f'found {len(existing_pred_outputs)} files in prediction output directory for existing output check.')
+        print(f' - Found {len(existing_pred_outputs)} files in prediction output directory for existing output check.')
 
         # Get existing uncombined outputs - changed to .rglob("*")
-        print(f'Checking for existing uncombined outputs in {self.uncombined_lidar_dir}...')
         potential_files = list(self.uncombined_lidar_dir.rglob("*"))
         existing_uncombined_outputs = {
             f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
-        print(f'found {len(existing_uncombined_outputs)} files in uncombined lidar directory for existing output check.')
+        print(f' - Found {len(existing_uncombined_outputs)} files in uncombined lidar directory for existing output check.')
 
         all_existing_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
 
         # Looks for preprocessed lidar, bluetopo, sediment, TSM, and hurricane rasters in the preprocessed directory and all subdirectories
-        potential_files = [
-            f 
-            for directory in self.preprocessed_subdirs.values() 
-            for f in directory.rglob("*") 
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        ]
+        potential_files = []
 
-        print(f"Found {len(potential_files)} potential prediction files in input directory.")
+        for data_type, directory in self.preprocessed_subdirs.items():
+            # 1. Search for TIFF files in this specific directory
+            found_files = [
+                f for f in directory.rglob("*") 
+                if f.suffix.lower() in {'.tif', '.tiff'}
+            ]
+            
+            # 2. Check if this specific directory came up empty
+            if not found_files:
+                raise RuntimeError(
+                    f"CRITICAL ERROR: Missing data for '{data_type}'. "
+                    f"No .tif files were found in {directory}."
+                )
+                
+            # 3. If files exist, add them to our main list
+            potential_files.extend(found_files)
+
+        print(f" - Found {len(potential_files)} potential prediction files in input directory.")
 
         excluded_folders = {'filled_tifs', 'combined_lidar_tifs'} # Exclude intermediate lidar tifs
-        prediction_files = []
+        prediction_files = [] 
 
         # Initialize counters and our tracking lists
         removed_existing = 0
@@ -241,24 +249,13 @@ class ModelDataPreProcessor:
         # Print the numerical summary
         print("--- File Filtering Summary ---")
         print(f"Total potential files: {len(potential_files)}")
-        print(f"Removed (already existing): {removed_existing}")
-        print(f"Removed (excluded keys): {len(files_removed_by_keys)}") 
-        print(f"Removed (excluded folders): {removed_folders}")
+        print(f" - Removed (already existing): {removed_existing}")
+        print(f" - Removed (excluded keys): {len(files_removed_by_keys)}") 
+        print(f" - Removed (excluded folders): {removed_folders}")
         print(f"Files kept: {len(prediction_files)}")
         print("------------------------------")
 
-        # # Print the specific files removed by the excluded keys
-        # if files_removed_by_keys:
-        #     print("\nFiles removed due to 'excluded_keys':")
-        #     for file_name in files_removed_by_keys:
-        #         print(f"  - {file_name}")
-
-        # Print the kept files that contain "mosaic"
-        if kept_mosaic_files:
-            print("\nKept files containing 'mosaic':")
-            for file_name in kept_mosaic_files:
-                print(f"  - {file_name}")
-
+        print(f" - Found {len(kept_mosaic_files)} lidar files to process.")
         print(f"Processing {len(prediction_files)} prediction files (Skipping {len(all_existing_outputs)} existing)...")
         
         # --- 3. Queue Prediction Tasks ---
@@ -274,11 +271,11 @@ class ModelDataPreProcessor:
             )
             prediction_tasks.append(task)
 
-        if prediction_tasks:
-            dask.compute(*prediction_tasks)
-            print("Prediction raster processing complete.")
-        else:
-            print("No new prediction rasters to process.")
+        # if prediction_tasks:
+        #     dask.compute(*prediction_tasks)
+        #     print("Prediction raster processing complete.")
+        # else:
+        #     print("No new prediction rasters to process.")
 
         print("Running Seabed Terrain Layer Engine...")
         engine = CreateSeabedTerrainLayerEngine()
@@ -288,14 +285,12 @@ class ModelDataPreProcessor:
             self.training_out_dir.mkdir(parents=True, exist_ok=True)
 
         # --- 4. Gather Training Inputs (from Prediction Outputs) ---
-        # Updated to rglob to look into subdirectories
         potential_files = list(self.training_out_dir.rglob("*"))
         existing_train_outputs = {
             f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
 
-        # Updated to rglob to look into subdirectories
         potential_files = list(self.prediction_out_dir.rglob("*"))
         training_candidates = [
             f for f in potential_files
@@ -361,7 +356,7 @@ class ModelDataPreProcessor:
             print(f"Mask does not intersect prediction raster {raster_name}. Skipping.")
             return
 
-        print(f'Processing prediction file {raster_name}...')
+        print(f' - Processing prediction file {raster_name}...')
         should_crop = any(k in raster_name for k in ["tsm", "sed", "hurr"])
         
         self._warp_to_cutline(
@@ -404,7 +399,7 @@ class ModelDataPreProcessor:
                 print(f"Mask does not intersect raster {raster_name}. Skipping.")
                 return
 
-            print(f'Processing training file {raster_name}...')
+            print(f' - Processing training file {raster_name}...')
             
             self._warp_to_cutline(
                 raster_path,
@@ -672,7 +667,6 @@ class ModelDataPreProcessor:
 
         file_suffix = f"_{mode}_clipped_data.parquet"
 
-        # UPath natively handles the search logic universally
         base_dir_upath = UPath(base_dir)
         files_to_process = list(base_dir_upath.rglob(f"*{file_suffix}"))
 
@@ -878,18 +872,20 @@ class ModelDataPreProcessor:
         with rasterio.open(open_path) as src:
             mask = src.read(1, out_dtype='uint8')
 
-            # TODO this is a problem bc the pilot training masks uses 1 not 2 for its value
             if process_type == 'prediction':
                 valid_mask = mask == 1
             elif process_type == 'training':
-                valid_mask = mask == 2
+                if self.mode == "pilot":
+                    valid_mask = mask == 1
+                else:
+                    # TODO we need to double check what er3 mask uses
+                    valid_mask = mask == 2
 
             shapes_gen = shapes(mask, valid_mask, transform=src.transform)  
 
             gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
-            gdf = gdf.to_crs("EPSG:32617")   
+            gdf = gdf.to_crs(self.target_crs)   
 
-            # UPath cleanly handles standardizing prefixes and parent directory resolving
             masks_dir_conf = get_config_item('MASK', 'MASKS_DIR')
             prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME')}/" if self.is_aws else ""
             mask_path = UPath(f"{prefix}{masks_dir_conf}/{process_type}_mask_pilot.parquet")
@@ -908,21 +904,23 @@ class ModelDataPreProcessor:
         
         mask_gdf_path = str(mask_gdf)
         print(f"----- Reading mask GeoDataFrame from: {mask_gdf_path}")
-        
         print(f"Preparing {process_type} sub-grids...")
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=self.fs if self.is_aws else None)
         combined_geometry = mask_gdf_df.union_all()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
-        sub_grids = gpd.read_file(str(self.grid_gpkg), layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
+        # FIX A: Use /vsis3/ for reading GPKG via GeoPandas/Fiona on AWS
+        grid_gpkg_str = str(self.grid_gpkg)
+        if self.is_aws and grid_gpkg_str.startswith("s3://"):
+            grid_gpkg_str = grid_gpkg_str.replace("s3://", "/vsis3/")
+
+        sub_grids = gpd.read_file(grid_gpkg_str, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
 
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
         intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
         
         if self.is_aws:
-            # S3/GDAL does not support SQLite random writes. 
-            # We must write to a local temp file first, then upload.
             with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
                 local_tmp_path = tmp.name
                 
@@ -931,11 +929,13 @@ class ModelDataPreProcessor:
             
             print(f"Uploading subgrids to: {output_path}")
             self.fs.put(local_tmp_path, str(output_path))
-            
-            # Clean up the local temp file
             os.remove(local_tmp_path)
         else:
-            # If not AWS, write directly to the provided local file path
-            intersecting_sub_grids.to_file(str(output_path), driver="GPKG") 
+            # FIX B: Ensure local directory exists before saving
+            output_upath = UPath(output_path)
+            output_upath.parent.mkdir(parents=True, exist_ok=True)
+            intersecting_sub_grids.to_file(str(output_upath), driver="GPKG") 
 
+        # SUCCESS PRINT STATEMENT
+        print(f"Successfully saved {process_type} subgrids to: {output_path}")
         return

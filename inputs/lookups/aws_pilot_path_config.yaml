@@ -41,8 +41,7 @@ PREPROCESSED:
   HURRICANE: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
   LIDAR: ER_3/model_variables/Prediction/pre_processed/tiled
   SEDIMENT: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
-  TSM: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters/ # or /ER_3/original_data_files/TSM_year_pair_rasters/?
-
+  TSM: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters/
 S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:

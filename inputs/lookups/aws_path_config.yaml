@@ -35,7 +35,6 @@ MODEL:
   TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
   UNCOMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled
-
 S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
