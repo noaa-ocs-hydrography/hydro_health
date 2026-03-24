@@ -130,7 +130,12 @@ class CreateHurricaneLayerEngine(Engine):
         print(f"Successfully saved layer '{layer_name}'.")
 
     def average_rasters(self, input_folder, start_year, end_year, output_name) -> None:
-        """Average and sum rasters for a given year range and save the results."""
+        """
+        Average and sum rasters for a given year range and save the results.
+        
+        Note: Despite the function name, this method calculates and outputs BOTH the 
+        average (mean) raster and the cumulative (sum) raster for the specified year range.
+        """
 
         output_folder = self.year_pair_raster_path
         output_folder.mkdir(parents=True, exist_ok=True)
@@ -191,6 +196,7 @@ class CreateHurricaneLayerEngine(Engine):
             sum_array = gaussian_filter(sum_array, sigma=10)
 
         # Save paths 
+        # Note: Both mean and cumulative rasters are generated and saved out for the year pair.
         mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
         cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
 
@@ -198,7 +204,9 @@ class CreateHurricaneLayerEngine(Engine):
         self.save_raster(average_array, mean_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
         self.save_raster(sum_array, cumulative_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
 
-        print(f"Year pair mean and cumulative rasters saved for {output_name} ({start_year}-{end_year}).")    
+        # UPDATED: Print exact output paths
+        print(f"Saved mean raster to: {mean_output_path}")
+        print(f"Saved cumulative raster to: {cumulative_output_path}")
 
     def clip_polygons(self) -> None:
         """Clip the hurricane polygons to the coastal boundary and save the result."""
@@ -666,23 +674,23 @@ class CreateHurricaneLayerEngine(Engine):
         """Entrypoint for processing the Hurricane layer"""
         print("Starting Hurricane Layer Engine processing...")
 
-        self.download_hurricane_data()    
+        # self.download_hurricane_data()    
         
-        # Parse points once and pass the Dataframe down the chain
-        point_gdf = self.convert_text_to_gpkg()
-        self.create_line_layer(point_gdf)
-        self.create_overlapping_buffers(point_gdf)
+        # # Parse points once and pass the Dataframe down the chain
+        # point_gdf = self.convert_text_to_gpkg()
+        # self.create_line_layer(point_gdf)
+        # self.create_overlapping_buffers(point_gdf)
         
-        self.clip_polygons()
-        self.polygons_to_raster()
+        # self.clip_polygons()
+        # self.polygons_to_raster()
 
-        self.generate_cumulative_rasters(
-            output_folder=self.count_raster_path,
-            value="cumulative_count")
+        # self.generate_cumulative_rasters(
+        #     output_folder=self.count_raster_path,
+        #     value="cumulative_count")
 
-        self.generate_cumulative_rasters(
-            output_folder=self.cumulative_raster_path,
-            value="cumulative_windspeed")
+        # self.generate_cumulative_rasters(
+        #     output_folder=self.cumulative_raster_path,
+        #     value="cumulative_windspeed")
 
         print("Averaging rasters for defined year ranges...")
         for start_year, end_year in self.year_ranges:
@@ -726,4 +734,3 @@ class CreateHurricaneLayerEngine(Engine):
                     shutil.copyfileobj(f_in, f_out)
             else:
                 shutil.copy(local_raster, path_obj)
-                
