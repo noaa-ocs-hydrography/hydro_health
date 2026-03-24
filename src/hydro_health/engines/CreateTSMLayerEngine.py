@@ -11,6 +11,7 @@ import tempfile
 
 from ftplib import FTP
 from rasterio.transform import from_bounds
+
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
@@ -57,11 +58,6 @@ class HydroHealthConfig:
 class CreateTSMLayerEngine(Engine):
     def __init__(self):
         super().__init__()
-        self.year_ranges = [
-            (1998, 2004), (2004, 2006), (2006, 2007), (2007, 2010),
-            (2010, 2015), (2014, 2022), (2016, 2017), (2017, 2018),
-            (2018, 2019), (2020, 2022), (2022, 2024)
-        ]
 
         creds = HydroHealthConfig()
         self.username = creds.username

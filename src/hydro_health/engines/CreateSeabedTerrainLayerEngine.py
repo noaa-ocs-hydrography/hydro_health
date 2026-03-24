@@ -28,14 +28,15 @@ except ImportError:
     print("Please install it by running: conda install whitebox\n")
     raise
 
+from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
-# from hydro_health.engines.Engine import Engine
 
 
-class CreateSeabedTerrainLayerEngine():
+class CreateSeabedTerrainLayerEngine(Engine):
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
     def __init__(self):
+        super().__init__()
         self.is_aws = (get_environment() == 'aws')
         self.fs = s3fs.S3FileSystem(anon=False)
         
@@ -43,22 +44,6 @@ class CreateSeabedTerrainLayerEngine():
         self.wbt = WhiteboxTools()
         self.wbt.verbose = False
         self.wbt.set_compress_rasters(True)
-        
-        # super().__init__() # Uncomment if inheriting from Engine
-        
-        self.year_ranges = [
-            (1998, 2004),
-            (2004, 2006),
-            (2006, 2007),
-            (2007, 2010),
-            (2010, 2015),
-            (2014, 2022),
-            (2016, 2017),
-            (2017, 2018),
-            (2018, 2019),
-            (2020, 2022),
-            (2022, 2024)
-        ]
 
         # Variables that do not change regardless of time step
         self.static_vars = [

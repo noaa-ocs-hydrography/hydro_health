@@ -6,7 +6,7 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables/Prediction/pre_processed/tiled
 HURRICANE:
-  SUBFOLDER: original_data_files/tsm_data
+  SUBFOLDER: ER_3/original_data_files/tsm_data
   COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
   CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
   DATA_PATH: ER_3/original_data_files/hurricane_data

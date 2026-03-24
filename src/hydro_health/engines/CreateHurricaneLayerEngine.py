@@ -1,9 +1,13 @@
 """Class to hold the logic for processing the Hurricane layer"""
 
 import os
+# Allow GDAL/Rasterio to write GeoTIFFs to S3 by using a local temp file under the hood
+os.environ["CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE"] = "YES"
+
 import requests
 import tempfile
 import shutil
+from collections import defaultdict
 from upath import UPath
 
 import geopandas as gpd
@@ -32,12 +36,6 @@ class CreateHurricaneLayerEngine(Engine):
         
         self.is_aws = (get_environment() == 'aws')
         
-        self.year_ranges = [
-            (1998, 2004), (2004, 2006), (2006, 2007), (2007, 2010),
-            (2010, 2015), (2014, 2022), (2016, 2017), (2017, 2018),
-            (2018, 2019), (2020, 2022), (2022, 2024)
-        ]
-        
         self.sediment_data = None
         self.create_file_paths()
 
@@ -45,15 +43,18 @@ class CreateHurricaneLayerEngine(Engine):
         """Creates Universal Paths based on the environment."""
         if self.is_aws:
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            # Disable directory caching since GDAL writes files outside of Python's fsspec awareness
+            kwargs = {"use_listings_cache": False}
+            
             # Use lstrip('/') to prevent 's3://bucket//path' double-slash S3 key errors
-            self.hurricane_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'GPKG_PATH')).lstrip('/')}")
-            self.txt_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'DATA_PATH')).lstrip('/')}")
-            self.year_pair_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH')).lstrip('/')}")
-            self.coast_boundary_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'COAST_BOUNDARY_PATH')).lstrip('/')}")
-            self.raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'RASTER_PATH')).lstrip('/')}")
-            self.mask_pred_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'MASK_PRED_PATH')).lstrip('/')}")
-            self.count_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'COUNT_RASTER_PATH')).lstrip('/')}")
-            self.cumulative_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH')).lstrip('/')}")
+            self.hurricane_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'GPKG_PATH')).lstrip('/')}", **kwargs)
+            self.txt_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'DATA_PATH')).lstrip('/')}", **kwargs)
+            self.year_pair_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH')).lstrip('/')}", **kwargs)
+            self.coast_boundary_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'COAST_BOUNDARY_PATH')).lstrip('/')}", **kwargs)
+            self.raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'RASTER_PATH')).lstrip('/')}", **kwargs)
+            self.mask_pred_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'MASK_PRED_PATH')).lstrip('/')}", **kwargs)
+            self.count_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'COUNT_RASTER_PATH')).lstrip('/')}", **kwargs)
+            self.cumulative_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH')).lstrip('/')}", **kwargs)
         else:
             self.hurricane_data_path = UPath(get_config_item('HURRICANE', 'GPKG_PATH'))
             self.txt_data_path = UPath(get_config_item('HURRICANE', 'DATA_PATH'))
@@ -64,6 +65,12 @@ class CreateHurricaneLayerEngine(Engine):
             self.count_raster_path = UPath(get_config_item('HURRICANE', 'COUNT_RASTER_PATH'))
             self.cumulative_raster_path = UPath(get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH'))
 
+        print("--- Hurricane Engine File Paths ---")
+        print(f"GPKG Data Path: {self.hurricane_data_path}")
+        print(f"TXT Data Path: {self.txt_data_path}")
+        print(f"Raster Base Path: {self.raster_path}")
+        print("-----------------------------------")
+
     def _get_gdal_path(self, path_obj) -> str:
         """Convert UPath to GDAL-compatible virtual file string if on AWS."""
         path_str = str(path_obj)
@@ -71,47 +78,93 @@ class CreateHurricaneLayerEngine(Engine):
             return path_str.replace("s3://", "/vsis3/")
         return path_str
 
+    def _read_gpkg_layer(self, layer_name: str) -> gpd.GeoDataFrame:
+        """Safely read a layer from a GeoPackage, avoiding GDAL /vsis3/ cache desyncs."""
+        if self.is_aws:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_gpkg = os.path.join(tmpdir, "temp_read.gpkg")
+                
+                with self.hurricane_data_path.open('rb') as f_in, open(local_gpkg, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                    
+                return gpd.read_file(local_gpkg, layer=layer_name)
+        else:
+            return gpd.read_file(self.hurricane_data_path, layer=layer_name)
+
     def _save_gpkg_layer(self, gdf: gpd.GeoDataFrame, layer_name: str) -> None:
         """Safely save a layer to a GeoPackage, handling S3 temp files if necessary."""
+        print(f"Saving layer '{layer_name}' to {self.hurricane_data_path}...")
+        
+        if gdf.empty:
+            print(f"WARNING: The GeoDataFrame for layer '{layer_name}' is empty. Saving empty layer.")
+
+        write_kwargs = {
+            "layer": layer_name,
+            "driver": "GPKG",
+            "engine": "pyogrio"
+        }
+        
+        file_exists = self.hurricane_data_path.exists()
+        
+        # Ensure we use append mode so we don't delete existing layers in the GPKG
+        # and override the specified layer if it exists
+        if file_exists:
+            write_kwargs["mode"] = "a"
+            write_kwargs["layer_options"] = {"OVERWRITE": "YES"}
+
         if self.is_aws:
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_gpkg = os.path.join(tmpdir, "temp.gpkg")
                 
-                # If the GPKG already exists on S3, download it first so we don't overwrite other layers
-                if self.hurricane_data_path.exists():
+                if file_exists:
                     with self.hurricane_data_path.open('rb') as f_in, open(local_gpkg, 'wb') as f_out:
                         shutil.copyfileobj(f_in, f_out)
                 
-                # Write/append the layer locally
-                gdf.to_file(local_gpkg, layer=layer_name, driver='GPKG')
+                gdf.to_file(local_gpkg, **write_kwargs)
                 
-                # Upload the updated GPKG back to S3
                 with open(local_gpkg, 'rb') as f_in, self.hurricane_data_path.open('wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
         else:
-            gdf.to_file(self.hurricane_data_path, layer=layer_name, driver='GPKG')
+            gdf.to_file(self.hurricane_data_path, **write_kwargs)
+            
+        print(f"Successfully saved layer '{layer_name}'.")
 
     def average_rasters(self, input_folder, start_year, end_year, output_name) -> None:
-        """Average rasters for a given year range and save the result."""
+        """Average and sum rasters for a given year range and save the results."""
 
         output_folder = self.year_pair_raster_path
         output_folder.mkdir(parents=True, exist_ok=True)
 
-        raster_files = [
-            f for f in UPath(input_folder).iterdir()
-            if f.suffix == ".tif" and any(str(year) in f.name for year in range(start_year, end_year + 1))
-        ]
-
-        if not raster_files:
-            print(f"No rasters found between {start_year} and {end_year}.")
+        try:
+            # Safely grab matching raster files and keep track of which years were found
+            raster_files = []
+            found_years = set()
+            for f in input_folder.rglob("*.tif"):
+                for year in range(start_year, end_year + 1):
+                    if str(year) in f.name:
+                        raster_files.append(f)
+                        found_years.add(year)
+                        break
+        except Exception as e:
+            print(f"Error accessing {input_folder}: {e}")
             return
 
+        # Check for missing years before doing any calculations
+        expected_years = set(range(start_year, end_year + 1))
+        missing_years = expected_years - found_years
+        
+        if missing_years:
+            print(f"Skipping year pair {start_year}-{end_year} for '{output_name}'. Missing data for years: {sorted(list(missing_years))}")
+            return
+
+        # Prepare dimensions and masks
         with rasterio.open(self._get_gdal_path(raster_files[0])) as src:
             meta = src.meta.copy()
             meta.update(dtype="float32", nodata=np.nan, compress="lzw")
             raster_shape = src.shape
             mask = src.read_masks(1)
 
+        # Arrays to hold cumulative (sum) data and counts (for averages)
         sum_array = np.zeros(raster_shape, dtype=np.float32)
         count_array = np.zeros(raster_shape, dtype=np.int32)
 
@@ -124,20 +177,28 @@ class CreateHurricaneLayerEngine(Engine):
                 sum_array[valid_mask] += data[valid_mask]
                 count_array[valid_mask] += 1
 
+        # Calculate averages from the accumulated sum
         with np.errstate(divide='ignore', invalid='ignore'):
             average_array = np.where(count_array > 0, sum_array / count_array, 0)
 
+        # Masking out nodata boundaries
         average_array[mask == 0] = np.nan
+        sum_array[mask == 0] = np.nan
 
-        if output_name.endswith('hurricane_count_mean.tif'):
+        # Apply Gaussian filter if processing count metrics (using simpler substr check instead of hardcoded .endswith)
+        if 'count' in output_name.lower():
             average_array = gaussian_filter(average_array, sigma=10)
+            sum_array = gaussian_filter(sum_array, sigma=10)
 
-        output_path = output_folder / f"{output_name}_{start_year}_{end_year}.tif"
+        # Save paths 
+        mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
+        cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
 
-        with rasterio.open(self._get_gdal_path(output_path), "w", **meta) as dst:
-            dst.write(average_array, 1)
+        # Save both results using the class's built-in save wrapper 
+        self.save_raster(average_array, mean_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
+        self.save_raster(sum_array, cumulative_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
 
-        print(f"Year pair raster saved to {output_path}.")    
+        print(f"Year pair mean and cumulative rasters saved for {output_name} ({start_year}-{end_year}).")    
 
     def clip_polygons(self) -> None:
         """Clip the hurricane polygons to the coastal boundary and save the result."""
@@ -145,7 +206,8 @@ class CreateHurricaneLayerEngine(Engine):
         if not self.coast_boundary_path.exists():
             raise FileNotFoundError(f"Coast boundary mask file not found at: {self.coast_boundary_path}")
 
-        gdf_to_clip = gpd.read_file(self._get_gdal_path(self.hurricane_data_path), layer='atlantic_polygon_buffer')
+        print("Subtracting wind radii from hurricane polygons...")
+        gdf_to_clip = self._read_gpkg_layer('atlantic_polygon_buffer')
         clip_boundary = gpd.read_file(self._get_gdal_path(self.coast_boundary_path))
 
         if gdf_to_clip.crs is None or clip_boundary.crs is None:
@@ -154,6 +216,8 @@ class CreateHurricaneLayerEngine(Engine):
         if gdf_to_clip.crs != clip_boundary.crs:
             clip_boundary = clip_boundary.to_crs(gdf_to_clip.crs)
 
+        # Buffer by 0 to clean up invalid topological intersections before iterating
+        gdf_to_clip['geometry'] = gdf_to_clip.geometry.buffer(0)
         gdf_to_clip = gdf_to_clip[~gdf_to_clip.geometry.is_empty & gdf_to_clip.geometry.is_valid]
 
         clipped_rows = []
@@ -172,6 +236,10 @@ class CreateHurricaneLayerEngine(Engine):
         clipped_gdf = gpd.GeoDataFrame(clipped_rows, columns=gdf_to_clip.columns, crs=gdf_to_clip.crs)
         clipped_gdf = clipped_gdf[clipped_gdf.geometry.is_valid]
 
+        # Use GeoPandas optimized clip function to safely clip geometries to the coastal mask
+        print("Applying spatial clip to the coast boundary...")
+        clipped_gdf = gpd.clip(clipped_gdf, clip_boundary)
+
         clipped_gdf['dissolve_id'] = clipped_gdf['dissolve_id'].astype(str)
         clipped_gdf['id'] = clipped_gdf['id'].astype(str)
         clipped_gdf['name'] = clipped_gdf['name'].astype(str)
@@ -184,6 +252,7 @@ class CreateHurricaneLayerEngine(Engine):
     def convert_text_to_gpkg(self) -> gpd.GeoDataFrame:
         """Convert the hurricane text data to a GeoPackage with point and line layers."""
 
+        print("Converting text data to GeoPackage points...")
         atlantic_point_layer_name = 'atlantic_hurricane_points'
 
         column_names = ['area_date',
@@ -236,7 +305,7 @@ class CreateHurricaneLayerEngine(Engine):
     def convert_coordinates(self, coord) -> float:
         """Convert coordinates from string format to float."""
 
-        coord = coord.replace('-', '') # TODO double check this isn't causing problems
+        coord = coord.replace('-', '') # TODO double check this isnt causing problems
         if 'N' in coord or 'E' in coord:
             return float(coord[:-1])
         elif 'S' in coord or 'W' in coord:
@@ -247,6 +316,7 @@ class CreateHurricaneLayerEngine(Engine):
     def create_line_layer(self, gdf: gpd.GeoDataFrame) -> None:
         """Create a line layer from the hurricane point data."""
 
+        print("Creating line layer from points...")
         atlantic_line_layer_name = 'atlantic_hurricane_lines'
 
         lines = (gdf.groupby('area_date').apply(
@@ -262,6 +332,7 @@ class CreateHurricaneLayerEngine(Engine):
     def create_overlapping_buffers(self, gdf: gpd.GeoDataFrame) -> None:
         """Create overlapping buffers around hurricane points and save them as polygons."""
 
+        print("Creating overlapping buffers...")
         gdf = gdf[gdf['year'] >= 1998]
         gdf = gdf.to_crs('EPSG:32617')  # WGS 84 UTM 17N
         
@@ -369,19 +440,23 @@ class CreateHurricaneLayerEngine(Engine):
         urls = [('atlantic_hurricane_data.txt', 'https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt'), 
                 ('pacific_hurricane_data.txt', 'https://www.nhc.noaa.gov/data/hurdat/hurdat2-nepac-1949-2023-042624.txt')]
         
+        print("Starting hurricane data download...")
         for filename, url in urls:
             response = requests.get(url)
             if response.status_code == 200:
                 self.txt_data_path.mkdir(parents=True, exist_ok=True)
                 filepath = self.txt_data_path / filename
+                print(f"Downloading {filename} to {filepath}")
                 with filepath.open('w', encoding='utf-8') as f:
                     f.write(response.text)
             else:
-                print('Error downloading HURDAT2 data.')  
+                print(f"Error downloading HURDAT2 data for {filename}.")  
+        print("Download complete.")
 
     def generate_cumulative_rasters(self, output_folder, value) -> None:
         """Generate cumulative rasters for hurricane data."""
 
+        print(f"Generating cumulative rasters for {value}...")
         input_raster_folder = self.raster_path
         mask_raster_path = self.mask_pred_path
         
@@ -413,17 +488,33 @@ class CreateHurricaneLayerEngine(Engine):
             mask_height, mask_width = new_height, new_width
             mask_valid = mask_data == 1
 
-        year_folders = [f.name for f in input_raster_folder.iterdir() if f.is_dir()]
+        try:
+            # Clear fsspec cache since GDAL may have written files behind its back
+            if hasattr(input_raster_folder, "fs"):
+                input_raster_folder.fs.invalidate_cache()
 
-        for year_folder in year_folders:
-            year_folder_path = input_raster_folder / year_folder
-            raster_files = [f.name for f in year_folder_path.iterdir() if f.suffix == '.tif']
+            # Use rglob to recursively find all child rasters safely on S3.
+            # Avoid using .glob('*/*.tif') as s3fs struggles with multi-level wildcards
+            all_rasters = list(input_raster_folder.rglob('*.tif'))
+        except Exception as e:
+            print(f"Error accessing {input_raster_folder}: {e}")
+            return
+
+        if not all_rasters:
+            print(f"No rasters found in {input_raster_folder}. Skipping cumulative raster generation.")
+            return
+
+        # Group the rasters by their parent year folder
+        year_to_rasters = defaultdict(list)
+        for r_path in all_rasters:
+            year_to_rasters[r_path.parent.name].append(r_path)
+
+        for year_folder, raster_files in year_to_rasters.items():
 
             cumulative_count = np.zeros((mask_height, mask_width), dtype=np.float32)
             cumulative_windspeed = np.zeros((mask_height, mask_width), dtype=np.float32)
 
-            for raster_file in raster_files:
-                raster_path = year_folder_path / raster_file
+            for raster_path in raster_files:
                 
                 with rasterio.open(self._get_gdal_path(raster_path)) as src:
                     raster_data = src.read(1)  
@@ -451,7 +542,7 @@ class CreateHurricaneLayerEngine(Engine):
                     elif value == "cumulative_windspeed":
                         cumulative_windspeed += np.nan_to_num(raster_data, nan=0)
 
-                print(f"Processed raster: {raster_file} for year {year_folder}")
+                print(f"Processed raster: {raster_path.name} for year {year_folder}")
             
             cumulative_windspeed[~mask_valid] = np.nan
             cumulative_count[~mask_valid] = np.nan
@@ -464,12 +555,15 @@ class CreateHurricaneLayerEngine(Engine):
                 output_name = f"cumulative_windspeed_{year_folder}.tif"
                 output_raster = cumulative_windspeed
             
-            output_path = UPath(output_folder) / output_name
+            output_path = output_folder / output_name
+            
+            # Make sure output directory exists
+            output_path.parent.mkdir(parents=True, exist_ok=True)
 
-            self.save_raster(output_raster, self._get_gdal_path(output_path), mask_height, mask_width, mask_transform, mask_crs)
+            self.save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs)
             print(f"Cumulative raster for year {year_folder} saved to {output_path}.")
 
-        print("Cumulative raster generation complete.")
+        print(f"Cumulative raster generation complete for {value}.")
 
     def get_corner_points(self, quarter_circle, quadrant) -> list:
         """Get the corner points of a quarter circle polygon based on the quadrant."""
@@ -487,7 +581,14 @@ class CreateHurricaneLayerEngine(Engine):
     def polygons_to_raster(self, resolution=500) -> None:
         """Convert hurricane polygons to rasters."""
 
-        gdf = gpd.read_file(self._get_gdal_path(self.hurricane_data_path), layer="trimmed_polygons")
+        print("Converting trimmed polygons to rasters...")
+        
+        try:
+            gdf = self._read_gpkg_layer("trimmed_polygons")
+        except Exception as e:
+            print(f"Error opening 'trimmed_polygons' layer. It may be missing due to empty overlap. Exception: {e}")
+            return
+            
         grouped = gdf.groupby(['name', 'year'])
 
         for (name, year), group in grouped:
@@ -518,19 +619,28 @@ class CreateHurricaneLayerEngine(Engine):
 
             raster_data = gaussian_filter(raster_data, sigma=3)
 
-            with rasterio.open(
-                self._get_gdal_path(raster_file),
-                "w",
-                driver="GTiff",
-                height=height,
-                width=width,
-                count=1,
-                dtype=raster_data.dtype,
-                crs=gdf.crs,
-                nodata=np.nan,
-                transform=transform,
-            ) as dst:
-                dst.write(raster_data, 1)
+            # Safely save the generated raster via local temp wrapper
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_raster = os.path.join(tmpdir, "temp.tif")
+                with rasterio.open(
+                    local_raster,
+                    "w",
+                    driver="GTiff",
+                    height=height,
+                    width=width,
+                    count=1,
+                    dtype=raster_data.dtype,
+                    crs=gdf.crs,
+                    nodata=np.nan,
+                    transform=transform,
+                ) as dst:
+                    dst.write(raster_data, 1)
+
+                if self.is_aws:
+                    with open(local_raster, 'rb') as f_in, raster_file.open('wb') as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                else:
+                    shutil.copy(local_raster, raster_file)
 
             print(f"Raster for {name} - {year} saved to {raster_file}.")
 
@@ -554,6 +664,7 @@ class CreateHurricaneLayerEngine(Engine):
 
     def run(self):
         """Entrypoint for processing the Hurricane layer"""
+        print("Starting Hurricane Layer Engine processing...")
 
         self.download_hurricane_data()    
         
@@ -573,6 +684,7 @@ class CreateHurricaneLayerEngine(Engine):
             output_folder=self.cumulative_raster_path,
             value="cumulative_windspeed")
 
+        print("Averaging rasters for defined year ranges...")
         for start_year, end_year in self.year_ranges:
             self.average_rasters(
                 input_folder=self.count_raster_path,
@@ -587,21 +699,31 @@ class CreateHurricaneLayerEngine(Engine):
                 end_year=end_year,
                 output_name=f"hurr_strength"
             )
+        
+        print("Hurricane Layer Engine processing complete.")
 
-    def save_raster(self, data, path, height, width, transform, crs) -> None:
-        """Save the raster data to a file."""
+    def save_raster(self, data, path_obj, height, width, transform, crs) -> None:
+        """Save the raster data to a file safely using a local temp file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_raster = os.path.join(tmpdir, "temp.tif")
+            with rasterio.open(
+                local_raster,
+                "w",
+                driver="GTiff",
+                height=height,
+                width=width,
+                count=1,
+                dtype=data.dtype,
+                crs=crs,
+                transform=transform,
+                nodata=np.nan,
+                compress="lzw",
+            ) as dst:
+                dst.write(data, 1)
 
-        with rasterio.open(
-            path, # Passed in path is already validated by _get_gdal_path upstream
-            "w",
-            driver="GTiff",
-            height=height,
-            width=width,
-            count=1,
-            dtype=data.dtype,
-            crs=crs,
-            transform=transform,
-            nodata=np.nan,
-            compress="lzw",
-        ) as dst:
-            dst.write(data, 1)
+            if self.is_aws:
+                with open(local_raster, 'rb') as f_in, path_obj.open('wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+            else:
+                shutil.copy(local_raster, path_obj)
+                
