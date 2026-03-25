@@ -18,7 +18,6 @@ from rasterio.enums import Resampling
 from rasterio.transform import Affine
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject
-from scipy.ndimage import gaussian_filter
 from shapely.geometry import GeometryCollection
 from shapely.geometry import LineString
 from shapely.geometry import Polygon
@@ -31,10 +30,11 @@ from hydro_health.helpers.tools import get_config_item, get_environment
 class CreateHurricaneLayerEngine(Engine):
     """Class to hold the logic for processing the Hurricane layer"""
 
-    def __init__(self):
+    def __init__(self, overwrite: bool = False):
         super().__init__()
         
         self.is_aws = (get_environment() == 'aws')
+        self.overwrite = overwrite
         
         self.sediment_data = None
         self.create_file_paths()
@@ -69,6 +69,7 @@ class CreateHurricaneLayerEngine(Engine):
         print(f"GPKG Data Path: {self.hurricane_data_path}")
         print(f"TXT Data Path: {self.txt_data_path}")
         print(f"Raster Base Path: {self.raster_path}")
+        print(f"Overwrite Existing Files: {self.overwrite}")
         print("-----------------------------------")
 
     def _get_gdal_path(self, path_obj) -> str:
@@ -89,7 +90,8 @@ class CreateHurricaneLayerEngine(Engine):
                     
                 return gpd.read_file(local_gpkg, layer=layer_name)
         else:
-            return gpd.read_file(self.hurricane_data_path, layer=layer_name)
+            # Explicitly cast to string to prevent engine errors with custom UPath types
+            return gpd.read_file(str(self.hurricane_data_path), layer=layer_name)
 
     def _save_gpkg_layer(self, gdf: gpd.GeoDataFrame, layer_name: str) -> None:
         """Safely save a layer to a GeoPackage, handling S3 temp files if necessary."""
@@ -105,27 +107,53 @@ class CreateHurricaneLayerEngine(Engine):
         }
         
         file_exists = self.hurricane_data_path.exists()
-        
-        # Ensure we use append mode so we don't delete existing layers in the GPKG
-        # and override the specified layer if it exists
-        if file_exists:
-            write_kwargs["mode"] = "a"
-            write_kwargs["layer_options"] = {"OVERWRITE": "YES"}
 
         if self.is_aws:
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_gpkg = os.path.join(tmpdir, "temp.gpkg")
                 
                 if file_exists:
-                    with self.hurricane_data_path.open('rb') as f_in, open(local_gpkg, 'wb') as f_out:
-                        shutil.copyfileobj(f_in, f_out)
+                    try:
+                        with self.hurricane_data_path.open('rb') as f_in, open(local_gpkg, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                        write_kwargs["mode"] = "a"
+                        write_kwargs["layer_options"] = {"OVERWRITE": "YES"}
+                    except Exception as e:
+                        print(f"Warning: Could not read existing GPKG from S3 ({e}). Starting fresh.")
+                        file_exists = False
                 
-                gdf.to_file(local_gpkg, **write_kwargs)
+                try:
+                    gdf.to_file(local_gpkg, **write_kwargs)
+                except Exception as e:
+                    print(f"Warning: Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
+                    if os.path.exists(local_gpkg):
+                        os.remove(local_gpkg)
+                    # Strip out append options and force a new file creation
+                    write_kwargs.pop("mode", None)
+                    write_kwargs.pop("layer_options", None)
+                    gdf.to_file(local_gpkg, **write_kwargs)
                 
                 with open(local_gpkg, 'rb') as f_in, self.hurricane_data_path.open('wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
         else:
-            gdf.to_file(self.hurricane_data_path, **write_kwargs)
+            # Ensure the parent directory exists locally before pyogrio attempts creation
+            self.hurricane_data_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            if file_exists:
+                write_kwargs["mode"] = "a"
+                write_kwargs["layer_options"] = {"OVERWRITE": "YES"}
+                
+            try:
+                # Explicitly cast to string to prevent C-engine errors
+                gdf.to_file(str(self.hurricane_data_path), **write_kwargs)
+            except Exception as e:
+                print(f"Warning: Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
+                if self.hurricane_data_path.exists():
+                    self.hurricane_data_path.unlink()
+                # Strip out append options and force a new file creation
+                write_kwargs.pop("mode", None)
+                write_kwargs.pop("layer_options", None)
+                gdf.to_file(str(self.hurricane_data_path), **write_kwargs)
             
         print(f"Successfully saved layer '{layer_name}'.")
 
@@ -139,6 +167,14 @@ class CreateHurricaneLayerEngine(Engine):
 
         output_folder = self.year_pair_raster_path
         output_folder.mkdir(parents=True, exist_ok=True)
+
+        mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
+        cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
+
+        # Check if files already exist before running expensive logic
+        if not self.overwrite and mean_output_path.exists() and cumulative_output_path.exists():
+            print(f"Skipping {output_name} for {start_year}-{end_year}. Files already exist.")
+            return
 
         try:
             # Safely grab matching raster files and keep track of which years were found
@@ -189,16 +225,6 @@ class CreateHurricaneLayerEngine(Engine):
         # Masking out nodata boundaries
         average_array[mask == 0] = np.nan
         sum_array[mask == 0] = np.nan
-
-        # Apply Gaussian filter if processing count metrics (using simpler substr check instead of hardcoded .endswith)
-        if 'count' in output_name.lower():
-            average_array = gaussian_filter(average_array, sigma=10)
-            sum_array = gaussian_filter(sum_array, sigma=10)
-
-        # Save paths 
-        # Note: Both mean and cumulative rasters are generated and saved out for the year pair.
-        mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
-        cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
 
         # Save both results using the class's built-in save wrapper 
         self.save_raster(average_array, mean_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
@@ -519,6 +545,18 @@ class CreateHurricaneLayerEngine(Engine):
 
         for year_folder, raster_files in year_to_rasters.items():
 
+            # Determine output paths before processing to allow skipping
+            if value == "cumulative_count":
+                output_name = f"cumulative_count_{year_folder}.tif"
+            elif value == "cumulative_windspeed":
+                output_name = f"cumulative_windspeed_{year_folder}.tif"
+            
+            output_path = output_folder / output_name
+
+            if not self.overwrite and output_path.exists():
+                print(f"Skipping {output_name}, already exists.")
+                continue
+
             cumulative_count = np.zeros((mask_height, mask_width), dtype=np.float32)
             cumulative_windspeed = np.zeros((mask_height, mask_width), dtype=np.float32)
 
@@ -556,14 +594,9 @@ class CreateHurricaneLayerEngine(Engine):
             cumulative_count[~mask_valid] = np.nan
 
             if value == "cumulative_count":
-                output_name = f"cumulative_count_{year_folder}.tif"
                 output_raster = cumulative_count
-
             elif value == "cumulative_windspeed":
-                output_name = f"cumulative_windspeed_{year_folder}.tif"
                 output_raster = cumulative_windspeed
-            
-            output_path = output_folder / output_name
             
             # Make sure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -605,7 +638,7 @@ class CreateHurricaneLayerEngine(Engine):
             output_folder.mkdir(parents=True, exist_ok=True)
             raster_file = output_folder / f"{name}_{year}.tif"
             
-            if raster_file.exists():
+            if not self.overwrite and raster_file.exists():
                 print(f"Skipping {raster_file}, already exists.")
                 continue  
 
@@ -624,8 +657,6 @@ class CreateHurricaneLayerEngine(Engine):
                     transform=transform,
                     fill=np.nan, 
                 )
-
-            raster_data = gaussian_filter(raster_data, sigma=3)
 
             # Safely save the generated raster via local temp wrapper
             with tempfile.TemporaryDirectory() as tmpdir:
@@ -674,23 +705,31 @@ class CreateHurricaneLayerEngine(Engine):
         """Entrypoint for processing the Hurricane layer"""
         print("Starting Hurricane Layer Engine processing...")
 
-        # self.download_hurricane_data()    
-        
-        # # Parse points once and pass the Dataframe down the chain
-        # point_gdf = self.convert_text_to_gpkg()
-        # self.create_line_layer(point_gdf)
-        # self.create_overlapping_buffers(point_gdf)
-        
-        # self.clip_polygons()
-        # self.polygons_to_raster()
+        if self.overwrite:
+            print("Overwrite is enabled. Removing existing GeoPackage to start fresh...")
+            try:
+                if self.hurricane_data_path.exists():
+                    self.hurricane_data_path.unlink()
+            except Exception as e:
+                print(f"Warning: Could not delete existing GPKG: {e}")
 
-        # self.generate_cumulative_rasters(
-        #     output_folder=self.count_raster_path,
-        #     value="cumulative_count")
+        self.download_hurricane_data()    
+        
+        # Parse points once and pass the Dataframe down the chain
+        point_gdf = self.convert_text_to_gpkg()
+        self.create_line_layer(point_gdf)
+        self.create_overlapping_buffers(point_gdf)
+        
+        self.clip_polygons()
+        self.polygons_to_raster()
 
-        # self.generate_cumulative_rasters(
-        #     output_folder=self.cumulative_raster_path,
-        #     value="cumulative_windspeed")
+        self.generate_cumulative_rasters(
+            output_folder=self.count_raster_path,
+            value="cumulative_count")
+
+        self.generate_cumulative_rasters(
+            output_folder=self.cumulative_raster_path,
+            value="cumulative_windspeed")
 
         print("Averaging rasters for defined year ranges...")
         for start_year, end_year in self.year_ranges:

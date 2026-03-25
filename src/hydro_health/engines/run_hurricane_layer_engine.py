@@ -14,7 +14,7 @@ if __name__ == '__main__':
     profiler = cProfile.Profile()
     profiler.enable()
 
-    engine = CreateHurricaneLayerEngine()
+    engine = CreateHurricaneLayerEngine(overwrite=True)
     engine.run()
 
     profiler.disable()

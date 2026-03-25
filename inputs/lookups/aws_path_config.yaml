@@ -59,6 +59,6 @@ TERRAIN:
   FILLED_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
   OUTPUTS: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs
 TSM:
-  DATA_PATH: original_data_files/tsm_data/nc_files
+  DATA_PATH: ER_3/original_data_files/tsm_data/nc_files
   MEAN_RASTER_PATH: original_data_files/tsm_data/tsm_rasters/mean_rasters
-  YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/TSM_year_pair_rasters
+  YEAR_PAIR_RASTER_PATH: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters

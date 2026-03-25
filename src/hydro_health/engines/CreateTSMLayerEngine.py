@@ -274,7 +274,7 @@ class CreateTSMLayerEngine(Engine):
                 os.remove(tmp.name)
 
     def run(self) -> None:
-        # self.download_tsm_data()
+        self.download_tsm_data()
         self.create_mean_year_rasters()
         for start_year, end_year in self.year_ranges:
             self.year_pair_rasters(start_year, end_year)
