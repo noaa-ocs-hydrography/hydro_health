@@ -61,4 +61,5 @@ TERRAIN:
 TSM:
   DATA_PATH: ER_3/original_data_files/tsm_data/nc_files
   MEAN_RASTER_PATH: original_data_files/tsm_data/tsm_rasters/mean_rasters
+  SUBFOLDER: original_data_files/tsm_data
   YEAR_PAIR_RASTER_PATH: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters
