@@ -131,12 +131,12 @@ class ModelDataPreProcessor:
 
         self.create_file_paths()
 
-        # self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
-        # self.raster_to_spatial_df(self.train_mask_path, process_type='training')
+        self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
+        self.raster_to_spatial_df(self.train_mask_path, process_type='training')
 
 
-        # self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_path=self.subgrid_paths['prediction'], process_type='prediction')
-        # self.create_subgrids(mask_gdf=self.mask_training_pq, output_path=self.subgrid_paths['training'], process_type='training')
+        self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_path=self.subgrid_paths['prediction'], process_type='prediction')
+        self.create_subgrids(mask_gdf=self.mask_training_pq, output_path=self.subgrid_paths['training'], process_type='training')
 
         try:
             mask_pred_gdf = gpd.read_parquet(str(self.mask_prediction_pq))

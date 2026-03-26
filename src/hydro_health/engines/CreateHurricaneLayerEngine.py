@@ -773,3 +773,4 @@ class CreateHurricaneLayerEngine(Engine):
                     shutil.copyfileobj(f_in, f_out)
             else:
                 shutil.copy(local_raster, path_obj)
+                
