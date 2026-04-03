@@ -1,5 +1,7 @@
 import pathlib
 import sys
+import os
+import time
 
 HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
@@ -46,12 +48,22 @@ class ManualDownloadEngine:
         
         engine = RasterVRTS3Engine(self.param_lookup)
         engine.setup_dask('aws')
-        engine.create_raster_vrts('NCMP', 'ER_3', 'DigitalCoast', data_folder='DigitalCoast_manual_downloads', skip_existing=False)
+        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', data_folder='DigitalCoast_manual_downloads', skip_existing=False)
         engine.close_dask()
 
+    def rebuild_training_mask(self) -> None:
+        engine = RasterMaskS3Engine(self.param_lookup)
+        result = engine.remerge_training_mask("ER_3", OUTPUTS)
+        print(result)
+
     def run(self) -> None:
+        if os.path.exists(OUTPUTS / 'log_prints.txt'):
+            now = time.time()
+            os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
+        
         # self.process_vrt()
-        self.process_masks()
+        # self.process_masks()
+        self.rebuild_training_mask()
         # self.process_grid_tiles()
         print('Done')
 
