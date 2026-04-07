@@ -1,6 +1,3 @@
-import os
-import sys
-import json
 import boto3
 import pathlib
 import shutil
@@ -16,34 +13,37 @@ from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
-mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
-
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
 def _create_prediction_mask(param_inputs: list[list]) -> None:
     """Create, upload, and retain the prediction mask locally for the training step"""
 
-    temp_folder, ecoregion, param_lookup = param_inputs
+    temp_folder, ecoregion = param_inputs
 
     s3_client = boto3.client('s3')
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-    engine = RasterMaskS3Engine(param_lookup)
 
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(str(gpkg))
     source_layer = gpkg_ds.GetLayerByName('EcoRegions_50m')
+
+    target_srs = osr.SpatialReference()
+    target_srs.ImportFromEPSG(32617)
+    target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
     
     mem_driver = ogr.GetDriverByName('Memory')
-    output_srs = osr.SpatialReference()
-    output_srs.ImportFromEPSG(32617)
     mem_ds = mem_driver.CreateDataSource('mem_ds')
-    mem_layer = mem_ds.CreateLayer('selected_ecoregion', srs=output_srs, geom_type=ogr.wkbPolygon)
+    mem_layer = mem_ds.CreateLayer('selected_ecoregion', srs=target_srs, geom_type=ogr.wkbPolygon)
 
     source_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
+
+    source_srs = source_layer.GetSpatialRef()
+    transformer = osr.CoordinateTransformation(source_srs, target_srs)
+
     for feature in source_layer:
-        geom = feature.GetGeometryRef()
-        geom.Transform(engine.get_transformation())
+        geom = feature.GetGeometryRef().Clone()
+        geom.Transform(transformer)
         new_feat = ogr.Feature(mem_layer.GetLayerDefn())
         new_feat.SetGeometry(geom)
         mem_layer.CreateFeature(new_feat)
@@ -60,17 +60,21 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
 
     target_ds = gdal.GetDriverByName("GTiff").Create(
         str(local_path), x_res, y_res, 1, gdal.GDT_Byte,
-        options=["COMPRESS=LZW", "TILED=YES", "NUM_THREADS=ALL_CPUS"]
+        options=[
+            "COMPRESS=LZW", 
+            "TILED=YES", 
+            "NUM_THREADS=ALL_CPUS", 
+            "SPARSE_OK=YES" # Efficiently handles the "empty" space
+        ]
     )
     target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
-    target_ds.SetProjection(output_srs.ExportToWkt())
+    target_ds.SetProjection(target_srs.ExportToWkt())
     target_ds.GetRasterBand(1).SetNoDataValue(0)
 
     gdal.RasterizeLayer(target_ds, [1], mem_layer, burn_values=[1])
     target_ds = None # Flush to disk
 
-    # Upload to S3
-    s3_key = f"testing/{ecoregion.stem}/{get_config_item('MASK', 'SUBFOLDER')}/{prediction_mask_name}"
+    s3_key = f"{ecoregion.stem}/{get_config_item('MASK', 'SUBFOLDER')}/{prediction_mask_name}"
     s3_client.upload_file(str(local_path), bucket, s3_key)
 
     mem_ds = None
@@ -81,7 +85,6 @@ def _create_training_mask(param_inputs: list[list]):
     """Create training mask, upload, and then cleanup local tif files"""
 
     temp_folder, ecoregion = param_inputs
-
     mask_subfolder = get_config_item('MASK', 'SUBFOLDER')
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
@@ -90,46 +93,66 @@ def _create_training_mask(param_inputs: list[list]):
     training_data_outline = temp_folder / ecoregion.stem / mask_subfolder / 'training_data_outlines.shp'
 
     if prediction_file.exists() and training_data_outline.exists():
-        # Copy prediction file locally to create the training base
-        shutil.copy(str(prediction_file), str(training_file))
+        # Use Translate instead of copy to ensure specific compression/options
+        gdal.Translate(
+            str(training_file), 
+            str(prediction_file),
+            creationOptions=["COMPRESS=LZW", "TILED=YES", "SPARSE_OK=YES", "NUM_THREADS=ALL_CPUS"]
+        )
         
         training_ds = gdal.Open(str(training_file), gdal.GA_Update)
-        shp_driver = ogr.GetDriverByName("ESRI Shapefile")
-        training_data_outline_ds = shp_driver.Open(str(training_data_outline))
-        training_mask_layer = training_data_outline_ds.GetLayer(0)
+        target_srs = osr.SpatialReference(training_ds.GetProjection())
+        target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
-        gpkg_driver = ogr.GetDriverByName("GPKG")
-        geopackage_ds = gpkg_driver.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
-        ecoregions_layer = geopackage_ds.GetLayer(get_config_item('SHARED', 'ECOREGIONS'))
-        ecoregions_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
-
-        in_memory_driver = ogr.GetDriverByName("Memory")
-        clipped_ds = in_memory_driver.CreateDataSource('clipped_mem')
-        clipped_layer = clipped_ds.CreateLayer(
-            "clipped_layer",
-            geom_type=training_mask_layer.GetGeomType(),
-            srs=training_mask_layer.GetSpatialRef(),
-        )
-        training_mask_layer.Clip(ecoregions_layer, clipped_layer)
-
-        gdal.RasterizeLayer(training_ds, [1], clipped_layer, burn_values=[2])
+        gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
+        eco_source_layer = gpkg_ds.GetLayer(get_config_item('SHARED', 'ECOREGIONS'))
+        eco_source_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
         
-        # Explicitly close everything to release file locks
-        training_ds = None
-        geopackage_ds = None
-        clipped_ds = None
-        training_data_outline_ds = None
+        # Memory layer for the ecoregion in the target CRS
+        mem_driver = ogr.GetDriverByName("Memory")
+        eco_mem_ds = mem_driver.CreateDataSource('eco_mem')
+        eco_clip_layer = eco_mem_ds.CreateLayer("eco_clip", srs=target_srs, geom_type=ogr.wkbMultiPolygon)
+        
+        eco_transform = osr.CoordinateTransformation(eco_source_layer.GetSpatialRef(), target_srs)
+        for feat in eco_source_layer:
+            geom = feat.GetGeometryRef().Clone()
+            geom.Transform(eco_transform)
+            new_feat = ogr.Feature(eco_clip_layer.GetLayerDefn())
+            new_feat.SetGeometry(geom)
+            eco_clip_layer.CreateFeature(new_feat)
 
-        # Upload final training mask to S3
+        shp_driver = ogr.GetDriverByName("ESRI Shapefile")
+        outline_ds = shp_driver.Open(str(training_data_outline))
+        outline_source_layer = outline_ds.GetLayer(0)
+        
+        mem_ds = mem_driver.CreateDataSource('outline_mem')
+        mem_transformed_layer = mem_ds.CreateLayer("outline_trans", srs=target_srs, geom_type=ogr.wkbMultiPolygon)
+        
+        outline_transform = osr.CoordinateTransformation(outline_source_layer.GetSpatialRef(), target_srs)
+        for feat in outline_source_layer:
+            geom = feat.GetGeometryRef().Clone()
+            geom.Transform(outline_transform)
+            new_feat = ogr.Feature(mem_transformed_layer.GetLayerDefn())
+            new_feat.SetGeometry(geom)
+            mem_transformed_layer.CreateFeature(new_feat)
+
+        final_clipped_ds = mem_driver.CreateDataSource('final_mem')
+        final_clipped_layer = final_clipped_ds.CreateLayer("final_clip", srs=target_srs, geom_type=ogr.wkbMultiPolygon)
+        
+        mem_transformed_layer.Clip(eco_clip_layer, final_clipped_layer)
+
+        gdal.RasterizeLayer(training_ds, [1], final_clipped_layer, burn_values=[2])
+        
+        training_ds = None
+        gpkg_ds = None
+        outline_ds = None
+        
         s3_client = boto3.client('s3')
-        s3_key = f"testing/{ecoregion.stem}/{mask_subfolder}/training_mask_{ecoregion.stem}.tif"
+        s3_key = f"{ecoregion.stem}/{mask_subfolder}/training_mask_{ecoregion.stem}.tif"
         s3_client.upload_file(str(training_file), bucket, s3_key)
 
-        # CLEANUP: Delete the local .tif files now that they are safely on S3
-        if prediction_file.exists():
-            prediction_file.unlink()
-        if training_file.exists():
-            training_file.unlink()
+        prediction_file.unlink()
+        training_file.unlink()
         
         return f' - Processed: {ecoregion.stem}'
     else:
@@ -183,8 +206,9 @@ class RasterMaskS3Engine(Engine):
         approved_files = {}
         for ecoregion in ecoregions:
             s3_files = s3fs.S3FileSystem()
-            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion.stem}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
-            json_files = s3_files.glob(f'{digital_coast_path}/**/feature.json')
+            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion.stem}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+            unapproved_dataset = 'NCEI'
+            json_files = [json_prefix for json_prefix in s3_files.glob(f'{digital_coast_path}/**/feature.json') if unapproved_dataset not in json_prefix]
             for file in json_files:
                 if ecoregion.stem not in approved_files:
                     approved_files[ecoregion.stem] = []
@@ -235,7 +259,7 @@ class RasterMaskS3Engine(Engine):
     def process_prediction_masks(self, ecoregions: list[pathlib.Path], temp_folder: pathlib.Path, outputs: str) -> None:
         """Multiprocessing entrypoint for creating prediction masks"""
 
-        future_tiles = self.client.map(_create_prediction_mask, [[temp_folder, ecoregion, self.param_lookup] for ecoregion in ecoregions])
+        future_tiles = self.client.map(_create_prediction_mask, [[temp_folder, ecoregion] for ecoregion in ecoregions])
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, outputs)
 
