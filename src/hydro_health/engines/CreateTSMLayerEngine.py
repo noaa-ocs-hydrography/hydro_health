@@ -11,6 +11,7 @@ import tempfile
 
 from ftplib import FTP
 from rasterio.transform import from_bounds
+
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
@@ -57,11 +58,6 @@ class HydroHealthConfig:
 class CreateTSMLayerEngine(Engine):
     def __init__(self):
         super().__init__()
-        self.year_ranges = [
-            (1998, 2004), (2004, 2006), (2006, 2007), (2007, 2010),
-            (2010, 2015), (2014, 2022), (2016, 2017), (2017, 2018),
-            (2018, 2019), (2020, 2022), (2022, 2024)
-        ]
 
         creds = HydroHealthConfig()
         self.username = creds.username
@@ -206,7 +202,7 @@ class CreateTSMLayerEngine(Engine):
 
             running_sum, valid_count = None, None
             for fname in nc_files:
-                path = self.output_folder / fname if get_environment() in ['local', 'remote'] else f's3://{fname}'
+                path = pathlib.Path(nc_files_folder) / fname if get_environment() in ['local', 'remote'] else f's3://{fname}'
                 try:
                     with xr.open_dataset(path, engine='h5netcdf') as ds:
                         arr = ds['TSM_mean'].values.squeeze().astype(np.float32)
@@ -240,7 +236,7 @@ class CreateTSMLayerEngine(Engine):
                     if os.path.exists(tmp_path): os.remove(tmp_path)
 
     def year_pair_rasters(self, start_year: int, end_year: int) -> None:
-        """Build and store year-pair mean rasters"""
+        """Build and store year-pair mean and cumulative rasters"""
 
         s3_files = s3fs.S3FileSystem()
         if get_environment() in ['local', 'remote']:
@@ -265,20 +261,40 @@ class CreateTSMLayerEngine(Engine):
                 sum_array[mask] += data[mask]
                 count_array[mask] += 1
 
+        # Calculate average and cumulative arrays
         avg_array = np.where(count_array > 0, sum_array / count_array, np.nan)
-        out_name = f'{start_year}_{end_year}_tsm_mean.tif'
+        cumulative_array = np.where(count_array > 0, sum_array, np.nan)
+
+        # Output filenames
+        out_name_mean = f'{start_year}_{end_year}_tsm_mean.tif'
+        out_name_cumulative = f'{start_year}_{end_year}_tsm_cumulative.tif'
 
         if get_environment() in ['local', 'remote']:
-            self._save_raster_data(avg_array, os.path.join(self.year_pair_path, out_name), meta['transform'], meta['crs'], meta['nodata'])
+            self.year_pair_path.mkdir(parents=True, exist_ok=True)
+            # Save Mean
+            self._save_raster_data(avg_array, os.path.join(self.year_pair_path, out_name_mean), meta['transform'], meta['crs'], meta['nodata'])
+            # Save Cumulative
+            self._save_raster_data(cumulative_array, os.path.join(self.year_pair_path, out_name_cumulative), meta['transform'], meta['crs'], meta['nodata'])
         else:
-            with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
-                self._save_raster_data(avg_array, tmp.name, meta['transform'], meta['crs'], meta['nodata'])
-                s3_dest = f"s3://{self.year_pair_path}/{out_name}"
-                s3_files.put(tmp.name, s3_dest)
-                os.remove(tmp.name)
+            # Save Mean to S3
+            with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_mean:
+                self._save_raster_data(avg_array, tmp_mean.name, meta['transform'], meta['crs'], meta['nodata'])
+                s3_dest_mean = f"s3://{self.year_pair_path}/{out_name_mean}"
+                s3_files.put(tmp_mean.name, s3_dest_mean)
+                print(f"Mean raster saved: {s3_dest_mean}")    
+            os.remove(tmp_mean.name)
+
+            # Save Cumulative to S3
+            with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_cumul:
+                self._save_raster_data(cumulative_array, tmp_cumul.name, meta['transform'], meta['crs'], meta['nodata'])
+                s3_dest_cumul = f"s3://{self.year_pair_path}/{out_name_cumulative}"
+                s3_files.put(tmp_cumul.name, s3_dest_cumul)
+                print(f"Cumulative raster saved: {s3_dest_cumul}")    
+            os.remove(tmp_cumul.name)
 
     def run(self) -> None:
         # self.download_tsm_data()
         self.create_mean_year_rasters()
         for start_year, end_year in self.year_ranges:
             self.year_pair_rasters(start_year, end_year)
+            

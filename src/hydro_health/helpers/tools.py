@@ -55,10 +55,18 @@ def get_config_item(parent: str, child: str=False, env_string: str=False) -> str
     env = env_string if env_string else None
     if env is None:
         env = get_environment()
-    
-    with open(str(INPUTS / 'lookups' / f'{env}_path_config.yaml'), 'r') as lookup:
+
+    model_mode = "pilot"  # "ecoregion" would be the other mode option
+
+    if model_mode == "pilot":
+        file_path = str(INPUTS / 'lookups' / f'{env}_{model_mode}_path_config.yaml') 
+    else:
+        file_path = str(INPUTS / 'lookups' / f'{env}_path_config.yaml')
+
+    with open(file_path, 'r') as lookup:
         config = yaml.safe_load(lookup)
         parent_item = config[parent]
+        
         if child:
             return parent_item[child]
         else:
@@ -83,7 +91,6 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
         make_ecoregion_folders(selected_ecoregions, output_folder)
     return list(selected_ecoregions['EcoRegion'].unique())
-
 
 
 def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
