@@ -35,7 +35,7 @@ def get_environment() -> str:
         return  'local'
     elif 'VS' in hostname:
         return 'remote'
-    elif 'ip-10' in hostname:
+    elif 'hydrohealth' in hostname:
         return 'aws'
     else:
         return 'remote'
@@ -56,7 +56,7 @@ def get_config_item(parent: str, child: str=False, env_string: str=False) -> str
     if env is None:
         env = get_environment()
 
-    model_mode = "pilot"  # "ecoregion" would be the other mode option
+    model_mode = "ecoregion"  
 
     if model_mode == "pilot":
         file_path = str(INPUTS / 'lookups' / f'{env}_{model_mode}_path_config.yaml') 

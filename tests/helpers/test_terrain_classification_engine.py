@@ -45,7 +45,7 @@ def engine():
 
 def test_get_tile_id(engine):
     """Test extracting 8-character alphanumeric Tile ID."""
-    assert engine._get_tile_id("bathy_A1B2C3D4_2020.tif") == "A1B2C3D4"
+    assert engine._get_tile_id("bathy_BH4SD56H_2020.tif") == "BH4SD56H"
     assert engine._get_tile_id("bluetopo_12345678_2020.tif") is None  # all digits
 
 def test_get_variable_type(engine):
@@ -56,9 +56,9 @@ def test_get_variable_type(engine):
 
 def test_get_year(engine):
     """Test year extraction from filename."""
-    assert engine._get_year("bathy_ABC12345_2015.tif") == 2015
-    assert engine._get_year("bathy_ABC12345_1999.tif") == 1999
-    assert engine._get_year("bathy_ABC12345_nodate.tif") is None
+    assert engine._get_year("bathy_BH4SD56H_2015.tif") == 2015
+    assert engine._get_year("bathy_BH4SD56H_1999.tif") == 1999
+    assert engine._get_year("bathy_BH4SD56H_nodate.tif") is None
 
 
 # ==============================================================================
@@ -67,10 +67,10 @@ def test_get_year(engine):
 
 def test_calculate_bpi(engine):
     """Test Bathymetric Position Index calculation."""
-    arr = np.ones((10, 10))
+    arr = np.ones((100, 100))
     arr[5, 5] = 10  # A spike
-    bpi = engine.calculate_bpi(arr, cell_size=1, inner_radius=1, outer_radius=3)
-    assert bpi.shape == (10, 10)
+    bpi = engine.calculate_bpi(arr, cell_size=1, inner_radius=8, outer_radius=32)
+    assert bpi.shape == (100, 100)
     assert bpi[5, 5] > 0  # Spike should have positive BPI
 
 def test_calculate_slope_and_tri(engine):

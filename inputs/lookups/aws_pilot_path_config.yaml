@@ -34,8 +34,7 @@ MODEL:
   PREDICTION_SUB_GRIDS: pilot/model_subgrids/prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: pilot/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: pilot/model_variables/Training/processed
-  UNCOMBINED_LIDAR_DIR: pilot/model_variables/Prediction/pre_processed/tiled
-  # COMBINED_LIDAR_DIR: pilot/model_variables/Prediction/pre_processed/combined_lidar_tifs
+  UNCOMBINED_LIDAR_DIR: pilot/model_variables/Prediction/pre_processed/tiled_not_filled
 PREPROCESSED:
   BLUETOPO: ER_3/model_variables/Prediction/pre_processed/BlueTopo
   HURRICANE: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
