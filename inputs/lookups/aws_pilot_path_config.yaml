@@ -6,11 +6,11 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables/Prediction/pre_processed/tiled
 HURRICANE:
-  COUNT_RASTER_PATH: original_data_files/hurricane_data/hurricane_count_raster
-  CUMULATIVE_RASTER_PATH: original_data_files/hurricane_data/hurricane_cumulative_raster
-  DATA_PATH: original_data_files/hurricane_data
-  GPKG_PATH: original_data_files/hurricane_data/hurricane_data.gpkg
-  RASTER_PATH: original_data_files/hurricane_data/hurricane_rasters
+  COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
+  DATA_PATH: ER_3/original_data_files/hurricane_data
+  GPKG_PATH: ER_3/original_data_files/hurricane_data/hurricane_data.gpkg
+  RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_rasters
   YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
 LIDAR_PLOTS:
   INPUT_VRTS: pilot/model_variables/Prediction/raw/DigitalCoast
@@ -18,7 +18,7 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: pilot/model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
-  COAST_BOUNDARY_PATH: coastal_boundary_dataset/50m_isobath_polygon/50m_isobath_polygon.shp
+  COAST_BOUNDARY_PATH: ER_3/masks/50m_isobath_polygon.gpkg
   MASKS_DIR: pilot/masks
   MASK_PRED_PATH: pilot/masks/prediction_mask_pilot.tif
   MASK_TRAINING_PATH: pilot/masks/training_mask_pilot.tif
@@ -66,6 +66,7 @@ TERRAIN:
   FILLED_DIR: pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
   OUTPUTS: pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs
 TSM:
-  DATA_PATH: original_data_files/tsm_data/nc_files
+  DATA_PATH: ER_3/original_data_files/tsm_data/nc_files
   MEAN_RASTER_PATH: original_data_files/tsm_data/tsm_rasters/mean_rasters
+  SUBFOLDER: original_data_files/tsm_data
   YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/TSM_year_pair_rasters

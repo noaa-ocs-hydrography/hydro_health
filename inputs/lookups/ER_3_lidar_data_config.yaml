@@ -170,12 +170,12 @@ EcoRegion-3:
     year: null
     note: Don't use, smaller coverage than USACE_USACE_NCMP_2015_5183
   NOAA_NCEI_2016_8483:
-    use: False
+    use: True
     date: '2016'
     year: null
     note: Valid dataset that is not a duplicate
   NOAA_NCEI_2016_8580:
-    use: False
+    use: True
     date: '2016'
     year: null
     note: Valid dataset that is not a duplicate
@@ -272,12 +272,12 @@ EcoRegion-3:
     year: null
     note: Corrupated LAZ dataset. Shp available which indicates small amount of coastal depth coverage. No DEM
   NOAA_NCEI_2017_8483:
-    use: False
+    use: True
     date: '2017'
     year: null
     note: Valid dataset that is not a duplicate, some overlap
   NOAA_NCEI_2017_8580:
-    use: False
+    use: True
     date: '2017'
     year: null
     note: Valid dataset that is not a duplicate
@@ -322,12 +322,12 @@ EcoRegion-3:
     year: null
     note: Corrupted, LAZ dataset, it seems there is an alt DEM to use?
   NOAA_NCEI_2018_8483:
-    use: False
+    use: True
     date: '2018'
     year: null
     note: Valid dataset that is not a duplicate
   NOAA_NCEI_2018_8580:
-    use: False
+    use: True
     date: '2018'
     year: null
     note: Valid dataset that is not a duplicate
@@ -377,12 +377,12 @@ EcoRegion-3:
     year: null
     note: Don't use, duplicate dataset like USGS_2018_8629
   NOAA_NCEI_2019_8483:
-    use: False
+    use: True
     date: '2019'
     year: null
     note: Valid dataset that is not a duplicate, but has some overlap
   NOAA_NCEI_2019_8580:
-    use: False
+    use: True
     date: '2019'
     year: null
     note: Valid dataset that is not a duplicate
@@ -419,12 +419,12 @@ EcoRegion-3:
     year: null
     note: Valid dataset, manual download       
   NOAA_NCEI_2020_8483:
-    use: False
+    use: True
     date: '2020'
     year: null
     note: Valid dataset that is not a duplicate
   NOAA_NCEI_2020_8580:
-    use: False
+    use: True
     date: '2020'
     year: null
     note: Valid dataset that is not a duplicate
@@ -449,12 +449,12 @@ EcoRegion-3:
     year: null
     note: Decided not to use, valid dataset that is not a duplicate
   NOAA_NCEI_2022_8483:
-    use: False
+    use: True
     date: '2022'
     year: null
     note: Valid dataset that is not a duplicate
   NOAA_NCEI_2022_8580:
-    use: False
+    use: True
     date: '2022'
     year: null
     note: Valid dataset that is not a duplicate

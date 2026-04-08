@@ -14,6 +14,7 @@ from rasterio.features import shapes
 from rasterio.warp import transform_bounds
 from shapely.geometry import shape
 import s3fs
+from scipy.ndimage import convolve, uniform_filter # <--- Added for TSM smoothing
 
 import geopandas as gpd
 import numpy as np
@@ -47,6 +48,7 @@ os.environ["VSI_CACHE_SIZE"] = "268435456"       # 512 MB VSI Cache (Standard fo
 class ModelDataPreProcessor:
     """Class for parallel preprocessing all model data"""
 
+    def __init__(self, overwrite: bool = False):
     def __init__(self, overwrite: bool = False):
         self.target_crs = "EPSG:32617"
         self.target_res = 8
@@ -93,10 +95,10 @@ class ModelDataPreProcessor:
         }
 
         self.preprocessed_subdirs = {
-            'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO')}"),
-            # 'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE')}"),
-            'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR')}"),
-            'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT')}"),
+            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO')}"),
+            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE')}"),
+            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR')}"),
+            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT')}"),
             'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM')}")
         }
         
@@ -117,7 +119,7 @@ class ModelDataPreProcessor:
             config_path = inputs_root / 'lookups' / 'ER_3_lidar_data_config.yaml'
             
             if not config_path.exists():
-                print(f"Warning: Config path {config_path} not found.")
+                print(f"[WARNING] Exclusion config path not found: {config_path}")
                 return set()
 
             with open(config_path, 'r') as file:
@@ -129,11 +131,11 @@ class ModelDataPreProcessor:
             }
             
             if excluded:
-                print(f"Loaded {len(excluded)} exclusion keys from config.")
+                print(f"[INFO] Loaded {len(excluded)} exclusion keys from config.")
             
             return excluded
         except Exception as e:
-            print(f"Error loading exclusion config: {e}")
+            print(f"[ERROR] Loading exclusion config failed: {e}")
             return set()
 
     def _clean_geometry(self, geom):
@@ -223,24 +225,27 @@ class ModelDataPreProcessor:
             f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
-        print(f' - Found {len(existing_pred_outputs)} files in prediction output directory for existing output check.')
+        print(f"\n[INFO] Checking existing outputs to prevent redundant processing...")
+        print(f"  -> Found {len(existing_pred_outputs)} files in prediction output directory.")
 
         potential_files = list(self.uncombined_lidar_dir.rglob("*"))
         existing_uncombined_outputs = {
             f.name for f in potential_files
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
-        print(f' - Found {len(existing_uncombined_outputs)} files in uncombined lidar directory for existing output check.')
+        print(f"  -> Found {len(existing_uncombined_outputs)} files in uncombined lidar directory.")
 
         all_existing_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
 
         potential_files = []
+        print(f"\n[INFO] Scanning for preprocessed input rasters in: {self.preprocessed_dir}")
 
         for data_type, directory in self.preprocessed_subdirs.items():
             found_files = [
                 f for f in directory.rglob("*") 
                 if f.suffix.lower() in {'.tif', '.tiff'}
             ]
+            print(f"  -> {data_type.capitalize()} directory: Found {len(found_files)} files.")
             
             if not found_files:
                 raise RuntimeError(
@@ -250,7 +255,9 @@ class ModelDataPreProcessor:
                 
             potential_files.extend(found_files)
 
-        print(f" - Found {len(potential_files)} potential prediction files in input directory.")
+        print(f"\n[INFO] Found {len(potential_files)} total potential prediction files in input directories.")
+
+        
 
         excluded_folders = {'filled_tifs', 'combined_lidar_tifs'}
         prediction_files = [] 
@@ -261,7 +268,7 @@ class ModelDataPreProcessor:
         kept_mosaic_files = []
 
         for f in potential_files:
-            if not self.overwrite and f.name in all_existing_outputs:
+            if not self.overwrite and not self.overwrite and f.name in all_existing_outputs:
                 removed_existing += 1
                 continue
                 
@@ -278,23 +285,27 @@ class ModelDataPreProcessor:
             if "mosaic" in f.name.lower():
                 kept_mosaic_files.append(f.name)
 
-        print("--- File Filtering Summary ---")
-        print(f"Total potential files: {len(potential_files)}")
+        print(f"\n[INFO] --- File Filtering Summary ---")
+        print(f"  -> Total potential files: {len(potential_files)}")
         if self.overwrite:
             print(f" - Kept existing target files (Overwrite Enabled)")
         else:
-            print(f" - Removed (already existing): {removed_existing}")
-        print(f" - Removed (excluded keys): {len(files_removed_by_keys)}") 
-        print(f" - Removed (excluded folders): {removed_folders}")
-        print(f"Files kept: {len(prediction_files)}")
-        print("------------------------------")
+            print(f"  -> Removed (already existing): {removed_existing}")
+        print(f"  -> Removed (excluded keys): {len(files_removed_by_keys)}") 
+        print(f"  -> Removed (excluded folders): {removed_folders}")
+        print(f"  -> Files kept for processing: {len(prediction_files)}")
+        print(f"------------------------------------")
 
-        print(f" - Found {len(kept_mosaic_files)} lidar files to process.")
+        skip_msg = f" (Skipping {removed_existing} existing)" if not self.overwrite else " (Overwrite enabled)"
+
+        print(f"\n[INFO] Found {len(kept_mosaic_files)} lidar mosaic files to process.")
         
         if self.overwrite:
             print(f"Processing {len(prediction_files)} prediction files (Overwrite enabled)...")
         else:
-            print(f"Processing {len(prediction_files)} prediction files (Skipping {len(all_existing_outputs)} existing)...")
+            print(f"[INFO] Outputting uncombined lidar to: {self.uncombined_lidar_dir}")
+        print(f"[INFO] Outputting prediction rasters to: {self.prediction_out_dir}")
+        print(f"[INFO] Queuing {len(prediction_files)} prediction files{skip_msg}...")
         
         # --- 3. Queue Prediction Tasks ---
         prediction_tasks = []
@@ -312,11 +323,12 @@ class ModelDataPreProcessor:
 
         if prediction_tasks:
             dask.compute(*prediction_tasks)
-            print("Prediction raster processing complete.")
+            print("[SUCCESS] Prediction raster processing complete.")
         else:
-            print("No new prediction rasters to process.")
+            print("[INFO] No new prediction rasters to process.")
 
-        print("Running Seabed Terrain Layer Engine...")
+        input("\nPress Enter to continue...")
+        print("\n[INFO] Running Seabed Terrain Layer Engine...")
         engine = CreateSeabedTerrainLayerEngine()
         engine.process()
 
@@ -342,10 +354,10 @@ class ModelDataPreProcessor:
             and not ('mosaic' in f.name and 'filled' not in f.name)
         ]
 
-        if self.overwrite:
-            print(f"Processing {len(training_files)} training files (Overwrite enabled)...")
-        else:
-            print(f"Processing {len(training_files)} training files (Skipping {len(existing_train_outputs)} existing)...")
+        skip_train_msg = f" (Skipping {len(existing_train_outputs)} existing)" if not self.overwrite else " (Overwrite enabled)"
+        
+        print(f"\n[INFO] Outputting training rasters to: {self.training_out_dir}")
+        print(f"[INFO] Queuing {len(training_files)} training files{skip_train_msg}...")
 
         # --- 5. Queue Training Tasks ---
         training_tasks = []
@@ -362,9 +374,9 @@ class ModelDataPreProcessor:
 
         if training_tasks:
             dask.compute(*training_tasks)
-            print("Training raster processing complete.")
+            print("[SUCCESS] Training raster processing complete.")
         else:
-            print("No new training rasters to process.")
+            print("[INFO] No new training rasters to process.")
 
     def process_prediction_raster(self, raster_path, mask_bounds, output_path, cutline_path) -> None:
         """Reprojects, resamples, and crops a raster for prediction."""
@@ -406,9 +418,10 @@ class ModelDataPreProcessor:
             print(f" - [ERROR] Bounding box check failed for {raster_name}: {e}", flush=True)
             return
 
-        print(f' - [PROCESSING] Starting warp on prediction file {raster_name}...', flush=True)
+        print(f"  [PROCESS] [PROCESSING] Starting warp on prediction file {raster_name}...", flush=True)
         should_crop = any(k in raster_name for k in ["tsm", "sed", "hurr"])
-        
+        is_tsm = "tsm" in raster_name or "strength" in raster_name # Identify if this is a TSM or hurr strength rasters that need smoothed
+
         try:
             self._warp_to_cutline(
                 raster_path, 
@@ -418,7 +431,8 @@ class ModelDataPreProcessor:
                 x_res=self.target_res, 
                 y_res=self.target_res,
                 crop_to_cutline=should_crop,
-                src_nodata=src_nodata
+                src_nodata=src_nodata,
+            apply_tsm_smoothing=is_tsm # Pass the flag to trigger smoothing
             )
         except Exception as e:
             print(f" - [ERROR] Unexpected failure during _warp_to_cutline for {raster_name}: {e}", flush=True)
@@ -442,19 +456,20 @@ class ModelDataPreProcessor:
             print(f" - [ERROR] Could not open training raster {raster_name}: {e}", flush=True)
             return
 
-        if raster_crs is not None:
-            try:
-                target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
-                if raster_crs != target_crs_obj:
-                    left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
-                    bounds_geom = box(left, bottom, right, top)
-                else:
+            # CRS Reprojection Fix: Transform raster bounds to the target CRS before checking for intersection
+            if raster_crs is not None:
+                try:
+                    target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
+                    if raster_crs != target_crs_obj:
+                        left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
+                        bounds_geom = box(left, bottom, right, top)
+                    else:
+                        bounds_geom = box(*raster_bounds)
+                except Exception as e:
+                    print(f"[WARNING] Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.")
                     bounds_geom = box(*raster_bounds)
-            except Exception as e:
-                print(f" - [WARNING] Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.", flush=True)
+            else:
                 bounds_geom = box(*raster_bounds)
-        else:
-            bounds_geom = box(*raster_bounds)
 
         try:
             mask_box = box(*mask_bounds)
@@ -523,10 +538,76 @@ class ModelDataPreProcessor:
         if 'src_nodata' in kwargs: warp_opts['srcNodata'] = kwargs.pop('src_nodata')
         if 'dst_nodata' in kwargs: warp_opts['dstNodata'] = kwargs.pop('dst_nodata')
         
+        apply_tsm_smoothing = kwargs.pop('apply_tsm_smoothing', False)
+        
+        apply_tsm_smoothing = kwargs.pop('apply_tsm_smoothing', False)
+        
         # --- 4. EXECUTE WARP ---
         try:
             # Output directly to our safe local file
             ds = gdal.Warp(gdal_dst_str, src_str, **warp_opts)
+
+            # --- 6. OPTIONAL TSM SMOOTHING PASS ---
+            if apply_tsm_smoothing and ds is not None:
+                print(f"  [SMOOTHING] Applying focal mean smoothing to {src_str} raster...")
+
+                # IMPORTANT: Close the dataset returned by gdal.Warp to flush writes
+                # and reopen it in Update mode to safely write into the LZW-compressed format.
+                ds = None
+                ds = gdal.Open(gdal_dst_str, gdal.GA_Update)
+                
+                if ds is not None:
+                    band = ds.GetRasterBand(1)
+                    array = band.ReadAsArray()
+                    
+                    if array is not None:
+                        array = array.astype(np.float32)
+                        nodata = band.GetNoDataValue()
+                        
+                        # Fallback if no specific nodata returned
+                        if nodata is None:
+                            nodata = warp_opts.get('dstNodata', warp_opts.get('srcNodata', -9999.0))
+
+                        # Convert your 2000 Map Units into a pixel radius
+                        pixel_size = ds.GetGeoTransform()[1]
+                        radius_pixels = int(2000 / pixel_size)
+                        size = radius_pixels * 2 + 1
+
+                        # Safe NoData mask creation that handles np.nan
+                        if pd.isna(nodata):
+                            valid_mask = (~np.isnan(array)).astype(np.float32)
+                            array[np.isnan(array)] = 0  # Temporarily zero out NoData
+                        else:
+                            valid_mask = (array != nodata).astype(np.float32)
+                            array[array == nodata] = 0  # Temporarily zero out NoData
+
+                        # Convolve data and mask, then divide to get the true mean ignoring NoData.
+                        # We use uniform_filter (O(1) sliding square window) instead of dense convolve (O(N*M))
+                        # to fix MemoryError / KilledWorker timeout issues on extremely large rasters.
+                        smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
+                        weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
+
+                        with np.errstate(divide='ignore', invalid='ignore'):
+                            final_array = np.where(weights > 0, smoothed / weights, nodata)
+
+                        # Re-mask to the input geometry mask. The smoothing filter extends data edges 
+                        # outwards; this strictly clips the values back to the original prediction mask bounds.
+                        gt = ds.GetGeoTransform()
+                        transform = rasterio.transform.Affine.from_gdal(*gt)
+                        
+                        out_of_bounds_mask = geometry_mask(
+                            [mask_geometry],
+                            out_shape=final_array.shape,
+                            transform=transform,
+                            invert=False  # Returns True for pixels OUTSIDE the geometry
+                        )
+                        
+                        final_array[out_of_bounds_mask] = nodata
+
+                        # Write array directly back to the warp dataset output
+                        band.WriteArray(final_array)
+                        band.FlushCache()
+
             
             # Catch silent GDAL failure
             if ds is None:
@@ -561,7 +642,7 @@ class ModelDataPreProcessor:
         
         sub_grid_path = self.subgrid_paths.get(data_type)
         if not sub_grid_path:
-            print(f"Error: No subgrid path defined for {data_type}")
+            print(f"[ERROR] No subgrid path defined for {data_type}")
             return
         
         print(f"Loading subgrids from: {sub_grid_path}")
@@ -569,7 +650,7 @@ class ModelDataPreProcessor:
              sub_grids = gpd.read_file(str(sub_grid_path))
              print("Successfully loaded subgrids.")
         except Exception as e:
-             print(f"Error reading subgrids from {sub_grid_path}: {e}")
+             print(f"[ERROR] Reading subgrids from {sub_grid_path} failed: {e}")
              return
         
         print(f"Number of tiles to process: {sub_grids.shape[0]}")
@@ -615,7 +696,7 @@ class ModelDataPreProcessor:
 
         print("Dask computation across all batches finished successfully.")
 
-        print("Combining results...")
+        print(f"\n[INFO] Combining {data_type} tile results and calculating statistics...")
         print(f"Concatenating {len(results_list)} tile result dataframes...")
         final_results_df = pd.concat(results_list, ignore_index=True)
         print(f"Final combined dataframe shape: {final_results_df.shape}")
@@ -624,7 +705,7 @@ class ModelDataPreProcessor:
         
         print(f"Generating statistics and saving to CSV format...")
         final_results_df.to_csv(str(output_csv_path), index=False, na_rep='NA')
-        print(f"Stats successfully saved to: {output_csv_path}")
+        print(f"[SUCCESS] Statistics successfully saved to: {output_csv_path}")
         print(f" - Finished clipping {data_type} rasters by tile.")
 
     def subtile_process_gridded(self, sub_grid, raster_files) -> pd.DataFrame:
@@ -720,7 +801,7 @@ class ModelDataPreProcessor:
                     'X': xs, 'Y': ys, 'Value': values, 'Raster': pathlib.Path(raster_path).stem
                 })
         except Exception as e:
-            print(f"Error reading {raster_path}: {e}")
+            print(f"[ERROR] Reading raster window from {raster_path} failed: {e}")
             return pd.DataFrame()
 
     @dask.delayed
@@ -743,7 +824,7 @@ class ModelDataPreProcessor:
             combined = gridded_df
 
         combined.to_parquet(save_path, engine="pyarrow", index=False)
-        print(f"Saved combined data for tile {tile_id} to {save_path}")
+        print(f"  [SUCCESS] Saved combined tile data to: {save_path}")
         return self.create_nan_stats_csv(combined, tile_id)
 
     def create_nan_stats_csv(self, df, tile_id) -> pd.DataFrame:
@@ -759,8 +840,7 @@ class ModelDataPreProcessor:
 
     def batch_long_format_transformation(self, base_dir, mode: Literal["training", "prediction"]):
         """Orchestrator for transforming wide tiles to long year-pair format."""
-        print("Starting Long Format Transformation...")
-        print(f"Starting Dask Transformation Batch: {mode}")
+        print(f"\n[INFO] Starting Long Format Transformation (Batch: {mode})...")
 
         file_suffix = f"_{mode}_clipped_data.parquet"
 
@@ -768,10 +848,11 @@ class ModelDataPreProcessor:
         files_to_process = list(base_dir_upath.rglob(f"*{file_suffix}"))
 
         if not files_to_process:
-            print("No files found for transformation.")
+            print(f"[WARNING] No files found for {mode} transformation in {base_dir}")
             return
 
-        print(f"Queueing {len(files_to_process)} tiles...")
+        print(f"[INFO] Outputting transformed {mode} long-format tiles to: {base_dir}")
+        print(f"[INFO] Queueing {len(files_to_process)} tiles...")
 
         tasks = []
         for fp in files_to_process:
@@ -782,9 +863,9 @@ class ModelDataPreProcessor:
         success = sum(1 for r in results if r.startswith("Success"))
         failed = len(results) - success
         
-        print(f"\n Transformation Complete. Success: {success}, Failed: {failed}")
+        print(f"\n[SUCCESS] Transformation Complete. Success: {success}, Failed: {failed}")
         if failed > 0:
-            print("Errors:\n" + "\n".join([r for r in results if not r.startswith("Success")]))
+            print("[ERROR] Transformation Errors:\n" + "\n".join([r for r in results if not r.startswith("Success")]))
 
     def _transform_tile_task(self, f_path: str, mode: Literal["training", "prediction"]) -> str:
         """Dask Worker: Reads file -> Calls specific processor -> Returns status."""
@@ -888,6 +969,7 @@ class ModelDataPreProcessor:
             out_path = str(UPath(output_dir) / out_name)
             
             pair_gdf[final_cols].to_parquet(out_path, index=None)
+            print(f"  [SUCCESS] Saved training long-format tile to: {out_path}")
             saved_files.append(out_name)
             del pair_gdf
 
@@ -926,6 +1008,7 @@ class ModelDataPreProcessor:
             out_path = str(UPath(output_dir) / out_name)
             
             pair_gdf.to_parquet(out_path, index=None)
+            print(f"  [SUCCESS] Saved prediction long-format tile to: {out_path}")
             saved_files.append(out_name)
             del pair_gdf
 
@@ -962,7 +1045,7 @@ class ModelDataPreProcessor:
     def raster_to_spatial_df(self, raster_path, process_type)-> gpd.GeoDataFrame:
         """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries."""   
 
-        print(f'Creating {process_type} mask data frame..')
+        print(f"\n[INFO] Creating {process_type} mask GeoDataFrame from: {raster_path}")
 
         open_path = str(raster_path)
 
@@ -990,7 +1073,7 @@ class ModelDataPreProcessor:
             if not self.is_aws:
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
 
-            print(f"Saving {process_type} mask GeoDataFrame to: {mask_path}")   
+            print(f"[INFO] Saving {process_type} mask GeoDataFrame to: {mask_path}")   
 
             gdf.to_parquet(str(mask_path))
 
@@ -1000,8 +1083,8 @@ class ModelDataPreProcessor:
         """ Create subgrids layer by intersecting grid tiles with the mask geometries"""        
         
         mask_gdf_path = str(mask_gdf)
-        print(f"----- Reading mask GeoDataFrame from: {mask_gdf_path}")
-        print(f"Preparing {process_type} sub-grids...")
+        print(f"\n[INFO] Preparing {process_type} sub-grids...")
+        print(f"  -> Reading mask GeoDataFrame from: {mask_gdf_path}")
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=self.fs if self.is_aws else None)
         combined_geometry = mask_gdf_df.union_all()
@@ -1021,10 +1104,10 @@ class ModelDataPreProcessor:
             with tempfile.NamedTemporaryFile(dir=self.local_tmp_dir, suffix=".gpkg", delete=False) as tmp:
                 local_tmp_path = tmp.name
                 
-            print(f"Writing GPKG locally to {local_tmp_path} before uploading...")
+            print(f"  -> Writing GPKG locally to {local_tmp_path} before uploading...")
             intersecting_sub_grids.to_file(local_tmp_path, driver="GPKG")
             
-            print(f"Uploading subgrids to: {output_path}")
+            print(f"  -> Uploading subgrids to S3: {output_path}")
             self.fs.put(local_tmp_path, str(output_path))
             os.remove(local_tmp_path)
         else:
@@ -1033,6 +1116,6 @@ class ModelDataPreProcessor:
             output_upath.parent.mkdir(parents=True, exist_ok=True)
             intersecting_sub_grids.to_file(str(output_upath), driver="GPKG") 
 
-        # SUCCESS PRINT STATEMENT
-        print(f"Successfully saved {process_type} subgrids to: {output_path}")
-        return
+        print(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}")
+        return 
+    

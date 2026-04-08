@@ -167,7 +167,7 @@ class GridDigitalCoastEngine(Engine):
 
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        ecoregion_paths = s3_files.glob(f"{bucket}/testing/ER_*")
+        ecoregion_paths = s3_files.glob(f"{bucket}/ER_*")
 
         for ecoregion_prefix in ecoregion_paths:
             print(f"Gridding S3 ecoregion: {ecoregion_prefix}")
