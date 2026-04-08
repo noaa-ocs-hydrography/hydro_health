@@ -6,6 +6,8 @@ import pandas as pd
 import geopandas as gpd
 import yaml
 
+import numpy as np
+
 from osgeo import ogr, osr, gdal
 
 from hydro_health.engines.Engine import Engine
@@ -88,38 +90,25 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     gpkg_ds = None
 
 
-
 def _create_training_mask(ecoregion: pathlib.Path) -> str:
-    """
-    Create training mask using double-VRT lazy evaluation.
-    Uses GDAL Config Options to resolve nested relative VRT paths.
-    """
-    # 1. Path Setup - Use absolute paths for everything
+    """Create training mask from valid raster data in the VRT files"""
+
+    gdal.UseExceptions()
+    
     mask_subfolder = (ecoregion / get_config_item('MASK', 'SUBFOLDER')).resolve()
     prediction_file = mask_subfolder / f'prediction_mask_{ecoregion.stem}.tif'
     training_file = mask_subfolder / f'training_mask_{ecoregion.stem}.tif'
     digital_coast_folder = (ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast').resolve()
 
-    # Find the provider VRT mosaics
     provider_vrts = [str(f.absolute()) for f in digital_coast_folder.glob("mosaic_*.vrt")]
 
     if not provider_vrts:
-        return f"{ecoregion.stem}: Skip - No VRTs found in {digital_coast_folder}"
+        return f"{ecoregion.stem}: Skip - No VRTs found."
     if not prediction_file.exists():
         return f"{ecoregion.stem}: Error - Prediction mask missing."
 
-    # 2. GDAL Configuration for Nested/Relative VRTs
-    gdal.UseExceptions()
-    gdal.SetCacheMax(512 * 1024 * 1024)
-    gdal.SetConfigOption('GDAL_NUM_THREADS', 'ALL_CPUS')
-    
-    # CRITICAL: This tells GDAL how to resolve "<SourceFilename relativeToVRT='1'>" 
-    # when the VRT is opened from a different directory.
-    gdal.SetConfigOption('VRT_RELATIVE_FILENAMES', 'YES')
-    gdal.SetConfigOption('VRT_DEFAULT_REL_PATH', str(digital_coast_folder))
-
     try:
-        # 3. Prepare Training File
+        # Clone the prediction mask
         if training_file.exists():
             training_file.unlink()
         shutil.copy(str(prediction_file), str(training_file))
@@ -130,35 +119,35 @@ def _create_training_mask(ecoregion: pathlib.Path) -> str:
         geo_t = train_ds.GetGeoTransform()
         proj = train_ds.GetProjection()
         cols, rows = train_ds.RasterXSize, train_ds.RasterYSize
-        
-        # 4. Create the Virtual Mosaic
-        # We pass the list of absolute paths to the provider VRTs
-        super_vrt = gdal.BuildVRT('', provider_vrts)
 
-        # 5. Warp to a Temporary VRT
-        temp_vrt_path = mask_subfolder / f"temp_warped_{ecoregion.stem}.vrt"
-        
-        warp_options = gdal.WarpOptions(
-            format='VRT',  
-            srcSRS='EPSG:4326', 
-            dstSRS=proj,
-            outputBounds=[geo_t[0], geo_t[3] + (rows * geo_t[5]), geo_t[0] + (cols * geo_t[1]), geo_t[3]],
-            xRes=geo_t[1],
-            yRes=abs(geo_t[5]),
-            resampleAlg=gdal.GRA_NearestNeighbour,
-            srcNodata=-9999
-        )
-        
-        # We pass the in-memory super_vrt dataset object
-        warped_vrt_ds = gdal.Warp(str(temp_vrt_path), super_vrt, options=warp_options)
-        
-        if warped_vrt_ds is None:
-            return f"{ecoregion.stem}: Error - Warp failed to return dataset."
+        # Find actual data presence across all VRTs
+        combined_presence = np.zeros((rows, cols), dtype=np.uint8)
+
+        for vrt_path in provider_vrts:
+            src_ds = gdal.Open(vrt_path)
+            src_nodata = src_ds.GetRasterBand(1).GetNoDataValue()
+            src_ds = None
+
+            # Warp this specific VRT to match our mask's grid, but force an Alpha band
+            mem_driver = gdal.GetDriverByName('MEM')
+            tmp_ds = mem_driver.Create('', cols, rows, 2, gdal.GDT_Byte)
+            tmp_ds.SetGeoTransform(geo_t)
+            tmp_ds.SetProjection(proj)
+
+            warp_options = gdal.WarpOptions(
+                format='MEM',
+                dstSRS=proj,
+                dstAlpha=True,  # Band 2 becomes our high-res binary mask
+                resampleAlg=gdal.GRA_NearestNeighbour,
+                srcNodata=src_nodata if src_nodata is not None else -9999
+            )
             
-        mask_band = warped_vrt_ds.GetRasterBand(1)
+            gdal.Warp(tmp_ds, vrt_path, options=warp_options)
+            vrt_presence = tmp_ds.GetRasterBand(2).ReadAsArray()
+            combined_presence |= (vrt_presence > 0).astype(np.uint8)
+            tmp_ds = None
 
-        # 6. Block Processing Loop
-        block_size = 2048 
+        block_size = 4096 
         burn_count_total = 0
 
         for y in range(0, rows, block_size):
@@ -166,41 +155,23 @@ def _create_training_mask(ecoregion: pathlib.Path) -> str:
             for x in range(0, cols, block_size):
                 num_cols = min(block_size, cols - x)
 
-                # Read Windows
                 train_chunk = train_band.ReadAsArray(x, y, num_cols, num_rows)
-                mask_chunk = mask_band.ReadAsArray(x, y, num_cols, num_rows)
-
-                if train_chunk is None or mask_chunk is None:
-                    continue
-
-                # Burn logic: Valid mask data (not -9999 or 0) and prediction is AOI (1)
-                burn_idx = (mask_chunk > -9000) & (mask_chunk != 0) & (train_chunk == 1)
+                presence_chunk = combined_presence[y:y+num_rows, x:x+num_cols]
+                burn_idx = (train_chunk == 1) & (presence_chunk > 0)
                 
-                if burn_idx.any():
-                    burn_count_total += int(burn_idx.sum())
+                if np.any(burn_idx):
+                    burn_count_total += int(np.sum(burn_idx))
                     train_chunk[burn_idx] = 2
                     train_band.WriteArray(train_chunk, x, y)
 
-        # 7. Finalize and Close Handles
         train_band.FlushCache()
-        train_ds.FlushCache()
+        train_ds = None 
         
-        # Explicitly kill objects to release file locks
-        train_band = None
-        train_ds = None
-        warped_vrt_ds = None
-        super_vrt = None 
-        
-        if temp_vrt_path.exists():
-            temp_vrt_path.unlink()
-
-        return f"{ecoregion.stem}: Success. {burn_count_total} pixels burned."
+        return f"{ecoregion.stem}: Success! {burn_count_total} raster pixels captured."
 
     except Exception as e:
         return f"{ecoregion.stem}: Critical Error - {str(e)}"
-    finally:
-        # Clean up config options
-        gdal.SetConfigOption('VRT_DEFAULT_REL_PATH', None)
+
 
 class RasterMaskEngine(Engine):
     def __init__(self, param_lookup):

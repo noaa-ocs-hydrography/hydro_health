@@ -66,30 +66,31 @@ class ModelDataPreProcessor:
     def create_file_paths(self):
         """Creates unified UPath objects that work both locally and on S3."""
         # Determine the base prefix depending on the environment
-        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME')}/" if self.is_aws else ""
+        model_mode = 'pilot'
+        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', model_mode=model_mode)}/" if self.is_aws else ""
         
-        self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ')}")
-        self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ')}")
-        self.grid_gpkg = UPath(f"{prefix}{get_config_item('MODEL', 'SUBGRIDS')}")
-        self.pred_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_PRED_PATH')}")
-        self.train_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_TRAINING_PATH')}")
-        self.preprocessed_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREPROCESSED_DIR')}")
-        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')}")
-        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR')}")
-        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR')}")
-        self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR')}")
-        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR')}")
+        self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ', model_mode=model_mode)}")
+        self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ', model_mode=model_mode)}")
+        self.grid_gpkg = UPath(f"{prefix}{get_config_item('MODEL', 'SUBGRIDS', model_mode=model_mode)}")
+        self.pred_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_PRED_PATH', model_mode=model_mode)}")
+        self.train_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_TRAINING_PATH', model_mode=model_mode)}")
+        self.preprocessed_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREPROCESSED_DIR', model_mode=model_mode)}")
+        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', model_mode=model_mode)}")
+        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', model_mode=model_mode)}")
+        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', model_mode=model_mode)}")
+        self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', model_mode=model_mode)}")
+        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR', model_mode=model_mode)}")
         self.subgrid_paths = {
-            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS')}"),
-            'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS')}")
+            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', model_mode=model_mode)}"),
+            'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS', model_mode=model_mode)}")
         }
 
         self.preprocessed_subdirs = {
-            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO')}"),
-            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE')}"),
-            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR')}"),
-            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT')}"),
-            'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM')}")
+            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', model_mode=model_mode)}"),
+            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', model_mode=model_mode)}"),
+            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR', model_mode=model_mode)}"),
+            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', model_mode=model_mode)}"),
+            'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', model_mode=model_mode)}")
         }
 
     def _load_exclusion_config(self) -> set:
@@ -973,8 +974,9 @@ class ModelDataPreProcessor:
             gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
             gdf = gdf.to_crs(self.target_crs)   
 
-            masks_dir_conf = get_config_item('MASK', 'MASKS_DIR')
-            prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME')}/" if self.is_aws else ""
+            model_mode = 'pilot'
+            masks_dir_conf = get_config_item('MASK', 'MASKS_DIR', model_mode=model_mode)
+            prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', model_mode=model_mode)}/" if self.is_aws else ""
             mask_path = UPath(f"{prefix}{masks_dir_conf}/{process_type}_mask_pilot.parquet")
             
             if not self.is_aws:
