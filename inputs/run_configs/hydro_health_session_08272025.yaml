@@ -1,5 +1,6 @@
 ecoregions:
 - ER_3
+pilot_model: true
 steps:
 - tool: run_bluetopo_tile_engine
   run: false
