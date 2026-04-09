@@ -1,57 +1,144 @@
 import yaml
 import pathlib
-import geopandas as gpd  # pip install geopandas;requires numpy==1.22.4 and activating cloned env in Pro
+import geopandas as gpd
+import s3fs
+import os
+import tempfile
+import json
+import time
 
-from hydro_health.engines.tiling.TileProcessor import TileProcessor
+from socket import gethostname
+from osgeo import gdal, osr, ogr
+
+
+gdal.UseExceptions()
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
-def get_config_item(parent: str, child: str=False) -> tuple[str, int]:
-    """Load config and return speciific key"""
+class Param:
+        def __init__(self, path):
+            self.value = path
 
-    with open(str(INPUTS / 'config.yaml'), 'r') as lookup:
+        @property
+        def valueAsText(self):
+            return self.value
+
+
+def get_environment() -> str:
+    """Determine current environment running code"""
+
+    hostname = gethostname()
+    if 'L' in hostname:
+        return  'local'
+    elif 'VS' in hostname:
+        return 'remote'
+    elif 'ip-10' in hostname:
+        return 'aws'
+    else:
+        return 'remote'
+
+
+def get_config_item(parent: str, child: str=False, env_string: str=False) -> str:
+    """
+    Load config and return speciific key
+    :param str parent: Primary key in config
+    :param str child: Secondary key in config
+    :param str env_string: Optional explicit value of "local" or "remote"
+    :returns str: Value from local or remote YAML config
+    """
+
+    # TODO add sample data and folders to input folder
+
+    env = env_string if env_string else None
+    if env is None:
+        env = get_environment()
+
+    model_mode = "pilot"  # "ecoregion" would be the other mode option
+
+    if model_mode == "pilot":
+        file_path = str(INPUTS / 'lookups' / f'{env}_{model_mode}_path_config.yaml') 
+    else:
+        file_path = str(INPUTS / 'lookups' / f'{env}_path_config.yaml')
+
+    with open(file_path, 'r') as lookup:
         config = yaml.safe_load(lookup)
         parent_item = config[parent]
+        
         if child:
             return parent_item[child]
         else:
             return parent_item
-        
 
-def get_state_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
-    """Obtain a subset of tiles based on state names"""
 
-    geopackage = INPUTS / get_config_item('SHARED', 'DATABASE')
+def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+    """Obtain the intersected EcoRegion folders"""
 
-    all_states = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'STATES'), columns=['STATE_NAME'])
-    coastal_states = param_lookup['coastal_states'].valueAsText.replace("'", "").split(';')
-    selected_states = all_states[all_states['STATE_NAME'].isin(coastal_states)]
+    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
+    # get master_grid geopackage path
+    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    if param_lookup['env'] == 'local':
+        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    else:
+        # get eco region from shapefile that matches drop down choices
+        eco_regions = param_lookup['eco_regions'].value
+        eco_regions = [region.split('-')[0] for region in eco_regions]
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        make_ecoregion_folders(selected_ecoregions, output_folder)
+    return list(selected_ecoregions['EcoRegion'].unique())
 
-    all_tiles = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'TILES'), columns=[get_config_item('SHARED', 'TILENAME')], mask=selected_states)
-    state_tiles = all_tiles.sjoin(selected_states)  # needed to keep STATE_NAME
-    state_tiles = state_tiles.drop(['index_right'], axis=1)
 
-    coastal_boundary = gpd.read_file(geopackage, layer=get_config_item('SHARED', 'BOUNDARY'))
-    tiles = state_tiles.sjoin(coastal_boundary)
-    # tiles.to_file(OUTPUTS / 'state_tiles.shp', driver='ESRI Shapefile')
+def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+    """Obtain a subset of tiles based on selected eco regions"""
+
+    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
+    # get master_grid geopackage path
+    master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+
+    # if/else logic only allows one option of Eco Region selection or Draw Polygon
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
+        drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
+    else:
+        # get eco region from shapefile that matches drop down choices
+        eco_regions = param_lookup['eco_regions'].valueAsText   #.replace("'", "").split(';')
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
+
+    mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
+    # Clip to remove extra polygons not handled by mask property
+    tiles = gpd.clip(mask_tiles, selected_sub_grids, keep_geom_type=True)
+    # Store EcoRegion ID with tiles
+    tiles = tiles.sjoin(selected_ecoregions, how="left")[['tile', 'EcoRegion', 'geometry']]
+    # selected_ecoregions.to_file(output_folder / 'selected_ecoregions.shp') 
+    # tiles.to_file(output_folder / 'selected_tiles.shp') 
 
     return tiles
 
 
-def process_tiles(tiles: gpd.GeoDataFrame, outputs:str = False) -> None:
-    # get environment (dev, prod)
-    # if dev, use multiprocessing
-    # if prod, send to API endpoint of listeners in kubernetes
-        # pickle each tuple of engine and tile
-        # unpickle the object
-        # call the class method with the tile argument
-        # log success of each call
-        # notify the main caller of completion?!
+def make_ecoregion_folders(selected_ecoregions: gpd.GeoDataFrame, output_folder: pathlib.Path):
+    """Create the main EcoRegion folders"""
 
-    output_folder = OUTPUTS if not outputs else outputs
-    processor = TileProcessor()
-    processor.process(tiles, output_folder)
-    
+    for _, row in selected_ecoregions.iterrows():
+        ecoregion_folder = output_folder / row['EcoRegion']
+        ecoregion_folder.mkdir(parents=True, exist_ok=True)
+
+
+def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs84_srs: osr.SpatialReference) -> pathlib.Path:
+    """Project a raster/geotiff to WGS84 spatial reference for tiling"""
+
+    raster_wgs84 = raster_path.parents[0] / f'{raster_path.stem}_wgs84.tif'
+    gdal.Warp(
+        raster_wgs84,
+        raster_ds,
+        dstSRS=wgs84_srs
+    )
+    return raster_wgs84
+

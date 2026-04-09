@@ -3,6 +3,7 @@ import os
 import json
 import requests
 import zipfile
+import pandas as pd
 import geopandas
 from osgeo import ogr, osr
 
@@ -66,7 +67,7 @@ def get_reef_1km_data() -> None:
             data.write(chunk)
     with zipfile.ZipFile(zip_file, 'r') as reef_zip:
         print('Unzipping 1km Reef zip file')
-        reef_zip.extractall(zip_folder)
+        reef_zip.extractall(zip_folder)    
 
 
 def get_active_captain() -> None:
