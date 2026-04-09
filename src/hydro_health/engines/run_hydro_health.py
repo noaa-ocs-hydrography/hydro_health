@@ -89,6 +89,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_sediment_layer_engine()
             elif step["tool"] == "run_hurricane_layer_engine" and step["run"]:
                 runners.run_hurricane_layer_engine()
+            elif step["tool"] == "run_preprocessor_modeldata" and step["run"]:
+                runners.run_preprocessor_modeldata(pilot_mode)
     update_config_runtime(config_path, config)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60} minutes")
