@@ -47,6 +47,7 @@ def test_get_tile_id(engine):
     """Test extracting 8-character alphanumeric Tile ID."""
     assert engine._get_tile_id("bathy_BH4SD56H_2020.tif") == "BH4SD56H"
     assert engine._get_tile_id("bluetopo_12345678_2020.tif") is None  # all digits
+    assert engine._get_tile_id("bluetopo_Z2345678_2020.tif") is None  # doesnt start with 'B'
 
 def test_get_variable_type(engine):
     """Test target variable matching."""

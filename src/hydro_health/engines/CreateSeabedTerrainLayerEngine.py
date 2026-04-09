@@ -30,7 +30,6 @@ except ImportError:
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
-from hydro_health.engines.Engine import Engine
 
 
 class CreateSeabedTerrainLayerEngine(Engine):
@@ -418,7 +417,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
                 
         print("\n--- PHASE 1 Complete ---")
 
-    def fill_with_fallback(self, input_file, output_file, max_iters=5, chunk_size=1024) -> None:
+    def fill_with_fallback(self, input_file, output_file, max_iters=5, chunk_size=512) -> None:
         """Performs chunked iterative focal fill on a raster file using Dask and rioxarray."""
         print(f"Attempting chunked fill for {os.path.basename(str(input_file))}")
 
@@ -573,7 +572,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
                     shutil.copyfileobj(f_in, f_out)
 
             if missing_wbt:
-                print(f"[{base_name}] Generating {len(missing_wbt)} missing WBT layer(s)...")
+                print(f"[{base_name}] Generating {len(missing_wbt)} required WBT layer(s)...")
             for out_s3, wbt_func, local_out in missing_wbt:
                 try:
                     wbt_func(local_bathy, local_out)
@@ -585,7 +584,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
                     print(f"WBT Error on {base_name} for {out_s3}: {e}")
 
             if missing_tci:
-                print(f"[{base_name}] Generating missing TCI layer...")
+                print(f"[{base_name}] Generating TCI layer...")
                 try: 
                     self.wbt.convergence_index(local_bathy, local_tci)
                 except AttributeError:
@@ -602,7 +601,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
                     print(f"Successfully wrote TCI layer file to: {out_tci}")
 
             if missing_shear:
-                print(f"[{base_name}] Generating missing Shear Proxy layer...")
+                print(f"[{base_name}] Generating Shear Proxy layer...")
                 try:
                     slope_src = local_slope if os.path.exists(local_slope) else None
                     plan_src = local_plan if os.path.exists(local_plan) else None
@@ -632,7 +631,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
                     print(f"Shear Proxy Calc Error {base_name}: {e}")
 
             if missing_numpy:
-                print(f"[{base_name}] Generating missing NumPy BTM classification layers...")
+                print(f"[{base_name}] Generating NumPy BTM classification layers...")
                 year = 'bt_bathy'
                 match = re.search(r'((?:19|20)\d{2})', base_name)
                 if match:
@@ -837,7 +836,7 @@ class CreateSeabedTerrainLayerEngine(Engine):
         print(f"{len(filled_files)} lidar and {len(found_bluetopo_files)} Bluetopo files found for dictionaries.")
 
         best_radii = {'fine': (8, 32), 'broad': (80, 240)}
-        self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
+        # self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
         print("\n--- PHASE 2: Parallel Processing of terrain products")
         tasks = []

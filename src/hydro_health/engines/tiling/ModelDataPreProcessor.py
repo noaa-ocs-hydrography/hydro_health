@@ -10,7 +10,7 @@ import shutil
 import gc # <--- Added for manual memory management
 from typing import List, Tuple, Literal
 from pathlib import Path
-from rasterio.features import shapes
+from rasterio.features import shapes, geometry_mask # <--- geometry_mask added for TSM smoothing
 from rasterio.warp import transform_bounds
 from shapely.geometry import shape
 import s3fs
@@ -48,7 +48,6 @@ os.environ["VSI_CACHE_SIZE"] = "268435456"       # 512 MB VSI Cache (Standard fo
 class ModelDataPreProcessor:
     """Class for parallel preprocessing all model data"""
 
-    def __init__(self, overwrite: bool = False):
     def __init__(self, overwrite: bool = False):
         self.target_crs = "EPSG:32617"
         self.target_res = 8
@@ -159,9 +158,9 @@ class ModelDataPreProcessor:
 
         # This tells Dask: "Use the whole machine, but stay under 26GB total."
         cluster = LocalCluster(
-            n_workers=1,          # Manually restricting workers is still safer for heavy Tiff warps
-            threads_per_worker=1, # GDAL internally uses threads, so we give each worker a couple threads to work with
-            memory_limit='32GB'    # 6GB * 5 workers = 30GB total. Safe for 32GB RAM.
+            n_workers=16,          # Manually restricting workers is still safer for heavy Tiff warps
+            threads_per_worker=2, # GDAL internally uses threads, so we give each worker a couple threads to work with
+            memory_limit='2GB'    # 6GB * 5 workers = 30GB total. Safe for 32GB RAM.
         )
         client = Client(cluster)
         print(f"Dask Dashboard: {client.dashboard_link}")
@@ -257,8 +256,6 @@ class ModelDataPreProcessor:
 
         print(f"\n[INFO] Found {len(potential_files)} total potential prediction files in input directories.")
 
-        
-
         excluded_folders = {'filled_tifs', 'combined_lidar_tifs'}
         prediction_files = [] 
 
@@ -268,7 +265,7 @@ class ModelDataPreProcessor:
         kept_mosaic_files = []
 
         for f in potential_files:
-            if not self.overwrite and not self.overwrite and f.name in all_existing_outputs:
+            if not self.overwrite and f.name in all_existing_outputs:
                 removed_existing += 1
                 continue
                 
@@ -432,7 +429,7 @@ class ModelDataPreProcessor:
                 y_res=self.target_res,
                 crop_to_cutline=should_crop,
                 src_nodata=src_nodata,
-            apply_tsm_smoothing=is_tsm # Pass the flag to trigger smoothing
+                apply_tsm_smoothing=is_tsm # Pass the flag to trigger smoothing
             )
         except Exception as e:
             print(f" - [ERROR] Unexpected failure during _warp_to_cutline for {raster_name}: {e}", flush=True)
@@ -456,20 +453,20 @@ class ModelDataPreProcessor:
             print(f" - [ERROR] Could not open training raster {raster_name}: {e}", flush=True)
             return
 
-            # CRS Reprojection Fix: Transform raster bounds to the target CRS before checking for intersection
-            if raster_crs is not None:
-                try:
-                    target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
-                    if raster_crs != target_crs_obj:
-                        left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
-                        bounds_geom = box(left, bottom, right, top)
-                    else:
-                        bounds_geom = box(*raster_bounds)
-                except Exception as e:
-                    print(f"[WARNING] Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.")
+        # CRS Reprojection Fix: Transform raster bounds to the target CRS before checking for intersection
+        if raster_crs is not None:
+            try:
+                target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
+                if raster_crs != target_crs_obj:
+                    left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
+                    bounds_geom = box(left, bottom, right, top)
+                else:
                     bounds_geom = box(*raster_bounds)
-            else:
+            except Exception as e:
+                print(f"[WARNING] Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.")
                 bounds_geom = box(*raster_bounds)
+        else:
+            bounds_geom = box(*raster_bounds)
 
         try:
             mask_box = box(*mask_bounds)
@@ -482,13 +479,19 @@ class ModelDataPreProcessor:
 
         print(f' - [PROCESSING] Starting warp on training file {raster_name}...', flush=True)
         
+        # FIXED: Brought over the TSM/cropping logic to the training side
+        should_crop = any(k in raster_name for k in ["tsm", "sed", "hurr"])
+        is_tsm = "tsm" in raster_name or "strength" in raster_name
+
         try:
             self._warp_to_cutline(
                 raster_path,
                 output_path,
                 cutline_path,
                 src_nodata=src_nodata,
-                dst_nodata=np.nan
+                dst_nodata=np.nan,
+                crop_to_cutline=should_crop,    # Added
+                apply_tsm_smoothing=is_tsm      # Added
             )
         except Exception as e:
             print(f" - [ERROR] Unexpected failure during _warp_to_cutline for {raster_name}: {e}", flush=True)
@@ -538,8 +541,7 @@ class ModelDataPreProcessor:
         if 'src_nodata' in kwargs: warp_opts['srcNodata'] = kwargs.pop('src_nodata')
         if 'dst_nodata' in kwargs: warp_opts['dstNodata'] = kwargs.pop('dst_nodata')
         
-        apply_tsm_smoothing = kwargs.pop('apply_tsm_smoothing', False)
-        
+        # FIXED: Removed the duplicate `.pop()` that was overwriting this to False
         apply_tsm_smoothing = kwargs.pop('apply_tsm_smoothing', False)
         
         # --- 4. EXECUTE WARP ---
@@ -547,74 +549,102 @@ class ModelDataPreProcessor:
             # Output directly to our safe local file
             ds = gdal.Warp(gdal_dst_str, src_str, **warp_opts)
 
-            # --- 6. OPTIONAL TSM SMOOTHING PASS ---
-            if apply_tsm_smoothing and ds is not None:
-                print(f"  [SMOOTHING] Applying focal mean smoothing to {src_str} raster...")
-
-                # IMPORTANT: Close the dataset returned by gdal.Warp to flush writes
-                # and reopen it in Update mode to safely write into the LZW-compressed format.
-                ds = None
-                ds = gdal.Open(gdal_dst_str, gdal.GA_Update)
-                
-                if ds is not None:
-                    band = ds.GetRasterBand(1)
-                    array = band.ReadAsArray()
-                    
-                    if array is not None:
-                        array = array.astype(np.float32)
-                        nodata = band.GetNoDataValue()
-                        
-                        # Fallback if no specific nodata returned
-                        if nodata is None:
-                            nodata = warp_opts.get('dstNodata', warp_opts.get('srcNodata', -9999.0))
-
-                        # Convert your 2000 Map Units into a pixel radius
-                        pixel_size = ds.GetGeoTransform()[1]
-                        radius_pixels = int(2000 / pixel_size)
-                        size = radius_pixels * 2 + 1
-
-                        # Safe NoData mask creation that handles np.nan
-                        if pd.isna(nodata):
-                            valid_mask = (~np.isnan(array)).astype(np.float32)
-                            array[np.isnan(array)] = 0  # Temporarily zero out NoData
-                        else:
-                            valid_mask = (array != nodata).astype(np.float32)
-                            array[array == nodata] = 0  # Temporarily zero out NoData
-
-                        # Convolve data and mask, then divide to get the true mean ignoring NoData.
-                        # We use uniform_filter (O(1) sliding square window) instead of dense convolve (O(N*M))
-                        # to fix MemoryError / KilledWorker timeout issues on extremely large rasters.
-                        smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
-                        weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
-
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            final_array = np.where(weights > 0, smoothed / weights, nodata)
-
-                        # Re-mask to the input geometry mask. The smoothing filter extends data edges 
-                        # outwards; this strictly clips the values back to the original prediction mask bounds.
-                        gt = ds.GetGeoTransform()
-                        transform = rasterio.transform.Affine.from_gdal(*gt)
-                        
-                        out_of_bounds_mask = geometry_mask(
-                            [mask_geometry],
-                            out_shape=final_array.shape,
-                            transform=transform,
-                            invert=False  # Returns True for pixels OUTSIDE the geometry
-                        )
-                        
-                        final_array[out_of_bounds_mask] = nodata
-
-                        # Write array directly back to the warp dataset output
-                        band.WriteArray(final_array)
-                        band.FlushCache()
-
-            
-            # Catch silent GDAL failure
             if ds is None:
                 raise RuntimeError(f"gdal.Warp returned None for {os.path.basename(src_str)}")
+
+            # --- 6. OPTIONAL TSM SMOOTHING PASS ---
+            if apply_tsm_smoothing:
+                print(f"  [SMOOTHING] Applying memory-safe chunked focal mean smoothing to {src_str}...")
+
+                # Calculate smoothing pixel radius based on warp dataset transform
+                pixel_size = ds.GetGeoTransform()[1]
+                radius_pixels = int(2000 / abs(pixel_size))
+                size = radius_pixels * 2 + 1
                 
+                # IMPORTANT: Fully close the GDAL dataset to release file locks 
+                # before we reopen it with rasterio
+                ds = None
+                
+                smoothed_tmp = gdal_dst_str.replace('.tif', '_smoothed.tif')
+                cutline_gdf = gpd.read_file(cutline_path)
+                mask_geometry = cutline_gdf.geometry.iloc[0]
+
+                # Reopen with rasterio to enable chunked window processing
+                with rasterio.open(gdal_dst_str) as src:
+                    kwargs = src.meta.copy()
+                    kwargs.update({
+                        'tiled': True,
+                        'blockxsize': 512,
+                        'blockysize': 512
+                    })
+                    nodata = src.nodata if src.nodata is not None else warp_opts.get('dstNodata', warp_opts.get('srcNodata', -9999.0))
+                    
+                    with rasterio.open(smoothed_tmp, 'w', **kwargs) as dst:
+                        # Process the file in manageable 4096x4096 chunks (approx 67MB each)
+                        block_size = 1024
+                        
+                        for y in range(0, src.height, block_size):
+                            for x in range(0, src.width, block_size):
+                                core_width = min(block_size, src.width - x)
+                                core_height = min(block_size, src.height - y)
+                                window = rasterio.windows.Window(x, y, core_width, core_height)
+                                
+                                # Read with overlap to prevent edge artifacts in smoothing
+                                read_xoff = max(0, x - radius_pixels)
+                                read_yoff = max(0, y - radius_pixels)
+                                read_right = min(src.width, x + core_width + radius_pixels)
+                                read_bottom = min(src.height, y + core_height + radius_pixels)
+                                
+                                read_window = rasterio.windows.Window(
+                                    read_xoff, 
+                                    read_yoff, 
+                                    read_right - read_xoff, 
+                                    read_bottom - read_yoff
+                                )
+                                
+                                array = src.read(1, window=read_window).astype(np.float32)
+                                
+                                # Safe NoData mask creation
+                                if pd.isna(nodata):
+                                    valid_mask = (~np.isnan(array)).astype(np.float32)
+                                    array[np.isnan(array)] = 0
+                                else:
+                                    valid_mask = (array != nodata).astype(np.float32)
+                                    array[array == nodata] = 0
+
+                                # Run scipy's uniform_filter (fast O(1) sliding window)
+                                smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
+                                weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
+                                
+                                with np.errstate(divide='ignore', invalid='ignore'):
+                                    final_array = np.where(weights > 0, smoothed / weights, nodata)
+                                
+                                # Crop the expanded smoothed array back to the core window size
+                                row_offset = int(y - read_yoff)
+                                col_offset = int(x - read_xoff)
+                                core_array = final_array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
+                                
+                                # Re-mask strictly to the cutline geometry boundary for this specific chunk
+                                window_transform = src.window_transform(window)
+                                out_of_bounds_mask = geometry_mask(
+                                    [mask_geometry],
+                                    out_shape=core_array.shape,
+                                    transform=window_transform,
+                                    invert=False
+                                )
+                                core_array[out_of_bounds_mask] = nodata
+                                
+                                # Write completed chunk directly into the new temp file
+                                dst.write(core_array.astype(kwargs['dtype']), 1, window=window)
+
+                # Swap the files: remove the unsmoothed original and replace with smoothed
+                if os.path.exists(gdal_dst_str):
+                    os.remove(gdal_dst_str)
+                shutil.move(smoothed_tmp, gdal_dst_str)
+            
             # Explicitly force garbage collection to flush and close the file
-            del ds
+            if ds is not None:
+                del ds
             
             if self.is_aws:
                 # Bypass /vsis3/ entirely and use our robust s3fs client to upload the file
@@ -675,14 +705,20 @@ class ModelDataPreProcessor:
             tile_name = sub_grid['tile_id']
             
             output_folder = output_dir / tile_name
+            expected_output_path = output_folder / f"{tile_name}_{data_type}_clipped_data.parquet"
 
-            # Pass the pre-globbed list of strings instead of the directory
-            gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, all_raster_files)
-            ungridded_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, all_raster_files)
-            
-            tasks.append(
-                self.save_combined_data(gridded_task, ungridded_task, output_folder, data_type, tile_id=tile_name)
-            )
+            if not self.overwrite and expected_output_path.exists():
+                print(f"  [SKIP] Tile already clipped: {tile_name}. Queuing stats generation only.")
+                stats_task = dask.delayed(self._generate_stats_from_existing)(str(expected_output_path), tile_name)
+                tasks.append(stats_task)
+            else:
+                # Pass the pre-globbed list of strings instead of the directory
+                gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, all_raster_files)
+                ungridded_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, all_raster_files)
+                
+                tasks.append(
+                    self.save_combined_data(gridded_task, ungridded_task, output_folder, data_type, tile_id=tile_name)
+                )
 
             # FIX 3: Process in batches and aggressively clean memory
             if len(tasks) >= batch_size or i == (len(sub_grids) - 1):
@@ -838,6 +874,15 @@ class ModelDataPreProcessor:
             new_row[f"{year_pair}_nan_percent"] = round(df[col].isna().mean() * 100, 2)
         return pd.DataFrame([new_row])
 
+    def _generate_stats_from_existing(self, filepath: str, tile_id: str) -> pd.DataFrame:
+        """Reads an existing parquet file to generate nan stats without reprocessing."""
+        try:
+            df = pd.read_parquet(filepath)
+            return self.create_nan_stats_csv(df, tile_id)
+        except Exception as e:
+            print(f"[ERROR] Failed to read existing tile {filepath} for stats: {e}")
+            return pd.DataFrame()
+
     def batch_long_format_transformation(self, base_dir, mode: Literal["training", "prediction"]):
         """Orchestrator for transforming wide tiles to long year-pair format."""
         print(f"\n[INFO] Starting Long Format Transformation (Batch: {mode})...")
@@ -902,6 +947,14 @@ class ModelDataPreProcessor:
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
 
+            out_name = f"{tile_name}_{pair_name}_long.parquet"
+            out_path = str(UPath(output_dir) / out_name)
+
+            if not self.overwrite and UPath(out_path).exists():
+                print(f"  [SKIP] Long-format training tile already exists: {out_path}")
+                saved_files.append(out_name)
+                continue
+
             cols_t_meta = col_meta[col_meta["year"] == y0]
             cols_t1_meta = col_meta[col_meta["year"] == y1]
 
@@ -963,11 +1016,6 @@ class ModelDataPreProcessor:
             final_cols = id_cols + ["year_t", "year_t1", target_col] + predictor_cols_t + predictor_cols_delta + forcing_cols + static_cols
             final_cols = [c for c in final_cols if c in pair_gdf.columns]
             
-            out_name = f"{tile_name}_{pair_name}_long.parquet"
-            
-            # Replaced manual path joining with UPath!
-            out_path = str(UPath(output_dir) / out_name)
-            
             pair_gdf[final_cols].to_parquet(out_path, index=None)
             print(f"  [SUCCESS] Saved training long-format tile to: {out_path}")
             saved_files.append(out_name)
@@ -990,6 +1038,14 @@ class ModelDataPreProcessor:
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
             
+            out_name = f"{tile_name}_{pair_name}_prediction_long.parquet"
+            out_path = str(UPath(output_dir) / out_name)
+
+            if not self.overwrite and UPath(out_path).exists():
+                print(f"  [SKIP] Long-format prediction tile already exists: {out_path}")
+                saved_files.append(out_name)
+                continue
+                
             forcing_pattern = f"{y0_str}_{y1_str}$"
             forcing_cols = [c for c in gdf.columns if re.search(forcing_pattern, c)]
 
@@ -1001,11 +1057,6 @@ class ModelDataPreProcessor:
             final_cols = [c for c in final_cols if c in gdf.columns]
 
             pair_gdf = gdf[final_cols].drop_duplicates()
-            
-            out_name = f"{tile_name}_{pair_name}_prediction_long.parquet"
-            
-            # Replaced manual path joining with UPath!
-            out_path = str(UPath(output_dir) / out_name)
             
             pair_gdf.to_parquet(out_path, index=None)
             print(f"  [SUCCESS] Saved prediction long-format tile to: {out_path}")
@@ -1117,5 +1168,4 @@ class ModelDataPreProcessor:
             intersecting_sub_grids.to_file(str(output_upath), driver="GPKG") 
 
         print(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}")
-        return 
-    
+        return
