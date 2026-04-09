@@ -37,12 +37,12 @@ dask.config.set({"distributed.worker.memory.spill": 0.80})
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
 
 # GDAL Configuration and S3 Network Optimizations
-os.environ["GDAL_CACHEMAX"] = "512"             # 1GB Cache (assumes ~8-12 workers)
+os.environ["GDAL_CACHEMAX"] = "512"             # 512 MB Cache
 os.environ["GDAL_HTTP_MAX_RETRY"] = "5"
 os.environ["GDAL_HTTP_RETRY_DELAY"] = "3"
 os.environ["AWS_MAX_CONNECTIONS"] = "32"
 os.environ["VSI_CACHE"] = "TRUE"
-os.environ["VSI_CACHE_SIZE"] = "268435456"       # 512 MB VSI Cache (Standard for large TIFFs)
+os.environ["VSI_CACHE_SIZE"] = "268435456"       # 256 MB VSI Cache (Standard for large TIFFs)
 
 
 class ModelDataPreProcessor:
@@ -94,10 +94,10 @@ class ModelDataPreProcessor:
         }
 
         self.preprocessed_subdirs = {
-            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO')}"),
+            'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO')}"),
             'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE')}"),
-            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR')}"),
-            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT')}"),
+            'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR')}"),
+            'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT')}"),
             'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM')}")
         }
         
