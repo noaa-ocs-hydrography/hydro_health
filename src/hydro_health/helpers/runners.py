@@ -1,5 +1,7 @@
 import pathlib
 import geopandas as gpd
+import cProfile
+import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
@@ -7,11 +9,12 @@ from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
+from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
+from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
-from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
@@ -105,6 +108,18 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> No
         engine = MetadataS3Engine()
     outputs = param_lookup['output_directory'].valueAsText
     engine.run(tiles, outputs)
+
+
+def run_preprocessor_modeldata(pilot_mode: bool=False) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    processor = ModelDataPreProcessor(overwrite=True, pilot_mode=pilot_mode)
+    processor.process()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)
 
 
 def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
