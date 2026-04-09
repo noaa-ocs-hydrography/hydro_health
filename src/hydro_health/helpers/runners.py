@@ -118,9 +118,9 @@ def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
+            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=True)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)
+        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=False)
 
 
 def run_tsm_layer_engine() -> None:
