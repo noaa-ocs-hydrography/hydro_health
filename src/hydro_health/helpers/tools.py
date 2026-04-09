@@ -41,7 +41,7 @@ def get_environment() -> str:
         return 'remote'
 
 
-def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode=False) -> str:
+def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode: bool=False) -> str:
     """
     Load config and return speciific key
     :param str parent: Primary key in config
