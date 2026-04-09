@@ -1,162 +1,98 @@
-import boto3
+import os
+import gc
 import pathlib
-import shutil
-import s3fs
 import tempfile
-import multiprocessing as mp
-import pandas as pd
+import boto3
+import s3fs
+import numpy as np
 import geopandas as gpd
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
+from osgeo import gdal, osr, ogr
 
-from osgeo import ogr, osr, gdal
+# Force GDAL settings for multi-processing stability
+os.environ['PROJ_LIB_CACHE'] = 'OFF'
+os.environ['PROJ_NETWORK'] = 'OFF'
+os.environ['PROJ_USER_WRITABLE_DIRECTORY'] = '/tmp'
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
+
+gdal.UseExceptions()
 
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
-def _create_prediction_mask(param_inputs: list[list]) -> None:
-    """Create, upload, and retain the prediction mask locally for the training step"""
+def _set_gdal_s3_options():
+    """Optimized GDAL settings for S3 VSI stability."""
 
-    temp_folder, ecoregion = param_inputs
+    gdal.SetConfigOption('GDAL_CACHEMAX', '512')
+    gdal.SetConfigOption('GDAL_HTTP_MAX_RETRY', '5')
+    gdal.SetConfigOption('GDAL_HTTP_RETRY_DELAY', '3')
+    gdal.SetConfigOption('AWS_REGION', 'us-east-2') 
+    gdal.SetConfigOption('GDAL_HTTP_TIMEOUT', '60')
+    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
+    gdal.SetConfigOption('VSI_CACHE', 'TRUE')
+    gdal.SetConfigOption('PROJ_CACHE_DIR', '/tmp/proj_cache')
+    gdal.SetConfigOption('GDAL_PROJ_THREAD_SAFE', 'YES')
 
-    s3_client = boto3.client('s3')
-    bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
-    gpkg = INPUTS / 'Master_Grids.gpkg'
-    gpkg_ds = ogr.Open(str(gpkg))
-    source_layer = gpkg_ds.GetLayerByName('EcoRegions_50m')
+def _vrt_to_mask_worker(vrt_path: str, scratch_dir: str, geo_t: list[float], cols: int, rows: int, target_srs_wkt: str) -> str:
+    """Converts one VRT into a detailed binary mask (1=data, 0=nodata)."""
 
-    target_srs = osr.SpatialReference()
-    target_srs.ImportFromEPSG(32617)
-    target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+    _set_gdal_s3_options()
+
+    pid = os.getpid()
+    vrt_name = pathlib.Path(vrt_path).stem
+    local_mask_path = scratch_dir / f"part_{vrt_name}.tif"
     
-    mem_driver = ogr.GetDriverByName('Memory')
-    mem_ds = mem_driver.CreateDataSource('mem_ds')
-    mem_layer = mem_ds.CreateLayer('selected_ecoregion', srs=target_srs, geom_type=ogr.wkbPolygon)
+    xmin, res_x, _, ymax, _, res_y = geo_t
+    xmax = xmin + (cols * res_x)
+    ymin = ymax + (rows * res_y)
 
-    source_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
+    try:
+        # Read the source nodata value
+        src_ds = gdal.Open(vrt_path)
+        src_nodata = src_ds.GetRasterBand(1).GetNoDataValue()
+        src_ds = None
 
-    source_srs = source_layer.GetSpatialRef()
-    transformer = osr.CoordinateTransformation(source_srs, target_srs)
+        with tempfile.TemporaryDirectory(dir=scratch_dir) as tmp_work:
+            tmp_warp = pathlib.Path(tmp_work) / "warp_with_alpha.tif"
+            
+            # Warp with nodata to find discrete areas
+            warp_opts = {
+                'format': 'GTiff',
+                'outputBounds': [xmin, ymin, xmax, ymax],
+                'width': cols,
+                'height': rows,
+                'dstSRS': target_srs_wkt,
+                'dstAlpha': True, # Band 2 becomes our high-res binary mask
+                'resampleAlg': gdal.GRA_NearestNeighbour,
+                'creationOptions': ['COMPRESS=LZW', 'TILED=YES']
+            }
+            
+            if src_nodata is not None:
+                warp_opts['srcNodata'] = src_nodata
 
-    for feature in source_layer:
-        geom = feature.GetGeometryRef().Clone()
-        geom.Transform(transformer)
-        new_feat = ogr.Feature(mem_layer.GetLayerDefn())
-        new_feat.SetGeometry(geom)
-        mem_layer.CreateFeature(new_feat)
-    
-    xmin, xmax, ymin, ymax = mem_layer.GetExtent()
-    pixel_size = 8
-    x_res = int((xmax - xmin) / pixel_size)
-    y_res = int((ymax - ymin) / pixel_size)
-
-    # Use the ecoregion path to store the file permanently for now
-    prediction_mask_name = f"prediction_mask_{ecoregion.stem}.tif"
-    local_path = temp_folder / ecoregion.stem / get_config_item('MASK', 'SUBFOLDER') / prediction_mask_name
-    local_path.parents[0].mkdir(parents=True, exist_ok=True)
-
-    target_ds = gdal.GetDriverByName("GTiff").Create(
-        str(local_path), x_res, y_res, 1, gdal.GDT_Byte,
-        options=[
-            "COMPRESS=LZW", 
-            "TILED=YES", 
-            "NUM_THREADS=ALL_CPUS", 
-            "SPARSE_OK=YES" # Efficiently handles the "empty" space
-        ]
-    )
-    target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
-    target_ds.SetProjection(target_srs.ExportToWkt())
-    target_ds.GetRasterBand(1).SetNoDataValue(0)
-
-    gdal.RasterizeLayer(target_ds, [1], mem_layer, burn_values=[1])
-    target_ds = None # Flush to disk
-
-    s3_key = f"{ecoregion.stem}/{get_config_item('MASK', 'SUBFOLDER')}/{prediction_mask_name}"
-    s3_client.upload_file(str(local_path), bucket, s3_key)
-
-    mem_ds = None
-    gpkg_ds = None
-
-
-def _create_training_mask(param_inputs: list[list]):
-    """Create training mask, upload, and then cleanup local tif files"""
-
-    temp_folder, ecoregion = param_inputs
-    mask_subfolder = get_config_item('MASK', 'SUBFOLDER')
-    bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-
-    prediction_file = temp_folder / ecoregion.stem / mask_subfolder / f'prediction_mask_{ecoregion.stem}.tif'
-    training_file = temp_folder / ecoregion.stem / mask_subfolder / f'training_mask_{ecoregion.stem}.tif'
-    training_data_outline = temp_folder / ecoregion.stem / mask_subfolder / 'training_data_outlines.shp'
-
-    if prediction_file.exists() and training_data_outline.exists():
-        # Use Translate instead of copy to ensure specific compression/options
-        gdal.Translate(
-            str(training_file), 
-            str(prediction_file),
-            creationOptions=["COMPRESS=LZW", "TILED=YES", "SPARSE_OK=YES", "NUM_THREADS=ALL_CPUS"]
-        )
-        
-        training_ds = gdal.Open(str(training_file), gdal.GA_Update)
-        target_srs = osr.SpatialReference(training_ds.GetProjection())
-        target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-        gpkg_ds = ogr.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
-        eco_source_layer = gpkg_ds.GetLayer(get_config_item('SHARED', 'ECOREGIONS'))
-        eco_source_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
-        
-        # Memory layer for the ecoregion in the target CRS
-        mem_driver = ogr.GetDriverByName("Memory")
-        eco_mem_ds = mem_driver.CreateDataSource('eco_mem')
-        eco_clip_layer = eco_mem_ds.CreateLayer("eco_clip", srs=target_srs, geom_type=ogr.wkbMultiPolygon)
-        
-        eco_transform = osr.CoordinateTransformation(eco_source_layer.GetSpatialRef(), target_srs)
-        for feat in eco_source_layer:
-            geom = feat.GetGeometryRef().Clone()
-            geom.Transform(eco_transform)
-            new_feat = ogr.Feature(eco_clip_layer.GetLayerDefn())
-            new_feat.SetGeometry(geom)
-            eco_clip_layer.CreateFeature(new_feat)
-
-        shp_driver = ogr.GetDriverByName("ESRI Shapefile")
-        outline_ds = shp_driver.Open(str(training_data_outline))
-        outline_source_layer = outline_ds.GetLayer(0)
-        
-        mem_ds = mem_driver.CreateDataSource('outline_mem')
-        mem_transformed_layer = mem_ds.CreateLayer("outline_trans", srs=target_srs, geom_type=ogr.wkbMultiPolygon)
-        
-        outline_transform = osr.CoordinateTransformation(outline_source_layer.GetSpatialRef(), target_srs)
-        for feat in outline_source_layer:
-            geom = feat.GetGeometryRef().Clone()
-            geom.Transform(outline_transform)
-            new_feat = ogr.Feature(mem_transformed_layer.GetLayerDefn())
-            new_feat.SetGeometry(geom)
-            mem_transformed_layer.CreateFeature(new_feat)
-
-        final_clipped_ds = mem_driver.CreateDataSource('final_mem')
-        final_clipped_layer = final_clipped_ds.CreateLayer("final_clip", srs=target_srs, geom_type=ogr.wkbMultiPolygon)
-        
-        mem_transformed_layer.Clip(eco_clip_layer, final_clipped_layer)
-
-        gdal.RasterizeLayer(training_ds, [1], final_clipped_layer, burn_values=[2])
-        
-        training_ds = None
-        gpkg_ds = None
-        outline_ds = None
-        
-        s3_client = boto3.client('s3')
-        s3_key = f"{ecoregion.stem}/{mask_subfolder}/training_mask_{ecoregion.stem}.tif"
-        s3_client.upload_file(str(training_file), bucket, s3_key)
-
-        prediction_file.unlink()
-        training_file.unlink()
-        
-        return f' - Processed: {ecoregion.stem}'
-    else:
-        return f' - Mask files missing: {ecoregion.stem}'
+            gdal.Warp(str(tmp_warp), vrt_path, **warp_opts)
+            
+            # Convert band 2 to local partial mask
+            ds = gdal.Open(str(tmp_warp))
+            gdal.Translate(
+                str(local_mask_path),
+                ds,
+                bandList=[2], 
+                format='GTiff',
+                creationOptions=['COMPRESS=LZW', 'TILED=YES', 'SPARSE_OK=YES']
+            )
+            ds = None
+            
+        print(f"[Worker {pid}] Detailed mask complete: {vrt_name}")
+        return str(local_mask_path)
+    except Exception as e:
+        print(f"!!! [Worker {pid}] Failed {vrt_name}: {e}")
+        return None
 
 
 class RasterMaskS3Engine(Engine):
@@ -164,108 +100,244 @@ class RasterMaskS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def dissolve_tile_index_shapefiles(self, approved_files, ecoregions, temp_folder) -> None:
-        """Dissolve tile index shapefiles by buffering through local temp storage"""
+    def create_prediction_mask(self, ecoregion: str, wkt_geom: str) -> None:
+        """Build the base prediction mask (Value 1) for the ecoregion polygon."""
+
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        s3_key = f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
+
+        target_srs = osr.SpatialReference()
+        target_srs.ImportFromEPSG(32617)
+        target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         
-        s3_files = s3fs.S3FileSystem()
-        for ecoregion in ecoregions:
-            if ecoregion.stem in approved_files:
-                for tile_index_path in approved_files[ecoregion.stem]:
-                    s3_folder = "/".join(tile_index_path.split('/')[:-1])
-                    digital_coast_path = "/".join(tile_index_path.split('/')[2:-1])
-                    file_stem = pathlib.Path(tile_index_path).stem
-                    for s3_file in s3_files.ls(s3_folder):
-                        if file_stem in s3_file:
-                            local_file = temp_folder / ecoregion.stem / digital_coast_path / pathlib.Path(s3_file).name
-                            s3_files.get(s3_file, str(local_file))
-                    
-                    local_shp = temp_folder / ecoregion.stem / digital_coast_path/  f"{file_stem}.shp"
-                    if not local_shp.exists():
-                        print(f"Error: Could not find {local_shp} after download.")
-                        continue
-                        
-                    tile_index = gpd.read_file(str(local_shp))
-                    
-                    print(f" - {file_stem}...")
-                    dissolved_tile_index = tile_index.dissolve().to_crs("EPSG:4326")
-                    
-                    dissolved_filename = f"{file_stem}_dis"
-                    local_out_path = temp_folder / ecoregion.stem / digital_coast_path / f"{dissolved_filename}.shp"
-                    dissolved_tile_index.to_file(local_out_path, driver='ESRI Shapefile')
-                    
-                    # upload local dissolved file to S3
-                    digital_coast_temp_folder = temp_folder / ecoregion.stem / digital_coast_path
-                    for local_file in digital_coast_temp_folder.glob(f"{dissolved_filename}.*"):
-                        s3_target = f"{s3_folder}/{local_file.name}"
-                        s3_files.put(str(local_file), s3_target)
-                        print(f" - uploaded: {s3_target}")
-
-    def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
-        """Get list of intersected features from ecoregion tile index shapefile"""
-
-        approved_files = {}
-        for ecoregion in ecoregions:
-            s3_files = s3fs.S3FileSystem()
-            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion.stem}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
-            unapproved_dataset = 'NCEI'
-            json_files = [json_prefix for json_prefix in s3_files.glob(f'{digital_coast_path}/**/feature.json') if unapproved_dataset not in json_prefix]
-            for file in json_files:
-                if ecoregion.stem not in approved_files:
-                    approved_files[ecoregion.stem] = []
-                parent_project = '/'.join(file.split('/')[:-1])
-                tile_index_shps = s3_files.glob(f'{parent_project}/**/*index*.shp')
-                if tile_index_shps:
-                    approved_files[ecoregion.stem].append(tile_index_shps[0])
-        return approved_files
-
-    def get_transformation(self) -> osr.CoordinateTransformation:
-        """Transformation object for WGS84 to UTM17"""
-
-        utm17_gdal = osr.SpatialReference()
-        utm17_gdal.ImportFromEPSG(32617)
-        wgs84_gdal = osr.SpatialReference()
-        wgs84_gdal.ImportFromEPSG(4326)
-        wgs84_to_utm17_transform = osr.CoordinateTransformation(wgs84_gdal, utm17_gdal)
-        return wgs84_to_utm17_transform
-
-    def merge_dissolved_polygons(self, ecoregions, temp_folder):
-        """Creating full training outline shapefile for ecoregion"""
-
-        for ecoregion in ecoregions:
-            digital_coast_folder = temp_folder / ecoregion.stem / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-            if digital_coast_folder.is_dir():
-                dissolved_shapefiles = digital_coast_folder.rglob('*_dis.shp')
-                merged_training_ds = pd.concat([gpd.read_file(shp) for shp in dissolved_shapefiles]).dissolve()
-                training_data_outlines = temp_folder / ecoregion.stem / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
-                merged_training_ds.to_file(training_data_outlines)
-
-    def run(self, outputs: str) -> None:
-        ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
-        print('Creating prediction masks')
-        self.setup_dask(self.param_lookup['env'])
-        with tempfile.TemporaryDirectory() as tmpdir:
-            temp_folder = pathlib.Path(tmpdir)
-            self.process_prediction_masks(ecoregions, temp_folder, outputs)
-            approved_files = self.get_approved_area_files(ecoregions)
-            print(f' - Found files for ecoregions: {list(approved_files.keys())}')
-            print('Dissolving tile index shapefiles')
-            self.dissolve_tile_index_shapefiles(approved_files, ecoregions, temp_folder)
-            print('Merging all dissolved tile index shapfiles')
-            self.merge_dissolved_polygons(ecoregions, temp_folder)
-            print('Creating training masks')
-            self.process_training_masks(ecoregions, temp_folder, outputs)
-            self.close_dask()
+        mem_ds = ogr.GetDriverByName('Memory').CreateDataSource(f'mem_{ecoregion}')
+        mem_layer = mem_ds.CreateLayer('selected_ecoregion', srs=target_srs, geom_type=ogr.wkbPolygon)
+        feat = ogr.Feature(mem_layer.GetLayerDefn())
+        feat.SetGeometry(ogr.CreateGeometryFromWkt(wkt_geom))
+        mem_layer.CreateFeature(feat)
         
-    def process_prediction_masks(self, ecoregions: list[pathlib.Path], temp_folder: pathlib.Path, outputs: str) -> None:
-        """Multiprocessing entrypoint for creating prediction masks"""
+        xmin, xmax, ymin, ymax = mem_layer.GetExtent()
+        pixel_size = 8
+        cols = max(1, int((xmax - xmin) / pixel_size))
+        rows = max(1, int((ymax - ymin) / pixel_size))
 
-        future_tiles = self.client.map(_create_prediction_mask, [[temp_folder, ecoregion] for ecoregion in ecoregions])
-        tile_results = self.client.gather(future_tiles)
-        self.print_async_results(tile_results, outputs)
+        with tempfile.NamedTemporaryFile(suffix='.tif') as tmp:
+            driver = gdal.GetDriverByName("GTiff")
+            out_ds = driver.Create(tmp.name, cols, rows, 1, gdal.GDT_Byte, 
+                                   options=["TILED=YES", "SPARSE_OK=YES"])
+            out_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
+            out_ds.SetProjection(target_srs.ExportToWkt())
+            out_ds.GetRasterBand(1).SetNoDataValue(0)
+            gdal.RasterizeLayer(out_ds, [1], mem_layer, burn_values=[1])
+            out_ds = None 
+            
+            boto3.client('s3').upload_file(tmp.name, bucket, s3_key)
 
-    def process_training_masks(self, ecoregions: list[pathlib.Path], temp_folder: pathlib.Path, outputs: str) -> None:
-        """Multiprocessing entrypoint for creating training masks"""
+    def create_training_mask(self, ecoregion: str, s3_vrt_paths: list[str], outputs: str) -> str:
+        """Tile-based merge using bitwise OR to combine 58 bathymetry masks."""
 
-        future_tiles = self.client.map(_create_training_mask, [[temp_folder, ecoregion] for ecoregion in ecoregions])
-        tile_results = self.client.gather(future_tiles)
-        self.print_async_results(tile_results, outputs)
+        _set_gdal_s3_options()
+
+        scratch_dir = pathlib.Path.home() / f"gdal_scratch_{ecoregion}"
+        scratch_dir.mkdir(exist_ok=True)
+        
+        local_pred_path = scratch_dir / "base_pred.tif"
+        local_raw_path = scratch_dir / "raw_training_merge.tif"
+        final_compressed_path = scratch_dir / f"training_mask_{ecoregion}.tif"
+
+        s3_client = boto3.client('s3', region_name='us-east-2')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+
+        self.write_message(f"Downloading base prediction mask for {ecoregion}...", outputs)
+        s3_client.download_file(bucket, f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif", str(local_pred_path))
+
+        base_ds = gdal.Open(str(local_pred_path))
+        geo_t = base_ds.GetGeoTransform()
+        target_srs_wkt = base_ds.GetProjection()
+        cols, rows = base_ds.RasterXSize, base_ds.RasterYSize
+        base_ds = None 
+
+        vsi_vrt_paths = [v.replace("s3://", "/vsis3/") for v in s3_vrt_paths]
+        worker_func = partial(_vrt_to_mask_worker, scratch_dir=scratch_dir, 
+                             geo_t=geo_t, cols=cols, rows=rows, target_srs_wkt=target_srs_wkt)
+
+        self.write_message(f"Starting worker swarm for {len(vsi_vrt_paths)} detailed VRT masks...", outputs)
+        gc.collect()
+        
+        with ProcessPoolExecutor(max_workers=6) as executor:
+            mask_files = list(executor.map(worker_func, vsi_vrt_paths))
+        
+        valid_masks = [f for f in mask_files if f is not None]
+
+        # Initialize training mask from prediction mask
+        gdal.Translate(str(local_raw_path), str(local_pred_path), 
+                       options=gdal.TranslateOptions(format="GTiff", creationOptions=["TILED=YES", "BIGTIFF=YES"]))
+        
+        train_ds = gdal.Open(str(local_raw_path), gdal.GA_Update)
+        train_band = train_ds.GetRasterBand(1)
+        mask_dss = [gdal.Open(m) for m in valid_masks]
+        mask_bands = [ds.GetRasterBand(1) for ds in mask_dss]
+
+        self.write_message(f"Merging {len(valid_masks)} partial masks with exhaustive OR logic...", outputs)
+        tile_size = 4096  # Cloud optimized largest block size; Could also use 2048
+        for y in range(0, rows, tile_size):
+            win_y = min(tile_size, rows - y)
+            for x in range(0, cols, tile_size):
+                win_x = min(tile_size, cols - x)
+                prediction_chunk = train_band.ReadAsArray(x, y, win_x, win_y)
+                starting_mask = np.zeros((win_y, win_x), dtype=np.uint8)
+
+                for mask_band in mask_bands:
+                    mask_block = mask_band.ReadAsArray(x, y, win_x, win_y)
+                    # Set to mask_block or keep starting_mask values
+                    starting_mask |= (mask_block > 0).astype(np.uint8)
+                
+                # If inside Ecoregion (1) AND has bathymetry (presence > 0) -> Value 2
+                mask_indices = (prediction_chunk == 1) & (starting_mask > 0)
+                
+                if np.any(mask_indices):
+                    prediction_chunk[mask_indices] = 2
+                    train_band.WriteArray(prediction_chunk, x, y)
+
+        train_band.FlushCache()
+        train_ds = None
+        mask_dss = None 
+
+        # Final Compress and Upload
+        gdal.Translate(
+            str(final_compressed_path),
+            str(local_raw_path),
+            options=gdal.TranslateOptions(
+                format="GTiff", creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES"]
+            ),
+        )
+
+        s3_key = f"{ecoregion}/{mask_sub}/training_mask_{ecoregion}.tif"
+        s3_client.upload_file(str(final_compressed_path), bucket, s3_key)
+
+        # Clean up EBS
+        # for f in scratch_dir.glob("part_*.tif"): f.unlink()
+        # local_pred_path.unlink()
+        # local_raw_path.unlink()
+        # final_compressed_path.unlink()
+        # scratch_dir.rmdir()
+
+        return f"{ecoregion}: Training mask completed"
+
+    def find_provider_vrts(self, ecoregion: str, manual_downloads: bool) -> list[str]:
+        """Obtain list of VRT S3 paths"""
+
+        s3 = s3fs.S3FileSystem()
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
+        search_paths = [f"s3://{bucket}/{ecoregion}/{dc_sub}/DigitalCoast"]
+        if manual_downloads: 
+            search_paths.append(f"{search_paths[0]}_manual_downloads")
+        
+        found = []
+        for path in search_paths: 
+            found.extend(s3.glob(f"{path}/**/mosaic_*.vrt"))
+        return found
+
+    def remerge_training_mask(self, ecoregion: str, outputs: str) -> str:
+        """
+        Standalone 'Merge-Only' function. 
+        Use this if you have manually modified/deleted part_*.tif files 
+        in the scratch directory and want to rebuild the final output.
+        """
+
+        _set_gdal_s3_options()
+        
+        # Path setup
+        scratch_dir = pathlib.Path.home() / f"gdal_scratch_{ecoregion}"
+        local_pred_path = scratch_dir / "base_pred.tif"
+        local_raw_path = scratch_dir / "raw_training_merge.tif"
+        final_compressed_path = scratch_dir / f"training_mask_{ecoregion}.tif"
+        
+        if not local_pred_path.exists():
+            return f"Error: {local_pred_path} not found. Need the base prediction mask to continue."
+
+        # Collect all remaining part mask files
+        valid_masks = [str(f) for f in scratch_dir.glob("part_*.tif")]
+        
+        if not valid_masks:
+            return f"Error: No part_*.tif files found in {scratch_dir}"
+
+        self.write_message(f"Remerging {len(valid_masks)} files for {ecoregion}...", outputs)
+
+        # Initialize the training mask from prediction mask
+        gdal.Translate(str(local_raw_path), str(local_pred_path), 
+                       options=gdal.TranslateOptions(format="GTiff", creationOptions=["TILED=YES", "BIGTIFF=YES"]))
+        
+        # Open training dataset and read values
+        train_ds = gdal.Open(str(local_raw_path), gdal.GA_Update)
+        train_band = train_ds.GetRasterBand(1)
+        cols, rows = train_ds.RasterXSize, train_ds.RasterYSize
+        
+        mask_dss = [gdal.Open(partial_mask) for partial_mask in valid_masks]
+        mask_bands = [ds.GetRasterBand(1) for ds in mask_dss]
+
+        # Build output band by reading tile blocks
+        tile_size = 4096 
+        for y in range(0, rows, tile_size):
+            win_y = min(tile_size, rows - y)
+            for x in range(0, cols, tile_size):
+                win_x = min(tile_size, cols - x)
+                
+                prediction_chunk = train_band.ReadAsArray(x, y, win_x, win_y)
+                combined_presence = np.zeros((win_y, win_x), dtype=np.uint8)
+
+                for mb in mask_bands:
+                    m_tile = mb.ReadAsArray(x, y, win_x, win_y)
+                    combined_presence |= (m_tile > 0).astype(np.uint8)
+                
+                # Ecoregion (1) + Bathy Presence (True) = Value 2
+                mask_indices = (prediction_chunk == 1) & (combined_presence > 0)
+                
+                if np.any(mask_indices):
+                    prediction_chunk[mask_indices] = 2
+                    train_band.WriteArray(prediction_chunk, x, y)
+
+        # Cleanup handles
+        train_band.FlushCache()
+        train_ds = None
+        mask_dss = None 
+
+        # Compress and Upload
+        self.write_message(f"Compressing and uploading rebuilt mask...", outputs)
+        gdal.Translate(
+            str(final_compressed_path),
+            str(local_raw_path),
+            options=gdal.TranslateOptions(
+                format="GTiff", creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES"]
+            ),
+        )
+
+        s3_client = boto3.client('s3', region_name='us-east-2')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        s3_key = f"{ecoregion}/{mask_sub}/training_mask_{ecoregion}.tif"
+        
+        s3_client.upload_file(str(final_compressed_path), bucket, s3_key)
+
+        return f"{ecoregion}: Remerge complete. S3 updated."
+    
+    def run(self, outputs: str, manual_downloads=False) -> None:
+        s3 = s3fs.S3FileSystem()
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
+
+        gpkg = str(INPUTS / 'Master_Grids.gpkg')
+        gdf = gpd.read_file(gpkg, layer='EcoRegions_50m').to_crs("EPSG:32617")
+        gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
+
+        for _, row in gdf.iterrows():
+            er = row['EcoRegion']
+            vrts = self.find_provider_vrts(er, manual_downloads)
+            self.create_prediction_mask(er, row['geometry'].wkt)
+            if vrts:
+                vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
+                result_string = self.create_training_mask(er, vrt_list, outputs)
+                self.write_message(result_string, outputs)

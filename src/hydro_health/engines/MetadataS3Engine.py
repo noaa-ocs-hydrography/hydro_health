@@ -1,9 +1,7 @@
 """Class for obtaining all available files"""
 
-import boto3
 import json
 import os
-import re
 import requests
 import geopandas as gpd
 import pathlib
@@ -101,7 +99,8 @@ class MetadataS3Engine:
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
-            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+            # TODO manual download would read JSON files from N:
+            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
             self.read_json_files(digital_coast_path, outputs)
 
     def write_message(self, message: str, output_folder: str) -> None:

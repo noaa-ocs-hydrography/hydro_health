@@ -314,6 +314,7 @@ class BlueTopoS3Engine(Engine):
             current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
+                # TODO this would need to check S3 now and not the temp folder
                 if current_file.exists():
                     self.write_message(f'Skipping: {current_file.name}', output_folder)
                     return output_tile_path
@@ -407,4 +408,4 @@ class BlueTopoS3Engine(Engine):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
             s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(tiff_file), bucket_name, f'testing/{str(s3_path)}')
+            s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')

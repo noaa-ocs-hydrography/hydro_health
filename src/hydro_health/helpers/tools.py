@@ -41,12 +41,13 @@ def get_environment() -> str:
         return 'remote'
 
 
-def get_config_item(parent: str, child: str=False, env_string: str=False) -> str:
+def get_config_item(parent: str, child: str=False, env_string: str=False, model_mode=None) -> str:
     """
     Load config and return speciific key
     :param str parent: Primary key in config
     :param str child: Secondary key in config
     :param str env_string: Optional explicit value of "local" or "remote"
+    :param str model_model: Optional "pilot" model focused run
     :returns str: Value from local or remote YAML config
     """
 
@@ -56,12 +57,8 @@ def get_config_item(parent: str, child: str=False, env_string: str=False) -> str
     if env is None:
         env = get_environment()
 
-    model_mode = "pilot"  # "ecoregion" would be the other mode option
-
-    if model_mode == "pilot":
-        file_path = str(INPUTS / 'lookups' / f'{env}_{model_mode}_path_config.yaml') 
-    else:
-        file_path = str(INPUTS / 'lookups' / f'{env}_path_config.yaml')
+    config_name = f'{env}_path_config.yaml' if model_mode is None else f'{env}_{model_mode}_path_config.yaml'
+    file_path = str(INPUTS / 'lookups' / config_name) 
 
     with open(file_path, 'r') as lookup:
         config = yaml.safe_load(lookup)

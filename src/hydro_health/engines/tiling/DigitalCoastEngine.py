@@ -7,8 +7,11 @@ import requests
 import shutil
 import geopandas as gpd
 import pathlib
+import rasterio
 import os
 import sys
+
+import numpy as np
 
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
@@ -101,6 +104,19 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
             if intersected_response.status_code == 200:
                 with open(output_file, 'wb') as file:
                     file.write(intersected_response.content)
+                    
+                # mask_file = shp_folder / f"mask_{dataset_name}"
+
+                # # Build binary mask of geotiff
+                # with rasterio.open(output_file) as src:
+                #     data = src.read(1)
+                #     nodata_val = src.nodata if src.nodata is not None else 0
+                #     binary_mask = (data != nodata_val).astype(np.uint8)
+                #     meta = src.profile.copy()
+                #     meta.update(dtype=rasterio.uint8, count=1, nodata=0)
+                    
+                #     with rasterio.open(mask_file, 'w', **meta) as dst:
+                #         dst.write(binary_mask, 1)
             else:
                 return f'Failed to download: {cleansed_url}'
         return f'- {shp_path.stem}'
@@ -154,21 +170,22 @@ class DigitalCoastEngine(Engine):
 
         self.write_message(f'Checking area size of tileindex files', outputs)
         tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(folder)]
-        move_providers = []
+        # move_providers = []
         for shp_path in tile_index_shapefiles:
             shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
             shp_df['area'] = shp_df['geometry'].area
             total_area = shp_df["area"].sum()
             if total_area < self.approved_size:
                 self.write_message(f' - provider too small: {total_area} - {shp_path}', outputs)
-                move_providers.append(shp_path.parents[2])
-        for provider in move_providers:
-            unused_provider_folder = digital_coast_folder / 'unused_providers'
-            if not unused_provider_folder.exists():
-                unused_provider_folder.mkdir()
-            if pathlib.Path(unused_provider_folder / provider.stem).exists():
-                shutil.rmtree(unused_provider_folder / provider.stem)
-            shutil.move(provider, unused_provider_folder)
+                shutil.rmtree(shp_path.parents[2])
+                # move_providers.append(shp_path.parents[2])
+        # for provider in move_providers:
+        #     unused_provider_folder = digital_coast_folder / 'unused_providers'
+        #     if not unused_provider_folder.exists():
+        #         unused_provider_folder.mkdir()
+        #     if pathlib.Path(unused_provider_folder / provider.stem).exists():
+        #         shutil.rmtree(unused_provider_folder / provider.stem)
+        #     shutil.move(provider, unused_provider_folder)
 
     def delete_unused_folder(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Delete any provider folders without a subfolder"""

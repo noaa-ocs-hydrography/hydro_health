@@ -62,7 +62,7 @@ class RasterVRTEngine(Engine):
         else:
             provider_folders = [folder for folder in outputs.glob('*') if folder.is_dir() and 'unused_providers' not in str(folder)]
             for provider in provider_folders:
-                geotiffs = list(provider.rglob(self.glob_lookup[file_type]))
+                geotiffs = [geotiff for geotiff in provider.rglob(self.glob_lookup[file_type]) if not geotiff.name.startswith('mask_')]
                 output_geotiffs = self.get_digitalcoast_tifs(output_folder, outputs, geotiffs, data_type, skip_existing)
                 self.build_output_vrts(outputs, file_type, output_geotiffs)
 

@@ -1,14 +1,12 @@
-import os
-import sys
+
 import json
 import pathlib
 import shutil
-import multiprocessing as mp
 import pandas as pd
 import geopandas as gpd
 import yaml
-from pathlib import Path
-from typing import List
+
+import numpy as np
 
 from osgeo import ogr, osr, gdal
 
@@ -16,9 +14,10 @@ from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
 
-mp.set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+
 
 
 def _create_prediction_mask(param_inputs: list[list]) -> None:
@@ -69,9 +68,18 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     mask_path = ecoregion / get_config_item('MASK', 'SUBFOLDER') / prediction_mask_name
     mask_path.parents[0].mkdir(parents=True, exist_ok=True)
 
+    # Updated creation options for a sparse, tiny file
+    creation_options = [
+        "COMPRESS=LZW", 
+        "TILED=YES", 
+        "SPARSE_OK=YES", 
+        "NUM_THREADS=ALL_CPUS",
+        "INTERLEAVE=BAND"
+    ]
+
     target_ds = gdal.GetDriverByName("GTiff").Create(
         str(mask_path), x_res, y_res, 1, gdal.GDT_Byte,
-        options=["COMPRESS=LZW", "TILED=YES", "NUM_THREADS=ALL_CPUS"]
+        options=creation_options
     )
     target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
     target_ds.SetProjection(output_srs.ExportToWkt())
@@ -82,40 +90,87 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     gpkg_ds = None
 
 
-def _create_training_mask(ecoregion):
-    """Create training mask for current ecoregion"""
+def _create_training_mask(ecoregion: pathlib.Path) -> str:
+    """Create training mask from valid raster data in the VRT files"""
 
-    prediction_file = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'prediction_mask_{ecoregion.stem}.tif'
-    training_data_outline = ecoregion / get_config_item('MASK', 'SUBFOLDER') / 'training_data_outlines.shp'
-    if prediction_file.exists() and training_data_outline.exists():
-        training_file = ecoregion / get_config_item('MASK', 'SUBFOLDER') / f'training_mask_{ecoregion.stem}.tif'
-        shutil.copy(prediction_file, training_file)
-        training_ds = gdal.Open(str(training_file), gdal.GA_Update)
-        shp_driver = ogr.GetDriverByName("ESRI Shapefile")
-        training_data_outline_ds = shp_driver.Open(str(training_data_outline))
-        gdal.PushErrorHandler('CPLQuietErrorHandler')
-        training_mask_layer = training_data_outline_ds.GetLayer(0)
-        gpkg_driver = ogr.GetDriverByName("GPKG")
-        geopackage_ds = gpkg_driver.Open(str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')))
-        ecoregions_layer = geopackage_ds.GetLayer(get_config_item('SHARED', 'ECOREGIONS'))
-        ecoregions_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion.stem}'")
+    gdal.UseExceptions()
+    
+    mask_subfolder = (ecoregion / get_config_item('MASK', 'SUBFOLDER')).resolve()
+    prediction_file = mask_subfolder / f'prediction_mask_{ecoregion.stem}.tif'
+    training_file = mask_subfolder / f'training_mask_{ecoregion.stem}.tif'
+    digital_coast_folder = (ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast').resolve()
 
-        in_memory_driver = ogr.GetDriverByName("Memory")
-        clipped_training_mask_ds = in_memory_driver.CreateDataSource('clipped_training_mask')
-        clipped_training_mask_layer = clipped_training_mask_ds.CreateLayer(
-            "clipped_training_mask_layer",
-            geom_type=training_mask_layer.GetGeomType(),
-            srs=training_mask_layer.GetSpatialRef(),
-        )
-        training_mask_layer.Clip(ecoregions_layer, clipped_training_mask_layer)
+    provider_vrts = [str(f.absolute()) for f in digital_coast_folder.glob("mosaic_*.vrt")]
 
-        gdal.RasterizeLayer(training_ds, [1], clipped_training_mask_layer, burn_values=[2])
-        print(f' - {ecoregion.stem}')
-        geopackage_ds = None
-        clipped_training_mask_ds = None
-        training_ds = None
-        shp_driver = None
-        training_data_outline_ds = None
+    if not provider_vrts:
+        return f"{ecoregion.stem}: Skip - No VRTs found."
+    if not prediction_file.exists():
+        return f"{ecoregion.stem}: Error - Prediction mask missing."
+
+    try:
+        # Clone the prediction mask
+        if training_file.exists():
+            training_file.unlink()
+        shutil.copy(str(prediction_file), str(training_file))
+        
+        train_ds = gdal.Open(str(training_file), gdal.GA_Update)
+        train_band = train_ds.GetRasterBand(1)
+        
+        geo_t = train_ds.GetGeoTransform()
+        proj = train_ds.GetProjection()
+        cols, rows = train_ds.RasterXSize, train_ds.RasterYSize
+
+        # Find actual data presence across all VRTs
+        combined_presence = np.zeros((rows, cols), dtype=np.uint8)
+
+        for vrt_path in provider_vrts:
+            src_ds = gdal.Open(vrt_path)
+            src_nodata = src_ds.GetRasterBand(1).GetNoDataValue()
+            src_ds = None
+
+            # Warp this specific VRT to match our mask's grid, but force an Alpha band
+            mem_driver = gdal.GetDriverByName('MEM')
+            tmp_ds = mem_driver.Create('', cols, rows, 2, gdal.GDT_Byte)
+            tmp_ds.SetGeoTransform(geo_t)
+            tmp_ds.SetProjection(proj)
+
+            warp_options = gdal.WarpOptions(
+                format='MEM',
+                dstSRS=proj,
+                dstAlpha=True,  # Band 2 becomes our high-res binary mask
+                resampleAlg=gdal.GRA_NearestNeighbour,
+                srcNodata=src_nodata if src_nodata is not None else -9999
+            )
+            
+            gdal.Warp(tmp_ds, vrt_path, options=warp_options)
+            vrt_presence = tmp_ds.GetRasterBand(2).ReadAsArray()
+            combined_presence |= (vrt_presence > 0).astype(np.uint8)
+            tmp_ds = None
+
+        block_size = 4096 
+        burn_count_total = 0
+
+        for y in range(0, rows, block_size):
+            num_rows = min(block_size, rows - y)
+            for x in range(0, cols, block_size):
+                num_cols = min(block_size, cols - x)
+
+                train_chunk = train_band.ReadAsArray(x, y, num_cols, num_rows)
+                presence_chunk = combined_presence[y:y+num_rows, x:x+num_cols]
+                burn_idx = (train_chunk == 1) & (presence_chunk > 0)
+                
+                if np.any(burn_idx):
+                    burn_count_total += int(np.sum(burn_idx))
+                    train_chunk[burn_idx] = 2
+                    train_band.WriteArray(train_chunk, x, y)
+
+        train_band.FlushCache()
+        train_ds = None 
+        
+        return f"{ecoregion.stem}: Success! {burn_count_total} raster pixels captured."
+
+    except Exception as e:
+        return f"{ecoregion.stem}: Critical Error - {str(e)}"
 
 
 class RasterMaskEngine(Engine):
@@ -131,21 +186,52 @@ class RasterMaskEngine(Engine):
             file.unlink()
 
     def dissolve_tile_index_shapefiles(self, approved_files, ecoregions) -> None:
-        """Create dissolved single polygons to use as burn rasters"""
+        """Create dissolved single polygons to use as burn rasters, excluding missing TIFs"""
 
         for ecoregion in ecoregions:
             if ecoregion.stem in approved_files:
                 for tile_index_path in approved_files[ecoregion.stem]:
-                    print(f' - {tile_index_path}')
+                    print(f' - Checking index: {tile_index_path.name}')
 
-                    dissolved_tile_index = tile_index_path.parents[0] / pathlib.Path(tile_index_path.stem + '_dis.shp')
-                    if dissolved_tile_index.exists():
-                    #     dissolved_tile_index.unlink()
-                        print(f'   -> Skipping, {dissolved_tile_index.name} already exists.')
-                        continue  # Skip to the next file in the loop
-                    # Some providers are in NAD83(NSRS2007)
-                    tile_index = gpd.read_file(tile_index_path).dissolve()
-                    tile_index.to_crs("EPSG:4326").to_file(dissolved_tile_index)
+                    dissolved_tile_index_path = tile_index_path.parent / f"{tile_index_path.stem}_dis.shp"
+                    if dissolved_tile_index_path.exists():
+                        print(f' - Skipping: {dissolved_tile_index_path.name}')
+                        continue 
+
+                    tile_index = gpd.read_file(tile_index_path)
+                    initial_count = len(tile_index)
+
+                    possible_cols = ['filename', 'location']
+                    file_col = next((c for c in possible_cols if c in tile_index.columns), None)
+
+                    if file_col:
+                        def check_local_tif(row):
+                            val = str(row[file_col])
+                            if not val or val == 'None':
+                                return False
+                            
+                            tif_name = pathlib.Path(val).name
+                            if not tif_name.lower().endswith('.tif'):
+                                tif_name = f"{pathlib.Path(tif_name).stem}.tif"
+                            
+                            local_tif = tile_index_path.parent / tif_name
+                            return local_tif.exists()
+
+                        tile_index = tile_index[tile_index.apply(check_local_tif, axis=1)].copy()
+                        
+                        final_count = len(tile_index)
+                        if final_count < initial_count:
+                            print(f' - removed {initial_count - final_count} polygons with missing tiles.')
+                    else:
+                        print(f' - Warning: No filename/location column found in {tile_index_path.name}')
+
+                    # Dissolve only if we have remaining geometry
+                    if not tile_index.empty:
+                        print(f' - Dissolving {len(tile_index)} polygons...')
+                        dissolved_gdf = tile_index.dissolve().to_crs("EPSG:4326")
+                        dissolved_gdf.to_file(dissolved_tile_index_path)
+                    else:
+                        print(f'   -> Skipping {tile_index_path.name}: No local TIF files found.')
 
     def get_approved_area_files(self, ecoregions: list[pathlib.Path]):
         """Get list of intersected features from ecoregion tile index shapefile"""
@@ -212,12 +298,12 @@ class RasterMaskEngine(Engine):
         print('Creating prediction masks')
         self.setup_dask(self.param_lookup['env'])
         self.process_prediction_masks(ecoregions, outputs)
-        approved_files = self.get_approved_area_files(ecoregions)
-        print(f' - Found files for ecoregions: {list(approved_files.keys())}')
-        print('Dissolving tile index shapefiles')
-        self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
-        print('Merging all dissolved tile index shapfiles')
-        self.merge_dissolved_polygons(ecoregions)
+        # approved_files = self.get_approved_area_files(ecoregions)
+        # print(f' - Found files for ecoregions: {list(approved_files.keys())}')
+        # print('Dissolving tile index shapefiles')
+        # self.dissolve_tile_index_shapefiles(approved_files, ecoregions)
+        # print('Merging all dissolved tile index shapfiles')
+        # self.merge_dissolved_polygons(ecoregions)
         print('Creating training masks')
         self.process_training_masks(ecoregions, outputs)
         self.close_dask()

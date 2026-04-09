@@ -162,7 +162,7 @@ class GridDigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str) -> None:
+    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download:bool) -> None:
         """Processor for gridding S3 VRT files with dask"""
 
         s3_files = s3fs.S3FileSystem()
@@ -177,7 +177,9 @@ class GridDigitalCoastEngine(Engine):
             bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
             
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-            vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/DigitalCoast/*.vrt")
+            digital_coast_folder = 'DigitalCoast_manual_downloads' if manual_download else 'DigitalCoast'
+            vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
+            print('vrt files:', f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
 
             if vrt_files:
                 # We pass the Future (blue_topo_gdf_future) instead of the full object
@@ -210,7 +212,7 @@ class GridDigitalCoastEngine(Engine):
             else:
                 print(f" - No VRTs found for {ecoregion.stem} locally.")
 
-    def run(self) -> None:
+    def run(self, manual_download=False) -> None:
         outputs = self.param_lookup['output_directory'].valueAsText
 
         self.setup_dask(self.param_lookup['env'])
@@ -224,6 +226,6 @@ class GridDigitalCoastEngine(Engine):
         if self.param_lookup['env'] in ['local', 'remote']:
             self.process_local_vrt_gridding(blue_topo_gdf_future, outputs)
         else:
-            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs)
+            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_download)
 
         self.close_dask()
