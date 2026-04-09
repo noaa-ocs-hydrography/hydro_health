@@ -47,7 +47,7 @@ def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_
     :param str parent: Primary key in config
     :param str child: Secondary key in config
     :param str env_string: Optional explicit value of "local" or "remote"
-    :param str model_model: Optional "pilot" model focused run
+    :param str pilot_mode: Optional pilot model focused run
     :returns str: Value from local or remote YAML config
     """
 
