@@ -87,8 +87,18 @@ def _grid_single_vrt_s3(params: list) -> str:
                 local_tmp_path, vrt_ds, format='GTiff',
                 cutlineDSName=in_memory_geojson, cropToCutline=True,
                 dstNodata=-9999, srcSRS=vrt_projection, dstSRS=vrt_projection,
-                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
+                creationOptions=[
+                    "COMPRESS=DEFLATE", 
+                    "PREDICTOR=3",      # Huge for elevation data compression
+                    "TILED=YES", 
+                    "BLOCKXSIZE=512", 
+                    "BLOCKYSIZE=512"
+                ]
             )
+
+            final_ds = gdal.Open(local_tmp_path, gdal.GA_Update)
+            final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
+            final_ds = None
 
             s3_files.put(local_tmp_path, output_prefix)
             if os.path.exists(local_tmp_path):
@@ -145,8 +155,18 @@ def _grid_single_vrt_local(params: list) -> str:
                 str(out_file), vrt_ds, format='GTiff',
                 cutlineDSName=tile_row.geometry.wkt, cropToCutline=True,
                 dstNodata=-9999, cutlineSRS=vrt_proj,
-                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"]
+                creationOptions=[
+                    "COMPRESS=DEFLATE", 
+                    "PREDICTOR=3", 
+                    "TILED=YES", 
+                    "BLOCKXSIZE=512", 
+                    "BLOCKYSIZE=512"
+                ]
             )
+
+            final_ds = gdal.Open(str(out_file), gdal.GA_Update)
+            final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
+            final_ds = None
             engine.write_message(f" - Processed S3: {out_file}", param_lookup['output_directory'].valueAsText)
         return f" - Processed Local: {vrt.name}"
     except Exception as e:

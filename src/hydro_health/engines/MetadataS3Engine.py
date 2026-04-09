@@ -43,15 +43,16 @@ class MetadataS3Engine:
                 self.write_message(f'#####################\nMetadata error: {full_list_url}', outputs)
                 pass
         else:
+            self.write_message(f' - skipping invalid metdata: {label}', outputs)
             # handle CUDEM data
-            cudem_tiffs = s3_files.glob(f"{provider_folder}/**/*.json")  # will CUDEM files not end in "YYYYv1.tif"?
-            years = sorted([pathlib.Path(tif.split('/')[-1]).stem[-6:-2] for tif in cudem_tiffs])
-            start = years[0]
-            end = years[-1]  # if only 1 year, -1 will still work
-            with s3_files.open(provider_folder + '/metadata.txt', 'w') as writer:
-                writer.write(f'Description: CUDEM\n')
-                writer.write(f'{start}, {end}\n')
-            self.write_message(f' - stored metadata: {provider_folder}', outputs)
+            # cudem_tiffs = s3_files.glob(f"{provider_folder}/**/*.json")  # will CUDEM files not end in "YYYYv1.tif"?
+            # years = sorted([pathlib.Path(tif.split('/')[-1]).stem[-6:-2] for tif in cudem_tiffs])
+            # start = years[0]
+            # end = years[-1]  # if only 1 year, -1 will still work
+            # with s3_files.open(provider_folder + '/metadata.txt', 'w') as writer:
+            #     writer.write(f'Description: CUDEM\n')
+            #     writer.write(f'{start}, {end}\n')
+            # self.write_message(f' - stored metadata: {provider_folder}', outputs)
 
     def read_json_files(self, digital_coast_path: pathlib.Path, outputs: str) -> None:
         """Read JSON files to download metadata information"""

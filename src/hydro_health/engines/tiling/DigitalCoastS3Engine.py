@@ -13,7 +13,9 @@ import tempfile
 import logging
 import platform
 import s3fs
+import rasterio
 
+from rasterio.io import MemoryFile
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -117,11 +119,33 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
                 continue
                 
             if intersected_response.status_code == 200:
-                # TODO The Solution: Calculate the MD5 hash of your BytesIO content before uploading. Compare it against the ETag of the current version in S3. If they match, skip the upload.
-                output_object = BytesIO(intersected_response.content)
-                ecoregion_folder = output_file.parents[8]
-                s3_prefix = str(output_file.relative_to(ecoregion_folder)).replace("\\", "/")
-                engine.upload_bytes_to_s3(output_object, s3_prefix)
+                # Open the downloaded bytes in memory and update for COG
+                with MemoryFile(intersected_response.content) as memfile:
+                    with memfile.open() as src:
+                        cog_buffer = BytesIO()
+                        dst_profile = src.profile.copy()
+                        dst_profile.update({
+                            "driver": "GTiff",
+                            "tiled": True,
+                            "blockxsize": 512,
+                            "blockysize": 512,
+                            "compress": "deflate",
+                            "predictor": 3,
+                            "interleave": "pixel"
+                        })
+
+                        with MemoryFile(cog_buffer) as out_memfile:
+                            with out_memfile.open(**dst_profile) as dst:
+                                dst.write(src.read())
+                                factors = [2, 4, 8, 16]
+                                dst.build_overviews(factors, rasterio.enums.Resampling.average)
+                                dst.update_tags(ns='rio_overview', resampling='average')
+                            
+                            cog_buffer.seek(0)
+                            
+                            ecoregion_folder = output_file.parents[8]
+                            s3_prefix = str(output_file.relative_to(ecoregion_folder)).replace("\\", "/")
+                            engine.upload_bytes_to_s3(cog_buffer, s3_prefix)
             else:
                 return f'Failed to download: {cleansed_url}'
         return f'- {shp_path.stem}'
@@ -137,7 +161,10 @@ class DigitalCoastS3Engine(Engine):
         self.param_lookup = param_lookup
 
     def breakup_cudem(self, ecoregion: str) -> None:
-        """Create unique year folders for CUDEM data"""
+        """
+        THIS IS NOT USED
+        Create unique year folders for CUDEM data
+        """
 
         s3_files = s3fs.S3FileSystem()
         digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
@@ -297,7 +324,7 @@ class DigitalCoastS3Engine(Engine):
                             provider_folder = pathlib.Path(*provider_path_parts[:digital_coast_index + 2])
                             self.upload_files_to_s3(provider_folder)
 
-                self.breakup_cudem(ecoregion)
+                # self.breakup_cudem(ecoregion)
         self.close_dask()
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:

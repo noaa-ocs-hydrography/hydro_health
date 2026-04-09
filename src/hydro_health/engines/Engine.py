@@ -60,8 +60,7 @@ class Engine:
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
 
-        # CUDEM: NOAA NCEI
-        provider_list_text = ['USACE', 'NCMP', 'NGS', 'NOAA NCEI', 'USGS']
+        provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI
         for text in provider_list_text:
             if text in feature_json['attributes']['provider_results_name']:
                 return True

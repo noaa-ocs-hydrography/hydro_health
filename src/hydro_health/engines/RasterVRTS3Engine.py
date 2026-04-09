@@ -34,7 +34,10 @@ def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
         warp_options = {
             'format': 'VRT',
             'dstSRS': 'EPSG:4326',
-            'resampleAlg': gdal.GRA_Bilinear
+            'resampleAlg': gdal.GRA_Bilinear,
+            'srcNodata': -999999,
+            'dstNodata': -999999,  # Ensures the "empty" space in the reprojected VRT is transparent
+            'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'] # Optional: helps with clean edges
         }
 
         warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, **warp_options)
@@ -119,6 +122,17 @@ def _read_geotiff_metadata(params: list):
         ds = None
 
 
+def _set_gdal_s3_options() -> None:
+    """Set the default S3 options for GDAL usage"""
+
+    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
+    gdal.SetConfigOption('AWS_VIRTUAL_HOSTING', 'FALSE') # Depends on your S3 setup
+    gdal.SetConfigOption('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
+    gdal.SetConfigOption('GDAL_HTTP_MULTIPLEX', 'YES')
+    gdal.SetConfigOption('VSI_CACHE', 'TRUE')
+    gdal.SetConfigOption('VSI_CACHE_SIZE', '10000000') # 10MB cache
+    
+
 class RasterVRTS3Engine(Engine):
     def __init__(self, param_lookup) -> None:
         super().__init__()
@@ -147,7 +161,8 @@ class RasterVRTS3Engine(Engine):
                 options = gdal.BuildVRTOptions(
                     resampleAlg='near', 
                     srcNodata=info.get('nodata_val'),
-                    allowProjectionDifference=True
+                    VRTNodata=info.get('nodata_val'), # Read and set nodata
+                    addAlpha=True # allows transparency between overlapping tiles
                 )
             else:
                 # Mosaic of 4326 VRTs
@@ -193,6 +208,7 @@ class RasterVRTS3Engine(Engine):
         return output_geotiffs
 
     def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, data_folder=False, skip_existing=False) -> None:
+        _set_gdal_s3_options()
         self.setup_dask(self.param_lookup['env'])
         
         s3_files = s3fs.S3FileSystem()

@@ -142,11 +142,18 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
             crs=src.crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
+            
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
 
     def create_catzoc_latest(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a CATZOC score raster using the most recent survey date"""
@@ -222,11 +229,18 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
-            crs=crs,
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            crs=src.crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
+            
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
@@ -355,8 +369,13 @@ class BlueTopoS3Engine(Engine):
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
-            creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
-            callback=gdal.TermProgress_nocb
+            creationOptions=[
+                "COMPRESS=DEFLATE",
+                "TILED=YES",
+                "COPY_SRC_OVERVIEWS=YES", # Use this if source has overviews
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512"
+            ]
         )
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
@@ -398,6 +417,7 @@ class BlueTopoS3Engine(Engine):
         meters_array = np.where(raster_array < 0, raster_array, no_data)
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
+        raster_ds.BuildOverviews("NEAREST", [2, 4, 8, 16])
         raster_ds = None
 
     def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:

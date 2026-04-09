@@ -84,7 +84,14 @@ def _vrt_to_mask_worker(vrt_path: str, scratch_dir: str, geo_t: list[float], col
                 ds,
                 bandList=[2], 
                 format='GTiff',
-                creationOptions=['COMPRESS=LZW', 'TILED=YES', 'SPARSE_OK=YES']
+                creationOptions=[
+                    'COMPRESS=DEFLATE', 
+                    'PREDICTOR=2',
+                    'TILED=YES', 
+                    'BLOCKXSIZE=512', 
+                    'BLOCKYSIZE=512', 
+                    'SPARSE_OK=YES'
+                ]
             )
             ds = None
             
@@ -125,7 +132,13 @@ class RasterMaskS3Engine(Engine):
         with tempfile.NamedTemporaryFile(suffix='.tif') as tmp:
             driver = gdal.GetDriverByName("GTiff")
             out_ds = driver.Create(tmp.name, cols, rows, 1, gdal.GDT_Byte, 
-                                   options=["TILED=YES", "SPARSE_OK=YES"])
+                                   options=[
+                                        "TILED=YES", 
+                                        "BLOCKXSIZE=512", 
+                                        "BLOCKYSIZE=512", 
+                                        "SPARSE_OK=YES", 
+                                        "COMPRESS=DEFLATE"
+                                    ])
             out_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
             out_ds.SetProjection(target_srs.ExportToWkt())
             out_ds.GetRasterBand(1).SetNoDataValue(0)
@@ -210,9 +223,21 @@ class RasterMaskS3Engine(Engine):
             str(final_compressed_path),
             str(local_raw_path),
             options=gdal.TranslateOptions(
-                format="GTiff", creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES"]
+                format="GTiff", 
+                creationOptions=[
+                    "COMPRESS=DEFLATE", 
+                    "PREDICTOR=2", 
+                    "TILED=YES", 
+                    "BLOCKXSIZE=512", 
+                    "BLOCKYSIZE=512", 
+                    "BIGTIFF=YES"
+                ]
             ),
         )
+
+        final_ds = gdal.Open(str(final_compressed_path), gdal.GA_Update)
+        final_ds.BuildOverviews("NEAREST", [2, 4, 8, 16, 32, 64])
+        final_ds = None
 
         s3_key = f"{ecoregion}/{mask_sub}/training_mask_{ecoregion}.tif"
         s3_client.upload_file(str(final_compressed_path), bucket, s3_key)
@@ -311,7 +336,15 @@ class RasterMaskS3Engine(Engine):
             str(final_compressed_path),
             str(local_raw_path),
             options=gdal.TranslateOptions(
-                format="GTiff", creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES"]
+                format="GTiff", 
+                creationOptions=[
+                    'COMPRESS=DEFLATE', 
+                    'PREDICTOR=2',
+                    'TILED=YES', 
+                    'BLOCKXSIZE=512',  # Standardize block size
+                    'BLOCKYSIZE=512',
+                    'SPARSE_OK=YES'
+                ]
             ),
         )
 
