@@ -1,5 +1,7 @@
 import pathlib
 import geopandas as gpd
+import cProfile
+import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
@@ -7,11 +9,12 @@ from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
+from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
+from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
-from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
@@ -107,6 +110,18 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> No
     engine.run(tiles, outputs)
 
 
+def run_preprocessor_modeldata(pilot_mode: bool=False) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    processor = ModelDataPreProcessor(overwrite=True, pilot_mode=pilot_mode)
+    processor.process()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)
+
+
 def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
     
@@ -118,9 +133,9 @@ def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False) -> None:
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
+            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=True)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)
+        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=False)
 
 
 def run_tsm_layer_engine() -> None:

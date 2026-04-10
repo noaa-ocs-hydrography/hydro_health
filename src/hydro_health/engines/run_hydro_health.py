@@ -25,7 +25,6 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'input_directory': Param(''),
             'output_directory': Param(str(OUTPUTS)),
             'eco_regions': Param(''),
-            'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
     elif env == 'remote':
@@ -40,7 +39,6 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'input_directory': Param(''),
             'output_directory': Param(str(OUTPUTS)),
             'eco_regions': Param(''),
-            'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
     return param_lookup
@@ -62,6 +60,9 @@ def run_hydro_health(config_name: str) -> None:
     with open(config_path, "r") as lookup:
         config = yaml.safe_load(lookup)
         print(f'Script has been run {len(config["runtimes"])} time(s)')
+
+        pilot_mode = config['pilot_mode']
+
         # load ecoregions from config for remote run
         param_lookup['eco_regions'].value = config['ecoregions'] if env in ['remote', 'aws'] else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
@@ -88,6 +89,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_sediment_layer_engine()
             elif step["tool"] == "run_hurricane_layer_engine" and step["run"]:
                 runners.run_hurricane_layer_engine()
+            elif step["tool"] == "run_preprocessor_modeldata" and step["run"]:
+                runners.run_preprocessor_modeldata(pilot_mode)
     update_config_runtime(config_path, config)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60} minutes")
