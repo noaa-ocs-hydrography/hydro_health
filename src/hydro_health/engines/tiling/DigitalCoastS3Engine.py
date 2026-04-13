@@ -13,17 +13,17 @@ import tempfile
 import logging
 import platform
 import s3fs
-import rasterio
 import gc
+import rasterio
+import rasterio.shutil
 
 from rasterio.enums import Resampling
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from collections import defaultdict
-from botocore.client import Config
 from botocore import UNSIGNED
-from io import BytesIO
+from botocore.client import Config
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
@@ -75,7 +75,7 @@ def _download_intersected_datasets(param_inputs: list) -> str:
     Files are downloaded to /home/"user"/temp_scratch instead of RAM.
     """
 
-    tile_gdf, shp_path, outputs, param_lookup = param_inputs
+    ecoregion, tile_gdf, shp_path, outputs, param_lookup = param_inputs
     shp_path_obj = pathlib.Path(shp_path)
     engine = DigitalCoastS3Engine(param_lookup)
     
@@ -124,7 +124,7 @@ def _download_intersected_datasets(param_inputs: list) -> str:
         request_session = requests.Session()
         request_session.mount("https://", adapter)
 
-        with rasterio.Env(**gdal_config):  # Use same GDAL config information
+        with rasterio.Env(**gdal_config):
             for url in urls:
                 cleansed_url = engine.cleansed_url(url)
                 if not cleansed_url.endswith('.tif'): 
@@ -154,14 +154,23 @@ def _download_intersected_datasets(param_inputs: list) -> str:
                                 rasterio.shutil.copy(src, tmp_cog.name, **dst_profile)
                                 
                                 with rasterio.open(tmp_cog.name, 'r+') as dst:
-                                    overviews = [2, 4, 8, 16]
-                                    dst.build_overviews(overviews, Resampling.average)
+                                    min_dim = min(dst.width, dst.height)
+                                    potential_ov = [2, 4, 8, 16]
+                                    valid_ov = [o for o in potential_ov if (min_dim // o) >= 4]
+                                    
+                                    if valid_ov:
+                                        dst.build_overviews(valid_ov, Resampling.average)
                                 
                                 dataset_name = cleansed_url.split('/')[-1]
-                                s3_prefix = f"DigitalCoast_COGs/{dataset_name}"
-                                
-                                with open(tmp_cog.name, 'rb') as f_upload:
-                                    engine.upload_bytes_to_s3(f_upload, s3_prefix)
+                                path_parts = shp_path_obj.parts
+                                try:
+                                    eco_idx = path_parts.index(ecoregion)
+                                    s3_path = "/".join(path_parts[eco_idx:-1])
+                                    s3_prefix = f"{s3_path}/{dataset_name}"
+                                    
+                                    engine.upload_file_to_s3(tmp_cog.name, s3_prefix)
+                                except ValueError:
+                                    engine.write_message(f"Path Error: {ecoregion} not in {shp_path}", outputs)
                     gc.collect()
                 except Exception as e:
                     engine.write_message(f"Error processing {cleansed_url}: {e}", outputs)
@@ -185,7 +194,7 @@ class DigitalCoastS3Engine(Engine):
         """
 
         s3_files = s3fs.S3FileSystem()
-        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
         cudem_folders = s3_files.glob(f"{digital_coast_path}/NOAA_NCEI_0*")
         for folder in cudem_folders:
             year_tifs = defaultdict(list)
@@ -329,7 +338,7 @@ class DigitalCoastS3Engine(Engine):
                                 print(f'Skipping already processed provider: {provider}')
                                 continue
                             
-                            param_inputs = [[ecoregion_tile_gdf, shp_path, outputs, self.param_lookup] for shp_path in current_files]
+                            param_inputs = [[ecoregion, ecoregion_tile_gdf, shp_path, outputs, self.param_lookup] for shp_path in current_files]
                             future_intersected_datasets = self.client.map(_download_intersected_datasets, param_inputs)
                             self.client.gather(future_intersected_datasets)
                             with open(provider_log, "a") as f:
@@ -364,20 +373,22 @@ class DigitalCoastS3Engine(Engine):
             # Delete zip file after extract
             zipped_file.unlink()
 
-    def upload_bytes_to_s3(self, file_object: BytesIO, s3_prefix: str) -> None:
-        """Stream object to S3"""
+    def upload_file_to_s3(self, temp_file_path: str, s3_prefix: str) -> None:
+        """Simple S3 file upload with only region setting"""
 
-        s3_client = boto3.client('s3')
+        s3_client = boto3.client('s3', region_name='us-east-2')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        s3_client.upload_fileobj(file_object, bucket_name, f'testing/{s3_prefix}')
+        
+        s3_client.upload_file(str(temp_file_path), bucket_name, s3_prefix.lstrip('/'))
 
     def upload_files_to_s3(self, provider_folder: pathlib.Path) -> None:
         """Upload all tiff files to s3 for current tile"""
         
-        s3_client = boto3.client('s3')
+        s3_client = boto3.client('s3', region_name='us-east-2')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        
         for found_file in provider_folder.rglob('*'):
             if found_file.is_file():
                 s3_prefix = "/".join(found_file.parts[3:])
                 print(f'Uploading {found_file} to {s3_prefix}')
-                s3_client.upload_file(str(found_file), bucket_name, f'testing/{s3_prefix}')
+                s3_client.upload_file(str(found_file), bucket_name, f'{s3_prefix}')
