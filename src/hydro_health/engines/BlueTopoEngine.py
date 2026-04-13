@@ -44,6 +44,7 @@ def _process_tile(param_inputs: list[list]) -> None:
         engine.set_ground_to_nodata(tiff_file_path)
         engine.create_slope(tiff_file_path)
         engine.create_rugosity(tiff_file_path)
+        engine.finalize_cog(tiff_file_path) 
 
 
 class BlueTopoEngine(Engine):
@@ -307,6 +308,32 @@ class BlueTopoEngine(Engine):
             tile_folder.mkdir(parents=True, exist_ok=True)   
             nbs_bucket.download_file(obj_summary.key, current_file)
         return output_tile_path
+    
+    def finalize_cog(self, tiff_path: pathlib.Path) -> None:
+        """The final pass to ensure perfect COG layout and overviews."""
+        temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
+        
+        ds = gdal.Open(str(tiff_path), gdal.GA_Update)
+        if ds is not None:
+            ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
+            ds = None
+
+        gdal.Translate(
+            str(temp_cog),
+            str(tiff_path),
+            creationOptions=[
+                "COMPRESS=DEFLATE",
+                "PREDICTOR=3",
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512",
+                "COPY_SRC_OVERVIEWS=YES"
+            ]
+        )
+        
+        if temp_cog.exists():
+            tiff_path.unlink()
+            temp_cog.rename(tiff_path)
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -333,11 +360,10 @@ class BlueTopoEngine(Engine):
         singleband_tile_name = tiff_file_path.parents[0] / output_name
 
         gdal.Translate(
-            singleband_tile_name,
-            tiff_file_path,
+            str(singleband_tile_name),
+            str(tiff_file_path),
             bandList=[band],
-            creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
-            callback=gdal.TermProgress_nocb
+            creationOptions=["COMPRESS=DEFLATE"]
         )
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:

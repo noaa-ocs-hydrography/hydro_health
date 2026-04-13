@@ -54,7 +54,8 @@ def _process_tile(param_inputs: list[list]) -> None:
             mb_tiff_file.unlink() 
             engine.set_ground_to_nodata(tiff_file_path)
             engine.create_slope(tiff_file_path)
-            engine.create_rugosity(tiff_file_path)            
+            engine.create_rugosity(tiff_file_path)
+            engine.finalize_cog(tiff_file_path)      
 
             engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id)
 
@@ -340,6 +341,32 @@ class BlueTopoS3Engine(Engine):
             nbs_bucket.download_file(obj_summary.key, str(current_file))
 
         return output_tile_path
+    
+    def finalize_cog(self, tiff_path: pathlib.Path) -> None:
+        """The final pass to ensure perfect COG layout and overviews."""
+        temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
+        
+        ds = gdal.Open(str(tiff_path), gdal.GA_Update)
+        if ds is not None:
+            ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
+            ds = None
+
+        gdal.Translate(
+            str(temp_cog),
+            str(tiff_path),
+            creationOptions=[
+                "COMPRESS=DEFLATE",
+                "PREDICTOR=3",
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512",
+                "COPY_SRC_OVERVIEWS=YES"
+            ]
+        )
+        
+        if temp_cog.exists():
+            tiff_path.unlink()
+            temp_cog.rename(tiff_path)
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -369,13 +396,7 @@ class BlueTopoS3Engine(Engine):
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
-            creationOptions=[
-                "COMPRESS=DEFLATE",
-                "TILED=YES",
-                "COPY_SRC_OVERVIEWS=YES", # Use this if source has overviews
-                "BLOCKXSIZE=512",
-                "BLOCKYSIZE=512"
-            ]
+            creationOptions=["COMPRESS=DEFLATE"]
         )
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
@@ -417,7 +438,6 @@ class BlueTopoS3Engine(Engine):
         meters_array = np.where(raster_array < 0, raster_array, no_data)
         raster_ds.GetRasterBand(1).WriteArray(meters_array)
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
-        raster_ds.BuildOverviews("NEAREST", [2, 4, 8, 16])
         raster_ds = None
 
     def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:

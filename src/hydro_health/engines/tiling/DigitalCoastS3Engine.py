@@ -14,8 +14,9 @@ import logging
 import platform
 import s3fs
 import rasterio
+import gc
 
-from rasterio.io import MemoryFile
+from rasterio.enums import Resampling
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -68,90 +69,107 @@ def _download_tile_index(param_inputs: list[list]) -> None:
                     lidar_bucket.download_fileobj(obj_summary.key, tile_index)
 
 
-def _download_intersected_datasets(param_inputs: list[list]) -> None:
-    """Parallel process spatial filter and download of datasets"""
+def _download_intersected_datasets(param_inputs: list) -> str:
+    """
+    Safely download DigitalCoast files that intersect the input polygon.
+    Files are downloaded to /home/"user"/temp_scratch instead of RAM.
+    """
 
     tile_gdf, shp_path, outputs, param_lookup = param_inputs
-
+    shp_path_obj = pathlib.Path(shp_path)
     engine = DigitalCoastS3Engine(param_lookup)
+    
+    scratch_dir = pathlib.Path.home() / "temp_scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Force GDAL to write to /home as well
+    gdal_config = {
+        "GDAL_TMPDIR": str(scratch_dir),
+        "GDAL_CACHEMAX": 512
+    }
 
     shp_df = gpd.read_file(shp_path, engine="pyogrio")
     shp_df['geometry'] = shp_df.geometry.make_valid()
     shp_df = shp_df.to_crs(4326)
+    shp_df.columns = shp_df.columns.str.lower()
 
-    shp_df.columns = shp_df.columns.str.lower()  # make url column all lowercase
-    if 'tile' in shp_df.columns:
-        # drop previous tile merged column
-        shp_df.drop('tile', axis=1, inplace=True)
+    cols_to_clear = ['tile', 'idx_right', 'index_right', 'index_left']
+    laundered_cols = [c for c in shp_df.columns if c.startswith('ecoregio_')]
+    shp_df = shp_df.drop(columns=cols_to_clear + laundered_cols, errors='ignore')
+
     df_joined = shp_df.sjoin(df=tile_gdf, how='left')
 
     if 'index_right' in df_joined.columns:
         df_joined = df_joined.rename(columns={'index_right': 'idx_right'})
-    shp_df = None
+
+    df_joined = df_joined.loc[:, ~df_joined.columns.duplicated()].copy()
     df_joined.to_file(shp_path, driver='ESRI Shapefile')
-    if df_joined['url'].any():
-        df_joined = df_joined.loc[df_joined['tile'].notnull()]
-        shp_folder = shp_path.parents[0]
-        urls = df_joined['url'].unique()
-        engine.write_message(f'{shp_path.name} URLs: {len(urls)}', outputs)
-        for i, url in enumerate(urls):
-            cleansed_url = engine.cleansed_url(url)
-            # Only download .tif files
-            if not cleansed_url.endswith('.tif'):
-                continue
-            dataset_name = cleansed_url.split('/')[-1]
-            output_file = shp_folder / dataset_name
-            try:
-                retry_strategy = Retry(
-                    total=3,  # retries
-                    backoff_factor=1,  # delay in seconds
-                    status_forcelist=[404],  # Status codes to retry on
-                    allowed_methods=["GET"]
-                )
-                adapter = HTTPAdapter(max_retries=retry_strategy)
-                request_session = requests.Session()
-                request_session.mount("https://", adapter)
-                request_session.mount("http://", adapter)
+    
+    urls = []
+    if not df_joined.empty and 'url' in df_joined.columns:
+        urls = df_joined.loc[df_joined['tile'].notnull(), 'url'].unique().tolist()
+    
+    # Aggressive memory cleanup
+    del shp_df
+    del df_joined
+    gc.collect()
 
-                intersected_response = request_session.get(cleansed_url, timeout=5)
-            except requests.exceptions.ConnectionError:
-                engine.write_message(f'Timeout error: {cleansed_url}', outputs)
-                continue
-                
-            if intersected_response.status_code == 200:
-                # Open the downloaded bytes in memory and update for COG
-                with MemoryFile(intersected_response.content) as memfile:
-                    with memfile.open() as src:
-                        cog_buffer = BytesIO()
-                        dst_profile = src.profile.copy()
-                        dst_profile.update({
-                            "driver": "GTiff",
-                            "tiled": True,
-                            "blockxsize": 512,
-                            "blockysize": 512,
-                            "compress": "deflate",
-                            "predictor": 3,
-                            "interleave": "pixel"
-                        })
+    if urls:
+        retry_strategy = Retry(
+            total=3, 
+            backoff_factor=1, 
+            status_forcelist=[429, 500, 502, 503, 504]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        request_session = requests.Session()
+        request_session.mount("https://", adapter)
 
-                        with MemoryFile(cog_buffer) as out_memfile:
-                            with out_memfile.open(**dst_profile) as dst:
-                                dst.write(src.read())
-                                factors = [2, 4, 8, 16]
-                                dst.build_overviews(factors, rasterio.enums.Resampling.average)
-                                dst.update_tags(ns='rio_overview', resampling='average')
-                            
-                            cog_buffer.seek(0)
-                            
-                            ecoregion_folder = output_file.parents[8]
-                            s3_prefix = str(output_file.relative_to(ecoregion_folder)).replace("\\", "/")
-                            engine.upload_bytes_to_s3(cog_buffer, s3_prefix)
-            else:
-                return f'Failed to download: {cleansed_url}'
-        return f'- {shp_path.stem}'
-    else:
-        return f'- No intersect: {shp_path.stem}'
-        
+        with rasterio.Env(**gdal_config):  # Use same GDAL config information
+            for url in urls:
+                cleansed_url = engine.cleansed_url(url)
+                if not cleansed_url.endswith('.tif'): 
+                    continue
+
+                try:
+                    with tempfile.NamedTemporaryFile(suffix='.tif', dir=scratch_dir, delete=True) as tmp_raw:
+                        with request_session.get(cleansed_url, timeout=15, stream=True) as r:
+                            r.raise_for_status()
+                            for chunk in r.iter_content(chunk_size=1024 * 1024): 
+                                tmp_raw.write(chunk)
+                            tmp_raw.flush()
+
+                        with rasterio.open(tmp_raw.name) as src:
+                            dst_profile = src.profile.copy()
+                            dst_profile.update({
+                                "driver": "GTiff", 
+                                "tiled": True, 
+                                "blockxsize": 512, 
+                                "blockysize": 512,
+                                "compress": "deflate", 
+                                "predictor": 3, 
+                                "interleave": "pixel"
+                            })
+
+                            with tempfile.NamedTemporaryFile(suffix='.tif', dir=scratch_dir, delete=True) as tmp_cog:
+                                rasterio.shutil.copy(src, tmp_cog.name, **dst_profile)
+                                
+                                with rasterio.open(tmp_cog.name, 'r+') as dst:
+                                    overviews = [2, 4, 8, 16]
+                                    dst.build_overviews(overviews, Resampling.average)
+                                
+                                dataset_name = cleansed_url.split('/')[-1]
+                                s3_prefix = f"DigitalCoast_COGs/{dataset_name}"
+                                
+                                with open(tmp_cog.name, 'rb') as f_upload:
+                                    engine.upload_bytes_to_s3(f_upload, s3_prefix)
+                    gc.collect()
+                except Exception as e:
+                    engine.write_message(f"Error processing {cleansed_url}: {e}", outputs)
+                    continue
+
+        request_session.close()
+    return f'- {shp_path_obj.stem}'
+
 
 class DigitalCoastS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
