@@ -57,8 +57,8 @@ def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_
     if env is None:
         env = get_environment()
 
-    config_name = f'{env}_{pilot_mode}_path_config.yaml' if pilot_mode else f'{env}_path_config.yaml'
-    file_path = str(INPUTS / 'lookups' / config_name) 
+    config_name = f'{env}_{"pilot_path" if pilot_mode else "path"}_config.yaml'
+    file_path = str(INPUTS / 'lookups' / config_name)
 
     with open(file_path, 'r') as lookup:
         config = yaml.safe_load(lookup)

@@ -76,6 +76,8 @@ class ModelDataPreProcessor:
         """Creates unified UPath objects that work both locally and on S3."""
         # Determine the base prefix depending on the environment
         prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
+        print(f"[INFO] Using base prefix: '{prefix}' for file paths.")
+
         
         self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)}")
         self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)}")
@@ -94,10 +96,10 @@ class ModelDataPreProcessor:
         }
 
         self.preprocessed_subdirs = {
-            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', pilot_mode=self.pilot_mode)}"),
+            'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', pilot_mode=self.pilot_mode)}"),
             'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', pilot_mode=self.pilot_mode)}"),
-            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR', pilot_mode=self.pilot_mode)}"),
-            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', pilot_mode=self.pilot_mode)}"),
+            'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR', pilot_mode=self.pilot_mode)}"),
+            'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', pilot_mode=self.pilot_mode)}"),
             'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', pilot_mode=self.pilot_mode)}")
         }
         
@@ -159,11 +161,17 @@ class ModelDataPreProcessor:
         # This tells Dask: "Use the whole machine, but stay under 26GB total."
         cluster = LocalCluster(
             n_workers=16,          # Manually restricting workers is still safer for heavy Tiff warps
-            threads_per_worker=2, # GDAL internally uses threads, so we give each worker a couple threads to work with
+            threads_per_worker=1,  # GDAL internally uses threads, so we give each worker a couple threads to work with
             memory_limit='2GB'    # 6GB * 5 workers = 30GB total. Safe for 32GB RAM.
         )
         client = Client(cluster)
         print(f"Dask Dashboard: {client.dashboard_link}")
+
+        self.raster_to_spatial_df(self.pred_mask_path, process_type='prediction')
+        self.raster_to_spatial_df(self.train_mask_path, process_type='training')
+
+        self.create_subgrids(mask_gdf=self.mask_prediction_pq, output_path=self.subgrid_paths['prediction'], process_type='prediction')
+        self.create_subgrids(mask_gdf=self.mask_training_pq, output_path=self.subgrid_paths['training'], process_type='training')
 
         try:        
             mask_pred_gdf = gpd.read_parquet(str(self.mask_prediction_pq))
@@ -324,7 +332,7 @@ class ModelDataPreProcessor:
         else:
             print("[INFO] No new prediction rasters to process.")
 
-        input("\nPress Enter to continue...")
+        # input("\nPress Enter to continue...")
         print("\n[INFO] Running Seabed Terrain Layer Engine...")
         engine = CreateSeabedTerrainLayerEngine()
         engine.process()
@@ -1093,43 +1101,75 @@ class ModelDataPreProcessor:
         meta["var_base"] = meta["colname"].str.replace(self.re_year_suffix, "", regex=True)
         return meta
     
-    def raster_to_spatial_df(self, raster_path, process_type)-> gpd.GeoDataFrame:
-        """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries."""   
+    def raster_to_spatial_df(self, raster_path, process_type) -> gpd.GeoDataFrame:
+        """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries in memory-safe chunks."""   
 
         print(f"\n[INFO] Creating {process_type} mask GeoDataFrame from: {raster_path}")
 
         open_path = str(raster_path)
+        
+        # Use GDAL's virtual file system for fast AWS reading
+        if self.is_aws and open_path.startswith("s3://"):
+            open_path = open_path.replace("s3://", "/vsis3/")
 
+        geometries = []
+        
         with rasterio.open(open_path) as src:
-            mask = src.read(1, out_dtype='uint8')
-
-            if process_type == 'prediction':
-                valid_mask = mask == 1
-            elif process_type == 'training':
-                if self.pilot_mode:
-                    valid_mask = mask == 1
-                else:
-                    # TODO we need to double check what er3 mask uses
-                    valid_mask = mask == 2
-
-            shapes_gen = shapes(mask, valid_mask, transform=src.transform)  
-
-            gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
-            gdf = gdf.to_crs(self.target_crs)   
-
-            pilot_mode = 'pilot'
-            masks_dir_conf = get_config_item('MASK', 'MASKS_DIR', pilot_mode=self.pilot_mode)
-            prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
-            mask_path = UPath(f"{prefix}{masks_dir_conf}/{process_type}_mask_pilot.parquet")
+            # Process in 4096x4096 chunks to prevent loading massive Ecoregion TIFFs into RAM
+            block_size = 4096
             
-            if not self.is_aws:
-                mask_path.parent.mkdir(parents=True, exist_ok=True)
+            for y in range(0, src.height, block_size):
+                for x in range(0, src.width, block_size):
+                    window = rasterio.windows.Window(
+                        x, y, 
+                        min(block_size, src.width - x), 
+                        min(block_size, src.height - y)
+                    )
+                    
+                    # Only read this small block into memory
+                    mask_chunk = src.read(1, window=window, out_dtype='uint8')
 
-            print(f"[INFO] Saving {process_type} mask GeoDataFrame to: {mask_path}")   
+                    if process_type == 'prediction':
+                        valid_mask = mask_chunk == 1
+                    elif process_type == 'training':
+                        if self.pilot_mode:
+                            valid_mask = mask_chunk == 1
+                        else:
+                            # TODO we need to double check what er3 mask uses
+                            valid_mask = mask_chunk == 2
 
-            gdf.to_parquet(str(mask_path))
+                    # Skip empty blocks entirely
+                    if not valid_mask.any():
+                        continue
 
-            return gdf
+                    # Transform shapes based on the current window offset
+                    win_transform = src.window_transform(window)
+                    shapes_gen = shapes(mask_chunk, mask=valid_mask, transform=win_transform)  
+
+                    for geom, _ in shapes_gen:
+                        geometries.append(shape(geom))
+                        
+            crs = src.crs
+
+        print(f"  -> Extracted {len(geometries)} geometries. Building GeoDataFrame...")
+        
+        # Geopandas union_all() later in process() will cleanly stitch any polygons that got split by block boundaries
+        gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
+        gdf = gdf.to_crs(self.target_crs)   
+
+        if process_type == 'prediction':
+            mask_path = self.mask_prediction_pq
+        else:
+            mask_path = self.mask_training_pq
+        
+        if not self.is_aws:
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+
+        print(f"[INFO] Saving {process_type} mask GeoDataFrame to: {mask_path}")   
+
+        gdf.to_parquet(str(mask_path))
+
+        return gdf
         
     def create_subgrids(self, mask_gdf, output_path, process_type) -> None:
         """ Create subgrids layer by intersecting grid tiles with the mask geometries"""        

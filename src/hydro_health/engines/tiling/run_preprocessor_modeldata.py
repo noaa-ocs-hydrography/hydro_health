@@ -15,7 +15,7 @@ if __name__ == '__main__':
     profiler = cProfile.Profile()
     profiler.enable()
 
-    processor = ModelDataPreProcessor(overwrite=True, pilot_mode=True)
+    processor = ModelDataPreProcessor(overwrite=True, pilot_mode=False)
 
     processor.process()
 
