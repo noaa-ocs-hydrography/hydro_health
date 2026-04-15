@@ -143,6 +143,7 @@ class RasterMaskS3Engine(Engine):
             out_ds.SetProjection(target_srs.ExportToWkt())
             out_ds.GetRasterBand(1).SetNoDataValue(0)
             gdal.RasterizeLayer(out_ds, [1], mem_layer, burn_values=[1])
+            out_ds.BuildOverviews("NEAREST", [2, 4, 8, 16, 32, 64])
             out_ds = None 
             
             boto3.client('s3').upload_file(tmp.name, bucket, s3_key)

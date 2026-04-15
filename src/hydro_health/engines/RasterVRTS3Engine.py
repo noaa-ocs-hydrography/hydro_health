@@ -12,9 +12,19 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 
+def _clean(s: str) -> str:
+    """Helper to normalize strings for comparison (removes non-breaking spaces, etc.)"""
+
+    if not s: 
+        return ""
+    # Replaces non-breaking spaces (\xa0) with standard spaces and strips whitespace
+    return " ".join(s.split()).lower().strip()
+
+
 def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
     """Original BlueTopo logic: Creates individual Warped VRTs (EPSG:4326) on S3"""
 
+    _set_gdal_s3_options()
     geotiff_prefix, s3_bucket, _ = params
     gdal.UseExceptions()
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
@@ -62,11 +72,10 @@ def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
             os.remove(local_vrt_path)
 
 
-def _read_geotiff_metadata(params: list):
-    """
-    Dask Worker: Scout that handles NAD83(2011) and other pedantic CRS strings.
-    Restored your original PROJJSON component matching logic!
-    """
+def _read_geotiff_metadata(params: list) -> dict[str]:
+    """Read the CRS metadata from each geotiff for use with VRT output"""
+
+    _set_gdal_s3_options()
 
     geotiff_prefix, all_crs_info, data_folder = params
     vsi_path = f'/vsis3/{geotiff_prefix}'
@@ -92,15 +101,18 @@ def _read_geotiff_metadata(params: list):
                 srs_json = json.loads(src_srs.ExportToPROJJSON())
                 components = srs_json.get('components', [{}])
                 comp_name = components[0].get('name', '')
-                horizontal_name = comp_name.split(' + ')[0].lower().strip()
-                match = [cr.code for cr in all_crs_info if cr.name.lower() == horizontal_name]
+                # Fixed string matching using _clean to handle hidden characters
+                horizontal_name = _clean(comp_name.split(' + ')[0])
+                match = [cr.code for cr in all_crs_info if _clean(cr.name) == horizontal_name]
                 if match:
                     bin_id = match[0]
             except:
                 pass
 
         if not bin_id:
-            bin_id = src_srs.GetAuthorityCode('DATUM') or src_srs.GetName().replace(" ", "_")
+            # Cleanup for the fallback to ensure key safety
+            fallback_name = src_srs.GetName()
+            bin_id = src_srs.GetAuthorityCode('DATUM') or _clean(fallback_name).replace(" ", "_")
             
         parts = geotiff_prefix.split('/')
         try:
@@ -157,12 +169,14 @@ class RasterVRTS3Engine(Engine):
             vrt_filename = temp_output_path / f'mosaic_{file_type}_{bin_key}.vrt'
             
             if data_type == 'DigitalCoast':
-                # Native CRS of geotiffs
+                # Force the VRT to use the first tile's WKT and allow differences
                 options = gdal.BuildVRTOptions(
                     resampleAlg='near', 
                     srcNodata=info.get('nodata_val'),
-                    VRTNodata=info.get('nodata_val'), # Read and set nodata
-                    addAlpha=True # allows transparency between overlapping tiles
+                    VRTNodata=info.get('nodata_val'),
+                    addAlpha=True,
+                    allowProjectionDifference=True,
+                    outputSRS=info.get('wkt')  # Force output CRS to first found
                 )
             else:
                 # Mosaic of 4326 VRTs
@@ -187,7 +201,8 @@ class RasterVRTS3Engine(Engine):
 
         output_geotiffs = {}
         for crs_code, s3_path, wkt in results:
-            clean_key = str(crs_code).replace('/', '').replace(' ', '_')
+            # Normalized key to ensure consistency
+            clean_key = _clean(str(crs_code)).replace('/', '').replace(' ', '_')
             if clean_key not in output_geotiffs:
                 output_geotiffs[clean_key] = {'crs': osr.SpatialReference(wkt=wkt), 'tiles': []}
             output_geotiffs[clean_key]['tiles'].append(s3_path)
@@ -203,10 +218,14 @@ class RasterVRTS3Engine(Engine):
         for res in results:
             key = res['bin_key']
             if key not in output_geotiffs:
-                output_geotiffs[key] = {'tiles': [], 'nodata_val': res['nodata']}
+                output_geotiffs[key] = {
+                    'tiles': [], 
+                    'nodata_val': res['nodata'],
+                    'wkt': res['wkt']
+                }
             output_geotiffs[key]['tiles'].append(res['vsi_path'])
         return output_geotiffs
-
+    
     def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, data_folder=False, skip_existing=False) -> None:
         _set_gdal_s3_options()
         self.setup_dask(self.param_lookup['env'])
@@ -226,6 +245,9 @@ class RasterVRTS3Engine(Engine):
         else:
             provider_folders = s3_files.glob(f"{base_s3}/*")
             for provider_path in provider_folders:
+                print(provider_path)
+                # if provider_path ==  'ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/raw/DigitalCoast/NOAA_NGS_2018_9060':
+                #     print(i, provider_path)
                 geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
                 if not geotiffs: 
                     continue

@@ -61,10 +61,10 @@ class ManualDownloadEngine:
             now = time.time()
             os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
         
-        # self.process_vrt()
-        # self.process_masks()
-        self.rebuild_training_mask()
-        # self.process_grid_tiles()
+        self.process_vrt()
+        self.process_masks()
+        # self.rebuild_training_mask()
+        self.process_grid_tiles()
         print('Done')
 
 if __name__ == '__main__':
