@@ -87,6 +87,8 @@ def test_create_training_mask(mock_gdal_opts, victim):
     mock_part_band.ReadAsArray.return_value = dummy_data.copy()
     mock_part_ds.GetRasterBand.return_value = mock_part_band
 
+    mock_final_ds = MagicMock()
+
     # Patch imports from class 
     with patch(f'{TILING_PATH}.boto3.client') as mock_boto, \
          patch(f'{TILING_PATH}.gdal') as mock_gdal, \
@@ -95,8 +97,13 @@ def test_create_training_mask(mock_gdal_opts, victim):
         
         mock_cfg.return_value = "test-value"
         
-        # gdal.Open is called multiple times
-        mock_gdal.Open.side_effect = [mock_train_ds, mock_train_ds, mock_part_ds]
+        # add mock for each gdal.Open call
+        mock_gdal.Open.side_effect = [
+            mock_train_ds, 
+            mock_train_ds, 
+            mock_part_ds,
+            mock_final_ds
+        ]
         
         # Mock the multiprocessing return
         mock_executor_instance = mock_exec.return_value.__enter__.return_value
@@ -111,6 +118,7 @@ def test_create_training_mask(mock_gdal_opts, victim):
         mock_gdal.Translate.assert_called() 
         # Verify S3 interaction
         mock_boto.return_value.upload_file.assert_called()
+        mock_final_ds.BuildOverviews.assert_called_once()
 
 
 def test_find_provider_vrts(victim):
