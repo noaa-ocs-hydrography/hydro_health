@@ -39,10 +39,10 @@ os.environ["VSI_CACHE_SIZE"] = "50000000"          # 50 MB cache limit
 class ModelDataPreProcessor:
     """Class for parallel preprocessing all model data"""
 
-    def __init__(self, overwrite: bool = False):
+    def __init__(self, overwrite: bool = False, pilot_mode: bool=False):
         self.target_crs = "EPSG:32617"
         self.target_res = 8
-        self.mode = "pilot"
+        self.pilot_mode = pilot_mode
         self.overwrite = overwrite
 
         self.fs = s3fs.S3FileSystem(anon=False)
@@ -66,31 +66,30 @@ class ModelDataPreProcessor:
     def create_file_paths(self):
         """Creates unified UPath objects that work both locally and on S3."""
         # Determine the base prefix depending on the environment
-        model_mode = 'pilot'
-        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', model_mode=model_mode)}/" if self.is_aws else ""
+        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
         
-        self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ', model_mode=model_mode)}")
-        self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ', model_mode=model_mode)}")
-        self.grid_gpkg = UPath(f"{prefix}{get_config_item('MODEL', 'SUBGRIDS', model_mode=model_mode)}")
-        self.pred_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_PRED_PATH', model_mode=model_mode)}")
-        self.train_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_TRAINING_PATH', model_mode=model_mode)}")
-        self.preprocessed_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREPROCESSED_DIR', model_mode=model_mode)}")
-        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', model_mode=model_mode)}")
-        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', model_mode=model_mode)}")
-        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', model_mode=model_mode)}")
-        self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', model_mode=model_mode)}")
-        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR', model_mode=model_mode)}")
+        self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)}")
+        self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)}")
+        self.grid_gpkg = UPath(f"{prefix}{get_config_item('MODEL', 'SUBGRIDS', pilot_mode=self.pilot_mode)}")
+        self.pred_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_PRED_PATH', pilot_mode=self.pilot_mode)}")
+        self.train_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_TRAINING_PATH', pilot_mode=self.pilot_mode)}")
+        self.preprocessed_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREPROCESSED_DIR', pilot_mode=self.pilot_mode)}")
+        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
+        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
+        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=self.pilot_mode)}")
+        self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', pilot_mode=self.pilot_mode)}")
+        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR', pilot_mode=self.pilot_mode)}")
         self.subgrid_paths = {
-            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', model_mode=model_mode)}"),
-            'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS', model_mode=model_mode)}")
+            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', pilot_mode=self.pilot_mode)}"),
+            'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS', pilot_mode=self.pilot_mode)}")
         }
 
         self.preprocessed_subdirs = {
-            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', model_mode=model_mode)}"),
-            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', model_mode=model_mode)}"),
-            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR', model_mode=model_mode)}"),
-            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', model_mode=model_mode)}"),
-            'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', model_mode=model_mode)}")
+            # 'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', pilot_mode=self.pilot_mode)}"),
+            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', pilot_mode=self.pilot_mode)}"),
+            # 'lidar': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'LIDAR', pilot_mode=self.pilot_mode)}"),
+            # 'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', pilot_mode=self.pilot_mode)}"),
+            'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', pilot_mode=self.pilot_mode)}")
         }
 
     def _load_exclusion_config(self) -> set:
@@ -963,7 +962,7 @@ class ModelDataPreProcessor:
             if process_type == 'prediction':
                 valid_mask = mask == 1
             elif process_type == 'training':
-                if self.mode == "pilot":
+                if self.pilot_mode:
                     valid_mask = mask == 1
                 else:
                     # TODO we need to double check what er3 mask uses
@@ -974,9 +973,9 @@ class ModelDataPreProcessor:
             gdf = gpd.GeoDataFrame({'geometry': [shape(geom) for geom, _ in shapes_gen]}, crs=src.crs)
             gdf = gdf.to_crs(self.target_crs)   
 
-            model_mode = 'pilot'
-            masks_dir_conf = get_config_item('MASK', 'MASKS_DIR', model_mode=model_mode)
-            prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', model_mode=model_mode)}/" if self.is_aws else ""
+            pilot_mode = 'pilot'
+            masks_dir_conf = get_config_item('MASK', 'MASKS_DIR', pilot_mode=self.pilot_mode)
+            prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
             mask_path = UPath(f"{prefix}{masks_dir_conf}/{process_type}_mask_pilot.parquet")
             
             if not self.is_aws:
