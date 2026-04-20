@@ -9,6 +9,8 @@ import itertools
 import warnings
 import gc
 import ctypes
+import logging
+import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -26,16 +28,42 @@ xr.set_options(file_cache_maxsize=1)
 
 import dask
 import dask.array as da
-from dask.distributed import Client, print as dask_print
+from dask.distributed import Client
 from dask import delayed, compute
 from scipy.ndimage import binary_erosion, uniform_filter, convolve
+
+# ==============================================================================
+#  LOGGING CONFIGURATION
+# ==============================================================================
+def get_logger():
+    """Sets up a logger that writes to both the console and a file in the home directory."""
+    logger = logging.getLogger("SeabedTerrainEngine")
+    # Prevent duplicate handlers if the module is reloaded
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(processName)s - %(message)s')
+
+        # File Handler (Home Directory)
+        log_file = Path.home() / "hydro_health.log"
+        fh = logging.FileHandler(log_file)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
+        # Console Handler
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+        
+    return logger
+
+logger = get_logger()
 
 # Check for WhiteboxTools dependency
 try:
     from whitebox import WhiteboxTools
 except ImportError:
-    print("\nCRITICAL ERROR: The 'whitebox' library is not installed.")
-    print("Please install it by running: conda install whitebox\n")
+    logger.critical("\nCRITICAL ERROR: The 'whitebox' library is not installed.")
+    logger.critical("Please install it by running: conda install whitebox\n")
     raise
 
 from hydro_health.engines.Engine import Engine
@@ -210,7 +238,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 shutil.copyfile(local_tmp_path, str(out_path))
             
             # Standard print goes to worker log safely
-            print(f"Successfully wrote raster DataArray file to: {out_path}")
+            logger.info(f"Successfully wrote raster DataArray file to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
@@ -231,7 +259,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 shutil.copyfile(local_tmp_path, str(out_path))
                 
             # Standard print goes to worker log safely
-            print(f"Successfully wrote NumPy array file to: {out_path}")
+            logger.info(f"Successfully wrote NumPy array file to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
@@ -443,13 +471,13 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
     def create_regionally_consistent_dictionaries(self, all_files, best_radii, output_dir, max_sample_files=10, pixels_per_file=20000) -> None:
         """Scans files, groups by year, samples pixels, and creates dictionaries."""
-        print("\n--- PHASE 1: Creating Regionally Consistent Dictionaries ---")
-        print(f"Dictionaries will be written to: {output_dir}")
+        logger.info("\n--- PHASE 1: Creating Regionally Consistent Dictionaries ---")
+        logger.info(f"Dictionaries will be written to: {output_dir}")
         out_path = UPath(output_dir)
         out_path.mkdir(parents=True, exist_ok=True)
 
         valid_years = {year for year_pair in self.year_ranges for year in year_pair}
-        print(f"DEBUG: Valid years mapped from engine.year_ranges: {sorted(list(valid_years))}")   
+        logger.debug(f"Valid years mapped from engine.year_ranges: {sorted(list(valid_years))}")   
 
         # 1. Group files by year
         year_groups = {}
@@ -467,18 +495,18 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         year_groups[year] = []
                     year_groups[year].append(f)
                     
-        print(f"DEBUG: All actual years extracted from filenames: {sorted(list(all_found_years))}")
+        logger.debug(f"All actual years extracted from filenames: {sorted(list(all_found_years))}")
         
         # Handle the generic 'BlueTopo.tif' case (using case-insensitive matching)
         generic_bathy = [f for f in all_files if 'bluetopo' in os.path.basename(str(f)).lower()]
         if generic_bathy:
             year_groups['BlueTopo'] = generic_bathy
             
-        print(f"DEBUG: Final grouped year-keys intended for processing: {list(year_groups.keys())}")
+        logger.debug(f"Final grouped year-keys intended for processing: {list(year_groups.keys())}")
 
         # 2. Process each year group
         for year, files in year_groups.items():
-            print(f"\n  - Processing group: {year} ({len(files)} files found)")
+            logger.info(f"\n  - Processing group: {year} ({len(files)} files found)")
 
             file_data = [(f, self._getsize(f)) for f in files]
             all_sizes = [x[1] for x in file_data]
@@ -494,28 +522,28 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             all_samples = {'slope': [], 'bpi_fine_std': [], 'bpi_broad_std': []}
             
             for f in files_to_sample:
-                print(f"    Sampling from: {os.path.basename(str(f))}")    
+                logger.info(f"    Sampling from: {os.path.basename(str(f))}")    
                 try:
                     with rasterio.open(str(f)) as src:
                         bathy_array = src.read(1)
                         bathy_array[bathy_array == src.nodata] = np.nan
                         cell_size = src.res[0]
                         
-                        print(f"      - Extracting up to {pixels_per_file} random valid pixels...")
+                        logger.info(f"      - Extracting up to {pixels_per_file} random valid pixels...")
                         valid_pixels = np.argwhere(~np.isnan(bathy_array))
                         if len(valid_pixels) > pixels_per_file:
                             sample_indices = valid_pixels[np.random.choice(len(valid_pixels), pixels_per_file, replace=False)]
                         else:
                             sample_indices = valid_pixels
                         
-                        print("      - Calculating derivatives for sampled pixels...")
+                        logger.info("      - Calculating derivatives for sampled pixels...")
                         slope_sample = self.calculate_slope(bathy_array, cell_size)
-                        print("      - Calculating BPI for sampled pixels...")
+                        logger.info("      - Calculating BPI for sampled pixels...")
                         
                         bpi_fine_sample = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
                         bpi_broad_sample = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
                         
-                        print("      - Collecting sampled values...")
+                        logger.info("      - Collecting sampled values...")
                         rows, cols = sample_indices[:, 0], sample_indices[:, 1]
                         all_samples['slope'].append(slope_sample[rows, cols])
                         all_samples['bpi_fine_std'].append(self.standardize_raster_array(bpi_fine_sample)[rows, cols])
@@ -526,7 +554,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         gc.collect()
 
                 except Exception as e:
-                    print(f"    - Warning: Could not sample from {os.path.basename(str(f))}. Reason: {e}")
+                    logger.warning(f"    - Warning: Could not sample from {os.path.basename(str(f))}. Reason: {e}")
                     continue
             
             # Create and save the dictionary for this year
@@ -541,15 +569,15 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 with dict_path.open('w') as fh:
                     year_dictionary.to_csv(fh, index=False)
                 
-                print(f"  - Saved consistent dictionary for year {year} to: {dict_path}")
+                logger.info(f"  - Saved consistent dictionary for year {year} to: {dict_path}")
             else:
-                print(f"  - No valid samples collected for year {year}. Skipping dictionary creation.")
+                logger.warning(f"  - No valid samples collected for year {year}. Skipping dictionary creation.")
                 
-        print("\n--- PHASE 1 Complete ---")
+        logger.info("\n--- PHASE 1 Complete ---")
 
     def fill_with_fallback(self, input_file, output_file, max_iters=5, chunk_size=512) -> None:
         """Performs chunked iterative focal fill on a raster file using Dask and rioxarray."""
-        print(f"Attempting chunked fill for {os.path.basename(str(input_file))}")
+        logger.info(f"Attempting chunked fill for {os.path.basename(str(input_file))}")
 
         da_chunk = {"x": chunk_size, "y": chunk_size}
         ds = rioxarray.open_rasterio(str(input_file), chunks=da_chunk)
@@ -557,13 +585,13 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         da = ds.squeeze().astype("float32")
         da = da.where(da != nodata)
         
-        print("Checking for interior gaps...")
+        logger.info("Checking for interior gaps...")
         
         # [MEMORY FIX 6]: single threaded compute on boolean mask
         nan_mask = da.isnull().compute(scheduler='single-threaded')
         
         if not binary_erosion(nan_mask, structure=np.ones((3,3))).any():
-            print(f"No interior gaps found in {os.path.basename(str(input_file))}. Skipping fill process.")
+            logger.info(f"No interior gaps found in {os.path.basename(str(input_file))}. Skipping fill process.")
             src = UPath(input_file)
             dst = UPath(output_file)
             if src.protocol == "s3":
@@ -571,7 +599,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             else:
                 shutil.copyfile(src, dst)
             
-            dask_print(f"✅ Copied/skipped gap fill for: {os.path.basename(str(output_file))}")
+            logger.info(f"✅ Copied/skipped gap fill for: {os.path.basename(str(output_file))}")
             return
 
         for i in range(max_iters):
@@ -600,7 +628,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         da.rio.write_nodata(nodata, inplace=True)
         
         self._save_raster_da(da, output_file, compress='LZW')
-        dask_print(f"✅ Filled raster process completed for: {os.path.basename(str(output_file))}")
+        logger.info(f"✅ Filled raster process completed for: {os.path.basename(str(output_file))}")
 
     def focal_fill_block(self, block: np.ndarray, w=3) -> np.ndarray:
         """Performs a single, efficient, nan-aware focal mean on a NumPy array block."""
@@ -617,7 +645,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
     def generate_neighborhood_statistics(self, file_path: Path) -> None:
         """Calculates focal mean and standard deviation for a given raster file."""
-        print(f"Calculating neighborhood statistics for: {file_path.name}")
+        logger.info(f"Calculating neighborhood statistics for: {file_path.name}")
         size = 3
 
         base_name = file_path.stem 
@@ -627,11 +655,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         out_mean = out_dir / f"{base_name}_mean{size}.tif"
 
         if 'mean' in file_path.name or (not self.overwrite and self._exists(out_sd)):
-            print(f"Output files already exist, skipping: {out_sd.name}")
+            logger.info(f"Output files already exist, skipping: {out_sd.name}")
             return 
         
         if 'sd3' in file_path.name or (not self.overwrite and self._exists(out_mean)):
-            print(f"Output files already exist, skipping: {out_mean.name}")
+            logger.info(f"Output files already exist, skipping: {out_mean.name}")
             return
         
         rds = rioxarray.open_rasterio(str(file_path), chunks=True).isel(band=0)
@@ -696,46 +724,46 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
             needs_processing = missing_wbt or missing_tci or missing_shear or missing_numpy
             if not needs_processing:
-                print(f"Skipped (All exist): {base_name}")
+                logger.info(f"Skipped (All exist): {base_name}")
                 return f"Skipped (All exist): {base_name}"
 
-            print(f"Processing terrain classification for: {base_name}")
+            logger.info(f"Processing terrain classification for: {base_name}")
 
             with UPath(bathy_path).open('rb') as f_in:
                 with open(local_bathy, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
             if missing_wbt:
-                print(f"[{base_name}] Generating {len(missing_wbt)} required WBT layer(s)...")
+                logger.info(f"[{base_name}] Generating {len(missing_wbt)} required WBT layer(s)...")
             for out_s3, wbt_func, local_out in missing_wbt:
                 try:
                     wbt_func(local_bathy, local_out)
                     if os.path.exists(local_out):
                         with open(local_out, 'rb') as f_in, UPath(out_s3).open('wb') as f_out:
                             shutil.copyfileobj(f_in, f_out)
-                        print(f"Successfully wrote WBT layer file to: {out_s3}")
+                        logger.info(f"Successfully wrote WBT layer file to: {out_s3}")
                 except Exception as e:
-                    dask_print(f"❌ WBT Error on {base_name} for {out_s3}: {e}")
+                    logger.error(f"❌ WBT Error on {base_name} for {out_s3}: {e}")
 
             if missing_tci:
-                print(f"[{base_name}] Generating TCI layer...")
+                logger.info(f"[{base_name}] Generating TCI layer...")
                 try: 
                     self.wbt.convergence_index(local_bathy, local_tci)
                 except AttributeError:
                     try:
                         self.wbt.run_tool("ConvergenceIndex", [f"--dem={local_bathy}", f"--output={local_tci}"])
                     except Exception as e:
-                        dask_print(f"❌ WBT TCI RunTool Error on {base_name}: {e}")
+                        logger.error(f"❌ WBT TCI RunTool Error on {base_name}: {e}")
                 except Exception as e: 
-                    dask_print(f"❌ WBT TCI Error on {base_name}: {e}")
+                    logger.error(f"❌ WBT TCI Error on {base_name}: {e}")
 
                 if os.path.exists(local_tci):
                     with open(local_tci, 'rb') as f_in, UPath(out_tci).open('wb') as f_out:
                         shutil.copyfileobj(f_in, f_out)
-                    print(f"Successfully wrote TCI layer file to: {out_tci}")
+                    logger.info(f"Successfully wrote TCI layer file to: {out_tci}")
 
             if missing_shear:
-                print(f"[{base_name}] Generating Shear Proxy layer...")
+                logger.info(f"[{base_name}] Generating Shear Proxy layer...")
                 try:
                     slope_src = local_slope if os.path.exists(local_slope) else None
                     plan_src = local_plan if os.path.exists(local_plan) else None
@@ -760,12 +788,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         meta.update(compress='LZW')
                         self._save_numpy_to_raster(shear.astype("float32"), out_shear, meta)
                     else:
-                        dask_print(f"⚠️ Skipping Shear Proxy for {base_name}: Inputs missing (could not resolve local copies)")
+                        logger.warning(f"⚠️ Skipping Shear Proxy for {base_name}: Inputs missing (could not resolve local copies)")
                 except Exception as e:
-                    dask_print(f"❌ Shear Proxy Calc Error {base_name}: {e}")
+                    logger.error(f"❌ Shear Proxy Calc Error {base_name}: {e}")
 
             if missing_numpy:
-                print(f"[{base_name}] Generating NumPy BTM classification layers...")
+                logger.info(f"[{base_name}] Generating NumPy BTM classification layers...")
                 
                 # Fix parsing to ensure BlueTopo files look for the correct dictionary
                 if 'bluetopo' in base_name.lower():
@@ -788,7 +816,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                             found = True
                             break
                     if not found:
-                        dask_print(f"❌ Dictionary missing for {year} on {base_name}")
+                        logger.error(f"❌ Dictionary missing for {year} on {base_name}")
                         return f"Dictionary missing for {year}"
                 
                 with dict_path.open('r') as fh:
@@ -900,7 +928,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 gc.collect()
 
         # Target 1 status print over the network per successful file
-        dask_print(f"✅ Successfully finished terrain processing: {base_name}")
+        logger.info(f"✅ Successfully finished terrain processing: {base_name}")
         
         # [MEMORY FIX 2]: Force OS to reclaim the memory pool at the end of heavy worker tasks
         try:
@@ -918,7 +946,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         except FileNotFoundError:
             file_paths = []
 
-        print(len(file_paths))
+        logger.info(f"Found {len(file_paths)} files.")
 
         for f_path in file_paths:
             f_name = f_path.name
@@ -954,7 +982,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 if p.suffix.lower() in ('.tif', '.tiff')
             ]
         except (NotADirectoryError, FileNotFoundError):
-            print(f"Directory {self.filled_dir} does not exist yet or is empty. Proceeding with 0 existing files.")
+            logger.warning(f"Directory {self.filled_dir} does not exist yet or is empty. Proceeding with 0 existing files.")
             file_paths = []
 
         for f_path in file_paths:
@@ -1022,7 +1050,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             main_output_dir = raw_output_dir
 
         dictionary_output_dir = self._join_paths(main_output_dir, "dictionaries")
-        print(f"Dictionaries path set to: {dictionary_output_dir}")
+        logger.info(f"Dictionaries path set to: {dictionary_output_dir}")
 
         keywords_to_exclude = ['tsm', 'hurr', 'sed', 'bluetopo']
         input_files = self._safe_ls(self.uncombined_dir) 
@@ -1039,10 +1067,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             if self.overwrite or not expected_output_path.exists():
                 lidar_data_paths.append(f)
 
-        print(f"Found {len(lidar_data_paths)} new lidar files to gap fill (skipped {len(valid_input_files) - len(lidar_data_paths)} existing).")
+        logger.info(f"Found {len(lidar_data_paths)} new lidar files to gap fill (skipped {len(valid_input_files) - len(lidar_data_paths)} existing).")
 
         if lidar_data_paths:
-            print("Starting gap fill process in parallel...")
+            logger.info("Starting gap fill process in parallel...")
             tasks = []
             for file in lidar_data_paths:
                 # OPTIMIZATION: Dask delayed now targets the top-level wrapper function
@@ -1051,9 +1079,9 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             
             dask.compute(*tasks)
         else:
-            print("All files have already been gap-filled. Skipping computation.")
+            logger.info("All files have already been gap-filled. Skipping computation.")
 
-        print("Gap fill process complete. Starting bathymetry combination...")
+        logger.info("Gap fill process complete. Starting bathymetry combination...")
         self.run_bathy_combination()
 
         filled_files = self._safe_ls(self.combined)
@@ -1069,12 +1097,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         ]
         
         bathy_files_to_process.extend(found_bluetopo_files)
-        print(f"{len(filled_files)} lidar and {len(found_bluetopo_files)} Bluetopo files found for dictionaries.")
+        logger.info(f"{len(filled_files)} lidar and {len(found_bluetopo_files)} Bluetopo files found for dictionaries.")
 
         best_radii = {'fine': (8, 32), 'broad': (80, 240)}
         # self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
-        print("\n--- PHASE 2: Pre-flight Check for Terrain Products ---")
+        logger.info("\n--- PHASE 2: Pre-flight Check for Terrain Products ---")
         tasks = []
         
         # Accumulators for summary output
@@ -1126,25 +1154,25 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             else:
                 total_skipped += 1
                 
-        print(f"Total bathymetry files checked: {len(bathy_files_to_process)}")
-        print(f"Total missing WBT layers:   {total_missing_wbt}")
-        print(f"Total missing TCI layers:   {total_missing_tci}")
-        print(f"Total missing Shear layers: {total_missing_shear}")
-        print(f"Total missing NumPy layers: {total_missing_numpy}")
-        print(f"Files skipped (All exist):  {total_skipped}")
+        logger.info(f"Total bathymetry files checked: {len(bathy_files_to_process)}")
+        logger.info(f"Total missing WBT layers:   {total_missing_wbt}")
+        logger.info(f"Total missing TCI layers:   {total_missing_tci}")
+        logger.info(f"Total missing Shear layers: {total_missing_shear}")
+        logger.info(f"Total missing NumPy layers: {total_missing_numpy}")
+        logger.info(f"Files skipped (All exist):  {total_skipped}")
             
-        print(f"\n--- Queuing {len(tasks)} parallel tasks for terrain processing ---")
+        logger.info(f"\n--- Queuing {len(tasks)} parallel tasks for terrain processing ---")
         if tasks:
             results = dask.compute(*tasks)
             # The return statements from the delayed functions will print here in the main thread
             for res in results:
-                print(res)
+                logger.info(res)
 
         WORKING_DIR = main_output_dir
         STATE_VARS = ["filled", "slope", "rugosity", "bpi_fine", "bpi_broad", "terrain_classification"]
 
-        print(f"\nStarting raster processing in: {WORKING_DIR}")
-        print(f"Finding files for: {', '.join(STATE_VARS)}")
+        logger.info(f"\nStarting raster processing in: {WORKING_DIR}")
+        logger.info(f"Finding files for: {', '.join(STATE_VARS)}")
         
         state_files_map = defaultdict(list)
         all_state_files_to_process = []
@@ -1174,10 +1202,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 state_files_map[var_name].append(file_info)
                 all_state_files_to_process.append(f)
                 
-        print(f"Found {len(set(all_state_files_to_process))} rasters for neighborhood stats.")
-        print(f"Found {len(state_files_map)} variable groups for calculation.")
+        logger.info(f"Found {len(set(all_state_files_to_process))} rasters for neighborhood stats.")
+        logger.info(f"Found {len(state_files_map)} variable groups for calculation.")
         
-        print("\n--- Processing Complete ---")
+        logger.info("\n--- Processing Complete ---")
 
     def process_combination_task(self, paths: List[str], out_path_str: str) -> str:
         """Loads one or more rasters, averages them, and saves to new name."""
@@ -1202,11 +1230,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 windowed=True,
                 nodata=-9999.0
             )
-            dask_print(f"✅ Combined: {out_path.name}")
+            logger.info(f"✅ Combined: {out_path.name}")
             return f"Created: {out_path.name}"
             
         except Exception as e:
-            dask_print(f"❌ Error combining {out_path.name}: {str(e)}")
+            logger.error(f"❌ Error combining {out_path.name}: {str(e)}")
             return f"Error on {out_path.name}: {str(e)}"
         
         finally:
@@ -1238,11 +1266,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 tiled=True,
                 windowed=True
             )
-            dask_print(f"✅ Created Delta: {out_path.name}")
+            logger.info(f"✅ Created Delta: {out_path.name}")
             return f"Created: {out_path.name}"
 
         except Exception as e:
-            dask_print(f"❌ Error creating delta {out_path.name}: {str(e)}")
+            logger.error(f"❌ Error creating delta {out_path.name}: {str(e)}")
             return f"Error on {out_path.name}: {str(e)}"
 
     def run_bathy_combination(self):
@@ -1250,7 +1278,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         groups = self.group_files_simple()
         delayed_tasks = []
 
-        print(f"Scanning complete. Found groups for {len(groups)} tiles.")
+        logger.info(f"Scanning complete. Found groups for {len(groups)} tiles.")
 
         for tile_id, year_map in groups.items():
             for year, paths in year_map.items():
@@ -1263,13 +1291,13 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 delayed_tasks.append(task)
 
         if not delayed_tasks:
-            print("No matching files found to process.")
+            logger.info("No matching files found to process.")
             return
 
-        print(f"Queued {len(delayed_tasks)} combination tasks. Computing...")
+        logger.info(f"Queued {len(delayed_tasks)} combination tasks. Computing...")
         results = dask.compute(*delayed_tasks)
         for res in results:
-            print(res)
+            logger.info(res)
 
     def run_gap_fill(self, input_file, output_dir, max_iters) -> None:
         """The main entry point for the gap-filling process."""
@@ -1278,7 +1306,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         )
 
         if not self.overwrite and self._exists(output_file):
-            print(f"File already exists, skipping gap fill: {os.path.basename(str(output_file))}")
+            logger.info(f"File already exists, skipping gap fill: {os.path.basename(str(output_file))}")
             return
         
         self.fill_with_fallback(

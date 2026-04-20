@@ -4,10 +4,13 @@ import zipfile
 import rasterio
 from rasterio.warp import transform_bounds
 import time
+import shutil
 
 # --- CONFIGURATION ---
 BASE_DIR = r"C:\Users\aubrey.mccutchan\Documents\Tampa Imagery"
 MASK_PATH = r"C:\Users\aubrey.mccutchan\Documents\prediction_mask_pilot.tif"
+OUTPUT_DIR_NAME = "Processed_TIFs" # Name of the new folder to move kept TIFs into
+OUTPUT_DIR = os.path.join(BASE_DIR, OUTPUT_DIR_NAME)
 CHECK_INTERVAL = 10  # Seconds to wait between checking the folder for new zips
 
 def check_intersection(bounds1, bounds2):
@@ -29,9 +32,9 @@ def is_file_ready(filepath):
         return False
 
 def process_tif(tif_path, mask_crs, mask_bounds):
-    """Checks a TIF against the mask and deletes it if it doesn't intersect."""
+    """Checks a TIF against the mask, moves it if it intersects, or deletes it."""
     try:
-        # Open just to read metadata, then close immediately
+        # Open just to read metadata, then close immediately to avoid file lock issues
         with rasterio.open(tif_path) as tif_src:
             tif_crs = tif_src.crs
             tif_bounds = tif_src.bounds
@@ -40,23 +43,36 @@ def process_tif(tif_path, mask_crs, mask_bounds):
         if tif_crs != mask_crs:
             tif_bounds = transform_bounds(tif_crs, mask_crs, *tif_bounds)
         
+        xml_path = os.path.splitext(tif_path)[0] + ".xml"
+
         # Check intersection
         if check_intersection(mask_bounds, tif_bounds):
-            print(f"  [+] KEEPING (Intersects): {os.path.basename(tif_path)}")
+            print(f"  [+] KEEPING & MOVING (Intersects): {os.path.basename(tif_path)}")
+            # Move the TIF to the output directory
+            shutil.move(tif_path, os.path.join(OUTPUT_DIR, os.path.basename(tif_path)))
+            
+            # Move companion XML if it exists
+            if os.path.exists(xml_path):
+                shutil.move(xml_path, os.path.join(OUTPUT_DIR, os.path.basename(xml_path)))
             return True
         else:
             print(f"  [-] DELETING (No Intersection): {os.path.basename(tif_path)}")
             os.remove(tif_path)
             
             # Clean up companion XML if it exists
-            xml_path = os.path.splitext(tif_path)[0] + ".xml"
             if os.path.exists(xml_path):
                 os.remove(xml_path)
             return False
             
     except Exception as e:
         print(f"  [!] Error reading {os.path.basename(tif_path)}: {e}")
-        return True # Keep it if we can't read it, just to be safe
+        # If it errors out, we'll try to move it anyway to be safe so it's not lost
+        try:
+            shutil.move(tif_path, os.path.join(OUTPUT_DIR, os.path.basename(tif_path)))
+            print(f"  [~] Moved unreadable file to output directory to be safe.")
+        except Exception as move_e:
+            pass
+        return True 
 
 def cleanup_empty_folder(folder_path):
     """Removes a folder if it is completely empty."""
@@ -77,6 +93,9 @@ def main():
         print(f"Could not open mask file. Please check the path. Error: {e}")
         return
 
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+
     print("-" * 50)
     print("Performing initial sweep of existing folders...")
     
@@ -84,12 +103,17 @@ def main():
     existing_tifs = glob.glob(os.path.join(BASE_DIR, "**", "*.tif"), recursive=True)
     
     for tif_path in existing_tifs:
+        # Skip processing if the file is already in the output directory
+        if os.path.abspath(OUTPUT_DIR) in os.path.abspath(tif_path):
+            continue
+
         process_tif(tif_path, mask_crs, mask_bounds)
         # Try to clean up the folder right after processing its file
         cleanup_empty_folder(os.path.dirname(tif_path))
 
     print("-" * 50)
-    print("Initial sweep complete. Monitoring for new downloads... (Press Ctrl+C to stop)")
+    print(f"Initial sweep complete. Valid files moved to '{OUTPUT_DIR_NAME}'.")
+    print("Monitoring for new downloads... (Press Ctrl+C to stop)")
 
     try:
         while True:
@@ -114,8 +138,10 @@ def main():
                 
                 for tif_path in extracted_tifs:
                     process_tif(tif_path, mask_crs, mask_bounds)
+                    # Try cleaning up immediate parent directory of the processed file
+                    cleanup_empty_folder(os.path.dirname(tif_path))
                 
-                # Clean up the newly extracted folder if it is now empty
+                # Clean up the main extracted folder if it is now empty (since files were moved/deleted)
                 cleanup_empty_folder(extract_dir)
             
             time.sleep(CHECK_INTERVAL)
