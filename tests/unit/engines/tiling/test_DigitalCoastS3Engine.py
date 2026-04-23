@@ -8,6 +8,10 @@ from unittest.mock import MagicMock, patch, call, mock_open
 from shapely.geometry import Polygon
 from botocore import UNSIGNED
 
+import sys
+HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[1]
+sys.path.append(str(HYDRO_HEALTH_MODULE))
+
 from hydro_health.helpers.tools import Param
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine, _download_tile_index
 
@@ -17,6 +21,11 @@ TILING_PATH = 'hydro_health.engines.tiling.DigitalCoastS3Engine'
 
 @pytest.fixture
 def victim(tmp_path):
+    """
+    Base victim fixture to return instance of test Class.
+    :param pathlib.Path tmp_path: pytest built-in TemporaryFile object magic
+    """
+    
     param_lookup = {
         'output_directory': Param(str(tmp_path)),
         'env': 'aws'
