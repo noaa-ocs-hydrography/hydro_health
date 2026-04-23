@@ -54,7 +54,8 @@ def _process_tile(param_inputs: list[list]) -> None:
             mb_tiff_file.unlink() 
             engine.set_ground_to_nodata(tiff_file_path)
             engine.create_slope(tiff_file_path)
-            engine.create_rugosity(tiff_file_path)            
+            engine.create_rugosity(tiff_file_path)
+            engine.finalize_cog(tiff_file_path)      
 
             engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id)
 
@@ -142,11 +143,18 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
             crs=src.crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
+            
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
 
     def create_catzoc_latest(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a CATZOC score raster using the most recent survey date"""
@@ -222,11 +230,18 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
-            crs=crs,
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            crs=src.crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
+            
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
@@ -326,6 +341,32 @@ class BlueTopoS3Engine(Engine):
             nbs_bucket.download_file(obj_summary.key, str(current_file))
 
         return output_tile_path
+    
+    def finalize_cog(self, tiff_path: pathlib.Path) -> None:
+        """The final pass to ensure perfect COG layout and overviews."""
+        temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
+        
+        ds = gdal.Open(str(tiff_path), gdal.GA_Update)
+        if ds is not None:
+            ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
+            ds = None
+
+        gdal.Translate(
+            str(temp_cog),
+            str(tiff_path),
+            creationOptions=[
+                "COMPRESS=DEFLATE",
+                "PREDICTOR=3",
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512",
+                "COPY_SRC_OVERVIEWS=YES"
+            ]
+        )
+        
+        if temp_cog.exists():
+            tiff_path.unlink()
+            temp_cog.rename(tiff_path)
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
@@ -355,8 +396,7 @@ class BlueTopoS3Engine(Engine):
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
-            creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
-            callback=gdal.TermProgress_nocb
+            creationOptions=["COMPRESS=DEFLATE"]
         )
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:

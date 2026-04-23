@@ -132,7 +132,10 @@ class DigitalCoastEngine(Engine):
         self.param_lookup = param_lookup
 
     def breakup_cudem(self, digital_coast_folder) -> None:
-        """Create unique year folders for CUDEM data"""
+        """
+        THIS IS NOT USED
+        Create unique year folders for CUDEM data
+        """
 
         cudem_folders = digital_coast_folder.glob('NOAA_NCEI_0*')
         for folder in cudem_folders:
@@ -252,7 +255,7 @@ class DigitalCoastEngine(Engine):
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
                 if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder, outputs)
-                self.breakup_cudem(digital_coast_folder)
+                # self.breakup_cudem(digital_coast_folder)
         self.close_dask()
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
