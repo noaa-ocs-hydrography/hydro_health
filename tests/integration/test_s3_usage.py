@@ -1,5 +1,4 @@
 import rasterio
-import pytest
 import sys
 import pathlib
 import s3fs
@@ -13,6 +12,16 @@ sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 from hydro_health.helpers.tools import get_config_item
 
+
+"""
+This is an integration test suite for design concerns we need to make sure never change.
+This test file needs to be run on the EC2 in order to access S3.
+Steps:
+1. SFTP the file to the EC2
+2. SSH onto the EC2
+3. Change directory to Repos/hydro_health/tests/integration
+4. run the test: pytest test_s3_usage.py -s
+"""
 
 
 def test_provider_folder_has_vrt():
@@ -52,7 +61,7 @@ def test_bluetopo_tiling_count():
 
 def test_provider_vrt_crs_matches_geotiff():
     """Check if VRT has same CRS as geotiffs"""
-    
+
     s3_files = s3fs.S3FileSystem()
     for i in range(1, 7):
         ecoregion = f'ER_{i}'
