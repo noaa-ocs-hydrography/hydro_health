@@ -35,7 +35,7 @@ def get_environment() -> str:
         return  'local'
     elif 'VS' in hostname:
         return 'remote'
-    elif 'ip-10' in hostname:
+    elif '.nos.noaa' in hostname:
         return 'aws'
     else:
         return 'remote'
