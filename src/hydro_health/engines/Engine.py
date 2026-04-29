@@ -3,7 +3,10 @@ import sys
 import json
 import os
 import re
+import time
+import datetime
 import requests
+import boto3
 import geopandas as gpd
 import dask
 import math
@@ -56,6 +59,8 @@ class Engine:
     #                 format='%(levelname)s:%(asctime)s %(message)s',
     #                 level=logging.INFO)
     #     self.logged = False
+
+        self.start_time = time.time()
 
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
@@ -173,6 +178,33 @@ class Engine:
 
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
+
+    def write_run_manifest(self, subfolder: str, extra_info: dict = None):
+        """Writes a single manifest for the entire Engine execution."""
+
+        end_time = time.time()
+        duration = round(end_time - self.start_time, 2) if self.start_time else 0
+        
+        manifest = {
+            "engine": self.__class__.__name__,
+            "run_date": datetime.datetime.now().isoformat(),
+            "duration_seconds": duration,
+            "status": "completed"
+        }
+        if extra_info:
+            manifest.update(extra_info)
+
+        if self.param_lookup['env'] == 'aws':
+            s3 = boto3.client('s3')
+            s3.put_object(
+                Bucket=get_config_item('SHARED', 'OUTPUT_BUCKET'),
+                Key=f"{subfolder}/_manifest.json",
+                Body=json.dumps(manifest, indent=4)
+            )
+        else:
+            manifest_prefix = OUTPUTS / subfolder / '_manifest.json'
+            with open(manifest_prefix, 'w') as manifest_writer:
+                manifest_writer.write(json.dumps(manifest, indent=4))
 
 
 # CATZOC score.py

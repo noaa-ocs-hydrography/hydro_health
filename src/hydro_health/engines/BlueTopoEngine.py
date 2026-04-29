@@ -389,6 +389,8 @@ class BlueTopoEngine(Engine):
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
         self.close_dask()
+        for ecoregion in self.param_lookup['eco_regions'].value:
+            self.write_run_manifest(f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo", {'tiles': len(param_inputs)})
 
         # log all tiles using tile_gdf
         tiles = list(tile_gdf['tile'])

@@ -3,7 +3,7 @@ ecoregions:
 pilot_mode: true
 steps:
 - tool: run_bluetopo_tile_engine
-  run: false
+  run: true
 - tool: run_digital_coast_engine
   run: false
 - tool: run_laz_conversion_engine
@@ -21,5 +21,5 @@ steps:
 - tool: run_sediment_layer_engine
   run: false
 - tool: run_preprocessor_modeldata
-  run: true
+  run: false
 runtimes: []
