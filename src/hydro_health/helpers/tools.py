@@ -1,14 +1,9 @@
 import yaml
 import pathlib
 import geopandas as gpd
-import s3fs
-import os
-import tempfile
-import json
-import time
 
 from socket import gethostname
-from osgeo import gdal, osr, ogr
+from osgeo import gdal, osr
 
 
 gdal.UseExceptions()
@@ -138,4 +133,7 @@ def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs
         dstSRS=wgs84_srs
     )
     return raster_wgs84
+
+
+
 
