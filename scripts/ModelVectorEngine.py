@@ -1,3 +1,10 @@
+"""
+This Engine builds the geopckage layer 'median_present_survey_score'
+which is a vectorized dataset using median values for all the cell
+values found in the integer based present_survey_score_int.tif.
+The integer based geotiff was manually created using the int() method in ArcGIS Pro.
+"""
+
 import os
 import sys
 import pathlib
