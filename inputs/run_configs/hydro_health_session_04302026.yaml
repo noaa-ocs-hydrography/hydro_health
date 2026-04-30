@@ -1,6 +1,12 @@
 ecoregions:
+- ER_1
+- ER_2
 - ER_3
-pilot_mode: true
+- ER_4
+- ER_5
+- ER_6
+pilot_mode: false
+output_prefix: low_res
 steps:
 - tool: run_bluetopo_tile_engine
   run: true

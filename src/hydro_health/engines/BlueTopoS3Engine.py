@@ -36,7 +36,7 @@ def _process_tile(param_inputs: list[list]) -> None:
     """
 
     # outputs folder available for logging
-    param_lookup, s3_output_bucket, tile_id, ecoregion_id = param_inputs
+    param_lookup, s3_output_bucket, tile_id, ecoregion_id, output_prefix = param_inputs
     
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = pathlib.Path(temp_dir)
@@ -46,7 +46,7 @@ def _process_tile(param_inputs: list[list]) -> None:
         tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id)
         if tiff_file_path:
             engine.create_survey_end_date_tiff(tiff_file_path)
-            # engine.create_catzoc_all(tiff_file_path)
+            engine.create_catzoc_all(tiff_file_path)
             # engine.create_catzoc_latest(tiff_file_path)
             mb_tiff_file = engine.rename_multiband(tiff_file_path)
             engine.multiband_to_singleband(mb_tiff_file, band=1)
@@ -54,10 +54,10 @@ def _process_tile(param_inputs: list[list]) -> None:
             mb_tiff_file.unlink() 
             engine.set_ground_to_nodata(tiff_file_path)
             engine.create_slope(tiff_file_path)
-            engine.create_rugosity(tiff_file_path)
+            # engine.create_rugosity(tiff_file_path)
             engine.finalize_cog(tiff_file_path)      
 
-            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id)
+            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id, output_prefix)
 
 
 class BlueTopoS3Engine(Engine):
@@ -133,7 +133,7 @@ class BlueTopoS3Engine(Engine):
         reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
         reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
 
-        survey_date_file_path = tiff_file_path.parents[1] / f'{tiff_file_path.stem}_catzoc_decay_all.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay_all.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -220,7 +220,7 @@ class BlueTopoS3Engine(Engine):
 
         reclassified_band = np.where(is_nodata, nodata, most_recent_survey['catzoc_decay']).astype(np.float32)
 
-        survey_date_file_path = tiff_file_path.parents[1] / f'{tiff_file_path.stem}_catzoc_decay_latest.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_catzoc_decay_latest.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -344,6 +344,7 @@ class BlueTopoS3Engine(Engine):
     
     def finalize_cog(self, tiff_path: pathlib.Path) -> None:
         """The final pass to ensure perfect COG layout and overviews."""
+
         temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
         
         ds = gdal.Open(str(tiff_path), gdal.GA_Update)
@@ -413,18 +414,19 @@ class BlueTopoS3Engine(Engine):
             if result:
                 self.write_message(result, output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool=False) -> None:
         print('Downloading BlueTopo Datasets')
 
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        self.setup_dask(self.param_lookup['env'])
-        param_inputs = [[self.param_lookup, output_bucket, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+        self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
+        param_inputs = [[self.param_lookup, output_bucket, row[0], row[1], output_prefix] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
         future_tiles = self.client.map(_process_tile, param_inputs)
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
         self.close_dask()
         for ecoregion in self.param_lookup['eco_regions'].value:
-            self.write_run_manifest(f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo")
+            s3_path = f"{output_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo" if output_prefix else f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+            self.write_run_manifest(s3_path)
 
         # log all tiles using tile_gdf
         tiles = list(tile_gdf['tile'])
@@ -442,12 +444,13 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  # took forever to find this gem
         raster_ds = None
 
-    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str) -> None:
+    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str, output_prefix: str|bool) -> None:
         """Upload all tiff files to s3 for current tile"""
 
         s3_client = boto3.client('s3')
         for tiff_file in tile_folder.glob('*'):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
-            s3_path = pathlib.Path(*tiff_file.parts[ecoregion_index:])
+            s3_subpath = pathlib.Path(*tiff_file.parts[ecoregion_index:])
+            s3_path = s3_subpath if not output_prefix else f'{output_prefix}/{s3_subpath}'
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
             s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')

@@ -28,12 +28,10 @@ def get_environment() -> str:
     hostname = gethostname()
     if 'L' in hostname:
         return  'local'
-    elif 'VS' in hostname:
+    elif 'OCS-VS-HydroVDA' in hostname:
         return 'remote'
-    elif '.nos.noaa' in hostname:
-        return 'aws'
     else:
-        return 'remote'
+        return 'aws'
 
 
 def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode: bool=False) -> str:
@@ -65,16 +63,17 @@ def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_
             return parent_item
 
 
-def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFrame:
     """Obtain the intersected EcoRegion folders"""
 
     output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    ecoregion_layer = 'ECOREGIONS' if low_res else 'ECOREGIONS_50M'
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
     else:
         # get eco region from shapefile that matches drop down choices
@@ -85,18 +84,19 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     return list(selected_ecoregions['EcoRegion'].unique())
 
 
-def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
+def get_ecoregion_tiles(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFrame:
     """Obtain a subset of tiles based on selected eco regions"""
 
     output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
 
+    ecoregion_layer = 'ECOREGIONS' if low_res else 'ECOREGIONS_50M'
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), mask=drawn_layer_gdf)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
     else:
         # get eco region from shapefile that matches drop down choices
