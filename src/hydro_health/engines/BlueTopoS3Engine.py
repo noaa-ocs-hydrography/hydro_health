@@ -31,14 +31,14 @@ from hydro_health.engines.Engine import Engine, supersession, catzoc
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-def _process_tile(param_inputs: list[list]) -> None:
+def _process_tile(param_inputs: list) -> None:
     """
     Static function that handles processing of a single tile.
     Refactored for S3-to-S3 workflow using ephemeral storage.
     """
 
     # outputs folder available for logging
-    param_lookup, s3_output_bucket, tile_id, ecoregion_id, output_prefix, force_rerun = param_inputs
+    param_lookup, s3_output_bucket, tile_id, ecoregion_id, output_prefix = param_inputs
     
     print(f"[{tile_id}] Initiating processing for ecoregion {ecoregion_id}...")
 
@@ -48,55 +48,43 @@ def _process_tile(param_inputs: list[list]) -> None:
         engine = BlueTopoS3Engine(param_lookup)
 
         # Download the tile and determine what level of processing is required
-        tiff_file_path, run_mode = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, s3_output_bucket, output_prefix, force_rerun)
+        tiff_file_path, run_mode = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, s3_output_bucket, output_prefix)
         
         if run_mode == 'skip' or not tiff_file_path:
-            print(f"[{tile_id}] Processing skipped (files already exist).")
+            print(f"[{tile_id}] Processing skipped (all files already exist).")
             return
 
         print(f"[{tile_id}] Download complete. Resampling and reprojecting base tile...")
         # First, resample and reproject to 100m to serve as the base bounding box and grid
         engine.resample_and_reproject(tiff_file_path)
 
-        if run_mode == 'iss_ukc_only':
-            print(f"[{tile_id}] Processing ISS and UKC TIFFs only...")
-            
-            engine.create_catzoc_all(tiff_file_path)
-            engine.create_ukc_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
+        print(f"[{tile_id}] Creating survey end date TIFF...")
+        engine.create_survey_end_date_tiff(tiff_file_path)
 
-            print(f"[{tile_id}] Uploading specific tiles to S3...")
-            # Upload only the specific new files, avoiding overwriting base files to save time
-            engine.upload_specific_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id, output_prefix, ['_ISS_all.tiff', '_UKC.tiff'])
-            print(f"[{tile_id}] Processing successfully completed (ISS/UKC only).")
+        print(f"[{tile_id}] Creating Initial Survey Score (ISS) all...")
+        engine.create_catzoc_all(tiff_file_path)
+        
+        print(f"[{tile_id}] Tiling corresponding UKC mosaic...")
+        engine.create_ukc_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
 
-        elif run_mode == 'all':
-            print(f"[{tile_id}] Creating survey end date TIFF...")
-            engine.create_survey_end_date_tiff(tiff_file_path)
+        print(f"[{tile_id}] Extracting singlebands...")
+        mb_tiff_file = engine.rename_multiband(tiff_file_path)
+        engine.multiband_to_singleband(mb_tiff_file, band=1)
+        engine.multiband_to_singleband(mb_tiff_file, band=2)
+        mb_tiff_file.unlink() 
 
-            print(f"[{tile_id}] Creating Initial Survey Score (ISS) all...")
-            engine.create_catzoc_all(tiff_file_path)
-            
-            print(f"[{tile_id}] Tiling corresponding UKC mosaic...")
-            engine.create_ukc_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
+        print(f"[{tile_id}] Setting ground to nodata...")
+        engine.set_ground_to_nodata(tiff_file_path)
 
-            print(f"[{tile_id}] Extracting singlebands...")
-            mb_tiff_file = engine.rename_multiband(tiff_file_path)
-            engine.multiband_to_singleband(mb_tiff_file, band=1)
-            engine.multiband_to_singleband(mb_tiff_file, band=2)
-            mb_tiff_file.unlink() 
+        print(f"[{tile_id}] Creating slope...")
+        engine.create_slope(tiff_file_path)
 
-            print(f"[{tile_id}] Setting ground to nodata...")
-            engine.set_ground_to_nodata(tiff_file_path)
+        print(f"[{tile_id}] Finalizing COG format...")
+        engine.finalize_cog(tiff_file_path)      
 
-            print(f"[{tile_id}] Creating slope...")
-            engine.create_slope(tiff_file_path)
-
-            print(f"[{tile_id}] Finalizing COG format...")
-            engine.finalize_cog(tiff_file_path)      
-
-            print(f"[{tile_id}] Uploading all final tiles to S3...")
-            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id, output_prefix)
-            print(f"[{tile_id}] Processing successfully completed (All Tasks).")
+        print(f"[{tile_id}] Uploading all final tiles to S3...")
+        engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id, output_prefix)
+        print(f"[{tile_id}] Processing successfully completed (All Tasks).")
 
 
 class BlueTopoS3Engine(Engine):
@@ -108,6 +96,11 @@ class BlueTopoS3Engine(Engine):
         # Set target resolution and CRS
         self.target_resolution = 100.0
         self.target_crs = "EPSG:32617"
+
+    @property
+    def res_str(self) -> str:
+        """Dynamically generate the resolution string (e.g., '100m' or '20m')"""
+        return f"{int(self.target_resolution)}m" if self.target_resolution.is_integer() else f"{self.target_resolution}m"
 
     def resample_and_reproject(self, tiff_path: pathlib.Path) -> None:
         """Warp the downloaded raster to target resolution and CRS."""
@@ -140,9 +133,9 @@ class BlueTopoS3Engine(Engine):
         Extract bounds from the current BlueTopo tile and tile out the corresponding UKC mosaic from S3.
         """
         er_prefix = ecoregion_id if str(ecoregion_id).startswith("ER_") else f"ER_{ecoregion_id}"
-        ukc_filename = f"{er_prefix}_UKC_Mosaic_100m.tif"
+        ukc_filename = f"{er_prefix}_UKC_Mosaic_{self.res_str}.tif"
         
-        s3_key = f"low_res/{ukc_filename}"
+        s3_key = f"low_res/{self.res_str}/{ukc_filename}"
         if output_prefix and output_prefix.strip('/') != "low_res":
             s3_key = f"{output_prefix}/{s3_key}"
             
@@ -425,10 +418,10 @@ class BlueTopoS3Engine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, s3_output_bucket: str, output_prefix: str|bool, force_rerun: bool) -> tuple[pathlib.Path | bool, str]:
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, s3_output_bucket: str, output_prefix: str|bool) -> tuple[pathlib.Path | bool, str]:
         """
-        Modified to check S3 bucket to skip already processed tiles,
-        or strategically return a run mode to only process missing ISS/UKC files.
+        Check the S3 bucket to skip already processed tiles.
+        Only runs logic to check if ALL final output files exist.
         """
 
         nbs_bucket = self.get_bucket()
@@ -450,65 +443,34 @@ class BlueTopoS3Engine(Engine):
                     s3_key = f'{output_prefix}/{s3_key}'
                     
                 s3_path_obj = pathlib.Path(s3_key)
-                iss_s3_key = str(s3_path_obj.parent / f"{s3_path_obj.stem}_ISS_all.tiff").replace("\\", "/")
-                ukc_s3_key = str(s3_path_obj.parent / f"{s3_path_obj.stem}_UKC.tiff").replace("\\", "/")
-
-                base_valid = False
-                iss_exists = False
-                ukc_exists = False
                 
-                try:
-                    head_response = s3_client.head_object(Bucket=s3_output_bucket, Key=s3_key)
-                    
-                    s3_meta = head_response.get('Metadata', {})
-                    if s3_meta.get('resolution') == str(self.target_resolution) and s3_meta.get('crs') == self.target_crs:
-                        base_valid = True
-                    else:
-                        s3_uri = f"s3://{s3_output_bucket}/{s3_key}"
-                        try:
-                            with rasterio.Env(AWSSession(boto3.Session())):
-                                with rasterio.open(s3_uri) as src:
-                                    res_x, _ = src.res
-                                    if abs(res_x - self.target_resolution) < 1.0:
-                                        base_valid = True
-                        except Exception:
-                            pass 
-                except ClientError:
-                    pass
+                # Check for ALL the files that get created during a run
+                expected_keys = [
+                    s3_key, # Base processed tile
+                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_ISS_all.tiff").replace("\\", "/"),
+                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_UKC.tiff").replace("\\", "/"),
+                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_survey_end_date.tiff").replace("\\", "/"),
+                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_slope.tiff").replace("\\", "/"),
+                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_unc.tiff").replace("\\", "/")
+                ]
 
-                if base_valid:
+                all_files_exist = True
+                for key in expected_keys:
                     try:
-                        s3_client.head_object(Bucket=s3_output_bucket, Key=iss_s3_key)
-                        iss_exists = True
+                        s3_client.head_object(Bucket=s3_output_bucket, Key=key)
                     except ClientError:
-                        pass
-                    
-                    try:
-                        s3_client.head_object(Bucket=s3_output_bucket, Key=ukc_s3_key)
-                        ukc_exists = True
-                    except ClientError:
-                        pass
+                        all_files_exist = False
+                        break
 
-                if base_valid:
-                    if force_rerun:
-                        run_mode = 'iss_ukc_only'
-                        msg = f"Base tile {tile_id} exists. Force rerun active for ISS and UKC derivatives."
-                        print(msg)
-                        self.write_message(msg, output_folder)
-                    elif iss_exists and ukc_exists:
-                        run_mode = 'skip'
-                        msg = f"Skipping {tile_id} for ecoregion: {ecoregion_id} (All files exist in S3)"
-                        print(msg)
-                        self.write_message(msg, output_folder)
-                        return False, run_mode
-                    else:
-                        run_mode = 'iss_ukc_only'
-                        msg = f"Base tile {tile_id} exists, but missing ISS or UKC. Processing derivatives..."
-                        print(msg)
-                        self.write_message(msg, output_folder)
+                if all_files_exist:
+                    run_mode = 'skip'
+                    msg = f"Skipping {tile_id} for ecoregion: {ecoregion_id} (All final derived files already exist in S3)"
+                    print(msg)
+                    self.write_message(msg, output_folder)
+                    return False, run_mode
                 else:
                     run_mode = 'all'
-                    msg = f"Base tile {tile_id} is missing or invalid. Re-downloading and processing all files..."
+                    msg = f"Tile {tile_id} is missing files. Downloading and processing all..."
                     print(msg)
                     self.write_message(msg, output_folder)
 
@@ -629,6 +591,15 @@ class BlueTopoS3Engine(Engine):
             ((0.0, -40.0), 'isobath_0_40m')
         ]
         
+        # Check if layers already exist to skip recreation
+        existing_layers = [master_ds.GetLayerByIndex(i).GetName() for i in range(master_ds.GetLayerCount())]
+        expected_layers = [layer_name for _, layer_name in depth_bands]
+        
+        if all(layer in existing_layers for layer in expected_layers):
+            print(f"[All Regions] Isobath layers already exist in {master_gpkg_path}. Skipping creation.")
+            master_ds = None
+            return
+        
         # Ensure layers exist in the Master_Grids.gpkg as POLYGONS
         layers = {}
         for _, layer_name in depth_bands:
@@ -722,24 +693,48 @@ class BlueTopoS3Engine(Engine):
         layers.clear()
         master_ds = None
 
-    def create_and_upload_bathy_mosaic(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool) -> None:
+    def create_and_upload_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool) -> None:
         """
-        Creates a massive 100m mosaic from all base bathy tiles across all processed ecoregions,
-        masks it securely with the EcoRegions layer, saves locally to low_res, and uploads to S3.
+        Creates massive 100m mosaics from all base bathy tiles and derivatives across all processed ecoregions,
+        masks them securely with the EcoRegions layer, saves locally to low_res, and uploads to S3.
         """
         output_folder = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/outputs")
-        low_res_dir = output_folder / "low_res"
+        low_res_dir = output_folder / "low_res" / self.res_str
         low_res_dir.mkdir(parents=True, exist_ok=True)
         
         master_gpkg_path = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg")
         
-        mosaic_filename = "BlueTopo_Bathy_Mosaic_100m.tiff"
-        local_mosaic_path = low_res_dir / mosaic_filename
-        
-        print(f"[Mosaic] Gathering S3 links for 100m base tiles across {len(ecoregion_ids)} ecoregions...")
         s3_client = boto3.client('s3')
-        vsis3_paths = []
+
+        mosaics_config = {
+            "Bathy": {"regex": re.compile(r'\d+\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Bathy_Mosaic_{self.res_str}.tiff", "paths": []},
+            "ISS": {"regex": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_ISS_Mosaic_{self.res_str}.tiff", "paths": []},
+            "Survey_Date": {"regex": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Survey_Date_Mosaic_{self.res_str}.tiff", "paths": []},
+            "Slope": {"regex": re.compile(r'_slope\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Slope_Mosaic_{self.res_str}.tiff", "paths": []},
+            "UKC": {"regex": re.compile(r'_UKC\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_UKC_Mosaic_{self.res_str}.tiff", "paths": []},
+        }
+
+        # 1. Determine which mosaics actually need to be generated
+        mosaics_to_process = {}
+        for m_key, config in mosaics_config.items():
+            s3_key = f"low_res/{self.res_str}/{config['filename']}"
+            if output_prefix:
+                s3_key = f"{output_prefix}/{s3_key}"
+                
+            try:
+                s3_client.head_object(Bucket=s3_bucket, Key=s3_key)
+                print(f"[Mosaic] {m_key} mosaic already exists at s3://{s3_bucket}/{s3_key}. Skipping creation.")
+            except ClientError:
+                mosaics_to_process[m_key] = config
+                mosaics_to_process[m_key]['s3_key'] = s3_key
+
+        if not mosaics_to_process:
+            print("[Mosaic] All requested mosaics already exist in S3. Skipping processing entirely.")
+            return
+
+        print(f"[Mosaic] Gathering S3 links across {len(ecoregion_ids)} ecoregions for: {list(mosaics_to_process.keys())}")
         
+        # 2. Gather source file paths in a single efficient pass through S3 per ecoregion
         for ecoregion_id in ecoregion_ids:
             search_prefix = f"{ecoregion_id}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
             if output_prefix:
@@ -752,21 +747,12 @@ class BlueTopoS3Engine(Engine):
                 if 'Contents' in page:
                     for obj in page['Contents']:
                         key = obj['Key']
-                        # Strictly look for files ending with digits + .tiff (case insensitive)
-                        if re.search(r'\d+\.tiff$', key, re.IGNORECASE):
-                            vsis3_paths.append(f"/vsis3/{s3_bucket}/{key}")
+                        for m_key, config in mosaics_to_process.items():
+                            if config['regex'].search(key):
+                                config['paths'].append(f"/vsis3/{s3_bucket}/{key}")
+                                break  # Prevent checking other regexes once mapped
                             
-        if not vsis3_paths:
-            print("[Mosaic] No base tiles found. Skipping mosaic creation.")
-            return
-            
-        print(f"[Mosaic] Building VRT from {len(vsis3_paths)} base tiles...")
-        vrt_path = "/vsimem/bathy_mosaic.vrt"
-        gdal.BuildVRT(vrt_path, vsis3_paths)
-        
-        print(f"[Mosaic] Warping and masking massive mosaic utilizing EcoRegions layer...")
-        
-        # Dynamically identify the exact layer name to prevent "Failed to identify source layer" errors
+        # 3. Locate the EcoRegions layer once for masking
         cutline_layer_name = None
         ds = ogr.Open(str(master_gpkg_path))
         if ds is not None:
@@ -785,8 +771,7 @@ class BlueTopoS3Engine(Engine):
         else:
             print(f"[Mosaic] WARNING: Could not open {master_gpkg_path} to check layers. Proceeding without mask...")
 
-        # Configure warp options dynamically
-        warp_kwargs = {
+        warp_kwargs_base = {
             "format": "GTiff",
             "xRes": self.target_resolution,
             "yRes": self.target_resolution,
@@ -797,49 +782,58 @@ class BlueTopoS3Engine(Engine):
         }
         
         if cutline_layer_name:
-            print(f"[Mosaic] Applying vector mask using layer: '{cutline_layer_name}'")
-            warp_kwargs["cutlineDSName"] = str(master_gpkg_path)
-            warp_kwargs["cutlineLayer"] = cutline_layer_name
-            warp_kwargs["cropToCutline"] = True
-            
-        warp_options = gdal.WarpOptions(**warp_kwargs)
-        
-        gdal.Warp(str(local_mosaic_path), vrt_path, options=warp_options)
-        
-        gdal.Unlink(vrt_path)
-        
-        print(f"[Mosaic] Generating robust overviews for fast performance...")
-        ds = gdal.Open(str(local_mosaic_path), gdal.GA_Update)
-        if ds is not None:
-            ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
-            ds = None
-            
-        s3_key = f"low_res/{mosaic_filename}"
-        if output_prefix:
-            s3_key = f"{output_prefix}/{s3_key}"
-            
-        print(f"[Mosaic] Uploading completely masked mosaic to s3://{s3_bucket}/{s3_key}...")
-        s3_client.upload_file(
-            str(local_mosaic_path), 
-            s3_bucket, 
-            s3_key,
-            ExtraArgs={
-                'Metadata': {
-                    'resolution': str(self.target_resolution),
-                    'crs': self.target_crs
-                }
-            }
-        )
-        print("[Mosaic] Bathymetry mosaic creation and upload perfectly complete.")
+            warp_kwargs_base["cutlineDSName"] = str(master_gpkg_path)
+            warp_kwargs_base["cutlineLayer"] = cutline_layer_name
+            warp_kwargs_base["cropToCutline"] = True
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool=False, force_rerun: bool=True, process_tiles: bool=False) -> None:
+        # 4. Generate & Upload each required mosaic dynamically
+        for m_key, config in mosaics_to_process.items():
+            if not config['paths']:
+                print(f"[Mosaic] No base tiles found for {m_key}. Skipping.")
+                continue
+
+            local_mosaic_path = low_res_dir / config['filename']
+            s3_key = config['s3_key']
+            
+            print(f"[Mosaic] Building VRT from {len(config['paths'])} base tiles for {m_key}...")
+            vrt_path = f"/vsimem/{m_key}_mosaic.vrt"
+            gdal.BuildVRT(vrt_path, config['paths'])
+            
+            print(f"[Mosaic] Warping and masking {m_key} mosaic utilizing EcoRegions layer...")
+            warp_options = gdal.WarpOptions(**warp_kwargs_base)
+            gdal.Warp(str(local_mosaic_path), vrt_path, options=warp_options)
+            
+            gdal.Unlink(vrt_path)
+            
+            print(f"[Mosaic] Generating robust overviews for fast performance...")
+            ds = gdal.Open(str(local_mosaic_path), gdal.GA_Update)
+            if ds is not None:
+                ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
+                ds = None
+                
+            print(f"[Mosaic] Uploading completely masked {m_key} mosaic to s3://{s3_bucket}/{s3_key}...")
+            s3_client.upload_file(
+                str(local_mosaic_path), 
+                s3_bucket, 
+                s3_key,
+                ExtraArgs={
+                    'Metadata': {
+                        'resolution': str(self.target_resolution),
+                        'crs': self.target_crs
+                    }
+                }
+            )
+            print(f"[Mosaic] {m_key} mosaic creation and upload perfectly complete.")
+
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool=False, process_tiles: bool=False) -> None:
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         all_ecoregions = self.param_lookup['eco_regions'].value
         
         if process_tiles:
             print('Downloading BlueTopo Datasets')
             self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
-            param_inputs = [[self.param_lookup, output_bucket, row[0], row[1], output_prefix, force_rerun] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)] 
+            # Param list cleaned up and simplified
+            param_inputs = [[self.param_lookup, output_bucket, row[0], row[1], output_prefix] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)] 
             
             print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
             future_tiles = self.client.map(_process_tile, param_inputs)
@@ -861,8 +855,8 @@ class BlueTopoS3Engine(Engine):
         # Generate the unified isobaths from all finished tiles across all ecoregions
         self.create_combined_isobaths(all_ecoregions, output_bucket, output_prefix)
 
-        # Mosaic all 100m base tiles, apply masks, save locally and push to S3
-        self.create_and_upload_bathy_mosaic(all_ecoregions, output_bucket, output_prefix)
+        # Mosaic all 100m base tiles and derivatives, apply masks, save locally and push to S3
+        self.create_and_upload_mosaics(all_ecoregions, output_bucket, output_prefix)
 
         tiles = list(tile_gdf['tile'])
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}
@@ -899,25 +893,3 @@ class BlueTopoS3Engine(Engine):
             
             self.write_message(f'Uploading {file} to s3://{bucket_name}/{s3_path_formatted}', self.param_lookup['output_directory'].valueAsText)
             s3_client.upload_file(str(file), bucket_name, f'{str(s3_path_formatted)}', ExtraArgs=s3_metadata_args)
-            
-    def upload_specific_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str, output_prefix: str|bool, suffixes: list[str]) -> None:
-        """Upload only specific files to S3 based on suffixes"""
-        s3_client = boto3.client('s3')
-        
-        s3_metadata_args = {
-            'Metadata': {
-                'resolution': str(self.target_resolution),
-                'crs': self.target_crs
-            }
-        }
-        
-        for file in tile_folder.glob('*'):
-            if any(str(file).endswith(suffix) for suffix in suffixes):
-                ecoregion_index = file.parts.index(ecoregion_id)
-                s3_subpath = pathlib.Path(*file.parts[ecoregion_index:])
-                s3_path = s3_subpath if not output_prefix else f'{output_prefix}/{s3_subpath}'
-                
-                s3_path_formatted = str(s3_path).replace("\\", "/") 
-                
-                self.write_message(f'Uploading specifically {file.name} to s3://{bucket_name}/{s3_path_formatted}', self.param_lookup['output_directory'].valueAsText)
-                s3_client.upload_file(str(file), bucket_name, f'{str(s3_path_formatted)}', ExtraArgs=s3_metadata_args)

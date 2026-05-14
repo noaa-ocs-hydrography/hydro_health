@@ -882,4 +882,4 @@ class CreateHurricaneLayerEngine(Engine):
                 with open(local_raster, 'rb') as f_in, path_obj.open('wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
             else:
-                shutil.copy(local_raster, path_obj)
+                shutil.copy(local_raster, path_obj) 
