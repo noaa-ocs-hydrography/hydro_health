@@ -607,6 +607,12 @@ class CreateHurricaneLayerEngine(Engine):
             
             output_path = output_folder / output_name
 
+            # ----- NEW CHECK ADDED HERE -----
+            if not self.overwrite and output_path.exists():
+                print(f"Skipping cumulative raster for year {year_folder} ({value}) - already exists at {output_path}.")
+                continue
+            # --------------------------------
+
             # Default empty rasters
             cumulative_count = np.zeros((mask_height, mask_width), dtype=np.float32)
             cumulative_windspeed = np.zeros((mask_height, mask_width), dtype=np.float32)
@@ -882,4 +888,4 @@ class CreateHurricaneLayerEngine(Engine):
                 with open(local_raster, 'rb') as f_in, path_obj.open('wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
             else:
-                shutil.copy(local_raster, path_obj) 
+                shutil.copy(local_raster, path_obj)

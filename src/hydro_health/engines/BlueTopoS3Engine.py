@@ -47,44 +47,60 @@ def _process_tile(param_inputs: list) -> None:
 
         engine = BlueTopoS3Engine(param_lookup)
 
-        # Download the tile and determine what level of processing is required
-        tiff_file_path, run_mode = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, s3_output_bucket, output_prefix)
+        # Download the tile and determine exactly which outputs are missing
+        tiff_file_path, missing_files = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, s3_output_bucket, output_prefix)
         
-        if run_mode == 'skip' or not tiff_file_path:
+        if not missing_files or not tiff_file_path:
             print(f"[{tile_id}] Processing skipped (all files already exist).")
             return
 
-        print(f"[{tile_id}] Download complete. Resampling and reprojecting base tile...")
-        # First, resample and reproject to 100m to serve as the base bounding box and grid
+        print(f"[{tile_id}] Missing components: {missing_files}. Resampling and reprojecting base tile...")
+        # First, resample and reproject to target resolution to serve as the base bounding box and grid
         engine.resample_and_reproject(tiff_file_path)
 
-        print(f"[{tile_id}] Creating survey end date TIFF...")
-        engine.create_survey_end_date_tiff(tiff_file_path)
+        if 'survey_end_date' in missing_files:
+            print(f"[{tile_id}] Creating survey end date TIFF...")
+            engine.create_survey_end_date_tiff(tiff_file_path)
 
-        print(f"[{tile_id}] Creating Initial Survey Score (ISS) all...")
-        engine.create_catzoc_all(tiff_file_path)
-        
-        print(f"[{tile_id}] Tiling corresponding UKC mosaic...")
-        engine.create_ukc_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
+        if 'ISS' in missing_files:
+            print(f"[{tile_id}] Creating Initial Survey Score (ISS) all...")
+            engine.create_catzoc_all(tiff_file_path)
+            
+        if 'UKC' in missing_files:
+            print(f"[{tile_id}] Tiling corresponding UKC mosaic...")
+            engine.create_ukc_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
 
-        print(f"[{tile_id}] Extracting singlebands...")
-        mb_tiff_file = engine.rename_multiband(tiff_file_path)
-        engine.multiband_to_singleband(mb_tiff_file, band=1)
-        engine.multiband_to_singleband(mb_tiff_file, band=2)
-        mb_tiff_file.unlink() 
+        if 'hurricane' in missing_files:
+            print(f"[{tile_id}] Creating cumulative hurricane count tile...")
+            engine.create_hurricane_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
 
-        print(f"[{tile_id}] Setting ground to nodata...")
-        engine.set_ground_to_nodata(tiff_file_path)
+        # Base, uncertainty, and slope require singleband conversion from the base tile
+        if any(k in missing_files for k in ['base', 'unc', 'slope']):
+            print(f"[{tile_id}] Extracting singlebands...")
+            mb_tiff_file = engine.rename_multiband(tiff_file_path)
+            
+            # Base (band 1) is required to be locally processed if base or slope is missing
+            engine.multiband_to_singleband(mb_tiff_file, band=1)
+            
+            if 'unc' in missing_files:
+                engine.multiband_to_singleband(mb_tiff_file, band=2)
+                
+            mb_tiff_file.unlink() 
 
-        print(f"[{tile_id}] Creating slope...")
-        engine.create_slope(tiff_file_path)
+            print(f"[{tile_id}] Setting ground to nodata...")
+            engine.set_ground_to_nodata(tiff_file_path)
 
-        print(f"[{tile_id}] Finalizing COG format...")
-        engine.finalize_cog(tiff_file_path)      
+            if 'slope' in missing_files:
+                print(f"[{tile_id}] Creating slope...")
+                engine.create_slope(tiff_file_path)
 
-        print(f"[{tile_id}] Uploading all final tiles to S3...")
-        engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], s3_output_bucket, ecoregion_id, output_prefix)
-        print(f"[{tile_id}] Processing successfully completed (All Tasks).")
+            if 'base' in missing_files:
+                print(f"[{tile_id}] Finalizing COG format...")
+                engine.finalize_cog(tiff_file_path)      
+
+        print(f"[{tile_id}] Uploading missing tiles to S3...")
+        engine.upload_missing_tiles_to_s3(tiff_file_path.parents[0], tiff_file_path.stem, s3_output_bucket, ecoregion_id, output_prefix, missing_files)
+        print(f"[{tile_id}] Processing successfully completed.")
 
 
 class BlueTopoS3Engine(Engine):
@@ -94,7 +110,7 @@ class BlueTopoS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         # Set target resolution and CRS
-        self.target_resolution = 100.0
+        self.target_resolution = 20.0
         self.target_crs = "EPSG:32617"
 
     @property
@@ -174,6 +190,129 @@ class BlueTopoS3Engine(Engine):
             dstNodata=-9999,
             creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
         )
+
+    def create_hurricane_tile(self, tiff_file_path: pathlib.Path, ecoregion_id: str, s3_bucket: str, output_prefix: str|bool) -> None:
+        """
+        Generate a hurricane count raster by evaluating the survey year and 
+        accumulating the corresponding yearly hurricane counts for each cell.
+        """
+        stem = tiff_file_path.stem
+        hurricane_tile_path = tiff_file_path.parents[0] / f'{stem}_hurricane.tiff'
+        
+        # Check if the survey end date raster was generated locally this run, or if we need to stream it from S3
+        local_survey_path = tiff_file_path.parents[0] / f'{stem}_survey_end_date.tiff'
+        if local_survey_path.exists():
+            survey_ds_path = str(local_survey_path)
+        else:
+            ecoregion_index = tiff_file_path.parts.index(ecoregion_id)
+            s3_subpath = pathlib.Path(*tiff_file_path.parts[ecoregion_index:])
+            formatted_subpath = str(s3_subpath).replace('\\', '/')
+            s3_key = f"low_res/{self.res_str}/{formatted_subpath}"
+            if output_prefix and output_prefix.strip('/') != "low_res":
+                s3_key = f"{output_prefix}/{s3_key}"
+            s3_path_obj = pathlib.Path(s3_key)
+            survey_s3_key = str(s3_path_obj.parent / f"{stem}_survey_end_date.tiff").replace("\\", "/")
+            survey_ds_path = f"/vsis3/{s3_bucket}/{survey_s3_key}"
+
+        try:
+            with rasterio.open(survey_ds_path) as src:
+                survey_years = src.read(1)
+                transform = src.transform
+                crs = src.crs
+                # Explicitly cast nodata to float, defaulting to -9999.0
+                nodata = float(src.nodata) if src.nodata is not None else -9999.0
+                width = src.width
+                height = src.height
+        except rasterio.errors.RasterioIOError:
+            print(f"[{stem}] Error: Survey end date raster required for Hurricane calculation could not be loaded from {survey_ds_path}")
+            return
+
+        minx = transform.c
+        maxy = transform.f
+        maxx = minx + transform.a * width
+        miny = maxy + transform.e * height
+
+        # Create a rigorous valid mask specifically ignoring 0, nodata, or nan
+        valid_mask = (survey_years != nodata) & (survey_years > 0) & ~np.isnan(survey_years)
+        
+        unique_years = np.unique(survey_years[valid_mask])
+        valid_years = [y for y in unique_years]
+
+        hurricane_path_prefix = get_config_item('HURRICANE', 'COUNT_RASTER_PATH')
+        
+        # Initialize everything to explicit nodata. 
+        result_array = np.full(survey_years.shape, nodata, dtype=np.float32)
+
+        if not valid_years:
+            with rasterio.open(hurricane_tile_path, "w", driver="GTiff", count=1, width=width, height=height, dtype=rasterio.float32, compress="lzw", tiled=True, blockxsize=512, blockysize=512, crs=crs, transform=transform, nodata=nodata) as dst:
+                dst.write(result_array, 1)
+            return
+
+        def get_year_count_array(target_year):
+            # Clamp year to valid data range
+            target_year = max(1851, min(2023, int(target_year)))
+            s3_uri = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tif"
+            
+            # Use MEM driver to warp just the exact bounding box needed directly from S3
+            warp_options = gdal.WarpOptions(
+                format="MEM",
+                outputBounds=(minx, miny, maxx, maxy),
+                xRes=self.target_resolution,
+                yRes=self.target_resolution,
+                dstSRS=self.target_crs,
+                resampleAlg=gdal.GRA_NearestNeighbour, # Counts should not be interpolated
+                dstNodata=-9999
+            )
+            gdal.PushErrorHandler('CPLQuietErrorHandler')
+            mem_ds = gdal.Warp('', s3_uri, options=warp_options)
+            gdal.PopErrorHandler()
+            
+            if mem_ds is None:
+                print(f"[{stem}] Warning: Could not load hurricane raster for year {target_year} at {s3_uri}. Returning zeros.")
+                return np.zeros((height, width), dtype=np.float32)
+            
+            arr = mem_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+            arr[arr == -9999] = 0.0 
+            return arr
+
+        # Start hurricane count at 0.0 ONLY for cells with a valid survey year
+        result_array[valid_mask] = 0.0
+
+        min_survey_year = max(1851, int(min(valid_years)))
+        max_hurricane_year = 2023
+
+        print(f"[{stem}] Aggregating yearly hurricane counts from {min_survey_year} to {max_hurricane_year}...")
+        for target_year in range(min_survey_year, max_hurricane_year + 1):
+            year_arr = get_year_count_array(target_year)
+            
+            # Add this year's count to any valid pixel whose survey year is <= target_year
+            # (i.e. the hurricane occurred during or after the survey year)
+            add_mask = valid_mask & (survey_years <= target_year)
+            result_array[add_mask] += year_arr[add_mask]
+
+        # FINAL SAFETY NET: forcefully reset any invalid cells (like survey_year = 0) back to nodata
+        result_array[~valid_mask] = nodata
+
+        with rasterio.open(
+            hurricane_tile_path,
+            "w",
+            driver="GTiff",
+            count=1,
+            width=width,
+            height=height,
+            dtype=rasterio.float32,
+            compress="lzw",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            crs=crs,
+            transform=transform,
+            nodata=nodata,
+        ) as dst:
+            dst.write(result_array, 1)
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path) -> None:
         """
@@ -418,16 +557,15 @@ class BlueTopoS3Engine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, s3_output_bucket: str, output_prefix: str|bool) -> tuple[pathlib.Path | bool, str]:
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, s3_output_bucket: str, output_prefix: str|bool) -> tuple[pathlib.Path | bool, list]:
         """
-        Check the S3 bucket to skip already processed tiles.
-        Only runs logic to check if ALL final output files exist.
+        Check the S3 bucket to determine exactly which files are missing to intelligently process the tile.
         """
 
         nbs_bucket = self.get_bucket()
         output_tile_path = False
         output_folder = self.param_lookup['output_directory'].valueAsText
-        run_mode = 'all'
+        missing_files = []
         
         s3_client = boto3.client('s3')
 
@@ -438,39 +576,39 @@ class BlueTopoS3Engine(Engine):
                 ecoregion_index = current_file.parts.index(ecoregion_id)
                 s3_subpath = pathlib.Path(*current_file.parts[ecoregion_index:])
                 
-                s3_key = str(s3_subpath).replace("\\", "/") 
-                if output_prefix:
+                # Push the search path inside low_res/{resolution}
+                formatted_subpath = str(s3_subpath).replace('\\', '/')
+                s3_key = f"low_res/{self.res_str}/{formatted_subpath}" 
+                if output_prefix and output_prefix.strip('/') != "low_res":
                     s3_key = f'{output_prefix}/{s3_key}'
                     
                 s3_path_obj = pathlib.Path(s3_key)
                 
-                # Check for ALL the files that get created during a run
-                expected_keys = [
-                    s3_key, # Base processed tile
-                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_ISS_all.tiff").replace("\\", "/"),
-                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_UKC.tiff").replace("\\", "/"),
-                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_survey_end_date.tiff").replace("\\", "/"),
-                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_slope.tiff").replace("\\", "/"),
-                    str(s3_path_obj.parent / f"{s3_path_obj.stem}_unc.tiff").replace("\\", "/")
-                ]
+                # Assign identifiers to each required target component
+                expected_keys = {
+                    'base': s3_key, 
+                    'ISS': str(s3_path_obj.parent / f"{s3_path_obj.stem}_ISS_all.tiff").replace("\\", "/"),
+                    'UKC': str(s3_path_obj.parent / f"{s3_path_obj.stem}_UKC.tiff").replace("\\", "/"),
+                    'hurricane': str(s3_path_obj.parent / f"{s3_path_obj.stem}_hurricane.tiff").replace("\\", "/"),
+                    'survey_end_date': str(s3_path_obj.parent / f"{s3_path_obj.stem}_survey_end_date.tiff").replace("\\", "/"),
+                    'slope': str(s3_path_obj.parent / f"{s3_path_obj.stem}_slope.tiff").replace("\\", "/"),
+                    'unc': str(s3_path_obj.parent / f"{s3_path_obj.stem}_unc.tiff").replace("\\", "/")
+                }
 
-                all_files_exist = True
-                for key in expected_keys:
+                # Evaluate precisely which files need generation
+                for file_id, key in expected_keys.items():
                     try:
                         s3_client.head_object(Bucket=s3_output_bucket, Key=key)
                     except ClientError:
-                        all_files_exist = False
-                        break
+                        missing_files.append(file_id)
 
-                if all_files_exist:
-                    run_mode = 'skip'
+                if not missing_files:
                     msg = f"Skipping {tile_id} for ecoregion: {ecoregion_id} (All final derived files already exist in S3)"
                     print(msg)
                     self.write_message(msg, output_folder)
-                    return False, run_mode
+                    return False, missing_files
                 else:
-                    run_mode = 'all'
-                    msg = f"Tile {tile_id} is missing files. Downloading and processing all..."
+                    msg = f"Tile {tile_id} is missing layers: {missing_files}. Downloading to fulfill targets..."
                     print(msg)
                     self.write_message(msg, output_folder)
 
@@ -486,7 +624,7 @@ class BlueTopoS3Engine(Engine):
             else:
                 self.write_message(f'Local file already exists, skipping download: {current_file.name}', output_folder)
 
-        return output_tile_path, run_mode
+        return output_tile_path, missing_files
     
     def finalize_cog(self, tiff_path: pathlib.Path) -> None:
         """The final pass to ensure perfect COG layout and overviews."""
@@ -563,6 +701,10 @@ class BlueTopoS3Engine(Engine):
         Uses an efficient tile-by-tile memory strategy to prevent VRT rendering dropouts,
         S3 connection thrashing, and massive disk usage.
         """
+        if self.target_resolution == 20.0:
+            print(f"[All Regions] Target resolution ({self.res_str}) is 20m. Skipping isobath generation.")
+            return
+
         master_gpkg_path = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg")
         
         print(f"[All Regions] Generating combined polygon isobaths and saving to local {master_gpkg_path}...")
@@ -617,8 +759,8 @@ class BlueTopoS3Engine(Engine):
         # Process one ecoregion at a time
         for ecoregion_id in ecoregion_ids:
             print(f"[{ecoregion_id}] Gathering S3 links...")
-            search_prefix = f"{ecoregion_id}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
-            if output_prefix:
+            search_prefix = f"low_res/{self.res_str}/{ecoregion_id}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+            if output_prefix and output_prefix.strip('/') != "low_res":
                 search_prefix = f"{output_prefix}/{search_prefix}"
                 
             paginator = s3_client.get_paginator('list_objects_v2')
@@ -695,14 +837,19 @@ class BlueTopoS3Engine(Engine):
 
     def create_and_upload_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool) -> None:
         """
-        Creates massive 100m mosaics from all base bathy tiles and derivatives across all processed ecoregions,
+        Creates massive mosaics from all base bathy tiles and derivatives across all processed ecoregions,
         masks them securely with the EcoRegions layer, saves locally to low_res, and uploads to S3.
         """
+        if self.target_resolution < 50.0:
+            print(f"[Mosaic] Target resolution ({self.res_str}) is under 50m. Skipping massive mosaic generation to prevent extreme file sizes.")
+            return
+
         output_folder = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/outputs")
         low_res_dir = output_folder / "low_res" / self.res_str
         low_res_dir.mkdir(parents=True, exist_ok=True)
         
-        master_gpkg_path = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg")
+        inputs_folder = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs")
+        master_gpkg_path = inputs_folder / "Master_Grids.gpkg"
         
         s3_client = boto3.client('s3')
 
@@ -710,6 +857,7 @@ class BlueTopoS3Engine(Engine):
             "Bathy": {"regex": re.compile(r'\d+\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Bathy_Mosaic_{self.res_str}.tiff", "paths": []},
             "ISS": {"regex": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_ISS_Mosaic_{self.res_str}.tiff", "paths": []},
             "Survey_Date": {"regex": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Survey_Date_Mosaic_{self.res_str}.tiff", "paths": []},
+            "Hurricane": {"regex": re.compile(r'_hurricane\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Hurricane_Mosaic_{self.res_str}.tiff", "paths": []},
             "Slope": {"regex": re.compile(r'_slope\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Slope_Mosaic_{self.res_str}.tiff", "paths": []},
             "UKC": {"regex": re.compile(r'_UKC\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_UKC_Mosaic_{self.res_str}.tiff", "paths": []},
         }
@@ -718,7 +866,7 @@ class BlueTopoS3Engine(Engine):
         mosaics_to_process = {}
         for m_key, config in mosaics_config.items():
             s3_key = f"low_res/{self.res_str}/{config['filename']}"
-            if output_prefix:
+            if output_prefix and output_prefix.strip('/') != "low_res":
                 s3_key = f"{output_prefix}/{s3_key}"
                 
             try:
@@ -736,8 +884,8 @@ class BlueTopoS3Engine(Engine):
         
         # 2. Gather source file paths in a single efficient pass through S3 per ecoregion
         for ecoregion_id in ecoregion_ids:
-            search_prefix = f"{ecoregion_id}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
-            if output_prefix:
+            search_prefix = f"low_res/{self.res_str}/{ecoregion_id}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+            if output_prefix and output_prefix.strip('/') != "low_res":
                 search_prefix = f"{output_prefix}/{search_prefix}"
                 
             paginator = s3_client.get_paginator('list_objects_v2')
@@ -825,37 +973,45 @@ class BlueTopoS3Engine(Engine):
             )
             print(f"[Mosaic] {m_key} mosaic creation and upload perfectly complete.")
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool=False, process_tiles: bool=False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool=False) -> None:
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         all_ecoregions = self.param_lookup['eco_regions'].value
         
-        if process_tiles:
-            print('Downloading BlueTopo Datasets')
-            self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
-            # Param list cleaned up and simplified
-            param_inputs = [[self.param_lookup, output_bucket, row[0], row[1], output_prefix] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)] 
+        print('Checking and processing BlueTopo Datasets...')
+        self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
+        
+        param_inputs = []
+        for _, row in tile_gdf.iterrows():
+            if not isinstance(row[1], str):
+                continue
+            tile_id = str(row[0])
             
-            print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
-            future_tiles = self.client.map(_process_tile, param_inputs)
-            
-            print("Waiting for all Dask workers to complete...")
-            tile_results = self.client.gather(future_tiles)
-            print("All Dask workers finished successfully.")
-            
-            self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
-            self.close_dask()
-        else:
-            print("Skipping individual tile processing (process_tiles=False).")
+            # For 20m resolution, restrict processing to Band 4 tiles exclusively (BH4 followed by a letter)
+            if self.target_resolution == 20.0 and not re.match(r'^BH4[A-Za-z]', tile_id):
+                continue
+                
+            param_inputs.append([self.param_lookup, output_bucket, tile_id, row[1], output_prefix])
+        
+        print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
+        future_tiles = self.client.map(_process_tile, param_inputs)
+        
+        print("Waiting for all Dask workers to complete...")
+        tile_results = self.client.gather(future_tiles)
+        print("All Dask workers finished successfully.")
+        
+        self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
+        self.close_dask()
         
         for ecoregion in all_ecoregions:
-            s3_path = f"{output_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo" if output_prefix else f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
-            if process_tiles:
-                self.write_run_manifest(s3_path)
+            s3_path = f"low_res/{self.res_str}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+            if output_prefix and output_prefix.strip('/') != "low_res":
+                s3_path = f"{output_prefix}/{s3_path}"
+            self.write_run_manifest(s3_path)
         
         # Generate the unified isobaths from all finished tiles across all ecoregions
         self.create_combined_isobaths(all_ecoregions, output_bucket, output_prefix)
 
-        # Mosaic all 100m base tiles and derivatives, apply masks, save locally and push to S3
+        # Mosaic all base tiles and derivatives, apply masks, save locally and push to S3
         self.create_and_upload_mosaics(all_ecoregions, output_bucket, output_prefix)
 
         tiles = list(tile_gdf['tile'])
@@ -872,8 +1028,8 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  
         raster_ds = None
 
-    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, bucket_name: str, ecoregion_id: str, output_prefix: str|bool) -> None:
-        """Upload all tiff and gpkg files to s3 for current tile with Resolution metadata"""
+    def upload_missing_tiles_to_s3(self, tile_folder: pathlib.Path, stem: str, bucket_name: str, ecoregion_id: str, output_prefix: str|bool, missing_files: list) -> None:
+        """Upload strictly the files marked as missing to minimize S3 overhead"""
         s3_client = boto3.client('s3')
         
         s3_metadata_args = {
@@ -883,13 +1039,32 @@ class BlueTopoS3Engine(Engine):
             }
         }
         
-        # This will automatically pick up the newly generated .gpkg file!
-        for file in tile_folder.glob('*'):
-            ecoregion_index = file.parts.index(ecoregion_id)
-            s3_subpath = pathlib.Path(*file.parts[ecoregion_index:])
-            s3_path = s3_subpath if not output_prefix else f'{output_prefix}/{s3_subpath}'
-            
-            s3_path_formatted = str(s3_path).replace("\\", "/")
-            
-            self.write_message(f'Uploading {file} to s3://{bucket_name}/{s3_path_formatted}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(file), bucket_name, f'{str(s3_path_formatted)}', ExtraArgs=s3_metadata_args)
+        # Map our logical component names to the exact file structures we generate
+        file_map = {
+            'base': f"{stem}.tiff",
+            'ISS': f"{stem}_ISS_all.tiff",
+            'UKC': f"{stem}_UKC.tiff",
+            'hurricane': f"{stem}_hurricane.tiff",
+            'survey_end_date': f"{stem}_survey_end_date.tiff",
+            'slope': f"{stem}_slope.tiff",
+            'unc': f"{stem}_unc.tiff"
+        }
+        
+        for mf in missing_files:
+            file_name = file_map.get(mf)
+            if not file_name:
+                continue
+                
+            local_file = tile_folder / file_name
+            if local_file.exists():
+                # Reconstruct the exact S3 prefix we need based on the dynamic resolution string
+                ecoregion_index = local_file.parts.index(ecoregion_id)
+                s3_subpath = pathlib.Path(*local_file.parts[ecoregion_index:])
+                
+                formatted_subpath = str(s3_subpath).replace('\\', '/')
+                s3_path_formatted = f"low_res/{self.res_str}/{formatted_subpath}"
+                if output_prefix and output_prefix.strip('/') != "low_res":
+                    s3_path_formatted = f"{output_prefix}/{s3_path_formatted}"
+                
+                self.write_message(f'Uploading {local_file.name} to s3://{bucket_name}/{s3_path_formatted}', self.param_lookup['output_directory'].valueAsText)
+                s3_client.upload_file(str(local_file), bucket_name, s3_path_formatted, ExtraArgs=s3_metadata_args)
