@@ -30,10 +30,8 @@ def get_environment() -> str:
         return  'local'
     elif 'VS' in hostname:
         return 'remote'
-    elif '.nos.noaa' in hostname:
-        return 'aws'
     else:
-        return 'remote'
+        return 'aws'
 
 
 def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode: bool=False) -> str:

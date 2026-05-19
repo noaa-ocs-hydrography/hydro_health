@@ -1,18 +1,24 @@
+import sys
 import os
 import pathlib
 import tempfile
 import boto3
+import shutil
 import numpy as np
 import geopandas as gpd
 import rasterio
 from rasterio import features
 from rasterio.transform import from_bounds
 
+HH_MODEL = pathlib.Path(__file__).parents[2]
+sys.path.append(str(HH_MODEL))
+
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_environment
 
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 def _rasterize_tile_worker(intersected_tiles: gpd.GeoDataFrame, bounds: list[float], crs: str, resolution: int, output_path: pathlib.Path) -> bool:
@@ -103,7 +109,6 @@ class ShoreTileEngine(Engine):
 
         eco_geom = gpd.GeoDataFrame([ecoregion_row], crs=bluetopo_tiles.crs)
         
-        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
         s3_client = boto3.client('s3', region_name='us-east-2')
 
@@ -132,7 +137,11 @@ class ShoreTileEngine(Engine):
                 )
                 
                 s3_key_tif = f"{ecoregion_id}/{mask_sub}/nearshore_mask.tif"
-                s3_client.upload_file(str(local_tif_path), bucket, s3_key_tif)
+                if self.param_lookup['env'] == 'aws':
+                    s3_client.upload_file(str(local_tif_path), get_config_item('SHARED', 'OUTPUT_BUCKET'), s3_key_tif)
+                else:
+                    os.makedirs(str(OUTPUTS / f"{ecoregion_id}/{mask_sub}"), exist_ok=True)
+                    shutil.copy(str(local_tif_path), str(OUTPUTS / s3_key_tif))
             else:
                 self.write_message(f"  No nearshore tiles for EcoRegion {ecoregion_id}", outputs)
                 
@@ -152,7 +161,11 @@ class ShoreTileEngine(Engine):
                 )
                 
                 s3_key_tif = f"{ecoregion_id}/{mask_sub}/offshore_mask.tif"
-                s3_client.upload_file(str(local_tif_path), bucket, s3_key_tif)
+                if self.param_lookup['env'] == 'aws':
+                    s3_client.upload_file(str(local_tif_path), get_config_item('SHARED', 'OUTPUT_BUCKET'), s3_key_tif)
+                else:
+                    os.makedirs(str(OUTPUTS / f"{ecoregion_id}/{mask_sub}"), exist_ok=True)
+                    shutil.copy(str(local_tif_path), str(OUTPUTS / s3_key_tif))
             else:
                 self.write_message(f"  No offshore tiles for EcoRegion {ecoregion_id}", outputs)
             
@@ -173,3 +186,8 @@ class ShoreTileEngine(Engine):
             self.write_message(result_log, outputs)
             
         self.write_message("Nearshore and Offshore masks finished", outputs)
+
+
+if __name__ == "__main__":
+    engine = ShoreTileS3Engine({'env': get_environment()})
+    engine.run(OUTPUTS)
