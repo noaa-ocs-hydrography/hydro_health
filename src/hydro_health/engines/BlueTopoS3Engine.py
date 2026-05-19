@@ -696,7 +696,7 @@ class BlueTopoS3Engine(Engine):
     def create_combined_isobaths(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool) -> None:
         """
         Creates solid polygon isobaths for specified depth bands (0-20m and 0-40m)
-        and appends them directly to the local Master_Grids.gpkg.
+        and appends them directly to the local isobath_layers.gpkg.
         
         Uses an efficient tile-by-tile memory strategy to prevent VRT rendering dropouts,
         S3 connection thrashing, and massive disk usage.
@@ -705,9 +705,10 @@ class BlueTopoS3Engine(Engine):
             print(f"[All Regions] Target resolution ({self.res_str}) is 20m. Skipping isobath generation.")
             return
 
-        master_gpkg_path = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg")
+        # Changed to save to a separate newly created GPKG
+        isobath_gpkg_path = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/isobath_layers.gpkg")
         
-        print(f"[All Regions] Generating combined polygon isobaths and saving to local {master_gpkg_path}...")
+        print(f"[All Regions] Generating combined polygon isobaths and saving to local {isobath_gpkg_path}...")
         s3_client = boto3.client('s3')
         
         # Optimize GDAL for S3 reads: allows dynamic block chunking directly from the web
@@ -715,13 +716,13 @@ class BlueTopoS3Engine(Engine):
         gdal.SetConfigOption('VSI_CACHE', 'YES')
         
         driver = ogr.GetDriverByName("GPKG")
-        if master_gpkg_path.exists():
-            master_ds = driver.Open(str(master_gpkg_path), 1)  # 1 indicates update mode
+        if isobath_gpkg_path.exists():
+            isobath_ds = driver.Open(str(isobath_gpkg_path), 1)  # 1 indicates update mode
         else:
-            master_ds = driver.CreateDataSource(str(master_gpkg_path))
+            isobath_ds = driver.CreateDataSource(str(isobath_gpkg_path))
             
-        if master_ds is None:
-            print(f"Error: Could not open or create {master_gpkg_path}")
+        if isobath_ds is None:
+            print(f"Error: Could not open or create {isobath_gpkg_path}")
             return
             
         srs = osr.SpatialReference()
@@ -734,24 +735,24 @@ class BlueTopoS3Engine(Engine):
         ]
         
         # Check if layers already exist to skip recreation
-        existing_layers = [master_ds.GetLayerByIndex(i).GetName() for i in range(master_ds.GetLayerCount())]
+        existing_layers = [isobath_ds.GetLayerByIndex(i).GetName() for i in range(isobath_ds.GetLayerCount())]
         expected_layers = [layer_name for _, layer_name in depth_bands]
         
         if all(layer in existing_layers for layer in expected_layers):
-            print(f"[All Regions] Isobath layers already exist in {master_gpkg_path}. Skipping creation.")
-            master_ds = None
+            print(f"[All Regions] Isobath layers already exist in {isobath_gpkg_path}. Skipping creation.")
+            isobath_ds = None
             return
         
-        # Ensure layers exist in the Master_Grids.gpkg as POLYGONS
+        # Ensure layers exist in the isobath_layers.gpkg as POLYGONS
         layers = {}
         for _, layer_name in depth_bands:
             # Safely delete layer if it already exists by checking integer indices
-            for i in range(master_ds.GetLayerCount()):
-                if master_ds.GetLayerByIndex(i).GetName() == layer_name:
-                    master_ds.DeleteLayer(i)
+            for i in range(isobath_ds.GetLayerCount()):
+                if isobath_ds.GetLayerByIndex(i).GetName() == layer_name:
+                    isobath_ds.DeleteLayer(i)
                     break
                 
-            layer = master_ds.CreateLayer(layer_name, srs=srs, geom_type=ogr.wkbPolygon)
+            layer = isobath_ds.CreateLayer(layer_name, srs=srs, geom_type=ogr.wkbPolygon)
             field_defn = ogr.FieldDefn("elevation", ogr.OFTReal)
             layer.CreateField(field_defn)
             layers[layer_name] = layer
@@ -831,9 +832,204 @@ class BlueTopoS3Engine(Engine):
                 src_band = None
                 src_ds = None
                 
-        print("[All Regions] Saving and securely closing Master_Grids.gpkg...")
+        print(f"[All Regions] Saving and securely closing {isobath_gpkg_path}...")
         layers.clear()
-        master_ds = None
+        isobath_ds = None
+
+    def create_and_upload_er_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool) -> None:
+        """
+        Creates isolated mosaics for each individual ecoregion and precisely masks them
+        to their specific boundary polygon from the EcoRegions layer.
+        """
+        output_folder = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/outputs")
+        low_res_dir = output_folder / "low_res" / self.res_str
+        low_res_dir.mkdir(parents=True, exist_ok=True)
+        
+        inputs_folder = pathlib.Path("/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs")
+        master_gpkg_path = inputs_folder / "Master_Grids.gpkg"
+        
+        s3_client = boto3.client('s3')
+
+        # Locate the EcoRegions layer once for masking
+        cutline_layer_name = None
+        er_field_name = None
+        
+        ds = ogr.Open(str(master_gpkg_path))
+        if ds is not None:
+            layer_names = [ds.GetLayerByIndex(i).GetName() for i in range(ds.GetLayerCount())]
+            for name in layer_names:
+                if name.lower().replace("_", "").replace(" ", "") == "ecoregions":
+                    cutline_layer_name = name
+                    break
+            
+            # Intelligently discover the column name containing the Ecoregion ID
+            if cutline_layer_name:
+                layer = ds.GetLayerByName(cutline_layer_name)
+                layer_defn = layer.GetLayerDefn()
+                field_names = [layer_defn.GetFieldDefn(i).GetName() for i in range(layer_defn.GetFieldCount())]
+                
+                # Prioritize field names to avoid grabbing a generic 'id' if 'ecoregion' exists
+                for expected in ['ecoregion_id', 'ecoregion', 'er', 'region', 'name', 'id']:
+                    for field in field_names:
+                        if field.lower() == expected:
+                            er_field_name = field
+                            break
+                    if er_field_name:
+                        break
+            ds = None
+        else:
+            print(f"[ER Mosaic] WARNING: Could not open {master_gpkg_path}. Proceeding without mask...")
+
+        warp_kwargs_base = {
+            "format": "GTiff",
+            "xRes": self.target_resolution,
+            "yRes": self.target_resolution,
+            "dstSRS": self.target_crs,
+            "resampleAlg": gdal.GRA_Bilinear,
+            "dstNodata": -9999,
+            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
+        }
+        
+        if cutline_layer_name:
+            warp_kwargs_base["cutlineDSName"] = str(master_gpkg_path)
+            warp_kwargs_base["cutlineLayer"] = cutline_layer_name
+            warp_kwargs_base["cropToCutline"] = True
+
+        for ecoregion_id in ecoregion_ids:
+            er_prefix = ecoregion_id if str(ecoregion_id).startswith("ER_") else f"ER_{ecoregion_id}"
+            
+            base_mosaics_config = {
+                "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
+                "ISS": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE),
+                "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
+                "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
+                "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
+                "UKC": re.compile(r'_UKC\.tiff$', re.IGNORECASE),
+            }
+
+            mosaics_config = {}
+            for name, regex in base_mosaics_config.items():
+                mosaics_config[name] = {
+                    "regex": regex,
+                    "filename": f"{er_prefix}_BlueTopo_{name}_Mosaic_{self.res_str}.tiff",
+                    "paths": [],
+                    "exclude_bh4": False
+                }
+                # Create a secondary non-Band4 version specifically for 100m runs
+                if self.target_resolution == 100.0:
+                    mosaics_config[f"{name}_Offshore"] = {
+                        "regex": regex,
+                        "filename": f"{er_prefix}_BlueTopo_{name}_Mosaic_Offshore_{self.res_str}.tiff",
+                        "paths": [],
+                        "exclude_bh4": True
+                    }
+
+            mosaics_to_process = {}
+            for m_key, config in mosaics_config.items():
+                s3_key = f"low_res/{self.res_str}/{ecoregion_id}/{config['filename']}"
+                if output_prefix and output_prefix.strip('/') != "low_res":
+                    s3_key = f"{output_prefix}/{s3_key}"
+                    
+                try:
+                    s3_client.head_object(Bucket=s3_bucket, Key=s3_key)
+                    print(f"[{ecoregion_id}] {m_key} ER mosaic already exists at s3://{s3_bucket}/{s3_key}. Skipping creation.")
+                except ClientError:
+                    mosaics_to_process[m_key] = config
+                    mosaics_to_process[m_key]['s3_key'] = s3_key
+
+            if not mosaics_to_process:
+                print(f"[{ecoregion_id}] All requested ER mosaics already exist in S3. Skipping processing.")
+                continue
+
+            print(f"[{ecoregion_id}] Gathering S3 links for ER specific mosaics: {list(mosaics_to_process.keys())}")
+            search_prefix = f"low_res/{self.res_str}/{ecoregion_id}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+            if output_prefix and output_prefix.strip('/') != "low_res":
+                search_prefix = f"{output_prefix}/{search_prefix}"
+                
+            paginator = s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=s3_bucket, Prefix=search_prefix)
+            
+            for page in pages:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        is_bh4 = bool(re.search(r'/BH4[A-Za-z]', key, re.IGNORECASE))
+                        for m_key, config in mosaics_to_process.items():
+                            if config['regex'].search(key):
+                                if config['exclude_bh4'] and is_bh4:
+                                    continue
+                                config['paths'].append(f"/vsis3/{s3_bucket}/{key}")
+                                
+            # Apply a specific SQL WHERE clause to the vector file to grab ONLY this Ecoregion's polygon
+            er_warp_kwargs = warp_kwargs_base.copy()
+            if cutline_layer_name and er_field_name:
+                clean_er_num = str(ecoregion_id).replace("ER_", "")
+                er_prefix_val = f"ER_{clean_er_num}"
+                
+                # Build a robust SQL query that perfectly matches the "ER_X" format in the attribute table
+                where_clauses = [
+                    f"{er_field_name} = '{er_prefix_val}'",
+                    f"{er_field_name} = '{ecoregion_id}'",
+                    f"{er_field_name} = '{clean_er_num}'"
+                ]
+                if clean_er_num.isdigit():
+                    where_clauses.append(f"{er_field_name} = {clean_er_num}")
+                    
+                er_warp_kwargs["cutlineWhere"] = " OR ".join(where_clauses)
+
+            for m_key, config in mosaics_to_process.items():
+                if not config['paths']:
+                    print(f"[{ecoregion_id}] No base tiles found for {m_key}. Skipping.")
+                    continue
+
+                local_mosaic_path = low_res_dir / config['filename']
+                s3_key = config['s3_key']
+                
+                print(f"[{ecoregion_id}] Building VRT from {len(config['paths'])} base tiles for {m_key}...")
+                vrt_path = f"/vsimem/{ecoregion_id}_{m_key}_mosaic.vrt"
+                gdal.BuildVRT(vrt_path, config['paths'])
+                
+                print(f"[{ecoregion_id}] Warping and precisely masking {m_key} ER mosaic...")
+                warp_options = gdal.WarpOptions(**er_warp_kwargs)
+                
+                # Use exceptions temporarily to ensure we catch the failure
+                gdal.UseExceptions()
+                try:
+                    gdal.Warp(str(local_mosaic_path), vrt_path, options=warp_options)
+                except RuntimeError as e:
+                    print(f"[{ecoregion_id}] WARNING: Masking failed with specific WHERE clause. Falling back to general cutline...")
+                    print(f"[{ecoregion_id}] GDAL Error: {e}")
+                    
+                    # Fall back to using the cutline layer without the WHERE filter
+                    fallback_kwargs = warp_kwargs_base.copy()
+                    fallback_options = gdal.WarpOptions(**fallback_kwargs)
+                    gdal.Warp(str(local_mosaic_path), vrt_path, options=fallback_options)
+                
+                gdal.Unlink(vrt_path)
+                
+                print(f"[{ecoregion_id}] Generating robust overviews...")
+                ds = gdal.Open(str(local_mosaic_path), gdal.GA_Update)
+                if ds is not None:
+                    ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
+                    ds = None
+                    
+                print(f"[{ecoregion_id}] Uploading {m_key} ER mosaic to s3://{s3_bucket}/{s3_key}...")
+                s3_client.upload_file(
+                    str(local_mosaic_path), 
+                    s3_bucket, 
+                    s3_key,
+                    ExtraArgs={
+                        'Metadata': {
+                            'resolution': str(self.target_resolution),
+                            'crs': self.target_crs
+                        }
+                    }
+                )
+                
+                if local_mosaic_path.exists():
+                    local_mosaic_path.unlink() # Save disk space
+                
+                print(f"[{ecoregion_id}] {m_key} ER mosaic fully completed.")
 
     def create_and_upload_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool) -> None:
         """
@@ -853,14 +1049,31 @@ class BlueTopoS3Engine(Engine):
         
         s3_client = boto3.client('s3')
 
-        mosaics_config = {
-            "Bathy": {"regex": re.compile(r'\d+\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Bathy_Mosaic_{self.res_str}.tiff", "paths": []},
-            "ISS": {"regex": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_ISS_Mosaic_{self.res_str}.tiff", "paths": []},
-            "Survey_Date": {"regex": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Survey_Date_Mosaic_{self.res_str}.tiff", "paths": []},
-            "Hurricane": {"regex": re.compile(r'_hurricane\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Hurricane_Mosaic_{self.res_str}.tiff", "paths": []},
-            "Slope": {"regex": re.compile(r'_slope\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_Slope_Mosaic_{self.res_str}.tiff", "paths": []},
-            "UKC": {"regex": re.compile(r'_UKC\.tiff$', re.IGNORECASE), "filename": f"BlueTopo_UKC_Mosaic_{self.res_str}.tiff", "paths": []},
+        base_mosaics_config = {
+            "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
+            "ISS": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE),
+            "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
+            "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
+            "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
+            "UKC": re.compile(r'_UKC\.tiff$', re.IGNORECASE),
         }
+
+        mosaics_config = {}
+        for name, regex in base_mosaics_config.items():
+            mosaics_config[name] = {
+                "regex": regex,
+                "filename": f"BlueTopo_{name}_Mosaic_{self.res_str}.tiff",
+                "paths": [],
+                "exclude_bh4": False
+            }
+            # Create a secondary non-Band4 version specifically for 100m runs
+            if self.target_resolution == 100.0:
+                mosaics_config[f"{name}_Offshore"] = {
+                    "regex": regex,
+                    "filename": f"BlueTopo_{name}_Mosaic_Offshore_{self.res_str}.tiff",
+                    "paths": [],
+                    "exclude_bh4": True
+                }
 
         # 1. Determine which mosaics actually need to be generated
         mosaics_to_process = {}
@@ -895,10 +1108,12 @@ class BlueTopoS3Engine(Engine):
                 if 'Contents' in page:
                     for obj in page['Contents']:
                         key = obj['Key']
+                        is_bh4 = bool(re.search(r'/BH4[A-Za-z]', key, re.IGNORECASE))
                         for m_key, config in mosaics_to_process.items():
                             if config['regex'].search(key):
+                                if config['exclude_bh4'] and is_bh4:
+                                    continue
                                 config['paths'].append(f"/vsis3/{s3_bucket}/{key}")
-                                break  # Prevent checking other regexes once mapped
                             
         # 3. Locate the EcoRegions layer once for masking
         cutline_layer_name = None
@@ -986,8 +1201,10 @@ class BlueTopoS3Engine(Engine):
                 continue
             tile_id = str(row[0])
             
+            is_band4 = bool(re.match(r'^BH4[A-Za-z]', tile_id))
+            
             # For 20m resolution, restrict processing to Band 4 tiles exclusively (BH4 followed by a letter)
-            if self.target_resolution == 20.0 and not re.match(r'^BH4[A-Za-z]', tile_id):
+            if self.target_resolution == 20.0 and not is_band4:
                 continue
                 
             param_inputs.append([self.param_lookup, output_bucket, tile_id, row[1], output_prefix])
@@ -1010,6 +1227,9 @@ class BlueTopoS3Engine(Engine):
         
         # Generate the unified isobaths from all finished tiles across all ecoregions
         self.create_combined_isobaths(all_ecoregions, output_bucket, output_prefix)
+
+        # Generate individual cleanly masked mosaics per Ecoregion
+        self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, output_prefix)
 
         # Mosaic all base tiles and derivatives, apply masks, save locally and push to S3
         self.create_and_upload_mosaics(all_ecoregions, output_bucket, output_prefix)
