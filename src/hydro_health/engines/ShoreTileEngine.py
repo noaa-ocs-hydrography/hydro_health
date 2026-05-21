@@ -76,7 +76,7 @@ class ShoreTileEngine(Engine):
         self.param_lookup = param_lookup
         
         # Consistent Configuration Foundations
-        self.target_crs = "EPSG:32617"  # UTM Zone 17N
+        self.target_crs = "EPSG:6350"  # NAD83 Albers (2011)
         self.nearshore_res = 20         # 20 meters
         self.offshore_res = 100         # 100 meters
 
@@ -189,5 +189,5 @@ class ShoreTileEngine(Engine):
 
 
 if __name__ == "__main__":
-    engine = ShoreTileS3Engine({'env': get_environment()})
+    engine = ShoreTileEngine({'env': get_environment()})
     engine.run(OUTPUTS)
