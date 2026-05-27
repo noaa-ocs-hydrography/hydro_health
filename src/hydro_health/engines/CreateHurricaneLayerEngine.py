@@ -526,7 +526,7 @@ class CreateHurricaneLayerEngine(Engine):
 
         eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
         print(f"Reading EcoRegions from {eco_path} for valid area mask...")
-        eco_gdf = gpd.read_file(eco_path, layer='EcoRegions')
+        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
         
         # Project EcoRegions to match target CRS (EPSG:32617)
         print("Projecting EcoRegions to match target projection (EPSG:32617)...")
@@ -697,7 +697,7 @@ class CreateHurricaneLayerEngine(Engine):
         # Load EcoRegions bounds to constrain massive ocean-wide storm rasterization sizes
         eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
         print(f"Reading EcoRegions from {eco_path} to constrain raster bounding boxes...")
-        eco_gdf = gpd.read_file(eco_path, layer='EcoRegions')
+        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
         eco_gdf = eco_gdf.to_crs('EPSG:32617')
         eco_minx, eco_miny, eco_maxx, eco_maxy = eco_gdf.total_bounds
             

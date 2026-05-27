@@ -97,11 +97,11 @@ class CreateSedimentLayerEngine(Engine):
 
         # Use the requested Master_Grids GeoPackage for bounds and valid area
         eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
-        print(f"Reading EcoRegions from {eco_path} for valid area mask...")
-        eco_gdf = gpd.read_file(eco_path, layer='EcoRegions')
+        print(f"Reading Enhanced_EcoRegions from {eco_path} for valid area mask...")
+        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
         
-        # Ensure it matches the EPSG:32617 used for sediment polygons
-        target_crs = "EPSG:32617"
+        # Ensure it matches the EPSG:6350 used for sediment polygons
+        target_crs = "EPSG:6350"
         if eco_gdf.crs != target_crs:
             eco_gdf = eco_gdf.to_crs(target_crs)
             
@@ -129,7 +129,7 @@ class CreateSedimentLayerEngine(Engine):
                 all_touched=False
             )
 
-        # 2. Rasterize EcoRegions to serve as the valid area mask
+        # 2. Rasterize Enhanced_EcoRegions to serve as the valid area mask
         eco_shapes = [(geom, 1) for geom in eco_gdf.geometry]
         valid_area_mask = rasterize(
             shapes=eco_shapes,
@@ -140,7 +140,7 @@ class CreateSedimentLayerEngine(Engine):
             all_touched=False
         )
 
-        # Apply EcoRegions mask to nullify non-valid areas
+        # Apply Enhanced_EcoRegions mask to nullify non-valid areas
         rasterized[valid_area_mask == 0] = nodata_val
 
         filename = f"{field_name}_raster_{resolution}m.tif"
@@ -220,7 +220,7 @@ class CreateSedimentLayerEngine(Engine):
             geometry=gpd.points_from_xy(self.sediment_data['Longitude'], self.sediment_data['Latitude'])
         )  
         gdf.set_crs(crs="EPSG:4326", inplace=True)
-        gdf_reprojected = gdf.to_crs("EPSG:32617")
+        gdf_reprojected = gdf.to_crs("EPSG:6350")
 
         self._modify_gpkg(gdf_reprojected, 'sediment_points', mode='w')
         print('Created sediment point layer.')
@@ -305,7 +305,7 @@ class CreateSedimentLayerEngine(Engine):
                 'sand_mud_mask': 1 if sed_int_val in [2, 3] else None
             })
 
-        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:32617')
+        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:6350')
 
         self._modify_gpkg(gdf_voronoi, 'sediment_polygons', mode='a')
         print("Appended sediment polygons layer.")
