@@ -191,3 +191,4 @@ class ShoreTileEngine(Engine):
 if __name__ == "__main__":
     engine = ShoreTileEngine({'env': get_environment()})
     engine.run(OUTPUTS)
+    print('Done')
