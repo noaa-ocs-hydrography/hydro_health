@@ -966,6 +966,7 @@ class BlueTopoS3Engine(Engine):
         layers.clear()
         isobath_ds = None
 
+
     def create_and_upload_er_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, output_prefix: str|bool, only_offshore: bool = False) -> None:
         """
         Creates isolated mosaics for each individual ecoregion and precisely masks them
@@ -1010,15 +1011,17 @@ class BlueTopoS3Engine(Engine):
         else:
             print(f"[ER Mosaic] WARNING: Could not open {master_gpkg_path}. Proceeding without mask...")
 
-        # Explicitly declare srcSRS so GDAL Warp is instructed on VRT input projection metadata
+        # Base warp arguments allowing GDAL to naturally unify projections perfectly
+        # Set targetAlignedPixels to perfectly align the 100m grids eliminating edge artifact grid lines
         warp_kwargs_base = {
             "format": "GTiff",
-            "srcSRS": self.target_crs,
             "dstSRS": self.target_crs,
             "xRes": self.target_resolution,
             "yRes": self.target_resolution,
             "dstNodata": -9999,
-            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
+            "targetAlignedPixels": True, 
+            "multithread": True,
+            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
         }
         
         if cutline_layer_name:
@@ -1121,55 +1124,56 @@ class BlueTopoS3Engine(Engine):
                     
                 er_warp_kwargs["cutlineWhere"] = " OR ".join(where_clauses)
 
-            for m_key, config in mosaics_to_process.items():
+            # Process standard mosaics before offshore mosaics
+            ordered_mosaics = sorted(mosaics_to_process.items(), key=lambda item: 1 if "Offshore" in item[0] else 0)
+            for m_key, config in ordered_mosaics:
                 if not config['paths']:
                     print(f"[{ecoregion_id}] No base tiles found for {m_key}. Skipping.")
                     continue
 
                 local_mosaic_path = low_res_dir / config['filename']
                 s3_key = config['s3_key']
+
+                # Categorical components require nearest neighbor resampling
+                m_key_lower = m_key.lower()
+                if "bathy" in m_key_lower or "unc" in m_key_lower or "slope" in m_key_lower or "ukc" in m_key_lower:
+                    resample_alg = gdal.GRA_Bilinear
+                else:
+                    resample_alg = gdal.GRA_NearestNeighbour
                 
-                print(f"[{ecoregion_id}] Resolving heterogeneous CRSs for {len(config['paths'])} {m_key} tiles...")
-                warped_vrts = []
-                for i, p in enumerate(config['paths']):
-                    # Create a lightweight VRT that reprojects the source tile to the target CRS
-                    vrt_p = f"/vsimem/{ecoregion_id}_{m_key}_src_{i}.vrt"
-                    gdal.Warp(vrt_p, p, options=gdal.WarpOptions(format="VRT", dstSRS=self.target_crs))
-                    warped_vrts.append(vrt_p)
+                current_warp_kwargs = er_warp_kwargs.copy()
+                current_warp_kwargs["resampleAlg"] = resample_alg
+
+                print(f"[{ecoregion_id}] Warping and precisely masking {m_key} ER mosaic dynamically from {len(config['paths'])} source files...")
                 
-                print(f"[{ecoregion_id}] Building unified VRT mosaic for {m_key}...")
-                vrt_path = f"/vsimem/{ecoregion_id}_{m_key}_mosaic.vrt"
-                # Safely BuildVRT across the intermediate uniformly-projected VRTs
-                gdal.BuildVRT(vrt_path, warped_vrts)
-                
-                print(f"[{ecoregion_id}] Warping and precisely masking {m_key} ER mosaic...")
-                
-                # Use exceptions temporarily to ensure we catch the failure
                 gdal.UseExceptions()
                 try:
-                    warp_options = gdal.WarpOptions(**er_warp_kwargs)
-                    gdal.Warp(str(local_mosaic_path), vrt_path, options=warp_options)
+                    warp_options = gdal.WarpOptions(**current_warp_kwargs)
+                    gdal.Warp(str(local_mosaic_path), config['paths'], options=warp_options)
                 except RuntimeError as e:
                     print(f"[{ecoregion_id}] WARNING: Masking failed with specific WHERE clause. Falling back to general cutline...")
                     print(f"[{ecoregion_id}] GDAL Error: {e}")
                     
-                    # Fall back to using the cutline layer without the WHERE filter
-                    fallback_kwargs = warp_kwargs_base.copy()
+                    if local_mosaic_path.exists():
+                        local_mosaic_path.unlink()
+                        
+                    fallback_kwargs = current_warp_kwargs.copy()
                     if "cutlineWhere" in fallback_kwargs:
                         del fallback_kwargs["cutlineWhere"]
                     
                     try:
                         fallback_options = gdal.WarpOptions(**fallback_kwargs)
-                        gdal.Warp(str(local_mosaic_path), vrt_path, options=fallback_options)
+                        gdal.Warp(str(local_mosaic_path), config['paths'], options=fallback_options)
                     except RuntimeError as e2:
                         print(f"[{ecoregion_id}] CRITICAL WARNING: General mask also failed! Generating unclipped mosaic...")
                         print(f"[{ecoregion_id}] GDAL Error: {e2}")
-                        unclipped_kwargs = {k: v for k, v in fallback_kwargs.items() if k not in ["cutlineDSName", "cutlineLayer", "cropToCutline"]}
-                        gdal.Warp(str(local_mosaic_path), vrt_path, options=gdal.WarpOptions(**unclipped_kwargs))
-                
-                gdal.Unlink(vrt_path)
-                for vrt_p in warped_vrts:
-                    gdal.Unlink(vrt_p)
+                        
+                        if local_mosaic_path.exists():
+                            local_mosaic_path.unlink()
+                            
+                        unclipped_kwargs = {k: v for k, v in fallback_kwargs.items() if k not in ["cutlineDSName", "cutlineLayer", "cropToCutline", "cutlineWhere"]}
+                        unclipped_options = gdal.WarpOptions(**unclipped_kwargs)
+                        gdal.Warp(str(local_mosaic_path), config['paths'], options=unclipped_options)
 
                 print(f"[{ecoregion_id}] Generating robust overviews...")
                 ds = gdal.Open(str(local_mosaic_path), gdal.GA_Update)
@@ -1320,15 +1324,17 @@ class BlueTopoS3Engine(Engine):
         else:
             print(f"[Mosaic] WARNING: Could not open {master_gpkg_path} to check layers. Proceeding without mask...")
 
-        # Explicitly declare srcSRS so GDAL Warp is instructed on VRT input projection metadata
+        # Base warp arguments allowing GDAL to naturally unify projections perfectly
+        # Set targetAlignedPixels to perfectly align the 100m grids eliminating edge artifact grid lines
         warp_kwargs_base = {
             "format": "GTiff",
-            "srcSRS": self.target_crs,
             "dstSRS": self.target_crs,
             "xRes": self.target_resolution,
             "yRes": self.target_resolution,
             "dstNodata": -9999,
-            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
+            "targetAlignedPixels": True,
+            "multithread": True,
+            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
         }
         
         if cutline_layer_name:
@@ -1352,51 +1358,57 @@ class BlueTopoS3Engine(Engine):
                 warp_kwargs_base["cutlineWhere"] = " OR ".join(where_clauses)
 
         # 4. Generate & Upload each required mosaic dynamically
-        for m_key, config in mosaics_to_process.items():
+        # Process standard mosaics before offshore mosaics
+        ordered_mosaics = sorted(mosaics_to_process.items(), key=lambda item: 1 if "Offshore" in item[0] else 0)
+        for m_key, config in ordered_mosaics:
             if not config['paths']:
                 print(f"[Mosaic] No base tiles found for {m_key}. Skipping.")
                 continue
 
             local_mosaic_path = low_res_dir / config['filename']
             s3_key = config['s3_key']
-            
-            print(f"[Mosaic] Resolving heterogeneous CRSs for {len(config['paths'])} {m_key} tiles...")
-            warped_vrts = []
-            for i, p in enumerate(config['paths']):
-                vrt_p = f"/vsimem/global_{m_key}_src_{i}.vrt"
-                gdal.Warp(vrt_p, p, options=gdal.WarpOptions(format="VRT", dstSRS=self.target_crs))
-                warped_vrts.append(vrt_p)
 
-            print(f"[Mosaic] Building unified VRT mosaic for {m_key}...")
-            vrt_path = f"/vsimem/{m_key}_mosaic.vrt"
-            gdal.BuildVRT(vrt_path, warped_vrts)
+            # Categorical components require nearest neighbor resampling
+            m_key_lower = m_key.lower()
+            if "bathy" in m_key_lower or "unc" in m_key_lower or "slope" in m_key_lower or "ukc" in m_key_lower:
+                resample_alg = gdal.GRA_Bilinear
+            else:
+                resample_alg = gdal.GRA_NearestNeighbour
             
-            print(f"[Mosaic] Warping and masking {m_key} mosaic utilizing EcoRegions layer...")
+            current_warp_kwargs = warp_kwargs_base.copy()
+            current_warp_kwargs["resampleAlg"] = resample_alg
+            
+            print(f"[Mosaic] Warping and masking {m_key} mosaic directly from {len(config['paths'])} source files...")
+            
             gdal.UseExceptions()
             try:
-                warp_options = gdal.WarpOptions(**warp_kwargs_base)
-                gdal.Warp(str(local_mosaic_path), vrt_path, options=warp_options)
+                warp_options = gdal.WarpOptions(**current_warp_kwargs)
+                gdal.Warp(str(local_mosaic_path), config['paths'], options=warp_options)
             except RuntimeError as e:
                 print(f"[Mosaic] WARNING: Masking failed with specific WHERE clause. Falling back to general cutline...")
                 print(f"[Mosaic] GDAL Error: {e}")
                 
+                if local_mosaic_path.exists():
+                    local_mosaic_path.unlink()
+                    
                 # Fall back to using the cutline layer without the WHERE filter
-                fallback_kwargs = warp_kwargs_base.copy()
+                fallback_kwargs = current_warp_kwargs.copy()
                 if "cutlineWhere" in fallback_kwargs:
                     del fallback_kwargs["cutlineWhere"]
                 
                 try:
                     fallback_options = gdal.WarpOptions(**fallback_kwargs)
-                    gdal.Warp(str(local_mosaic_path), vrt_path, options=fallback_options)
+                    gdal.Warp(str(local_mosaic_path), config['paths'], options=fallback_options)
                 except RuntimeError as e2:
                     print(f"[Mosaic] CRITICAL WARNING: General mask also failed! Generating unclipped mosaic...")
                     print(f"[Mosaic] GDAL Error: {e2}")
-                    unclipped_kwargs = {k: v for k, v in fallback_kwargs.items() if k not in ["cutlineDSName", "cutlineLayer", "cropToCutline"]}
-                    gdal.Warp(str(local_mosaic_path), vrt_path, options=gdal.WarpOptions(**unclipped_kwargs))
-            
-            gdal.Unlink(vrt_path)
-            for vrt_p in warped_vrts:
-                gdal.Unlink(vrt_p)
+                    
+                    if local_mosaic_path.exists():
+                        local_mosaic_path.unlink()
+                        
+                    unclipped_kwargs = {k: v for k, v in fallback_kwargs.items() if k not in ["cutlineDSName", "cutlineLayer", "cropToCutline", "cutlineWhere"]}
+                    unclipped_options = gdal.WarpOptions(**unclipped_kwargs)
+                    gdal.Warp(str(local_mosaic_path), config['paths'], options=unclipped_options)
 
             print(f"[Mosaic] Generating robust overviews for fast performance...")
             ds = gdal.Open(str(local_mosaic_path), gdal.GA_Update)
@@ -1533,4 +1545,4 @@ class BlueTopoS3Engine(Engine):
                     s3_path_formatted = f"{output_prefix}/{s3_path_formatted}"
                 
                 self.write_message(f'Uploading {local_file.name} to s3://{bucket_name}/{s3_path_formatted}', self.param_lookup['output_directory'].valueAsText)
-                s3_client.upload_file(str(local_file), bucket_name, s3_path_formatted, ExtraArgs=s3_metadata_args) 
+                s3_client.upload_file(str(local_file), bucket_name, s3_path_formatted, ExtraArgs=s3_metadata_args)
