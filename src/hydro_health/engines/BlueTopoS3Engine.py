@@ -7,6 +7,7 @@ import pathlib
 import sys
 import rasterio
 import re
+import s3fs
 
 from rasterio.session import AWSSession
 import geopandas as gpd
@@ -38,74 +39,50 @@ def _process_tile(param_inputs: list) -> None:
     """
 
     # outputs folder available for logging
-    param_lookup, s3_output_bucket, tile_id, ecoregion_id, output_prefix, target_res = param_inputs
+    param_lookup, tile_id, ecoregion_id, output_prefix, target_res = param_inputs
     
     print(f"[{tile_id}] Initiating processing for ecoregion {ecoregion_id}...")
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_path = pathlib.Path(temp_dir)
+    engine = BlueTopoS3Engine(param_lookup)
+    engine.target_resolution = target_res
 
-        engine = BlueTopoS3Engine(param_lookup)
-        engine.target_resolution = target_res
+    # TODO need to check if BlueTopo tile and other tiffs already exist
+    # Unconditionally regenerate all layers
+    missing_files = ['base', 'ISS', 'hurricane', 'survey_end_date', 'slope', 'unc']
+    if engine.file_in_s3(ecoregion_id, tile_id):
+        print(f'BlueTopo tile {tile_id} already exists.  Skipping download.')
+    else:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = pathlib.Path(temp_dir)
 
-        # Download the tile (unconditionally downloads and returns all components as missing)
-        tiff_file_path, missing_files = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, s3_output_bucket, output_prefix)
-        
-        if not tiff_file_path:
-            print(f"[{tile_id}] Processing skipped (Source tile could not be downloaded).")
-            return
-
-        print(f"[{tile_id}] Resampling and reprojecting base tile...")
-        # First, resample and reproject to target resolution to serve as the base bounding box and grid
-        engine.resample_and_reproject(tiff_file_path)
-
-        if 'survey_end_date' in missing_files:
-            print(f"[{tile_id}] Creating survey end date TIFF...")
+            tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, output_prefix)
+            if not tiff_file_path:
+                print(f"[{tile_id}] Processing skipped (Source tile could not be downloaded).")
+                return
+            
+            engine.resample_and_reproject(tiff_file_path)
             engine.create_survey_end_date_tiff(tiff_file_path)
-
-        if 'ISS' in missing_files:
-            print(f"[{tile_id}] Creating Initial Survey Score (ISS) all...")
             engine.create_catzoc_all(tiff_file_path)
-
-        if 'hurricane' in missing_files:
-            print(f"[{tile_id}] Creating cumulative hurricane count tile...")
-            engine.create_hurricane_tile(tiff_file_path, ecoregion_id, s3_output_bucket, output_prefix)
-
-        # Base, uncertainty, and slope require singleband conversion from the base tile
-        if any(k in missing_files for k in ['base', 'unc', 'slope']):
-            print(f"[{tile_id}] Extracting singlebands...")
+            engine.create_hurricane_tile(tiff_file_path, ecoregion_id, output_prefix)
             mb_tiff_file = engine.rename_multiband(tiff_file_path)
-            
-            # Base (band 1) is required to be locally processed if base or slope is missing
             engine.multiband_to_singleband(mb_tiff_file, band=1)
-            
-            if 'unc' in missing_files:
-                engine.multiband_to_singleband(mb_tiff_file, band=2)
-                
-            mb_tiff_file.unlink() 
-
-            print(f"[{tile_id}] Setting ground to nodata...")
+            engine.multiband_to_singleband(mb_tiff_file, band=2)
+            mb_tiff_file.unlink()
             engine.set_ground_to_nodata(tiff_file_path)
+            engine.create_slope(tiff_file_path)
+            engine.finalize_cog(tiff_file_path)      
 
-            if 'slope' in missing_files:
-                print(f"[{tile_id}] Creating slope...")
-                engine.create_slope(tiff_file_path)
+            # Crop intermediate tiffs dynamically if we are in 20m resolution mode
+            if engine.target_resolution == 20.0:
+                print(f"[{tile_id}] Resolution is 20m. Cropping all local intermediate tiffs to ecoregion {ecoregion_id}...")
+                tile_folder = tiff_file_path.parent
+                stem = tiff_file_path.stem
+                for local_file in tile_folder.glob(f"{stem}*.tiff"):
+                    engine.crop_to_ecoregion(local_file, ecoregion_id)
 
-            if 'base' in missing_files:
-                print(f"[{tile_id}] Finalizing COG format...")
-                engine.finalize_cog(tiff_file_path)      
-
-        # Crop intermediate tiffs dynamically if we are in 20m resolution mode
-        if engine.target_resolution == 20.0:
-            print(f"[{tile_id}] Resolution is 20m. Cropping all local intermediate tiffs to ecoregion {ecoregion_id}...")
-            tile_folder = tiff_file_path.parent
-            stem = tiff_file_path.stem
-            for local_file in tile_folder.glob(f"{stem}*.tiff"):
-                engine.crop_to_ecoregion(local_file, ecoregion_id)
-
-        print(f"[{tile_id}] Uploading newly generated tiles to S3...")
-        engine.upload_missing_tiles_to_s3(tiff_file_path.parents[0], tiff_file_path.stem, s3_output_bucket, ecoregion_id, output_prefix, missing_files)
-        print(f"[{tile_id}] Processing successfully completed.")
+            print(f"[{tile_id}] Uploading newly generated tiles to S3...")
+            engine.upload_missing_tiles_to_s3(tiff_file_path.parents[0], tiff_file_path.stem, ecoregion_id, output_prefix, missing_files)
+            print(f"[{tile_id}] Processing successfully completed.")
 
 
 def _parse_survey_date(date_str: str) -> date | None:
@@ -150,6 +127,8 @@ class BlueTopoS3Engine(Engine):
 
     def resample_and_reproject(self, tiff_path: pathlib.Path) -> None:
         """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""
+
+        print(f"  - Resampling and reprojecting base tile...")
         output_folder = self.param_lookup['output_directory'].valueAsText
         msg = f"Resampling {tiff_path.name} to {self.target_resolution}m and explicitly locking into {self.target_crs}..."
         print(msg)
@@ -314,11 +293,13 @@ class BlueTopoS3Engine(Engine):
             if temp_cropped.exists():
                 temp_cropped.unlink()
 
-    def create_hurricane_tile(self, tiff_file_path: pathlib.Path, ecoregion_id: str, s3_bucket: str, output_prefix: str|bool) -> None:
+    def create_hurricane_tile(self, tiff_file_path: pathlib.Path, ecoregion_id: str, output_prefix: str|bool) -> None:
         """
         Generate a hurricane count raster by evaluating the survey year and 
         accumulating the corresponding yearly hurricane counts for each cell.
         """
+
+        print("  - Creating cumulative hurricane count tile...")
         stem = tiff_file_path.stem
         hurricane_tile_path = tiff_file_path.parents[0] / f'{stem}_hurricane.tiff'
         
@@ -364,6 +345,7 @@ class BlueTopoS3Engine(Engine):
             target_year = max(1851, min(2023, int(target_year)))
             
             # Construct both the .tiff and the .tif fallbacks
+            s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             s3_uri_tiff = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tiff"
             s3_uri_tif = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tif"
             
@@ -447,6 +429,8 @@ class BlueTopoS3Engine(Engine):
         """
         Generate an Initial Survey Score (ISS) raster of unique values for each survey area.
         """
+
+        print("  - Creating Initial Survey Score (ISS) all...")
         with rasterio.open(tiff_file_path) as src:
             contributor_band_values = np.round(src.read(3))
             transform = src.transform
@@ -609,6 +593,8 @@ class BlueTopoS3Engine(Engine):
 
     def create_slope(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a slope raster from the DEM"""
+
+        print("  - Creating slope...")
         slope_name = str(tiff_file_path.stem) + '_slope.tiff'
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(str(slope_file_path), str(tiff_file_path), 'slope')
@@ -616,6 +602,7 @@ class BlueTopoS3Engine(Engine):
     def create_survey_end_date_tiff(self, tiff_file_path: pathlib.Path) -> None:
         """Create survey end date tiffs from contributor band values in the XML file."""        
 
+        print("  - Creating survey end date TIFF...")
         with rasterio.open(tiff_file_path) as src:
             contributor_band_values = np.round(src.read(3))
             transform = src.transform
@@ -671,16 +658,12 @@ class BlueTopoS3Engine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, s3_output_bucket: str, output_prefix: str|bool) -> tuple[pathlib.Path | bool, list]:
-        """
-        Unconditionally download the NBS source tile and stage it for full processing.
-        """
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool) -> tuple[pathlib.Path | bool, list]:
+        """Unconditionally download the NBS source tile and stage it for full processing."""
+
         nbs_bucket = self.get_bucket()
         output_tile_path = False
         output_folder = self.param_lookup['output_directory'].valueAsText
-        
-        # Unconditionally regenerate all layers
-        missing_files = ['base', 'ISS', 'hurricane', 'survey_end_date', 'slope', 'unc']
 
         msg = f"Tile {tile_id} targeted for full processing. Downloading fresh NBS Source and metadata..."
         print(msg)
@@ -693,21 +676,32 @@ class BlueTopoS3Engine(Engine):
             if current_file.suffix in ('.tiff', '.tif', '.xml'):
                 tile_folder = current_file.parents[0]
                 tile_folder.mkdir(parents=True, exist_ok=True)   
-
-                if current_file.exists():
-                    current_file.unlink() # Force a clean download
-
                 self.write_message(f'Downloading: {current_file.name}', output_folder)
                 nbs_bucket.download_file(obj_summary.key, str(current_file))
                 
                 if current_file.suffix in ('.tiff', '.tif'):
                     output_tile_path = current_file
 
-        return output_tile_path, missing_files
+        return output_tile_path
+    
+    def file_in_s3(ecoregion_id: str, tile_id: str) -> bool:
+        """Check if BlueTopo tile already exists in S3"""
+
+        s3_files = s3fs.S3FileSystem()
+        bluetopo_tile_folder = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/ER_3/{get_config_item("BLUETOPO", "SUBFOLDER")}/BlueTopo/{tile_id}'
+        search_path = f"{bluetopo_tile_folder}/**/*.tiff"
+        found_files = s3_files.glob(search_path)
+        for file in found_files:
+            filename = pathlib.Path(file).name
+            if len(filename.split('_')) == 3:
+                # Found tile example: BlueTopo_BC25V26P_20250916.tiff
+                return True
+        return False
     
     def finalize_cog(self, tiff_path: pathlib.Path) -> None:
         """The final pass to ensure perfect COG layout and overviews."""
 
+        print("  - Finalizing COG format...")
         temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
         
         ds = gdal.Open(str(tiff_path), gdal.GA_Update)
@@ -1410,7 +1404,7 @@ class BlueTopoS3Engine(Engine):
                     if self.target_resolution == 20.0 and not is_band4:
                         continue
                         
-                    param_inputs.append([self.param_lookup, output_bucket, tile_id, row[1], output_prefix, self.target_resolution])
+                    param_inputs.append([self.param_lookup, tile_id, row[1], output_prefix, self.target_resolution])
                 
                 # Sort parallel task configurations to submit them sequentially (ER1 -> ER2 -> ... -> ER6)
                 param_inputs = sorted(param_inputs, key=lambda x: _get_er_num(x[3]))
@@ -1451,6 +1445,8 @@ class BlueTopoS3Engine(Engine):
 
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
         """Set positive elevation to no data value"""
+
+        print("  - Setting ground to nodata...")
         raster_ds = gdal.Open(str(tiff_file_path), gdal.GA_Update)
         no_data = -9999
         raster_array = raster_ds.ReadAsArray()
@@ -1459,7 +1455,7 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  
         raster_ds = None
 
-    def upload_missing_tiles_to_s3(self, tile_folder: pathlib.Path, stem: str, bucket_name: str, ecoregion_id: str, output_prefix: str|bool, missing_files: list) -> None:
+    def upload_missing_tiles_to_s3(self, tile_folder: pathlib.Path, stem: str, ecoregion_id: str, output_prefix: str|bool, missing_files: list) -> None:
         """Upload all newly generated files to S3"""
         s3_client = boto3.client('s3')
         
@@ -1496,5 +1492,6 @@ class BlueTopoS3Engine(Engine):
                 if output_prefix and output_prefix.strip('/') != "low_res":
                     s3_path_formatted = f"{output_prefix}/{s3_path_formatted}"
                 
+                bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
                 self.write_message(f'Uploading {local_file.name} to s3://{bucket_name}/{s3_path_formatted}', self.param_lookup['output_directory'].valueAsText)
                 s3_client.upload_file(str(local_file), bucket_name, s3_path_formatted, ExtraArgs=s3_metadata_args)
