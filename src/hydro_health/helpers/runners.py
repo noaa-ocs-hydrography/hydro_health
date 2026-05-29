@@ -28,20 +28,20 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
-def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool=False, resolution: list[int]=[8]) -> None:
+def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     if param_lookup['env'] in ['local', 'remote']:
-        run_bluetopo_tile_engine_local(tiles, param_lookup, resolution)
+        run_bluetopo_tile_engine_local(tiles, param_lookup, output_prefix, resolution)
     else:
         run_bluetopo_tile_engine_s3(tiles, param_lookup, output_prefix, resolution)
 
 
-def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], resolution: list[int]) -> None:
+def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     engine = BlueTopoEngine(param_lookup)
-    engine.run(tiles, resolution)
+    engine.run(tiles, output_prefix, resolution)
 
 
 def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict], output_prefix: str|bool, resolution: list[int]) -> None:

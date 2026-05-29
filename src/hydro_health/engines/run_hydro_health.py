@@ -63,8 +63,8 @@ def run_hydro_health(config_name: str) -> None:
         print(f'Script has been run {len(config["runtimes"])} time(s)')
 
         pilot_mode = config['pilot_mode']
-        output_prefix = config['output_prefix']
-        resolution = config['resolution']
+        output_prefix = config.get('output_prefix', '')
+        resolution = config.get('resolution', [8])
 
         # load ecoregions from config for remote run
         param_lookup['eco_regions'].value = config['ecoregions']

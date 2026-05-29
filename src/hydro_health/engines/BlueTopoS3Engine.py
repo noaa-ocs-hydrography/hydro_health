@@ -1311,13 +1311,12 @@ class BlueTopoS3Engine(Engine):
         all_ecoregions = sorted(all_ecoregions, key=_get_er_num)
         print(f"[BlueTopo Engine] Processing ecoregions in sequential order: {all_ecoregions}")
 
+        self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
         for current_res in resolution:
             print(f"\n{'='*50}\n[BlueTopo Engine] STARTING PROCESSING FOR {current_res}\n{'='*50}")
 
             if not self.skip_tiling:
                 print(f'Checking and processing BlueTopo Datasets for {current_res}...')
-                self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
-
                 param_inputs = []
                 for _, row in tile_gdf.iterrows():
                     if not isinstance(row[1], str):
@@ -1343,7 +1342,7 @@ class BlueTopoS3Engine(Engine):
                 print("All Dask workers finished successfully.")
 
                 self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
-                self.close_dask()
+                
 
                 for ecoregion in all_ecoregions:
                     if output_prefix == 'low_res':
@@ -1369,6 +1368,7 @@ class BlueTopoS3Engine(Engine):
                 # Generate all individual cleanly masked mosaics per Ecoregion (ER1 to ER6 order)
                 self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, only_offshore=False)
                 # NO FULL SIZE MOSAICS CREATED FOR 20M
+        self.close_dask()
 
         tiles = list(tile_gdf['tile']) if 'tile' in tile_gdf.columns else [str(row[0]) for _, row in tile_gdf.iterrows()]
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}
@@ -1393,6 +1393,7 @@ class BlueTopoS3Engine(Engine):
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for tiff_file in tile_folder.glob('*'):
             ecoregion_index = tiff_file.parts.index(ecoregion_id)
+            # TODO add 20m or 100m folder to output
             ecoregion_path = [output_prefix] + list(tiff_file.parts[ecoregion_index:]) if output_prefix else tiff_file.parts[ecoregion_index:]
             s3_path = pathlib.Path(*ecoregion_path)
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)

@@ -28,11 +28,11 @@ set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 def _process_tile(param_inputs: list[list]) -> None:
     """Static function for pickling that handles processing of a single tile"""
 
-    param_lookup, tile_id, ecoregion_id, target_res = param_inputs
+    param_lookup, tile_id, ecoregion_id, output_prefix, target_res = param_inputs
 
     engine = BlueTopoEngine(param_lookup)
 
-    tiff_file_path = engine.download_nbs_tile(tile_id, ecoregion_id)
+    tiff_file_path = engine.download_nbs_tile(tile_id, ecoregion_id, output_prefix, target_res)
     if tiff_file_path:
         engine.resample_and_reproject(tiff_file_path, target_res)
         engine.create_survey_end_date_tiff(tiff_file_path)
@@ -54,6 +54,7 @@ class BlueTopoEngine(Engine):
     def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
+        self.target_crs = "EPSG:6350"
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path) -> None:
         """
@@ -289,7 +290,7 @@ class BlueTopoEngine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, tile_id: str, ecoregion_id: str) -> pathlib.Path:
+    def download_nbs_tile(self, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res: int) -> pathlib.Path:
         """Download all NBS files for a single tile"""
 
         nbs_bucket = self.get_bucket()
@@ -297,7 +298,13 @@ class BlueTopoEngine(Engine):
         output_pathlib = pathlib.Path(output_folder)
         output_tile_path = False
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            current_file = output_pathlib / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
+            if output_prefix == 'low_res':
+                beginning_prefix = output_pathlib / output_prefix / f'{target_res}m'
+            elif output_prefix:
+                beginning_prefix = output_pathlib / output_prefix
+            else:
+                beginning_prefix = output_pathlib
+            current_file = beginning_prefix / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # Store the path to the tile, not the xml
             if current_file.suffix == '.tiff':
                 # if current_file.exists():
@@ -381,19 +388,25 @@ class BlueTopoEngine(Engine):
             if result:
                 self.write_message(result, output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, resolution: list[int]) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int]) -> None:
         print('Downloading BlueTopo Datasets')
 
         self.setup_dask(self.param_lookup['env'])
         for current_res in resolution:
-            param_inputs = [[self.param_lookup, row[0], row[1], current_res] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+            param_inputs = [[self.param_lookup, row[0], row[1], output_prefix, current_res] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
             future_tiles = self.client.map(_process_tile, param_inputs)
             tile_results = self.client.gather(future_tiles)
             self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
-            self.close_dask()
-        for ecoregion in self.param_lookup['eco_regions'].value:
-            self.write_run_manifest(f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo", {'tiles': len(param_inputs)})
-
+            for ecoregion in self.param_lookup['eco_regions'].value:
+                if output_prefix == 'low_res':
+                    beginning_prefix = f'{output_prefix}/{current_res}m'
+                elif output_prefix:
+                    beginning_prefix = output_prefix
+                else:
+                    beginning_prefix = ''
+                output_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+                self.write_run_manifest(output_path, {'tiles': len(param_inputs)})
+        self.close_dask()
         # log all tiles using tile_gdf
         tiles = list(tile_gdf['tile'])
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}

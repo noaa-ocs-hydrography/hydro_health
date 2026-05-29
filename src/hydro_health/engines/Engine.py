@@ -258,7 +258,7 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
 
-    def write_run_manifest(self, subfolder: str, extra_info: dict = None):
+    def write_run_manifest(self, subfolder: str, extra_info: dict):
         """Writes a single manifest for the entire Engine execution."""
 
         end_time = time.time()
@@ -282,6 +282,7 @@ class Engine:
             )
         else:
             manifest_prefix = OUTPUTS / subfolder / '_manifest.json'
+            manifest_prefix.parent.mkdir(parents=True, exist_ok=True)
             with open(manifest_prefix, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))
 
