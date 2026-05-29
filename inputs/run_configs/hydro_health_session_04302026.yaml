@@ -7,6 +7,9 @@ ecoregions:
 - ER_6
 pilot_mode: false
 output_prefix: low_res
+resolution: 
+- 20
+- 100
 steps:
 - tool: run_bluetopo_tile_engine
   run: true
@@ -28,20 +31,4 @@ steps:
   run: false
 - tool: run_preprocessor_modeldata
   run: false
-runtimes:
-- '05072026'
-- '05072026'
-- '05072026'
-- 05082026
-- '05112026'
-- '05112026'
-- '05112026'
-- '05112026'
-- '05122026'
-- '05122026'
-- '05132026'
-- '05142026'
-- '05142026'
-- '05142026'
-- '05142026'
-- '05142026'
+runtimes: []

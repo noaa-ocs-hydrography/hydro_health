@@ -28,12 +28,13 @@ set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 def _process_tile(param_inputs: list[list]) -> None:
     """Static function for pickling that handles processing of a single tile"""
 
-    param_lookup, tile_id, ecoregion_id = param_inputs
+    param_lookup, tile_id, ecoregion_id, target_res = param_inputs
 
     engine = BlueTopoEngine(param_lookup)
 
     tiff_file_path = engine.download_nbs_tile(tile_id, ecoregion_id)
     if tiff_file_path:
+        engine.resample_and_reproject(tiff_file_path, target_res)
         engine.create_survey_end_date_tiff(tiff_file_path)
         engine.create_catzoc_all(tiff_file_path)
         engine.create_catzoc_latest(tiff_file_path)
@@ -380,15 +381,16 @@ class BlueTopoEngine(Engine):
             if result:
                 self.write_message(result, output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, resolution: list[int]) -> None:
         print('Downloading BlueTopo Datasets')
 
         self.setup_dask(self.param_lookup['env'])
-        param_inputs = [[self.param_lookup, row[0], row[1]] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
-        future_tiles = self.client.map(_process_tile, param_inputs)
-        tile_results = self.client.gather(future_tiles)
-        self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
-        self.close_dask()
+        for current_res in resolution:
+            param_inputs = [[self.param_lookup, row[0], row[1], current_res] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+            future_tiles = self.client.map(_process_tile, param_inputs)
+            tile_results = self.client.gather(future_tiles)
+            self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
+            self.close_dask()
         for ecoregion in self.param_lookup['eco_regions'].value:
             self.write_run_manifest(f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo", {'tiles': len(param_inputs)})
 

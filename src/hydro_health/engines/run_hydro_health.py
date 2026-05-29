@@ -64,6 +64,7 @@ def run_hydro_health(config_name: str) -> None:
 
         pilot_mode = config['pilot_mode']
         output_prefix = config['output_prefix']
+        resolution = config['resolution']
 
         # load ecoregions from config for remote run
         param_lookup['eco_regions'].value = config['ecoregions']
@@ -71,7 +72,7 @@ def run_hydro_health(config_name: str) -> None:
         tiles = get_ecoregion_tiles(param_lookup, low_res=True)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
-                runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix=output_prefix)
+                runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix=output_prefix, resolution=resolution)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup)
             # TODO Removed laz download until HH 2.0
@@ -118,5 +119,5 @@ def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None
 
 
 if __name__ == "__main__":
-    config_name = "hydro_health_session_04302026.yaml"
+    config_name = "hydro_health_session_08272025.yaml"
     run_hydro_health(config_name)
