@@ -43,20 +43,19 @@ def _process_tile(param_inputs: list) -> None:
     Refactored for S3-to-S3 workflow using ephemeral storage.
     """
 
-    # outputs folder available for logging
     param_lookup, tile_id, ecoregion_id, output_prefix, target_res = param_inputs
     
     print(f"[{tile_id}] Initiating processing for ecoregion {ecoregion_id}...")
 
     engine = BlueTopoS3Engine(param_lookup)
-
-    if engine.file_in_s3(ecoregion_id, tile_id):
+        
+    if engine.file_in_s3(output_prefix, target_res, ecoregion_id, tile_id):
         print(f'BlueTopo tile {tile_id} already exists.  Skipping download.')
     else:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = pathlib.Path(temp_dir)
 
-            tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, output_prefix)
+            tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, output_prefix, target_res)
             if not tiff_file_path:
                 print(f"[{tile_id}] Processing skipped (Source tile could not be downloaded).")
                 return
@@ -85,7 +84,7 @@ def _process_tile(param_inputs: list) -> None:
                     engine.crop_to_ecoregion(local_file, ecoregion_id, target_res)
 
             print(f"[{tile_id}] Uploading newly generated tiles to S3...")
-            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], tiff_file_path.stem, ecoregion_id, output_prefix)
+            engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], temp_path)
             print(f"[{tile_id}] Processing successfully completed.")
 
 
@@ -583,7 +582,7 @@ class BlueTopoS3Engine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool) -> tuple[pathlib.Path | bool, list]:
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res:  int) -> pathlib.Path|bool:
         """Unconditionally download the NBS source tile and stage it for full processing."""
 
         nbs_bucket = self.get_bucket()
@@ -591,17 +590,22 @@ class BlueTopoS3Engine(Engine):
         output_folder = self.param_lookup['output_directory'].valueAsText
 
         msg = f"Tile {tile_id} targeted for full processing. Downloading fresh NBS Source and metadata..."
-        print(msg)
         self.write_message(msg, output_folder)
 
         for obj_summary in nbs_bucket.objects.filter(Prefix=f"BlueTopo/{tile_id}"):
-            current_file = temp_folder / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
-
+            if output_prefix == 'low_res':
+                beginning_prefix = temp_folder / output_prefix / f'{target_res}m'
+            elif output_prefix:
+                beginning_prefix = temp_folder / output_prefix
+            else:
+                beginning_prefix = temp_folder
+            current_file = beginning_prefix / ecoregion_id / get_config_item('BLUETOPO', 'SUBFOLDER') / obj_summary.key
             # We need the main raster (.tiff/.tif) and the attribute table metadata (.aux.xml)
             if current_file.suffix in ('.tiff', '.tif', '.xml'):
                 tile_folder = current_file.parents[0]
                 tile_folder.mkdir(parents=True, exist_ok=True)   
-                self.write_message(f'Downloading: {current_file.name}', output_folder)
+                # self.write_message(f'Downloading: {current_file.name}', output_folder)
+                self.write_message(f'Full path: {current_file}', output_folder)
                 nbs_bucket.download_file(obj_summary.key, str(current_file))
 
                 if current_file.suffix in ('.tiff', '.tif'):
@@ -609,11 +613,19 @@ class BlueTopoS3Engine(Engine):
 
         return output_tile_path
 
-    def file_in_s3(ecoregion_id: str, tile_id: str) -> bool:
+    def file_in_s3(self, output_prefix: str, target_res: int, ecoregion_id: str, tile_id: str, overwrite: bool=False) -> bool:
         """Check if BlueTopo tile already exists in S3"""
 
+        if overwrite:
+            return False
         s3_files = s3fs.S3FileSystem()
-        bluetopo_tile_folder = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/ER_3/{get_config_item("BLUETOPO", "SUBFOLDER")}/BlueTopo/{tile_id}'
+        if output_prefix == 'low_res':
+            beginning_prefix = f'{output_prefix}/{target_res}m/{ecoregion_id}'
+        elif output_prefix:
+            beginning_prefix = f'{output_prefix}/{ecoregion_id}'
+        else:
+            beginning_prefix = ecoregion_id
+        bluetopo_tile_folder = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/{beginning_prefix}/{get_config_item("BLUETOPO", "SUBFOLDER")}/BlueTopo/{tile_id}'
         search_path = f"{bluetopo_tile_folder}/**/*.tiff"
         found_files = s3_files.glob(search_path)
         for file in found_files:
@@ -1313,7 +1325,7 @@ class BlueTopoS3Engine(Engine):
 
         self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
         for current_res in resolution:
-            print(f"\n{'='*50}\n[BlueTopo Engine] STARTING PROCESSING FOR {current_res}\n{'='*50}")
+            print(f"\n{'='*50}\n[BlueTopo Engine] STARTING PROCESSING FOR {current_res}m\n{'='*50}")
 
             if not self.skip_tiling:
                 print(f'Checking and processing BlueTopo Datasets for {current_res}...')
@@ -1352,7 +1364,7 @@ class BlueTopoS3Engine(Engine):
                     else:
                         beginning_prefix = ''
                     s3_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
-                    self.write_run_manifest(s3_path)
+                    self.write_run_manifest(s3_path, {'tiles': len(param_inputs)})
             else:   
                 print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
 
@@ -1386,15 +1398,12 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  
         raster_ds = None
 
-    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, ecoregion_id: str, output_prefix: str|bool) -> None:
+    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, temp_folder: pathlib.Path) -> None:
         """Upload all tiff files to s3 for current tile"""
 
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for tiff_file in tile_folder.glob('*'):
-            ecoregion_index = tiff_file.parts.index(ecoregion_id)
-            # TODO add 20m or 100m folder to output
-            ecoregion_path = [output_prefix] + list(tiff_file.parts[ecoregion_index:]) if output_prefix else tiff_file.parts[ecoregion_index:]
-            s3_path = pathlib.Path(*ecoregion_path)
+            s3_path = tile_folder.relative_to(temp_folder)  # Strip off the temp_folder parts
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
             s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
