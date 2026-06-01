@@ -152,7 +152,87 @@ class Engine:
 
         for result in results:
             if result:
-                self.write_message(f'Result: {result}', output_folder)  
+                self.write_message(f'Result: {result}', output_folder)
+
+    def resample_and_reproject(self, tiff_path: pathlib.Path, target_res: int) -> None:
+        """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""
+
+        print(f"  - Resampling and reprojecting base tile...")
+        output_folder = self.param_lookup['output_directory'].valueAsText
+        msg = f"Resampling {tiff_path.name} to {target_res}m and explicitly locking into {target_res}..."
+        self.write_message(msg, output_folder)
+
+        # Open source dataset to dynamically determine available band count
+        src_ds = gdal.Open(str(tiff_path))
+        if src_ds is None:
+            raise FileNotFoundError(f"Could not open downloaded source TIFF: {tiff_path}")
+        band_count = src_ds.RasterCount
+        src_ds = None
+
+        warped_bands = []
+        temp_files_to_clean = []
+
+        # Resample each band independently to match continuous vs categorical types
+        for band_idx in range(1, band_count + 1):
+            # TODO delete the band_*.tiff files after resample
+            raw_band_path = tiff_path.parent / f"band_{band_idx}_raw.tiff"
+            warped_band_path = tiff_path.parent / f"band_{band_idx}_warped.tiff"
+
+            # Extract single band from source
+            ds_ext = gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
+            ds_ext = None  # Flush and release lock
+            temp_files_to_clean.append(raw_band_path)
+
+            # Choose correct resampling algorithm
+            # Bands 1 (Bathy) and 2 (Uncertainty) get Bilinear interpolation
+            # Bands 3+ (Contributor IDs/Metadata indices) must get Nearest Neighbor to avoid float corruption
+            if band_idx in (1, 2):
+                resample_alg = gdal.GRA_Bilinear
+            else:
+                resample_alg = gdal.GRA_NearestNeighbour
+
+            # Warp single band to output parameters
+            ds_warp = gdal.Warp(
+                str(warped_band_path),
+                str(raw_band_path),
+                xRes=target_res,
+                yRes=target_res,
+                targetAlignedPixels=True,
+                dstSRS=self.target_crs,
+                resampleAlg=resample_alg,
+                dstNodata=-9999,
+                creationOptions=["COMPRESS=DEFLATE"]
+            )
+            ds_warp = None  # Flush and release lock
+            warped_bands.append(str(warped_band_path))
+            temp_files_to_clean.append(warped_band_path)
+
+        # Re-merge the correctly resampled single bands back into a multi-band dataset
+        temp_tiff = tiff_path.parent / f"warped_{tiff_path.name}"
+        vrt_path = tiff_path.parent / f"warped_multiband.vrt"
+
+        vrt_ds = gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
+        vrt_ds = None  # Flush and release lock
+
+        # Explicitly apply the self.target_crs here to strictly guarantee the finalized TIFF doesn't inherit a corrupted VRT CRS
+        ds_trans = gdal.Translate(
+            str(temp_tiff),
+            str(vrt_path),
+            outputSRS=self.target_crs,
+            creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
+        )
+        ds_trans = None  # Flush and release lock
+
+        # Clean up temporary intermediate files securely
+        if vrt_path.exists():
+            vrt_path.unlink()
+        for tmp_file in temp_files_to_clean:
+            if tmp_file.exists():
+                tmp_file.unlink()
+
+        if temp_tiff.exists():
+            tiff_path.unlink()
+            temp_tiff.rename(tiff_path)
 
     def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
@@ -179,7 +259,7 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
 
-    def write_run_manifest(self, subfolder: str, extra_info: dict = None):
+    def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""
 
         end_time = time.time()
@@ -203,6 +283,7 @@ class Engine:
             )
         else:
             manifest_prefix = OUTPUTS / subfolder / '_manifest.json'
+            manifest_prefix.parent.mkdir(parents=True, exist_ok=True)
             with open(manifest_prefix, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))
 

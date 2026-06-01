@@ -1,0 +1,34 @@
+ecoregions:
+- ER_1
+- ER_2
+- ER_3
+- ER_4
+- ER_5
+- ER_6
+pilot_mode: false
+output_prefix: low_res
+resolution: 
+- 20
+- 100
+steps:
+- tool: run_bluetopo_tile_engine
+  run: true
+- tool: run_digital_coast_engine
+  run: false
+- tool: run_laz_conversion_engine
+  run: false
+- tool: run_metadata_engine
+  run: false
+- tool: run_vrt_creation
+  run: false
+- tool: run_raster_mask_engine
+  run: false
+- tool: grid_digital_coast_files
+  run: false
+- tool: run_tsm_layer_engine
+  run: false
+- tool: run_sediment_layer_engine
+  run: false
+- tool: run_preprocessor_modeldata
+  run: false
+runtimes: []
