@@ -174,6 +174,7 @@ class Engine:
 
         # Resample each band independently to match continuous vs categorical types
         for band_idx in range(1, band_count + 1):
+            # TODO delete the band_*.tiff files after resample
             raw_band_path = tiff_path.parent / f"band_{band_idx}_raw.tiff"
             warped_band_path = tiff_path.parent / f"band_{band_idx}_warped.tiff"
 

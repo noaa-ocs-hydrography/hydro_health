@@ -1404,6 +1404,6 @@ class BlueTopoS3Engine(Engine):
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for tiff_file in tile_folder.glob('*'):
-            s3_path = tile_folder.relative_to(temp_folder)  # Strip off the temp_folder parts
+            s3_path = tiff_file.relative_to(temp_folder)  # Strip off the temp_folder parts
             self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
             s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
