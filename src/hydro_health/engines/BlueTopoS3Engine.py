@@ -62,6 +62,7 @@ def _process_tile(param_inputs: list) -> None:
             
             engine.resample_and_reproject(tiff_file_path, target_res)
             engine.create_survey_end_date_tiff(tiff_file_path)
+            engine.create_survey_provider_tiff(tiff_file_path, param_lookup['output_directory'].valueAsText)
             engine.create_catzoc_all(tiff_file_path)
 
             # TODO hurricane logic to another engine
@@ -581,6 +582,61 @@ class BlueTopoS3Engine(Engine):
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
+
+    def create_survey_provider_tiff(self, tiff_file_path: pathlib.Path, output: str, provider: str='NOS') -> None:
+        """Create survey end date tiffs from contributor band values in the XML file."""        
+
+        with rasterio.open(tiff_file_path) as src:
+            contributor_band_values = src.read(3)
+            transform = src.transform
+            nodata = src.nodata 
+            width, height = src.width, src.height  
+
+        xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
+        tree = etree.parse(xml_file_path)
+        root = tree.getroot()
+
+        contributor_band_xml = root.xpath("//PAMRasterBand[Description='Contributor']")
+        rows = contributor_band_xml[0].xpath(".//GDALRasterAttributeTable/Row")
+
+        table_data = []
+        for row in rows:
+            fields = row.xpath(".//F")
+            field_values = [field.text for field in fields]
+            if len(field_values) > 17:
+                data = {
+                    "source_survey_id": field_values[14],
+                    "source_institution": field_values[15]
+                }
+                table_data.append(data)
+                self.write_message(f'{data}', output)
+        # attribute_table_df = pd.DataFrame(table_data)
+
+        # attribute_table_df['survey_year_end'] = attribute_table_df['survey_date_end'].apply(lambda x: x.year if pd.notna(x) else 0)
+        # attribute_table_df['survey_year_end'] = attribute_table_df['survey_year_end'].round(2)
+
+        # date_mapping = attribute_table_df[['value', 'survey_year_end']].drop_duplicates()
+        # reclass_matrix = date_mapping.to_numpy()
+        # reclass_dict = {row[0]: row[1] for row in reclass_matrix}
+
+        # reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
+        # reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
+
+        # survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_survey_end_date.tiff'
+        # with rasterio.open(
+        #     survey_date_file_path,
+        #     "w",
+        #     driver="GTiff",
+        #     count=1,
+        #     width=width,
+        #     height=height,
+        #     dtype=rasterio.float32,
+        #     compress="lzw",
+        #     crs=src.crs,
+        #     transform=transform,
+        #     nodata=nodata,
+        # ) as dst:
+        #     dst.write(reclassified_band, 1)
 
     def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res:  int) -> pathlib.Path|bool:
         """Unconditionally download the NBS source tile and stage it for full processing."""

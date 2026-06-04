@@ -36,6 +36,8 @@ def _process_tile(param_inputs: list[list]) -> None:
     if tiff_file_path:
         engine.resample_and_reproject(tiff_file_path, target_res)
         engine.create_survey_end_date_tiff(tiff_file_path)
+        engine.create_survey_provider_tiff(tiff_file_path, param_lookup['output_directory'].valueAsText)
+        engine.create_survey_provider_tiff(tiff_file_path, param_lookup['output_directory'].valueAsText, only_nos=False)
         engine.create_catzoc_all(tiff_file_path)
         engine.create_catzoc_latest(tiff_file_path)
         mb_tiff_file = engine.rename_multiband(tiff_file_path)
@@ -289,6 +291,62 @@ class BlueTopoEngine(Engine):
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
+
+    def create_survey_provider_tiff(self, tiff_file_path: pathlib.Path, output: str, only_nos: bool=True) -> None:
+        """Create a binary coverage raster (1 = match, 0 = no match) for a specific survey provider."""        
+
+        with rasterio.open(tiff_file_path) as src:
+            contributor_band_values = src.read(3)
+            transform = src.transform
+            nodata = src.nodata 
+            width, height = src.width, src.height  
+            crs = src.crs
+
+        xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
+        tree = etree.parse(xml_file_path)
+        root = tree.getroot()
+
+        contributor_band_xml = root.xpath("//PAMRasterBand[Description='Contributor']")
+        if not contributor_band_xml:
+            self.write_message("Error: 'Contributor' band not found in XML.", output)
+            return
+
+        rows = contributor_band_xml[0].xpath(".//GDALRasterAttributeTable/Row")
+        matching_values = set()
+        for row in rows:
+            fields = row.xpath(".//F")
+            field_values = [field.text for field in fields]
+            if len(field_values) > 17:
+                nos_match = 'nos' in field_values[15].lower()
+                if (only_nos and nos_match) or (not only_nos and not nos_match):
+                    try:
+                        pixel_value = float(field_values[0])
+                        matching_values.add(pixel_value)
+                    except ValueError:
+                        continue
+
+        coverage_mask = np.isin(contributor_band_values, list(matching_values)).astype(np.uint8)
+        
+        if nodata is not None:
+            coverage_mask = np.where(contributor_band_values == nodata, 0, coverage_mask)
+
+        provider_type = "NOS" if only_nos else "External"
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_{provider_type}_survey_provider.tiff'
+        
+        with rasterio.open(
+            survey_date_file_path,
+            "w",
+            driver="GTiff",
+            count=1,
+            width=width,
+            height=height,
+            dtype=rasterio.uint8,
+            compress="lzw",
+            crs=crs,
+            transform=transform,
+            nodata=0,
+        ) as dst:
+            dst.write(coverage_mask, 1)
 
     def download_nbs_tile(self, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res: int) -> pathlib.Path:
         """Download all NBS files for a single tile"""
