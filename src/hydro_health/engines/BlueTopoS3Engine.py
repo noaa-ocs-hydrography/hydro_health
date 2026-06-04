@@ -73,6 +73,7 @@ def _process_tile(param_inputs: list) -> None:
             mb_tiff_file.unlink()
             engine.set_ground_to_nodata(tiff_file_path)
             # engine.create_slope(tiff_file_path)
+            # engine.create_rugosity(tiff_file_path)
             # engine.finalize_cog(tiff_file_path)      
 
             # # Crop intermediate tiffs dynamically if we are in 20m resolution mode
@@ -513,6 +514,7 @@ class BlueTopoS3Engine(Engine):
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
+        
         rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
         rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
         gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
