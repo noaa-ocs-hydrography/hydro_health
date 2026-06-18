@@ -9,6 +9,7 @@ pilot_mode: false
 output_prefix: low_res
 resolution:
 - 20
+- 100
 steps:
 - tool: run_bluetopo_tile_engine
   run: true
