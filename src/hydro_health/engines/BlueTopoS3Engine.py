@@ -38,24 +38,6 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
-def _check_corruption(path: str) -> str|None:
-    """Checks a single path over S3 using GDAL, returns the path if corrupt, else None"""
-    try:
-        gdal.UseExceptions()
-        gdal.PushErrorHandler('CPLQuietErrorHandler')
-        ds = gdal.Open(path)
-        if ds is not None:
-            # Checksum forces GDAL to read and decompress every block over S3 for every band
-            for i in range(1, ds.RasterCount + 1):
-                ds.GetRasterBand(i).Checksum()
-        ds = None
-        gdal.PopErrorHandler()
-        return None
-    except Exception:
-        gdal.PopErrorHandler()
-        return path
-
-
 def _process_tile(param_inputs: list) -> str:
     """
     Static function that handles processing of a single tile.
@@ -212,76 +194,6 @@ class BlueTopoS3Engine(Engine):
 
         # Attempt to automatically fix invalid vector geometries (TopologyExceptions) on the fly
         gdal.SetConfigOption('OGR_ENABLE_MAKE_VALID', 'YES')
-
-    def verify_and_remake_corrupt_tiles(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool) -> None:
-        """
-        Scans all files generated for the target resolution/ecoregions, tests them for
-        corruption via Dask workers using GDAL Checksum, and fully remakes any corrupted tiles.
-        """
-        print(f"\n[Pre-Mosaic Validation] Scanning S3 for any corrupted tiles in {current_res}m...")
-        s3_client = boto3.client('s3')
-        search_prefix_base = f"low_res/{current_res}m/"
-        if output_prefix and output_prefix.strip('/') != "low_res":
-            search_prefix_base = f"{output_prefix}/{search_prefix_base}"
-        
-        all_s3_keys = []
-        paginator = s3_client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=s3_bucket, Prefix=search_prefix_base)
-        
-        for page in pages:
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    if obj['Key'].lower().endswith(('.tiff', '.tif')):
-                        all_s3_keys.append(obj['Key'])
-
-        valid_keys = []
-        for ecoregion_id in ecoregion_ids:
-            match = re.search(r'\d+', str(ecoregion_id))
-            clean_er_num = match.group(0) if match else str(ecoregion_id)
-            valid_folders = [f"/{ecoregion_id}/", f"/ER_{clean_er_num}/", f"/ER{clean_er_num}/"]
-            for key in all_s3_keys:
-                if any(f in f"/{key}" for f in valid_folders):
-                    valid_keys.append(f"/vsis3/{s3_bucket}/{key}")
-
-        if not valid_keys:
-            print("[Pre-Mosaic Validation] No files found to validate.")
-            return
-
-        print(f"[Pre-Mosaic Validation] Found {len(valid_keys)} files. Deep-inspecting via Dask workers...")
-        future_checks = self.client.map(_check_corruption, valid_keys)
-        corrupt_paths = self.client.gather(future_checks)
-        corrupt_paths = [p for p in corrupt_paths if p is not None]
-
-        if not corrupt_paths:
-            print("[Pre-Mosaic Validation] All files are completely valid. No remakes necessary.")
-            return
-
-        print(f"[Pre-Mosaic Validation] WARNING: Found {len(corrupt_paths)} corrupted files. Parsing tile IDs for remake...")
-        
-        tiles_to_remake = set()
-        for path in corrupt_paths:
-            er_match = re.search(r'/(ER_\d+)/', path)
-            er = er_match.group(1) if er_match else None
-            tile_match = re.search(r'(B[A-Z0-9]{7})', path)
-            tile = tile_match.group(1) if tile_match else None
-            
-            if er and tile:
-                tiles_to_remake.add((tile, er))
-
-        if not tiles_to_remake:
-            print("[Pre-Mosaic Validation] Could not parse tile IDs from corrupt paths. Skipping remake.")
-            return
-            
-        print(f"[Pre-Mosaic Validation] Submitting {len(tiles_to_remake)} unique base tiles to be fully remade from scratch...")
-        remake_params = []
-        for tile_id, er in tiles_to_remake:
-            # Append overwrite=True to safely bypass the file_in_s3 block check
-            remake_params.append([self.param_lookup, tile_id, er, output_prefix, current_res, True])
-        
-        future_remakes = self.client.map(_process_tile, remake_params)
-        remake_results = self.client.gather(future_remakes)
-        self.print_async_results(remake_results, self.param_lookup['output_directory'].valueAsText)
-        print("[Pre-Mosaic Validation] Corrupt tiles successfully remade!")
 
     def crop_to_ecoregion(self, tiff_path: pathlib.Path, ecoregion_id: str, resolution: int) -> None:
         """Crop a single tile's TIFF to its ecoregion boundary if resolution is 20m."""
@@ -1156,35 +1068,6 @@ class BlueTopoS3Engine(Engine):
         layers.clear()
         isobath_ds = None
 
-    def get_valid_mosaic_paths(self, paths: list[str]) -> list[str]:
-        """
-        Deeply validates S3 TIFF files right before mosaicking to ensure no corrupted 
-        tiles (e.g., TIFFReadEncodedTile errors) break the massive base render.
-        """
-        valid_paths = []
-        gdal.UseExceptions()
-        print(f"      [Mosaic Pre-Processing] Deeply validating {len(paths)} source files to prevent render crashes...")
-        for idx, path in enumerate(paths):
-            if idx % 100 == 0 and idx > 0:
-                print(f"        -> Checked {idx}/{len(paths)} files...")
-            try:
-                gdal.PushErrorHandler('CPLQuietErrorHandler')
-                ds = gdal.Open(path)
-                if ds is not None:
-                    # Checksum forces GDAL to read and decompress every block over S3
-                    ds.GetRasterBand(1).Checksum()
-                    valid_paths.append(path)
-                ds = None
-            except Exception as e:
-                print(f"        -> WARNING: Dropping corrupt file from mosaic: {path.split('/')[-1]}")
-            finally:
-                gdal.PopErrorHandler()
-                
-        dropped = len(paths) - len(valid_paths)
-        if dropped > 0:
-            print(f"      [Mosaic Pre-Processing] WARNING: Safely dropped {dropped} corrupt files from mosaic queue.")
-        return valid_paths
-
     def _build_mosaic_chunked(self, target_path: pathlib.Path, paths: list[str], warp_kwargs: dict) -> None:
         """
         Process a massive list of S3 inputs using VRTs (Virtual Rasters) to guarantee 
@@ -1448,21 +1331,47 @@ class BlueTopoS3Engine(Engine):
                 current_warp_kwargs["resampleAlg"] = resample_alg
 
                 print(f"[{ecoregion_id}] Warping and precisely masking {m_key} ER mosaic dynamically from {len(config['paths'])} source files...")
-                
-                # --- DEEP VALIDATION BEFORE MOSAIC ---
-                valid_paths = self.get_valid_mosaic_paths(config['paths'])
-                if not valid_paths:
-                    print(f"[{ecoregion_id}] No valid tiles found for {m_key} after corruption check. Skipping.")
-                    continue
 
                 # Use chunked mosaic build to save memory and skip file limit restrictions
-                try:
-                    self._build_mosaic_chunked(local_mosaic_path, valid_paths, current_warp_kwargs)
-                except Exception as e:
-                    error_msg = f"[{ecoregion_id}] ERROR: Mosaic generation failed for {m_key}. Exception details: {e}"
-                    print(error_msg)
-                    if 'output_directory' in self.param_lookup:
-                        self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
+                max_mosaic_retries = 10
+                mosaic_attempt = 0
+                success = False
+
+                while mosaic_attempt < max_mosaic_retries and not success:
+                    try:
+                        self._build_mosaic_chunked(local_mosaic_path, config['paths'], current_warp_kwargs)
+                        success = True
+                    except Exception as e:
+                        error_str = str(e)
+                        match = re.search(r'(B[A-Z0-9]{7})', error_str)
+                        if match:
+                            bad_tile = match.group(1)
+                            print(f"[{ecoregion_id}] Mosaic crashed on corrupt tile {bad_tile}. Forcing full re-download and reprocess...")
+                            
+                            # Find the correct ecoregion for this tile from the paths
+                            bad_er = ecoregion_id
+                            for p in config['paths']:
+                                if bad_tile in p:
+                                    er_match = re.search(r'/(ER_\d+)/', p)
+                                    if er_match:
+                                        bad_er = er_match.group(1)
+                                    break
+                                    
+                            _process_tile([self.param_lookup, bad_tile, bad_er, output_prefix, current_res, True])
+                            mosaic_attempt += 1
+                            
+                            # Clear GDAL cache to ensure it fetches the newly generated file from S3 instead of the cached corrupt one
+                            gdal.VSICurlClearCache()
+                            
+                            print(f"[{ecoregion_id}] Retrying mosaic generation (Attempt {mosaic_attempt+1}/{max_mosaic_retries})...")
+                        else:
+                            error_msg = f"[{ecoregion_id}] ERROR: Mosaic generation failed for {m_key}. Exception details: {e}"
+                            print(error_msg)
+                            if 'output_directory' in self.param_lookup:
+                                self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
+                            break # Safely break and skip
+
+                if not success:
                     continue # Safely skip to the next mosaic type instead of crashing the whole pipeline
 
                 print(f"[{ecoregion_id}] Generating robust overviews for {m_key}...")
@@ -1693,20 +1602,46 @@ class BlueTopoS3Engine(Engine):
 
             print(f"[Mosaic] Warping and masking {m_key} mosaic directly from {len(config['paths'])} source files...")
 
-            # --- DEEP VALIDATION BEFORE MOSAIC ---
-            valid_paths = self.get_valid_mosaic_paths(config['paths'])
-            if not valid_paths:
-                print(f"[Mosaic] No valid tiles found for {m_key} after corruption check. Skipping.")
-                continue
-
             # Use chunked mosaic build to save memory and skip file limit restrictions
-            try:
-                self._build_mosaic_chunked(local_mosaic_path, valid_paths, current_warp_kwargs)
-            except Exception as e:
-                error_msg = f"[Mosaic] ERROR: Massive mosaic generation failed for {m_key}. Exception details: {e}"
-                print(error_msg)
-                if 'output_directory' in self.param_lookup:
-                    self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
+            max_mosaic_retries = 10
+            mosaic_attempt = 0
+            success = False
+
+            while mosaic_attempt < max_mosaic_retries and not success:
+                try:
+                    self._build_mosaic_chunked(local_mosaic_path, config['paths'], current_warp_kwargs)
+                    success = True
+                except Exception as e:
+                    error_str = str(e)
+                    match = re.search(r'(B[A-Z0-9]{7})', error_str)
+                    if match:
+                        bad_tile = match.group(1)
+                        print(f"[Mosaic] Mosaic crashed on corrupt tile {bad_tile}. Forcing full re-download and reprocess...")
+                        
+                        # Find the correct ecoregion for this tile from the paths
+                        bad_er = ecoregion_ids[0] # fallback
+                        for p in config['paths']:
+                            if bad_tile in p:
+                                er_match = re.search(r'/(ER_\d+)/', p)
+                                if er_match:
+                                    bad_er = er_match.group(1)
+                                break
+                                
+                        _process_tile([self.param_lookup, bad_tile, bad_er, output_prefix, current_res, True])
+                        mosaic_attempt += 1
+                        
+                        # Clear GDAL cache to ensure it fetches the newly generated file from S3 instead of the cached corrupt one
+                        gdal.VSICurlClearCache()
+                        
+                        print(f"[Mosaic] Retrying mosaic generation (Attempt {mosaic_attempt+1}/{max_mosaic_retries})...")
+                    else:
+                        error_msg = f"[Mosaic] ERROR: Massive mosaic generation failed for {m_key}. Exception details: {e}"
+                        print(error_msg)
+                        if 'output_directory' in self.param_lookup:
+                            self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
+                        break
+
+            if not success:
                 continue # Safely skip to the next mosaic type instead of crashing the whole pipeline
 
             print(f"[Mosaic] Generating robust overviews for fast performance...")
@@ -1768,76 +1703,6 @@ class BlueTopoS3Engine(Engine):
 
             if local_mosaic_path.exists():
                 local_mosaic_path.unlink() # Save disk space
-
-    def verify_and_remake_corrupt_tiles(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool) -> None:
-        """
-        Scans all files generated for the target resolution/ecoregions, tests them for
-        corruption via Dask workers using GDAL Checksum, and fully remakes any corrupted tiles.
-        """
-        print(f"\n[Pre-Mosaic Validation] Scanning S3 for any corrupted tiles in {current_res}m...")
-        s3_client = boto3.client('s3')
-        search_prefix_base = f"low_res/{current_res}m/"
-        if output_prefix and output_prefix.strip('/') != "low_res":
-            search_prefix_base = f"{output_prefix}/{search_prefix_base}"
-        
-        all_s3_keys = []
-        paginator = s3_client.get_paginator('list_objects_v2')
-        pages = paginator.paginate(Bucket=s3_bucket, Prefix=search_prefix_base)
-        
-        for page in pages:
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    if obj['Key'].lower().endswith(('.tiff', '.tif')):
-                        all_s3_keys.append(obj['Key'])
-
-        valid_keys = []
-        for ecoregion_id in ecoregion_ids:
-            match = re.search(r'\d+', str(ecoregion_id))
-            clean_er_num = match.group(0) if match else str(ecoregion_id)
-            valid_folders = [f"/{ecoregion_id}/", f"/ER_{clean_er_num}/", f"/ER{clean_er_num}/"]
-            for key in all_s3_keys:
-                if any(f in f"/{key}" for f in valid_folders):
-                    valid_keys.append(f"/vsis3/{s3_bucket}/{key}")
-
-        if not valid_keys:
-            print("[Pre-Mosaic Validation] No files found to validate.")
-            return
-
-        print(f"[Pre-Mosaic Validation] Found {len(valid_keys)} files. Deep-inspecting via Dask workers...")
-        future_checks = self.client.map(_check_corruption, valid_keys)
-        corrupt_paths = self.client.gather(future_checks)
-        corrupt_paths = [p for p in corrupt_paths if p is not None]
-
-        if not corrupt_paths:
-            print("[Pre-Mosaic Validation] All files are completely valid. No remakes necessary.")
-            return
-
-        print(f"[Pre-Mosaic Validation] WARNING: Found {len(corrupt_paths)} corrupted files. Parsing tile IDs for remake...")
-        
-        tiles_to_remake = set()
-        for path in corrupt_paths:
-            er_match = re.search(r'/(ER_\d+)/', path)
-            er = er_match.group(1) if er_match else None
-            tile_match = re.search(r'(B[A-Z0-9]{7})', path)
-            tile = tile_match.group(1) if tile_match else None
-            
-            if er and tile:
-                tiles_to_remake.add((tile, er))
-
-        if not tiles_to_remake:
-            print("[Pre-Mosaic Validation] Could not parse tile IDs from corrupt paths. Skipping remake.")
-            return
-            
-        print(f"[Pre-Mosaic Validation] Submitting {len(tiles_to_remake)} unique base tiles to be fully remade from scratch...")
-        remake_params = []
-        for tile_id, er in tiles_to_remake:
-            # Append overwrite=True to safely bypass the file_in_s3 block check
-            remake_params.append([self.param_lookup, tile_id, er, output_prefix, current_res, True])
-        
-        future_remakes = self.client.map(_process_tile, remake_params)
-        remake_results = self.client.gather(future_remakes)
-        self.print_async_results(remake_results, self.param_lookup['output_directory'].valueAsText)
-        print("[Pre-Mosaic Validation] Corrupt tiles successfully remade!")
 
 
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int] = None) -> None:
@@ -1955,9 +1820,6 @@ class BlueTopoS3Engine(Engine):
             else:   
                 print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
 
-            
-            # --- MANDATORY PRE-MOSAIC CORRUPTION CHECK ---
-            self.verify_and_remake_corrupt_tiles(all_ecoregions, output_bucket, current_res, output_prefix)
 
             # TODO need to remove all of the mosaic logic and self.skip_tiling
             # Generate the unified isobaths from all finished tiles across all ecoregions (ER1 to ER6 order)
