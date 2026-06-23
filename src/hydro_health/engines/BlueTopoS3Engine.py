@@ -10,6 +10,8 @@ import re
 import s3fs
 import psutil  # Added for memory tracking
 import shutil  # Added for backup/restore of base tiles
+import concurrent.futures # Added for aggressive parallel S3 downloading
+import gc # Added for aggressive RAM purging
 
 from rasterio.session import AWSSession
 import geopandas as gpd
@@ -28,7 +30,6 @@ from lxml import etree
 from osgeo import gdal, ogr, osr
 
 from hydro_health.helpers.tools import get_config_item
-# Removed 'decay' from the imports since we only want ISS now
 from hydro_health.engines.Engine import Engine, supersession, catzoc
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
@@ -38,28 +39,30 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
+
 def _process_tile(param_inputs: list) -> str:
     """
     Static function that handles processing of a single tile.
     Refactored for S3-to-S3 workflow using ephemeral storage.
     """
 
-    param_lookup = param_inputs[0]
-    tile_id = param_inputs[1]
-    ecoregion_id = param_inputs[2]
-    output_prefix = param_inputs[3]
-    target_res = param_inputs[4]
-    overwrite = param_inputs[5] if len(param_inputs) > 5 else False
+    param_lookup, tile_id, ecoregion_id, output_prefix, target_res = param_inputs
     
     print(f"[{tile_id}] Initiating processing for ecoregion {ecoregion_id}...")
 
     engine = BlueTopoS3Engine(param_lookup)
         
-    if engine.file_in_s3(output_prefix, target_res, ecoregion_id, tile_id, overwrite=overwrite):
-        msg = f'BlueTopo tile {tile_id} already exists.  Skipping download.'
+    existing_files = engine.check_s3_existing_files(output_prefix, target_res, ecoregion_id, tile_id, overwrite=False)
+        
+    if all(existing_files.values()):
+        msg = f'[{tile_id}] BlueTopo tile and all derivatives already exist. Skipping download.'
         print(msg)
         return msg
     else:
+        # Determine exactly which files are missing to inform the user
+        missing_files = [k for k, v in existing_files.items() if not v]
+        print(f"[{tile_id}] Missing derivatives detected: {missing_files}. Downloading raw NBS source to generate them...")
+
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = pathlib.Path(temp_dir)
 
@@ -92,25 +95,31 @@ def _process_tile(param_inputs: list) -> str:
 
                 try:
                     # Explicitly and safely warp the base tile to the target CRS and Resolution
+                    print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
                     engine.warp_bluetopo_tile(tiff_file_path, target_res)
                     
-                    engine.create_survey_end_date_tiff(tiff_file_path)
-                    engine.create_catzoc_all(tiff_file_path, increased_scale=True)
+                    if not existing_files['survey_end_date']:
+                        engine.create_survey_end_date_tiff(tiff_file_path)
+                        
+                    if not existing_files['iss_110']:
+                        engine.create_catzoc_all(tiff_file_path, increased_scale=True)
 
-                    # TODO hurricane logic to another engine
-                    engine.create_hurricane_tile(tiff_file_path, target_res)
+                    if not existing_files['hurricane']:
+                        engine.create_hurricane_tile(tiff_file_path, target_res)
                     
-                    mb_tiff_file = engine.rename_multiband(tiff_file_path)
-                    engine.multiband_to_singleband(mb_tiff_file, band=1)
-                    engine.multiband_to_singleband(mb_tiff_file, band=2)
-                    if mb_tiff_file.exists():
-                        mb_tiff_file.unlink()
-                    engine.set_ground_to_nodata(tiff_file_path)
+                    # Only parse the multiband source if we are actively generating the base tile or uncertainty tile
+                    if not existing_files['base'] or not existing_files['unc']:
+                        mb_tiff_file = engine.rename_multiband(tiff_file_path)
+                        if not existing_files['base']:
+                            engine.multiband_to_singleband(mb_tiff_file, band=1)
+                        if not existing_files['unc']:
+                            engine.multiband_to_singleband(mb_tiff_file, band=2)
+                        if mb_tiff_file.exists():
+                            mb_tiff_file.unlink()
                     
-                    # Uncommented to create slope and rugosity
-                    # engine.create_slope(tiff_file_path) # Removed tile-level slope to generate artifact-free at the mosaic level instead
-                    engine.create_rugosity(tiff_file_path)
-                    engine.finalize_cog(tiff_file_path)      
+                    if not existing_files['base']:
+                        engine.set_ground_to_nodata(tiff_file_path)
+                        engine.finalize_cog(tiff_file_path)     
 
                     # Crop intermediate tiffs dynamically if we are in 20m resolution mode
                     if target_res == 20:
@@ -141,8 +150,9 @@ def _process_tile(param_inputs: list) -> str:
                 print(msg)
                 return msg
 
-            print(f"[{tile_id}] Uploading newly generated tiles to S3...")
-            engine.upload_current_tiles_to_s3(tile_folder, temp_path)
+            print(f"[{tile_id}] Uploading strictly ONLY the newly generated missing files to S3...")
+            # Pass existing files here to strictly prevent overwriting existing derivatives
+            engine.upload_current_tiles_to_s3(tile_folder, temp_path, existing_files)
             
             msg = f"[{tile_id}] Processing successfully completed."
             print(msg)
@@ -187,6 +197,9 @@ class BlueTopoS3Engine(Engine):
         gdal.SetConfigOption('VSI_CACHE', 'YES')
         gdal.SetConfigOption('CPL_VSIL_CURL_ALLOWED_EXTENSIONS', 'tif,tiff')
         gdal.SetConfigOption('COMPRESS_OVERVIEW', 'DEFLATE')
+        
+        # FIXED: Drastically reduced GDAL cache to 1GB to prevent EC2 OS thrashing/freezing
+        gdal.SetConfigOption('GDAL_CACHEMAX', '1024MB')
         
         # Add HTTP retries to prevent massive mosaics from silently stalling due to network blips
         gdal.SetConfigOption('GDAL_HTTP_MAX_RETRY', '5')
@@ -270,7 +283,9 @@ class BlueTopoS3Engine(Engine):
         warp_options = gdal.WarpOptions(**warp_kwargs)
 
         try:
-            gdal.Warp(str(temp_cropped), str(tiff_path), options=warp_options)
+            ds_crop = gdal.Warp(str(temp_cropped), str(tiff_path), options=warp_options)
+            ds_crop = None # EXPLICIT CLEANUP
+            
             if temp_cropped.exists():
                 tiff_path.unlink()
                 temp_cropped.rename(tiff_path)
@@ -285,7 +300,7 @@ class BlueTopoS3Engine(Engine):
         accumulating the corresponding yearly hurricane counts for each cell.
         """
 
-        print("  - Creating cumulative hurricane count tile...")
+        print(f"[{tiff_file_path.name}] Creating cumulative hurricane count tile...")
         stem = tiff_file_path.stem
         hurricane_tile_path = tiff_file_path.parents[0] / f'{stem}_hurricane.tiff'
 
@@ -349,13 +364,11 @@ class BlueTopoS3Engine(Engine):
             s3_uri_tiff = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tiff"
             s3_uri_tif = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tif"
 
-            # Use MEM driver to warp just the exact bounding box needed directly from S3
-            # FIX: Force output to exactly match the source tile's pixel width/height instead of target resolution
             warp_options = gdal.WarpOptions(
                 format="MEM",
                 outputBounds=(minx, miny, maxx, maxy),
-                width=width,    # <--- Changed from xRes
-                height=height,  # <--- Changed from yRes
+                width=width,    
+                height=height,  
                 dstSRS=self.target_crs,
                 resampleAlg=gdal.GRA_NearestNeighbour, # Counts should not be interpolated
                 dstNodata=-9999
@@ -385,6 +398,8 @@ class BlueTopoS3Engine(Engine):
 
             arr = mem_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
             arr[arr == -9999] = 0.0 
+            
+            mem_ds = None # EXPLICIT CLEANUP TO PREVENT LEAK
             return arr
 
         # Start hurricane count at 0.0 ONLY for cells with a valid survey year
@@ -398,7 +413,6 @@ class BlueTopoS3Engine(Engine):
             year_arr = get_year_count_array(target_year)
 
             # Add this year's count to any valid pixel whose survey year is <= target_year
-            # (i.e. the hurricane occurred during or after the survey year)
             add_mask = valid_mask & (survey_years <= target_year)
             result_array[add_mask] += year_arr[add_mask]
 
@@ -429,7 +443,7 @@ class BlueTopoS3Engine(Engine):
     def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster of unique values for each survey area."""
 
-        print("  - Creating Initial Survey Score (ISS) all...")
+        print(f"[{tiff_file_path.name}] Creating Initial Survey Score (ISS) all...")
         with rasterio.open(tiff_file_path) as src:
             contributor_band_values = np.round(src.read(3))
             transform = src.transform
@@ -511,6 +525,7 @@ class BlueTopoS3Engine(Engine):
     def create_catzoc_latest(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster using the most recent survey date"""
 
+        print(f"[{tiff_file_path.name}] Creating Initial Survey Score (ISS) latest...")
         with rasterio.open(tiff_file_path) as src:
             contributor_band_values = np.round(src.read(3))
             transform = src.transform
@@ -586,25 +601,10 @@ class BlueTopoS3Engine(Engine):
             dst.build_overviews(factors, rasterio.enums.Resampling.average)
             dst.update_tags(ns='rio_overview', resampling='average')
 
-    def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
-        """Generate a rugosity/roughness raster from the DEM"""
-        
-        rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
-        rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
-        gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
-
-    def create_slope(self, tiff_file_path: pathlib.Path) -> None:
-        """Generate a slope raster from the DEM"""
-
-        print("  - Creating slope...")
-        slope_name = str(tiff_file_path.stem) + '_slope.tiff'
-        slope_file_path = tiff_file_path.parents[0] / slope_name
-        gdal.DEMProcessing(str(slope_file_path), str(tiff_file_path), 'slope')
-
     def create_survey_end_date_tiff(self, tiff_file_path: pathlib.Path) -> None:
         """Create survey end date tiffs from contributor band values in the XML file."""        
 
-        print("  - Creating survey end date TIFF...")
+        print(f"[{tiff_file_path.name}] Creating survey end date TIFF...")
         with rasterio.open(tiff_file_path) as src:
             contributor_band_values = np.round(src.read(3))
             transform = src.transform
@@ -750,11 +750,19 @@ class BlueTopoS3Engine(Engine):
 
         return output_tile_path
 
-    def file_in_s3(self, output_prefix: str, target_res: int, ecoregion_id: str, tile_id: str, overwrite: bool=False) -> bool:
-        """Check if BlueTopo tile already exists in S3"""
+    def check_s3_existing_files(self, output_prefix: str|bool, target_res: int, ecoregion_id: str, tile_id: str, overwrite: bool=False) -> dict:
+        """Check which derivatives already exist in S3 for a tile"""
+        existing = {
+            'base': False,
+            'iss_110': False,
+            'survey_end_date': False,
+            'hurricane': False,
+            'unc': False
+        }
 
         if overwrite:
-            return False
+            return existing
+            
         s3_files = s3fs.S3FileSystem()
         if output_prefix == 'low_res':
             beginning_prefix = f'{output_prefix}/{target_res}m/{ecoregion_id}'
@@ -762,30 +770,42 @@ class BlueTopoS3Engine(Engine):
             beginning_prefix = f'{output_prefix}/{ecoregion_id}'
         else:
             beginning_prefix = ecoregion_id
+            
         bluetopo_tile_folder = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/{beginning_prefix}/{get_config_item("BLUETOPO", "SUBFOLDER")}/BlueTopo/{tile_id}'
         search_path = f"{bluetopo_tile_folder}/**/*.tiff"
         found_files = s3_files.glob(search_path)
         
         for file in found_files:
             filename = pathlib.Path(file).name
+            # Exclude cropped temporary versions if they somehow got uploaded
+            if filename.startswith('crop_') or filename.startswith('temp_'):
+                continue
+                
             if len(filename.split('_')) == 3:
-                # Found tile example: BlueTopo_BC25V26P_20250916.tiff
-                # missing_files = ['base', 'ISS', 'hurricane', 'survey_end_date', 'slope', 'unc']
-                return True
-        return False
+                existing['base'] = True
+            elif filename.endswith('_ISS_all_110.tiff'):
+                existing['iss_110'] = True
+            elif filename.endswith('_survey_end_date.tiff'):
+                existing['survey_end_date'] = True
+            elif filename.endswith('_hurricane.tiff'):
+                existing['hurricane'] = True
+            elif filename.endswith('_unc.tiff'):
+                existing['unc'] = True
+                
+        return existing
 
     def finalize_cog(self, tiff_path: pathlib.Path) -> None:
         """The final pass to ensure perfect COG layout and overviews."""
 
-        print("  - Finalizing COG format...")
+        print(f"[{tiff_path.name}] Finalizing COG format...")
         temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
 
         ds = gdal.Open(str(tiff_path), gdal.GA_Update)
         if ds is not None:
             ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
-            ds = None
+            ds = None # EXPLICIT CLEANUP
 
-        gdal.Translate(
+        ds_trans = gdal.Translate(
             str(temp_cog),
             str(tiff_path),
             creationOptions=[
@@ -797,6 +817,7 @@ class BlueTopoS3Engine(Engine):
                 "COPY_SRC_OVERVIEWS=YES"
             ]
         )
+        ds_trans = None # EXPLICIT CLEANUP
 
         if temp_cog.exists():
             tiff_path.unlink()
@@ -824,12 +845,13 @@ class BlueTopoS3Engine(Engine):
         output_name = str(tiff_file_path.name).replace('_mb', band_name_lookup[band])
         singleband_tile_name = tiff_file_path.parents[0] / output_name
 
-        gdal.Translate(
+        ds_trans = gdal.Translate(
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
             creationOptions=["COMPRESS=DEFLATE"]
         )
+        ds_trans = None # EXPLICIT CLEANUP
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
         """Update file name for singleband conversion"""
@@ -853,14 +875,14 @@ class BlueTopoS3Engine(Engine):
         auth_code = src_srs.GetAuthorityCode(None)
         gt = ds.GetGeoTransform()
         x_res = abs(gt[1])
-        ds = None
+        ds = None # EXPLICIT CLEANUP
         
         # If it's already exactly EPSG:6350 AND the correct resolution, no warp needed
         if str(auth_code) == "6350" and abs(x_res - target_res) < 0.1:
-            print(f"  - Tile is already {self.target_crs} at {target_res}m. Skipping warp.")
+            print(f"[{tiff_file_path.name}] Tile is already {self.target_crs} at {target_res}m. Skipping warp.")
             return
 
-        print(f"  - Reprojecting and resampling base tile to {self.target_crs} at {target_res}m...")
+        print(f"[{tiff_file_path.name}] Reprojecting and resampling base tile to {self.target_crs} at {target_res}m...")
         
         # Keep original XML safe
         xml_path = tiff_file_path.parent / f"{tiff_file_path.name}.aux.xml"
@@ -876,22 +898,26 @@ class BlueTopoS3Engine(Engine):
         final_warp = tiff_file_path.parent / f"warp_{tiff_file_path.name}"
         
         # Extract the bands using gdal.Translate
-        gdal.Translate(str(temp_b12_src), str(tiff_file_path), bandList=[1, 2], creationOptions=["COMPRESS=DEFLATE"])
-        gdal.Translate(str(temp_b3_src), str(tiff_file_path), bandList=[3], creationOptions=["COMPRESS=DEFLATE"])
+        ds1 = gdal.Translate(str(temp_b12_src), str(tiff_file_path), bandList=[1, 2], creationOptions=["COMPRESS=DEFLATE"])
+        ds1 = None
+        ds2 = gdal.Translate(str(temp_b3_src), str(tiff_file_path), bandList=[3], creationOptions=["COMPRESS=DEFLATE"])
+        ds2 = None
         
         # Warp Bands 1 & 2 (Bilinear)
-        gdal.Warp(str(temp_b12_warp), str(temp_b12_src), options=gdal.WarpOptions(
+        ds3 = gdal.Warp(str(temp_b12_warp), str(temp_b12_src), options=gdal.WarpOptions(
             format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
             resampleAlg=gdal.GRA_Bilinear, targetAlignedPixels=True,
             creationOptions=["COMPRESS=DEFLATE"]
         ))
+        ds3 = None
         
         # Warp Band 3 (Nearest Neighbor)
-        gdal.Warp(str(temp_b3_warp), str(temp_b3_src), options=gdal.WarpOptions(
+        ds4 = gdal.Warp(str(temp_b3_warp), str(temp_b3_src), options=gdal.WarpOptions(
             format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
             resampleAlg=gdal.GRA_NearestNeighbour, targetAlignedPixels=True,
             creationOptions=["COMPRESS=DEFLATE"]
         ))
+        ds4 = None
         
         # Combine them using rasterio
         if temp_b12_warp.exists() and temp_b3_warp.exists():
@@ -1068,90 +1094,149 @@ class BlueTopoS3Engine(Engine):
         layers.clear()
         isobath_ds = None
 
-    def _build_mosaic_chunked(self, target_path: pathlib.Path, paths: list[str], warp_kwargs: dict) -> None:
+    def _download_vsis3_paths_concurrently(self, vsis3_paths: list[str], temp_dir: pathlib.Path) -> list[str]:
         """
-        Process a massive list of S3 inputs using VRTs (Virtual Rasters) to guarantee 
-        a single-pass render. This eliminates the O(N^2) disk I/O bottleneck caused by 
-        repeatedly appending compressed data to giant GeoTIFFs.
+        [OPTION 1 FIX] Bulk download tiles from S3 to local disk before GDAL processing.
+        Significantly reduces network thrashing inside the GDAL Warp operations.
+        """
+        local_paths = []
+        download_tasks = []
+
+        for vsi_path in vsis3_paths:
+            parts = vsi_path.replace("/vsis3/", "").split("/", 1)
+            if len(parts) == 2:
+                bucket, key = parts
+                # Flatten the path to prevent folder creation issues and guarantee uniqueness
+                safe_filename = key.replace("/", "_")
+                local_path = temp_dir / safe_filename
+                download_tasks.append((bucket, key, local_path))
+        
+        # FIXED: Initialize one single globally shared Boto3 client context pool
+        s3_pool_client = boto3.client('s3', config=Config(max_pool_connections=32))
+
+        def _download_task(task_info):
+            bucket, key, local_path = task_info
+            if not local_path.exists():
+                s3_pool_client.download_file(bucket, key, str(local_path))
+            return str(local_path)
+
+        mem_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
+        print(f"      [S3 Pre-Download] FAST FETCH: Fetching {len(download_tasks)} files locally to eliminate S3 warp latency... (RAM: {mem_mb:.1f}MB)")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=32) as executor:
+            futures = [executor.submit(_download_task, task) for task in download_tasks]
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    local_paths.append(future.result())
+                except Exception as e:
+                    print(f"      [S3 Pre-Download] WARNING: File download failed: {e}")
+
+        print(f"      [S3 Pre-Download] Complete. {len(local_paths)} files perfectly staged locally.")
+        
+        # Clear out Boto3 client connections to free RAM
+        del s3_pool_client
+        gc.collect()
+        
+        return local_paths
+
+    def _build_local_mosaic(self, target_path: pathlib.Path, paths: list[str], warp_kwargs: dict) -> None:
+        """
+        Process a massive list of inputs locally using a highly-optimized Two-Step Translate/Warp Pipeline.
+        Step 1: Translate VRT -> Stitched Temp TIFF (Very Fast, no vector intersection math)
+        Step 2: Warp Temp TIFF -> Final TIFF (Applies cutline precisely on a single file, rather than 700+)
         """
         gdal.UseExceptions()
-        chunk_size = 250
-        path_chunks = [paths[i:i + chunk_size] for i in range(0, len(paths), chunk_size)]
-        
         output_folder = self.param_lookup['output_directory'].valueAsText if 'output_directory' in self.param_lookup else None
 
-        # FORCE temp files to be written to the same large EBS volume as the outputs, NOT the small EC2 root /tmp drive
         with tempfile.TemporaryDirectory(dir=target_path.parent) as temp_dir:
             temp_dir_path = pathlib.Path(temp_dir)
-            chunk_vrts = []
+            
+            # 1. PULL EVERYTHING TO LOCAL FAST STORAGE FIRST
+            local_paths = self._download_vsis3_paths_concurrently(paths, temp_dir_path)
 
-            print(f"      [Mosaic Pre-Processing] Building {len(path_chunks)} Virtual Rasters (VRTs) to map data without copying...")
-            
-            # Extract cutline parameters to separate the geometry masking from the massive pixel render
-            warp_kwargs_unclipped = warp_kwargs.copy()
-            cutline_ds = warp_kwargs_unclipped.pop("cutlineDSName", None)
-            cutline_layer = warp_kwargs_unclipped.pop("cutlineLayer", None)
-            cutline_where = warp_kwargs_unclipped.pop("cutlineWhere", None)
-            crop_to_cutline = warp_kwargs_unclipped.pop("cropToCutline", False)
-            
-            for i, chunk in enumerate(path_chunks):
-                # Evaluate memory right before warp operation
-                mem_mb = psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-                sys_mem = psutil.virtual_memory().percent
-                print(f"        -> [VRT Chunk {i+1}/{len(path_chunks)}] Mapping {len(chunk)} files | Sys RAM: {sys_mem}% | Process RAM: {mem_mb:.1f} MB")
-                
-                chunk_vrt_path = str(temp_dir_path / f"chunk_{i}.vrt")
-                
-                # Because tiles are already in EPSG:6350, use gdal.BuildVRT to safely map ALL
-                # files in the chunk instead of gdal.Warp which ignores files 2-N in VRT mode.
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg=warp_kwargs_unclipped.get("resampleAlg", gdal.GRA_NearestNeighbour),
-                    srcNodata=warp_kwargs_unclipped.get("srcNodata", -9999),
-                    VRTNodata=warp_kwargs_unclipped.get("dstNodata", -9999)
-                )
-                
-                gdal.BuildVRT(chunk_vrt_path, chunk, options=vrt_options)
-                chunk_vrts.append(chunk_vrt_path)
+            if not local_paths:
+                raise RuntimeError("No files were successfully downloaded to build the mosaic.")
 
-            print(f"      [Mosaic Base Render] Rendering unified unmasked mosaic from VRTs in a single pass...")
-            unclipped_path = temp_dir_path / "unclipped_mosaic.tiff"
+            print(f"      [Mosaic Final Render] Building Virtual Raster (VRT) for {len(local_paths)} local files...")
+            final_vrt = str(temp_dir_path / "final_merge.vrt")
             
-            # ONE single render pass to disk using all mapped VRTs
+            # Use the provided warp arguments directly (now handles clipping + mosaicking simultaneously)
+            warp_kwargs_base = warp_kwargs.copy()
+            
+            # Extract final-stage only parameters for vector masking so they don't break the Translate phase
+            cutline_ds = warp_kwargs_base.pop("cutlineDSName", None)
+            cutline_layer = warp_kwargs_base.pop("cutlineLayer", None)
+            cutline_where = warp_kwargs_base.pop("cutlineWhere", None)
+            crop_to_cutline = warp_kwargs_base.pop("cropToCutline", False)
+
+            vrt_options = gdal.BuildVRTOptions(
+                resampleAlg=warp_kwargs_base.get("resampleAlg", gdal.GRA_NearestNeighbour),
+                srcNodata=warp_kwargs_base.get("srcNodata", -9999),
+                VRTNodata=warp_kwargs_base.get("dstNodata", -9999)
+            )
+            vrt_ds = gdal.BuildVRT(final_vrt, local_paths, options=vrt_options)
+            vrt_ds = None # Must flush to disk, or VRT remains cached indefinitely in RAM
+
+            # Custom progress callback function for GDAL
+            def custom_progress_callback(complete, message, cb_data):
+                percent = int(complete * 100)
+                if percent > cb_data['last_printed']:
+                    print(f"        -> {cb_data['step_name']} Progress: {percent}%")
+                    sys.stdout.flush() # Force output to console immediately so it doesn't look hung
+                    cb_data['last_printed'] = percent
+                return 1
+
+            solid_tiff = str(temp_dir_path / "solid_mosaic.tiff")
+
+            print(f"      [Mosaic Final Render] Executing Step 1/2: Stitching 700+ tiles into a single master raster... (Fast Translate)")
             try:
-                gdal.Warp(str(unclipped_path), chunk_vrts, options=gdal.WarpOptions(**warp_kwargs_unclipped), callback=gdal.TermProgress_nocb)
-            except RuntimeError as e:
-                warn_msg = f"        -> CRITICAL WARNING: Base render failed. Error: {e}"
+                # Step 1: Rapidly stitch without worrying about vector math bounds
+                cb_data_1 = {'last_printed': -1, 'step_name': 'Stitching'}
+                trans_opts = gdal.TranslateOptions(
+                    format="GTiff",
+                    creationOptions=["COMPRESS=LZW", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=4"],
+                    noData=-9999,
+                    callback=custom_progress_callback,
+                    callback_data=cb_data_1
+                )
+                trans_ds = gdal.Translate(solid_tiff, final_vrt, options=trans_opts)
+                trans_ds = None
+                
+                print(f"      [Mosaic Final Render] Executing Step 2/2: Applying Vector Mask... (Single File Warp)")
+                # Step 2: Now that it's a single file, safely apply the vector mask without crashing GDAL threading
+                if cutline_ds:
+                    mask_kwargs = warp_kwargs_base.copy()
+                    mask_kwargs["cutlineDSName"] = cutline_ds
+                    if cutline_layer:
+                        mask_kwargs["cutlineLayer"] = cutline_layer
+                    if cutline_where:
+                        mask_kwargs["cutlineWhere"] = cutline_where
+                    mask_kwargs["cropToCutline"] = crop_to_cutline
+                    
+                    # Prevent I/O thread lockup, the single file warp is natively fast enough
+                    mask_kwargs["multithread"] = False 
+                    
+                    cb_data_2 = {'last_printed': -1, 'step_name': 'Masking'}
+                    warp_ds = gdal.Warp(
+                        str(target_path), 
+                        solid_tiff, 
+                        options=gdal.WarpOptions(**mask_kwargs), 
+                        callback=custom_progress_callback, 
+                        callback_data=cb_data_2
+                    )
+                    warp_ds = None
+                else:
+                    # Fallback if no mask was provided
+                    shutil.copy(solid_tiff, str(target_path))
+
+            except Exception as e:
+                warn_msg = f"        -> FATAL: Mosaic stitch/mask failed. Error: {e}"
                 print(warn_msg)
                 if output_folder: self.write_message(warn_msg, output_folder)
-                raise e # If the base render fails, we abort
-
-            # Process the clipping as a completely independent step
-            if cutline_ds and cutline_layer:
-                print(f"      [Mosaic Clipping] Applying final vector mask to cleanly crop the mosaic...")
+                raise e
                 
-                # Inherit all original properties to ensure the mask behaves identically to the base render,
-                # explicitly mapping srcNodata to dstNodata so holes are punched correctly.
-                mask_kwargs = warp_kwargs_unclipped.copy()
-                mask_kwargs["cutlineDSName"] = cutline_ds
-                mask_kwargs["cutlineLayer"] = cutline_layer
-                mask_kwargs["cropToCutline"] = crop_to_cutline
-                if cutline_where:
-                    mask_kwargs["cutlineWhere"] = cutline_where
-                
-                try:
-                    gdal.Warp(str(target_path), str(unclipped_path), options=gdal.WarpOptions(**mask_kwargs), callback=gdal.TermProgress_nocb)
-                    # IMMEDIATELY delete the massive unclipped file to prevent double disk usage
-                    if unclipped_path.exists():
-                        unclipped_path.unlink()
-                except Exception as e:
-                    warn_msg = f"        -> WARNING: Final vector clipping failed. Retaining unclipped mosaic. Error: {e}"
-                    print(warn_msg)
-                    if output_folder: self.write_message(warn_msg, output_folder)
-                    shutil.move(str(unclipped_path), str(target_path))
-                    unclipped_kwargs = {k: v for k, v in fallback_kwargs.items() if k not in ["cutlineDSName", "cutlineLayer", "cropToCutline", "cutlineWhere"]}
-                    gdal.Warp(str(target_path), chunk_vrts, options=gdal.WarpOptions(**unclipped_kwargs), callback=gdal.TermProgress_nocb)
-            else:
-                shutil.move(str(unclipped_path), str(target_path))
+        # Force Python garbage collection
+        gc.collect()
 
     def create_and_upload_er_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool, increased_scale: bool=False) -> None:
         """
@@ -1187,6 +1272,7 @@ class BlueTopoS3Engine(Engine):
                 print(f"      [S3 Paginator] Scanned {page_num} pages, found {len(all_s3_keys)} keys so far... (RAM: {mem_mb:.1f}MB)")
 
         print(f"[ER Mosaic] Finished scanning S3. Total keys retrieved: {len(all_s3_keys)}")
+        all_s3_keys_set = set(all_s3_keys)
 
         # Locate the EcoRegions layer once for masking
         cutline_layer_name = None
@@ -1220,6 +1306,8 @@ class BlueTopoS3Engine(Engine):
 
         # Base warp arguments allowing GDAL to naturally unify projections perfectly
         # Set targetAlignedPixels to perfectly align the grids eliminating edge artifact grid lines
+        # FIXED: Explicitly reduced warpMemoryLimit to 512MB to prevent OS Swap thrashing
+        # FIXED: Replaced ALL_CPUS with 4, stopping the 16/32-core EC2 RAM explosions!
         warp_kwargs_base = {
             "format": "GTiff",
             "dstSRS": self.target_crs,
@@ -1228,18 +1316,66 @@ class BlueTopoS3Engine(Engine):
             "srcNodata": -9999,
             "dstNodata": -9999,
             "targetAlignedPixels": True, 
-            "multithread": True,
-            "warpMemoryLimit": 4096, # Reduced from 8192 to prevent EC2 OOM 
-            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
+            "multithread": False, # Stop complex Vector/Thread lockups here
+            "warpOptions": ["NUM_THREADS=4"], # Safe chunk-based threading (prevents vector deadlock)
+            "warpMemoryLimit": 512 * 1024 * 1024, # 512MB Limit to brutally stop OS RAM Thrashing
+            "creationOptions": ["COMPRESS=DEFLATE", "ZLEVEL=3", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=4"]
         }
 
-        if cutline_layer_name:
-            warp_kwargs_base["cutlineDSName"] = str(master_gpkg_path)
-            warp_kwargs_base["cutlineLayer"] = cutline_layer_name
-            warp_kwargs_base["cropToCutline"] = True
-
         for ecoregion_id in ecoregion_ids:
+            # -------------------------------------------------------------------------------------
+            # SKIP LOGIC: Only generate ER mosaics for ER 3, 4, 5, and 6 as requested
+            # -------------------------------------------------------------------------------------
+            match = re.search(r'\d+', str(ecoregion_id))
+            clean_er_num = match.group(0) if match else str(ecoregion_id)
+
+            if clean_er_num not in ["3", "4", "5", "6"]:
+                print(f"[ER Mosaic] Skipping mosaic generation for {ecoregion_id} as only ER 3, 4, 5, and 6 are requested.")
+                continue
+            # -------------------------------------------------------------------------------------
+
             er_prefix = ecoregion_id if str(ecoregion_id).startswith("ER_") else f"ER_{ecoregion_id}"
+
+            # Apply a specific SQL WHERE clause to the vector file to grab ONLY this Ecoregion's polygon
+            er_warp_kwargs = warp_kwargs_base.copy()
+            temp_mask_path = str(low_res_dir / f"{ecoregion_id}_mask.geojson")
+
+            if cutline_layer_name and er_field_name:
+                # Robust extraction of the ecoregion number to prevent ER_1/ER1 split matching errors
+                er_prefix_val = f"ER_{clean_er_num}"
+                er_val_no_underscore = f"ER{clean_er_num}"
+
+                # Build a robust SQL query that perfectly matches any possible GPKG ID format
+                where_clauses = [
+                    f"{er_field_name} = '{er_prefix_val}'",
+                    f"{er_field_name} = '{er_val_no_underscore}'",
+                    f"{er_field_name} = '{ecoregion_id}'",
+                    f"{er_field_name} = '{clean_er_num}'"
+                ]
+                if clean_er_num.isdigit():
+                    where_clauses.append(f"{er_field_name} = {clean_er_num}")
+                    
+                print(f"[{ecoregion_id}] Extracting vector mask to memory-safe GeoJSON to prevent SQLite thread locking...")
+                ds_gpkg = ogr.Open(str(master_gpkg_path))
+                if ds_gpkg:
+                    layer = ds_gpkg.GetLayerByName(cutline_layer_name)
+                    layer.SetAttributeFilter(" OR ".join(where_clauses))
+                    
+                    if os.path.exists(temp_mask_path):
+                        os.remove(temp_mask_path)
+                        
+                    drv = ogr.GetDriverByName("GeoJSON")
+                    out_ds = drv.CreateDataSource(temp_mask_path)
+                    out_layer = out_ds.CreateLayer("mask", srs=layer.GetSpatialRef(), geom_type=layer.GetGeomType())
+                    
+                    for feat in layer:
+                        out_layer.CreateFeature(feat)
+                        
+                    out_ds = None
+                    ds_gpkg = None
+                    
+                    er_warp_kwargs["cutlineDSName"] = temp_mask_path
+                    er_warp_kwargs["cropToCutline"] = True
 
             # Map configuration properties dictating regex mapping
             # REMOVED Slope from base config to calculate at the mosaic level
@@ -1272,8 +1408,6 @@ class BlueTopoS3Engine(Engine):
             print(f"[{ecoregion_id}] Mapping local S3 keys for ER specific mosaics: {list(mosaics_to_process.keys())}")
             
             # Use dynamic folder checking to ensure robust mapping whether it's '1' or 'ER_1'
-            match = re.search(r'\d+', str(ecoregion_id))
-            clean_er_num = match.group(0) if match else str(ecoregion_id)
             valid_folders = [f"/{ecoregion_id}/", f"/ER_{clean_er_num}/", f"/ER{clean_er_num}/"]
 
             for key in all_s3_keys:
@@ -1289,27 +1423,6 @@ class BlueTopoS3Engine(Engine):
                             continue
                         config['paths'].append(f"/vsis3/{s3_bucket}/{key}")
 
-            # Apply a specific SQL WHERE clause to the vector file to grab ONLY this Ecoregion's polygon
-            er_warp_kwargs = warp_kwargs_base.copy()
-            if cutline_layer_name and er_field_name:
-                # Robust extraction of the ecoregion number to prevent ER_1/ER1 split matching errors
-                match = re.search(r'\d+', str(ecoregion_id))
-                clean_er_num = match.group(0) if match else str(ecoregion_id)
-                er_prefix_val = f"ER_{clean_er_num}"
-                er_val_no_underscore = f"ER{clean_er_num}"
-
-                # Build a robust SQL query that perfectly matches any possible GPKG ID format
-                where_clauses = [
-                    f"{er_field_name} = '{er_prefix_val}'",
-                    f"{er_field_name} = '{er_val_no_underscore}'",
-                    f"{er_field_name} = '{ecoregion_id}'",
-                    f"{er_field_name} = '{clean_er_num}'"
-                ]
-                if clean_er_num.isdigit():
-                    where_clauses.append(f"{er_field_name} = {clean_er_num}")
-
-                er_warp_kwargs["cutlineWhere"] = " OR ".join(where_clauses)
-
             # Process standard mosaics before offshore mosaics
             ordered_mosaics = sorted(mosaics_to_process.items(), key=lambda item: 1 if "Offshore" in item[0] else 0)
             for m_key, config in ordered_mosaics:
@@ -1322,6 +1435,18 @@ class BlueTopoS3Engine(Engine):
 
                 # Categorical components require nearest neighbor resampling
                 m_key_lower = m_key.lower()
+                
+                # Check if mosaics already exist to skip heavy processing
+                if m_key_lower == "bathy" or m_key_lower == "bathy_offshore":
+                    slope_s3_key = s3_key.replace("Bathy", "Slope")
+                    if s3_key in all_s3_keys_set and slope_s3_key in all_s3_keys_set:
+                        print(f"[{ecoregion_id}] {m_key} and its Slope mosaic already exist in S3. Skipping.")
+                        continue
+                else:
+                    if s3_key in all_s3_keys_set:
+                        print(f"[{ecoregion_id}] {m_key} mosaic already exists in S3. Skipping.")
+                        continue
+
                 if "bathy" in m_key_lower or "unc" in m_key_lower:
                     resample_alg = gdal.GRA_Bilinear
                 else:
@@ -1331,47 +1456,15 @@ class BlueTopoS3Engine(Engine):
                 current_warp_kwargs["resampleAlg"] = resample_alg
 
                 print(f"[{ecoregion_id}] Warping and precisely masking {m_key} ER mosaic dynamically from {len(config['paths'])} source files...")
-
-                # Use chunked mosaic build to save memory and skip file limit restrictions
-                max_mosaic_retries = 10
-                mosaic_attempt = 0
-                success = False
-
-                while mosaic_attempt < max_mosaic_retries and not success:
-                    try:
-                        self._build_mosaic_chunked(local_mosaic_path, config['paths'], current_warp_kwargs)
-                        success = True
-                    except Exception as e:
-                        error_str = str(e)
-                        match = re.search(r'(B[A-Z0-9]{7})', error_str)
-                        if match:
-                            bad_tile = match.group(1)
-                            print(f"[{ecoregion_id}] Mosaic crashed on corrupt tile {bad_tile}. Forcing full re-download and reprocess...")
-                            
-                            # Find the correct ecoregion for this tile from the paths
-                            bad_er = ecoregion_id
-                            for p in config['paths']:
-                                if bad_tile in p:
-                                    er_match = re.search(r'/(ER_\d+)/', p)
-                                    if er_match:
-                                        bad_er = er_match.group(1)
-                                    break
-                                    
-                            _process_tile([self.param_lookup, bad_tile, bad_er, output_prefix, current_res, True])
-                            mosaic_attempt += 1
-                            
-                            # Clear GDAL cache to ensure it fetches the newly generated file from S3 instead of the cached corrupt one
-                            gdal.VSICurlClearCache()
-                            
-                            print(f"[{ecoregion_id}] Retrying mosaic generation (Attempt {mosaic_attempt+1}/{max_mosaic_retries})...")
-                        else:
-                            error_msg = f"[{ecoregion_id}] ERROR: Mosaic generation failed for {m_key}. Exception details: {e}"
-                            print(error_msg)
-                            if 'output_directory' in self.param_lookup:
-                                self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
-                            break # Safely break and skip
-
-                if not success:
+                
+                # Single pass directly to output
+                try:
+                    self._build_local_mosaic(local_mosaic_path, config['paths'], current_warp_kwargs)
+                except Exception as e:
+                    error_msg = f"[{ecoregion_id}] ERROR: Mosaic generation failed for {m_key}. Exception details: {e}"
+                    print(error_msg)
+                    if 'output_directory' in self.param_lookup:
+                        self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
                     continue # Safely skip to the next mosaic type instead of crashing the whole pipeline
 
                 print(f"[{ecoregion_id}] Generating robust overviews for {m_key}...")
@@ -1402,12 +1495,13 @@ class BlueTopoS3Engine(Engine):
                     slope_s3_key = config['s3_key'].replace("Bathy", "Slope")
                     
                     print(f"[{ecoregion_id}] Generating {slope_key} mosaic directly from {m_key} mosaic to prevent edge artifacts...")
-                    gdal.DEMProcessing(
+                    slope_ds = gdal.DEMProcessing(
                         str(slope_local_path), 
                         str(local_mosaic_path), 
                         'slope', 
-                        creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
+                        creationOptions=["COMPRESS=DEFLATE", "ZLEVEL=3", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=4"]
                     )
+                    slope_ds = None # FIXED: Close dataset immediately
                     
                     print(f"[{ecoregion_id}] Generating robust overviews for {slope_key}...")
                     ds_slope = gdal.Open(str(slope_local_path), gdal.GA_Update)
@@ -1433,6 +1527,12 @@ class BlueTopoS3Engine(Engine):
 
                 if local_mosaic_path.exists():
                     local_mosaic_path.unlink() # Save disk space
+            
+            # Clean up the temporary extracted mask for this ER
+            if os.path.exists(temp_mask_path):
+                os.remove(temp_mask_path)
+                
+            gc.collect()
 
     def create_and_upload_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool, increased_scale: bool=False) -> None:
         """
@@ -1442,6 +1542,12 @@ class BlueTopoS3Engine(Engine):
 
         if current_res < 50:
             print(f"[Mosaic] Target resolution ({current_res}m) is under 50m. Skipping massive mosaic generation to prevent extreme file sizes.")
+            return
+
+        # Restrict processing to only ER 3, 4, 5, and 6 as requested
+        ecoregion_ids = [er for er in ecoregion_ids if (re.search(r'\d+', str(er)).group(0) if re.search(r'\d+', str(er)) else str(er)) in ["3", "4", "5", "6"]]
+        if not ecoregion_ids:
+            print("[Mosaic] No requested Ecoregions (3, 4, 5, or 6) found. Skipping mosaic generation.")
             return
 
         low_res_dir = OUTPUTS / "low_res" / f'{current_res}m'
@@ -1513,6 +1619,7 @@ class BlueTopoS3Engine(Engine):
                 print(f"      [S3 Paginator] Scanned {page_num} pages, found {len(all_s3_keys)} keys so far... (RAM: {mem_mb:.1f}MB)")
 
         print(f"[Mosaic] Finished scanning S3. Total keys retrieved: {len(all_s3_keys)}")
+        all_s3_keys_set = set(all_s3_keys)
 
         # 2. Gather source file paths in a single efficient pass through S3 per ecoregion
         for ecoregion_id in ecoregion_ids:
@@ -1555,8 +1662,29 @@ class BlueTopoS3Engine(Engine):
         else:
             print(f"[Mosaic] WARNING: Could not open {master_gpkg_path} to check layers. Proceeding without mask...")
 
+        temp_mask_path = str(low_res_dir / "full_mask.geojson")
+        if cutline_layer_name:
+            print(f"[Mosaic] Extracting full vector mask to memory-safe GeoJSON to prevent SQLite thread locking...")
+            ds_gpkg = ogr.Open(str(master_gpkg_path))
+            if ds_gpkg:
+                layer = ds_gpkg.GetLayerByName(cutline_layer_name)
+                
+                if os.path.exists(temp_mask_path):
+                    os.remove(temp_mask_path)
+                    
+                drv = ogr.GetDriverByName("GeoJSON")
+                out_ds = drv.CreateDataSource(temp_mask_path)
+                out_layer = out_ds.CreateLayer("mask", srs=layer.GetSpatialRef(), geom_type=layer.GetGeomType())
+                
+                for feat in layer:
+                    out_layer.CreateFeature(feat)
+                    
+                out_ds = None
+                ds_gpkg = None
+
         # Base warp arguments allowing GDAL to naturally unify projections perfectly
         # Set targetAlignedPixels to perfectly align the grids eliminating edge artifact grid lines
+        # FIXED: Explicitly reduced warpMemoryLimit to 512MB to prevent OS Swap thrashing
         warp_kwargs_base = {
             "format": "GTiff",
             "dstSRS": self.target_crs,
@@ -1565,14 +1693,14 @@ class BlueTopoS3Engine(Engine):
             "srcNodata": -9999,
             "dstNodata": -9999,
             "targetAlignedPixels": True,
-            "multithread": True,
-            "warpMemoryLimit": 4096, # Reduced from 8192 to prevent EC2 OOM
-            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
+            "multithread": False, # Stop complex Vector/Thread lockups here
+            "warpOptions": ["NUM_THREADS=4"], # Safe chunk-based threading (prevents vector deadlock)
+            "warpMemoryLimit": 512 * 1024 * 1024, # 512MB Limit to brutally stop OS RAM Thrashing
+            "creationOptions": ["COMPRESS=DEFLATE", "ZLEVEL=3", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=4"]
         }
 
         if cutline_layer_name:
-            warp_kwargs_base["cutlineDSName"] = str(master_gpkg_path)
-            warp_kwargs_base["cutlineLayer"] = cutline_layer_name
+            warp_kwargs_base["cutlineDSName"] = temp_mask_path
             warp_kwargs_base["cropToCutline"] = True
             # For the combined 100m all-tiles mosaic, we intentionally DO NOT pass a cutlineWhere clause.
             # This forces GDAL to utilize every single polygon inside the Enhanced_EcoRegions layer 
@@ -1592,6 +1720,18 @@ class BlueTopoS3Engine(Engine):
 
             # Categorical components require nearest neighbor resampling
             m_key_lower = m_key.lower()
+            
+            # Check if mosaics already exist to skip heavy processing
+            if m_key_lower == "bathy" or m_key_lower == "bathy_offshore":
+                slope_s3_key = s3_key.replace("Bathy", "Slope")
+                if s3_key in all_s3_keys_set and slope_s3_key in all_s3_keys_set:
+                    print(f"[Mosaic] {m_key} and its Slope mosaic already exist in S3. Skipping.")
+                    continue
+            else:
+                if s3_key in all_s3_keys_set:
+                    print(f"[Mosaic] {m_key} mosaic already exists in S3. Skipping.")
+                    continue
+
             if "bathy" in m_key_lower or "unc" in m_key_lower:
                 resample_alg = gdal.GRA_Bilinear
             else:
@@ -1602,46 +1742,14 @@ class BlueTopoS3Engine(Engine):
 
             print(f"[Mosaic] Warping and masking {m_key} mosaic directly from {len(config['paths'])} source files...")
 
-            # Use chunked mosaic build to save memory and skip file limit restrictions
-            max_mosaic_retries = 10
-            mosaic_attempt = 0
-            success = False
-
-            while mosaic_attempt < max_mosaic_retries and not success:
-                try:
-                    self._build_mosaic_chunked(local_mosaic_path, config['paths'], current_warp_kwargs)
-                    success = True
-                except Exception as e:
-                    error_str = str(e)
-                    match = re.search(r'(B[A-Z0-9]{7})', error_str)
-                    if match:
-                        bad_tile = match.group(1)
-                        print(f"[Mosaic] Mosaic crashed on corrupt tile {bad_tile}. Forcing full re-download and reprocess...")
-                        
-                        # Find the correct ecoregion for this tile from the paths
-                        bad_er = ecoregion_ids[0] # fallback
-                        for p in config['paths']:
-                            if bad_tile in p:
-                                er_match = re.search(r'/(ER_\d+)/', p)
-                                if er_match:
-                                    bad_er = er_match.group(1)
-                                break
-                                
-                        _process_tile([self.param_lookup, bad_tile, bad_er, output_prefix, current_res, True])
-                        mosaic_attempt += 1
-                        
-                        # Clear GDAL cache to ensure it fetches the newly generated file from S3 instead of the cached corrupt one
-                        gdal.VSICurlClearCache()
-                        
-                        print(f"[Mosaic] Retrying mosaic generation (Attempt {mosaic_attempt+1}/{max_mosaic_retries})...")
-                    else:
-                        error_msg = f"[Mosaic] ERROR: Massive mosaic generation failed for {m_key}. Exception details: {e}"
-                        print(error_msg)
-                        if 'output_directory' in self.param_lookup:
-                            self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
-                        break
-
-            if not success:
+            # Single pass directly to output
+            try:
+                self._build_local_mosaic(local_mosaic_path, config['paths'], current_warp_kwargs)
+            except Exception as e:
+                error_msg = f"[Mosaic] ERROR: Massive mosaic generation failed for {m_key}. Exception details: {e}"
+                print(error_msg)
+                if 'output_directory' in self.param_lookup:
+                    self.write_message(error_msg, self.param_lookup['output_directory'].valueAsText)
                 continue # Safely skip to the next mosaic type instead of crashing the whole pipeline
 
             print(f"[Mosaic] Generating robust overviews for fast performance...")
@@ -1672,12 +1780,13 @@ class BlueTopoS3Engine(Engine):
                 slope_s3_key = config['s3_key'].replace("Bathy", "Slope")
                 
                 print(f"[Mosaic] Generating {slope_key} mosaic directly from {m_key} mosaic to prevent edge artifacts...")
-                gdal.DEMProcessing(
+                slope_ds = gdal.DEMProcessing(
                     str(slope_local_path), 
                     str(local_mosaic_path), 
                     'slope', 
-                    creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=ALL_CPUS"]
+                    creationOptions=["COMPRESS=DEFLATE", "ZLEVEL=3", "TILED=YES", "BIGTIFF=YES", "NUM_THREADS=4"]
                 )
+                slope_ds = None # FIXED: Close dataset immediately
                 
                 print(f"[Mosaic] Generating robust overviews for {slope_key}...")
                 ds_slope = gdal.Open(str(slope_local_path), gdal.GA_Update)
@@ -1703,14 +1812,16 @@ class BlueTopoS3Engine(Engine):
 
             if local_mosaic_path.exists():
                 local_mosaic_path.unlink() # Save disk space
-
+        
+        # Cleanup full mask
+        if os.path.exists(temp_mask_path):
+            os.remove(temp_mask_path)
+            
+        gc.collect()
 
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int] = None) -> None:
-        if resolution is None:
-            resolution = [20]
-            
-        # Force descending numerical order so 100m processes before 20m (handles string numbers too)
-        resolution = sorted([int(r) for r in resolution], reverse=True)
+        # Force resolution to 20m only as requested
+        resolution = [20]
         
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         
@@ -1725,8 +1836,17 @@ class BlueTopoS3Engine(Engine):
         def _get_er_num(er_str):
             match = re.search(r'\d+', str(er_str))
             return int(match.group(0)) if match else 9999
+            
         all_ecoregions = sorted(list(set(all_ecoregions)), key=_get_er_num)
-        print(f"[BlueTopo Engine] Processing ecoregions in sequential order: {all_ecoregions}")
+        
+        # Restrict to only ER 3, 4, 5, and 6
+        all_ecoregions = [er for er in all_ecoregions if str(_get_er_num(er)) in ["3", "4", "5", "6"]]
+        
+        print(f"[BlueTopo Engine] Processing ecoregions in sequential order (Restricted to ER 3, 4, 5, and 6): {all_ecoregions}")
+        
+        if not all_ecoregions:
+            print("[BlueTopo Engine] No requested Ecoregions (ER 3, 4, 5, or 6) found in input. Exiting run.")
+            return
 
         self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
         for current_res in resolution:
@@ -1772,6 +1892,9 @@ class BlueTopoS3Engine(Engine):
                     raw_er = str(row[er_col]).strip()
                     er_match = re.search(r'\d+', raw_er)
                     normalized_er = f"ER_{er_match.group(0)}" if er_match else raw_er
+                    
+                    if normalized_er not in all_ecoregions:
+                        continue
                     
                     raw_id = str(row[tile_col]).strip()
                     # Remove 'BlueTopo' to prevent the regex from accidentally matching the word 'BlueTopo' instead of the ID
@@ -1820,7 +1943,6 @@ class BlueTopoS3Engine(Engine):
             else:   
                 print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
 
-
             # TODO need to remove all of the mosaic logic and self.skip_tiling
             # Generate the unified isobaths from all finished tiles across all ecoregions (ER1 to ER6 order)
             # self.create_combined_isobaths(all_ecoregions, output_bucket, current_res, output_prefix)
@@ -1829,10 +1951,8 @@ class BlueTopoS3Engine(Engine):
                 # When processing 100m, produce ONLY the unified big offshore mosaics
                 self.create_and_upload_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, increased_scale=True)
             elif current_res == 20:
-                # Generate all individual cleanly masked mosaics per Ecoregion (ER1 to ER6 order), SKIPPING ER_1
-                mosaic_ecoregions = [er for er in all_ecoregions if er not in ['ER_1', 'ER1']]
-                print(f"[BlueTopo Engine] Skipping ER1 as requested. Mosaicking 20m for: {mosaic_ecoregions}")
-                self.create_and_upload_er_mosaics(mosaic_ecoregions, output_bucket, current_res, output_prefix, increased_scale=True)
+                # Generate all individual cleanly masked mosaics per Ecoregion (ER1 to ER6 order)
+                self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, increased_scale=True)
                 # NO FULL SIZE MOSAICS CREATED FOR 20M
         self.close_dask()
 
@@ -1852,7 +1972,7 @@ class BlueTopoS3Engine(Engine):
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
         """Set positive elevation to no data value"""
 
-        print("  - Setting ground to nodata...")
+        print(f"[{tiff_file_path.name}] Setting ground to nodata...")
         raster_ds = gdal.Open(str(tiff_file_path), gdal.GA_Update)
         no_data = -9999
         raster_array = raster_ds.ReadAsArray()
@@ -1861,12 +1981,28 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  
         raster_ds = None
 
-    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, temp_folder: pathlib.Path) -> None:
-        """Upload all tiff files to s3 for current tile"""
+    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, temp_folder: pathlib.Path, existing_files: dict = None) -> None:
+        """Upload all tiff files to s3 for current tile, strictly skipping those that already existed in S3."""
 
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        for tiff_file in tile_folder.glob('*'):
+        
+        for tiff_file in tile_folder.glob('*.tiff'):
+            filename = tiff_file.name
+            
+            # Prevent overwriting existing derivatives if they were already marked as present in S3
+            if existing_files:
+                if len(filename.split('_')) == 3 and existing_files.get('base'):
+                    continue
+                if filename.endswith('_ISS_all_110.tiff') and existing_files.get('iss_110'):
+                    continue
+                if filename.endswith('_survey_end_date.tiff') and existing_files.get('survey_end_date'):
+                    continue
+                if filename.endswith('_hurricane.tiff') and existing_files.get('hurricane'):
+                    continue
+                if filename.endswith('_unc.tiff') and existing_files.get('unc'):
+                    continue
+
             s3_path = tiff_file.relative_to(temp_folder)  # Strip off the temp_folder parts
-            self.write_message(f'Uploading {tiff_file} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
+            self.write_message(f'Uploading {filename} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
             s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
