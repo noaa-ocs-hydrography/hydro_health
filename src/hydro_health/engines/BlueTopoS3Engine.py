@@ -189,8 +189,8 @@ class BlueTopoS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         self.target_crs = "EPSG:6350"
-        # Tiling is strictly executed
-        self.skip_tiling = False
+        # Tiling is bypassed to exclusively remake mosaics
+        self.skip_tiling = True
 
         # Apply global GDAL S3 Network and Overview Optimizations
         gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
@@ -367,7 +367,7 @@ class BlueTopoS3Engine(Engine):
             warp_options = gdal.WarpOptions(
                 format="MEM",
                 outputBounds=(minx, miny, maxx, maxy),
-                width=width,    
+                width=width,   
                 height=height,  
                 dstSRS=self.target_crs,
                 resampleAlg=gdal.GRA_NearestNeighbour, # Counts should not be interpolated
@@ -1324,13 +1324,13 @@ class BlueTopoS3Engine(Engine):
 
         for ecoregion_id in ecoregion_ids:
             # -------------------------------------------------------------------------------------
-            # SKIP LOGIC: Only generate ER mosaics for ER 3, 4, 5, and 6 as requested
+            # SKIP LOGIC: Only generate ER mosaics for ER 6 as requested
             # -------------------------------------------------------------------------------------
             match = re.search(r'\d+', str(ecoregion_id))
             clean_er_num = match.group(0) if match else str(ecoregion_id)
 
-            if clean_er_num not in ["3", "4", "5", "6"]:
-                print(f"[ER Mosaic] Skipping mosaic generation for {ecoregion_id} as only ER 3, 4, 5, and 6 are requested.")
+            if clean_er_num not in ["6"]:
+                print(f"[ER Mosaic] Skipping mosaic generation for {ecoregion_id} as only ER 6 is requested.")
                 continue
             # -------------------------------------------------------------------------------------
 
@@ -1395,7 +1395,7 @@ class BlueTopoS3Engine(Engine):
                     "regex": regex,
                     "filename": f"{er_prefix}_{bt_prefix}{name}_Mosaic_{current_res}m{'_110' if increased_scale and name == 'ISS' else ''}.tiff",
                     "paths": [],
-                    "exclude_bh4": False
+                    "exclude_nearshore_bands": False
                 }
 
             mosaics_to_process = mosaics_config
@@ -1416,10 +1416,10 @@ class BlueTopoS3Engine(Engine):
                 if f"/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo/" not in f"/{key}":
                     continue
                     
-                is_bh4 = bool(re.search(r'/BH4[A-Za-z]', key, re.IGNORECASE))
+                is_nearshore = bool(re.search(r'/BH[45]', key, re.IGNORECASE))
                 for m_key, config in mosaics_to_process.items():
                     if config['regex'].search(key):
-                        if config['exclude_bh4'] and is_bh4:
+                        if config.get('exclude_nearshore_bands') and is_nearshore:
                             continue
                         config['paths'].append(f"/vsis3/{s3_bucket}/{key}")
 
@@ -1544,10 +1544,10 @@ class BlueTopoS3Engine(Engine):
             print(f"[Mosaic] Target resolution ({current_res}m) is under 50m. Skipping massive mosaic generation to prevent extreme file sizes.")
             return
 
-        # Restrict processing to only ER 3, 4, 5, and 6 as requested
-        ecoregion_ids = [er for er in ecoregion_ids if (re.search(r'\d+', str(er)).group(0) if re.search(r'\d+', str(er)) else str(er)) in ["3", "4", "5", "6"]]
+        # Restrict processing to only ER 6 as requested
+        ecoregion_ids = [er for er in ecoregion_ids if (re.search(r'\d+', str(er)).group(0) if re.search(r'\d+', str(er)) else str(er)) in ["6"]]
         if not ecoregion_ids:
-            print("[Mosaic] No requested Ecoregions (3, 4, 5, or 6) found. Skipping mosaic generation.")
+            print("[Mosaic] No requested Ecoregions (6) found. Skipping mosaic generation.")
             return
 
         low_res_dir = OUTPUTS / "low_res" / f'{current_res}m'
@@ -1577,15 +1577,15 @@ class BlueTopoS3Engine(Engine):
                     "regex": regex,
                     "filename": f"{bt_prefix}{name}_Mosaic_{current_res}m{'_110' if increased_scale and name == 'ISS' else ''}.tiff",
                     "paths": [],
-                    "exclude_bh4": False
+                    "exclude_nearshore_bands": False
                 }
-            # Create a secondary non-Band4 version specifically for 100m runs
+            # Create a secondary non-Band4/5 version specifically for 100m runs
             if current_res == 100:
                 mosaics_config[f"{name}_Offshore"] = {
                     "regex": regex,
                     "filename": f"{bt_prefix}{name}_Mosaic_Offshore_{current_res}m{'_110' if increased_scale and name == 'ISS' else ''}.tiff",
                     "paths": [],
-                    "exclude_bh4": True
+                    "exclude_nearshore_bands": True
                 }
 
         # Unconditionally process all configured mosaics
@@ -1635,10 +1635,10 @@ class BlueTopoS3Engine(Engine):
                 if f"/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo/" not in f"/{key}":
                     continue
 
-                is_bh4 = bool(re.search(r'/BH4[A-Za-z]', key, re.IGNORECASE))
+                is_nearshore = bool(re.search(r'/BH[45]', key, re.IGNORECASE))
                 for m_key, config in mosaics_to_process.items():
                     if config['regex'].search(key):
-                        if config['exclude_bh4'] and is_bh4:
+                        if config.get('exclude_nearshore_bands') and is_nearshore:
                             continue
                         config['paths'].append(f"/vsis3/{s3_bucket}/{key}")
 
@@ -1820,8 +1820,8 @@ class BlueTopoS3Engine(Engine):
         gc.collect()
 
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int] = None) -> None:
-        # Force resolution to 20m only as requested
-        resolution = [20]
+        # Force resolution to 100m only to remake offshore mosaics
+        resolution = [100]
         
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         
@@ -1839,13 +1839,13 @@ class BlueTopoS3Engine(Engine):
             
         all_ecoregions = sorted(list(set(all_ecoregions)), key=_get_er_num)
         
-        # Restrict to only ER 3, 4, 5, and 6
-        all_ecoregions = [er for er in all_ecoregions if str(_get_er_num(er)) in ["3", "4", "5", "6"]]
+        # Restrict to only ER 6
+        all_ecoregions = [er for er in all_ecoregions if str(_get_er_num(er)) in ["6"]]
         
-        print(f"[BlueTopo Engine] Processing ecoregions in sequential order (Restricted to ER 3, 4, 5, and 6): {all_ecoregions}")
+        print(f"[BlueTopo Engine] Processing ecoregions in sequential order (Restricted to ER 6): {all_ecoregions}")
         
         if not all_ecoregions:
-            print("[BlueTopo Engine] No requested Ecoregions (ER 3, 4, 5, or 6) found in input. Exiting run.")
+            print("[BlueTopo Engine] No requested Ecoregions (ER 6) found in input. Exiting run.")
             return
 
         self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
@@ -1908,11 +1908,15 @@ class BlueTopoS3Engine(Engine):
                     
                     tile_id = match.group(1)
 
-                    # Look for BH4 anywhere in the tile_id for safe targeting
-                    is_band4 = bool(re.search(r'BH4[A-Z]', tile_id, re.IGNORECASE))
+                    # Look for BH4 or BH5 anywhere in the tile_id for safe targeting
+                    is_nearshore_band = bool(re.search(r'BH[45]', tile_id, re.IGNORECASE))
 
-                    # For 20m resolution, restrict processing to Band 4 tiles exclusively (BH4 followed by a letter)
-                    if current_res == 20 and not is_band4:
+                    # For 20m resolution, restrict processing to Band 4 and Band 5 tiles exclusively
+                    if current_res == 20 and not is_nearshore_band:
+                        continue
+
+                    # For 100m resolution, exclude Band 4 and Band 5 tiles entirely
+                    if current_res == 100 and is_nearshore_band:
                         continue
 
                     param_inputs.append([self.param_lookup, tile_id, normalized_er, output_prefix, current_res])
