@@ -1544,12 +1544,6 @@ class BlueTopoS3Engine(Engine):
             print(f"[Mosaic] Target resolution ({current_res}m) is under 50m. Skipping massive mosaic generation to prevent extreme file sizes.")
             return
 
-        # Restrict processing to only ER 6 as requested
-        ecoregion_ids = [er for er in ecoregion_ids if (re.search(r'\d+', str(er)).group(0) if re.search(r'\d+', str(er)) else str(er)) in ["6"]]
-        if not ecoregion_ids:
-            print("[Mosaic] No requested Ecoregions (6) found. Skipping mosaic generation.")
-            return
-
         low_res_dir = OUTPUTS / "low_res" / f'{current_res}m'
         low_res_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1839,13 +1833,10 @@ class BlueTopoS3Engine(Engine):
             
         all_ecoregions = sorted(list(set(all_ecoregions)), key=_get_er_num)
         
-        # Restrict to only ER 6
-        all_ecoregions = [er for er in all_ecoregions if str(_get_er_num(er)) in ["6"]]
-        
-        print(f"[BlueTopo Engine] Processing ecoregions in sequential order (Restricted to ER 6): {all_ecoregions}")
+        print(f"[BlueTopo Engine] Processing ecoregions in sequential order: {all_ecoregions}")
         
         if not all_ecoregions:
-            print("[BlueTopo Engine] No requested Ecoregions (ER 6) found in input. Exiting run.")
+            print("[BlueTopo Engine] No requested Ecoregions found in input. Exiting run.")
             return
 
         self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
