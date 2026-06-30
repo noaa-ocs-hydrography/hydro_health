@@ -1,300 +1,474 @@
-import fiona
-import sys
-import pathlib
-import requests
-import rasterio
-import fsspec
-import shutil
-import tempfile
 import os
-import boto3
-import pandas as pd
-import geopandas as gpd
-import numpy as np
+import pathlib
+import arcpy
+import zipfile
+import re
+import json
+import time
+import gc
+from arcgis.gis import GIS
 
+# --- CONFIGURATION ---
+BASE_FOLDER = r"C:\Users\aubrey.mccutchan\Documents\AGO_uploads"
+OFFSHORE_DIR = pathlib.Path(BASE_FOLDER) / "Offshore_100m"
+INSHORE_DIR = pathlib.Path(BASE_FOLDER) / "Inshore_20m"
 
-from scipy.spatial import Voronoi
-from shapely.geometry import Polygon
-from rasterio.features import rasterize
-from rasterio.enums import Resampling
-from rasterio.transform import from_origin
-from urllib.parse import urlparse
-from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item, get_environment
+# The folder in ArcGIS Online where these will be saved
+AGO_FOLDER_NAME = "Hydro_Health_Outputs" 
 
+# The exact title of the target Web Map where layers should be added
+TARGET_WEBMAP_TITLE = "Hydro Health Model - Simple"
 
-OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+# Dictionary to customize output layer names on AGO
+LAYER_NAME_KEY = {
+    "HG": "Hydrographic Gap",
+    "PSS": "Present Survey Score",
+    "DSS": "Desired Survey Score",
+    "ISS": "Initial Survey Score",
+    "decay_coefficient": "Decay Coefficient"
+}
 
+def zip_shapefile(shp_path):
+    """Zips a shapefile and all its associated component files."""
+    shp_path = str(shp_path)
+    zip_path = shp_path.replace('.shp', '.zip')
+    
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        # Standard shapefile extensions
+        for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.xml']:
+            file_to_zip = shp_path.replace('.shp', ext)
+            if os.path.exists(file_to_zip):
+                zipf.write(file_to_zip, arcname=os.path.basename(file_to_zip))
+                
+    return zip_path
 
-class CreateSedimentLayerEngine(Engine):
-    """Class to hold the logic for processing the Sediment layer"""
+def cleanup_shapefile(shp_path):
+    """Deletes a shapefile, its components, and its zip file from the local drive."""
+    # Force Python's Garbage Collector to release memory handles on the zip file
+    gc.collect()
+    
+    shp_path = str(shp_path)
+    for ext in ['.shp', '.shx', '.dbf', '.prj', '.cpg', '.xml', '.zip']:
+        f = shp_path.replace('.shp', ext)
+        if os.path.exists(f):
+            # Aggressive retry loop to handle stubborn Windows file locks
+            for attempt in range(5):
+                try:
+                    os.remove(f)
+                    break # Success!
+                except Exception as e:
+                    if attempt == 4:
+                        print(f"  [Warning] Could not delete {f}: {e}")
+                    else:
+                        time.sleep(1) # Wait a second and try again
 
-    def __init__(self):
-        super().__init__()
-        self.sediment_types = ['Gravel', 'Sand', 'Mud', 'Clay'] 
-        self.sediment_data = None
-        self.sediment_prefix = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER_3/{get_config_item('SEDIMENT', 'SUBFOLDER')}"
-        if get_environment() in ["local", "remote"]:
-            self.data_path = OUTPUTS / pathlib.Path(get_config_item("SEDIMENT", "DATA_PATH"))
-            self.gpkg_path = OUTPUTS / pathlib.Path(get_config_item("SEDIMENT", "GPKG_PATH"))
-            self.mask_path = OUTPUTS / pathlib.Path(get_config_item("SEDIMENT", "MASK_PATH"))
-            self.raster_path = OUTPUTS / pathlib.Path(get_config_item("SEDIMENT", "RASTER_PATH"))
-        else:
-            self.data_path = self.sediment_prefix
-            self.gpkg_path = f"{self.sediment_prefix}/sediment_data.gpkg"
-            self.mask_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER_3/{get_config_item('SEDIMENT', 'MASK_PATH')}"
-            self.raster_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER_3/{get_config_item('SEDIMENT', 'RASTER_PATH')}"
+def delete_existing_ago_items(gis, title):
+    """Searches for and deletes existing items on AGO with the exact same title."""
+    print(f"  Checking AGO for existing items named '{title}'...")
+    # Search by exact title and current user
+    query = f'title:"{title}" AND owner:"{gis.users.me.username}"'
+    existing_items = gis.content.search(query=query, max_items=10)
+    
+    deleted_count = 0
+    for item in existing_items:
+        # AGO search can sometimes return fuzzy/partial matches, so we ensure an exact title match
+        if item.title == title:
+            print(f"    -> Deleting existing {item.type} (ID: {item.id})...")
+            item.delete()
+            deleted_count += 1
+            
+    if deleted_count == 0:
+        print("    -> No existing items found. Proceeding with fresh upload.")
 
-    def _modify_gpkg(self, gdf: gpd.GeoDataFrame, layer_name: str, mode: str='w') -> None:
-        """Handles the S3 round-trip for GeoPackages"""
-
-        if get_environment() in ['local', 'remote']:
-            gdf.to_file(self.gpkg_path, layer=layer_name, driver='GPKG', engine='pyogrio', mode=mode)
+def add_layer_to_webmap(gis, webmap_title, feature_layer_item):
+    """Adds a published Feature Layer to a specific Web Map, replacing older versions if present."""
+    print(f"  Adding '{feature_layer_item.title}' to Web Map '{webmap_title}'...")
+    try:
+        # Removed the 'owner' requirement so it finds maps owned by other team members (like Stephen)
+        query = f'title:"{webmap_title}" AND type:"Web Map"'
+        wm_items = gis.content.search(query=query, max_items=1)
+        
+        if not wm_items:
+            print(f"    -> [Warning] Web Map '{webmap_title}' not found. Cannot add layer.")
             return
 
-        p = urlparse(self.gpkg_path)
-        bucket, key = p.netloc, p.path.lstrip('/')
-        s3 = boto3.client('s3')
-
-        with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
-            tmp_path = tmp.name
+        wm_item = wm_items[0]
         
-        try:
-            # Download existing gpkg if appending
-            if mode == 'a':
-                try:
-                    s3.download_file(bucket, key, tmp_path)
-                except Exception:
-                    mode = 'w'
+        # Download the Web Map's underlying JSON data
+        wm_data = wm_item.get_data()
+        
+        if wm_data is None:
+            wm_data = {"operationalLayers": []}
+        elif "operationalLayers" not in wm_data:
+            wm_data["operationalLayers"] = []
 
-            gdf.to_file(tmp_path, layer=layer_name, driver='GPKG', engine='pyogrio', mode=mode)
-            s3.upload_file(tmp_path, bucket, key)
-        finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        # Check if a layer with the same title already exists and remove it from the list
+        original_count = len(wm_data['operationalLayers'])
+        wm_data['operationalLayers'] = [
+            layer for layer in wm_data['operationalLayers'] 
+            if layer.get('title') != feature_layer_item.title
+        ]
+        
+        if len(wm_data['operationalLayers']) < original_count:
+            print(f"    -> Removing older version of '{feature_layer_item.title}' from Web Map...")
 
-    def add_sed_size_column(self) -> None:
-        """
-        Adds column for the sediment size in mm
-        Renames Grainsze column to Size_phi to clarify size is in phi units
-        """      
-
-        self.sediment_data['sed_size'] = 2 ** -(self.sediment_data['Grainsze'])
-        self.sediment_data = self.sediment_data.rename(columns={'Grainsze': 'Size_phi'})
-
-    def add_sediment_mapping_column(self) -> None:   
-        """Adds column for the integer value of each sediment time for rasterization"""    
-
-        sediment_mapping = {
-            'Gravel': 1,
-            'Sand': 2,
-            'Mud': 3,
-            'Clay': 4
+        # Construct the new layer definition
+        new_layer = {
+            "id": f"{feature_layer_item.id}",
+            "layerType": "ArcGISFeatureLayer",
+            "url": feature_layer_item.layers[0].url, # Get the exact URL to the first layer
+            "title": feature_layer_item.title,
+            "itemId": feature_layer_item.id,
+            "visibility": True,
+            "opacity": 1
         }
-        self.sediment_data['sed_int'] = self.sediment_data['sed_type'].map(sediment_mapping)  
 
-    def convert_polys_to_raster(self, field_name, resolution=100) -> None:
-        """Rasterize polygons using a field, clip with mask, and set custom resolution."""
+        # Add the newly published layer to the operational layers
+        wm_data['operationalLayers'].append(new_layer)
 
-        print(f"Creating raster for {field_name} at {resolution} m resolution...")
+        # Save the updates back to ArcGIS Online
+        wm_item.update(item_properties={"text": json.dumps(wm_data)})
+        print("    -> Successfully added layer to Web Map!")
+        
+    except Exception as e:
+        if "403" in str(e):
+            print(f"    -> [Warning] Cannot edit Web Map '{webmap_title}'. It is likely owned by someone else.")
+            print(f"                 To fix this, the owner must put the map in a 'Shared Update' group.")
+        else:
+            print(f"    -> [Error] Failed to add layer to Web Map: {e}")
 
-        with rasterio.open(self.mask_path) as mask_src:
-            bounds = mask_src.bounds
-            crs = mask_src.crs
+def upload_and_publish(gis, zip_path, title, tags, folder_name):
+    """Uploads a zipped shapefile to AGO and publishes it."""
+    # Step 1: Clean up any existing items first to avoid duplicates
+    delete_existing_ago_items(gis, title)
+    
+    print(f"  Uploading and publishing '{title}' to AGO...")
+    properties = {
+        'title': title,
+        'description': f'Vectorized Hydro Health Data - {title}',
+        'tags': tags,
+        'type': 'Shapefile'
+    }
+    
+    shp_item = None
+    published_item = None
+    
+    try:
+        # Fetch the live Folder object to use Folder.add() and avoid deprecation warnings
+        target_folder = None
+        
+        # Try live API first
+        if hasattr(gis.content, 'folders'):
+            try:
+                for f in gis.content.folders.get():
+                    if f.title == folder_name:
+                        target_folder = f
+                        break
+            except Exception:
+                pass
+                
+        # Fallback to cached API if new API fails
+        if not target_folder:
+            for f in gis.users.me.folders:
+                if hasattr(f, 'title') and f.title == folder_name:
+                    target_folder = f
+                    break
+                elif isinstance(f, dict) and f.get('title') == folder_name:
+                    target_folder = f
+                    break
+        
+        # Upload
+        if target_folder and hasattr(target_folder, 'add'):
+            shp_item = target_folder.add(item_properties=properties, data=zip_path)
+        else:
+            shp_item = gis.content.add(item_properties=properties, data=zip_path, folder=folder_name)
 
-        xres, yres = resolution, resolution
-        width = int((bounds.right - bounds.left) / xres)
-        height = int((bounds.top - bounds.bottom) / yres)
-        transform = from_origin(bounds.left, bounds.top, xres, yres)
+        # Publish it as a Feature Layer
+        # We generate a unique system name to avoid AGO cache collisions when overwriting
+        safe_name = re.sub(r'[^a-zA-Z0-9]', '_', title)
+        unique_service_name = f"{safe_name}_{int(time.time())}"
+        
+        published_item = shp_item.publish(publish_parameters={'name': unique_service_name})
+        print(f"  -> Successfully published: {published_item.title} (ID: {published_item.id})")
+        
+        # --- Configure Symbology ---
+        try:
+            print("    -> Configuring default symbology for True_Value...")
+            fl = published_item.layers[0]
+            
+            # 1. Ask AGO for the min and max values of the True_Value field
+            stats = fl.query(out_statistics=[
+                {"statisticType": "min", "onStatisticField": "True_Value", "outStatisticFieldName": "min_val"},
+                {"statisticType": "max", "onStatisticField": "True_Value", "outStatisticFieldName": "max_val"}
+            ])
+            min_val = stats.features[0].attributes.get('min_val', 0)
+            max_val = stats.features[0].attributes.get('max_val', 1)
 
-        with fiona.open(self.gpkg_path, layer='sediment_polygons') as src:
-            assert src.crs == crs.to_dict(), "CRS mismatch between mask and vector layer"
-            shapes = (
-                (feature["geometry"], feature["properties"][field_name])
-                for feature in src if feature["properties"][field_name] is not None
-            )
-            nodata_val = -9999.0
-            rasterized = rasterize(
-                shapes=shapes,
-                out_shape=(height, width),
-                transform=transform,
-                fill=nodata_val,
-                dtype='float32',
-                all_touched=False
-            )
+            # 2. Define a continuous color ramp (Light Yellow to Dark Blue)
+            renderer_update = {
+                "drawingInfo": {
+                    "renderer": {
+                        "type": "classBreaks",
+                        "field": "True_Value",
+                        "minValue": min_val,
+                        "classBreakInfos": [{
+                            "classMaxValue": max_val,
+                            "symbol": {
+                                "type": "esriSFS",
+                                "style": "esriSFSSolid",
+                                "color": [13, 136, 198, 255],
+                                "outline": {"type": "esriSLS", "style": "esriSLSSolid", "color": [153, 153, 153, 64], "width": 0.5}
+                            }
+                        }],
+                        "visualVariables": [{
+                            "type": "colorInfo",
+                            "field": "True_Value",
+                            "stops": [
+                                {"value": min_val, "color": [255, 255, 178, 255]}, # Light Yellow
+                                {"value": max_val, "color": [37, 52, 148, 255]}    # Dark Blue
+                            ]
+                        }]
+                    }
+                }
+            }
+            # 3. Apply the update directly to the layer's settings
+            fl.manager.update_definition(renderer_update)
+            print("    -> Default symbology successfully set!")
+            
+        except Exception as e:
+            print(f"    -> [Warning] Could not set default symbology: {e}")
+            
+        # --- Add the styled layer to the Web Map ---
+        add_layer_to_webmap(gis, TARGET_WEBMAP_TITLE, published_item)
 
-        with rasterio.open(self.mask_path) as mask_src:
-            mask_reproj = np.empty((height, width), dtype='float32')
-            rasterio.warp.reproject(
-                source=rasterio.band(mask_src, 1),
-                destination=mask_reproj,
-                src_transform=mask_src.transform,
-                src_crs=mask_src.crs,
-                dst_transform=transform,
-                dst_crs=crs,
-                resampling=Resampling.nearest
-            )
+    except Exception as e:
+        print(f"  -> [Error] Failed to upload/publish '{title}'.")
+        print(f"     Details: {e}")
+        
+    finally:
+        # Guarantee the underlying zipped shapefile item is always deleted, even on crash
+        if shp_item:
+            try:
+                shp_item.delete()
+            except Exception:
+                pass
+        
+        # Explicitly delete python references before calling garbage collection to free file locks
+        try:
+            del shp_item
+        except NameError:
+            pass
+            
+        try:
+            del published_item
+        except NameError:
+            pass
+            
+        gc.collect()
 
-        rasterized[mask_reproj == 0] = nodata_val
+def convert_raster_to_polygon_safe(tif_path, out_shp):
+    """Safely converts floating-point rasters to polygons by scaling."""
+    # Multiply by 10,000 to preserve 4 decimal places, convert to Int
+    in_ras = arcpy.sa.Raster(str(tif_path))
+    scaled_ras = arcpy.sa.Int(in_ras * 10000)
+    
+    # Now it is an integer, so it will convert successfully
+    arcpy.RasterToPolygon_conversion(
+        in_raster=scaled_ras,
+        out_polygon_features=out_shp,
+        simplify="SIMPLIFY",
+        raster_field="Value"
+    )
+    
+    # RasterToPolygon stores the raster value in a field called 'gridcode'
+    # We create a new float field and divide by 10,000 to get the exact decimals back
+    arcpy.management.AddField(out_shp, "True_Value", "DOUBLE")
+    arcpy.management.CalculateField(out_shp, "True_Value", "!gridcode! / 10000.0", "PYTHON3")
+    
+    # Clean up the unnecessary fields
+    try:
+        arcpy.management.DeleteField(out_shp, ["Id", "gridcode"])
+    except:
+        pass
 
-        filename = f"{field_name}_raster_{resolution}m.tif"
+def process_offshore(gis):
+    """Processes the 100m offshore TIFFs individually."""
+    print("\n" + "="*40)
+    print("PROCESSING OFFSHORE (100m) FOLDER")
+    print("="*40)
+    
+    if not OFFSHORE_DIR.exists():
+        print(f"Directory not found: {OFFSHORE_DIR}")
+        return
 
-        with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
-            tmp_path = tmp.name
+    tifs = list(OFFSHORE_DIR.glob("*.tif")) + list(OFFSHORE_DIR.glob("*.tiff"))
+    
+    for tif_path in tifs:
+        base_name = tif_path.stem
+        print(f"\n--- Processing {base_name} ---")
+        
+        # Extract the variable shorthand (e.g., 'HG') from 'HG_Eco_region_all_tiles_100m'
+        var_key = base_name.replace("_Eco_region_all_tiles_100m", "")
+        
+        # Look up the friendly name, default to the var_key if not found in dictionary
+        friendly_name = LAYER_NAME_KEY.get(var_key, var_key)
+        final_title = f"{friendly_name} Offshore 100m"
+        
+        temp_shp = str(OFFSHORE_DIR / f"{base_name}_vector.shp")
         
         try:
-            with rasterio.open(
-                tmp_path,
-                'w',
-                driver='GTiff',
-                height=height,
-                width=width,
-                count=1,
-                dtype='float32',
-                crs=crs,
-                transform=transform,
-                nodata=nodata_val,
-                compress='lzw'
-            ) as dst:
-                dst.write(rasterized, 1)
+            print(f"  Converting {base_name} to vector (handling decimals)...")
+            convert_raster_to_polygon_safe(tif_path, temp_shp)
+            
+            # Zip, upload, and clean up
+            zip_path = zip_shapefile(temp_shp)
+            upload_and_publish(gis, zip_path, title=final_title, tags=['HydroHealth', 'Offshore', '100m', var_key], folder_name=AGO_FOLDER_NAME)
+            cleanup_shapefile(temp_shp)
+            
+        except Exception as e:
+            print(f"  [Error] Processing failed for {base_name}: {e}")
 
-            if get_environment() in ['local', 'remote']:
-                final_local_path = self.raster_path / filename
-                final_local_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(tmp_path, str(final_local_path))
-                print(f"Raster saved locally to {final_local_path}")
-            else:
-                # EC2/S3: self.raster_path is a string "s3://bucket/path/..."
-                p = urlparse(self.raster_path)
-                bucket = p.netloc
-                key = f"{p.path.lstrip('/')}/{filename}".replace("//", "/")
-                
-                print(f"Uploading to s3://{bucket}/{key}...")
-                s3 = boto3.client('s3')
-                s3.upload_file(tmp_path, bucket, key)
-                print(f"Raster uploaded successfully.")
+def process_inshore(gis):
+    """Groups the 20m inshore TIFFs by variable, merges them, and uploads."""
+    print("\n" + "="*40)
+    print("PROCESSING INSHORE (20m) FOLDER")
+    print("="*40)
+    
+    if not INSHORE_DIR.exists():
+        print(f"Directory not found: {INSHORE_DIR}")
+        return
 
+    tifs = list(INSHORE_DIR.glob("*.tif")) + list(INSHORE_DIR.glob("*.tiff"))
+    
+    # 1. Group the TIFFs by their variable prefix (e.g., 'HG' from 'HG_ER_1.tif')
+    # This regex looks for anything before "_ER_" followed by numbers.
+    pattern = re.compile(r"(.+)_ER_\d+", re.IGNORECASE)
+    groups = {}
+    
+    for tif in tifs:
+        match = pattern.match(tif.stem)
+        if match:
+            var_name = match.group(1) # This extracts 'HG', 'PSS', 'decay_coefficient', etc.
+            if var_name not in groups:
+                groups[var_name] = []
+            groups[var_name].append(tif)
+        else:
+            print(f"  [Warning] File {tif.name} does not match the expected naming convention and will be skipped.")
+
+    # 2. Process each group
+    for var_name, tif_list in groups.items():
+        print(f"\n--- Processing Variable Group: {var_name} ({len(tif_list)} files) ---")
+        
+        # Look up the friendly name for the final AGO title
+        friendly_name = LAYER_NAME_KEY.get(var_name, var_name)
+        final_title = f"{friendly_name} Inshore 20m"
+        
+        temp_shps_to_merge = []
+        
+        try:
+            # Step A: Convert each individual ER TIFF to a temporary shapefile
+            for tif_path in tif_list:
+                print(f"  Converting {tif_path.name} to vector (handling decimals)...")
+                temp_shp = str(INSHORE_DIR / f"temp_{tif_path.stem}.shp")
+                convert_raster_to_polygon_safe(tif_path, temp_shp)
+                temp_shps_to_merge.append(temp_shp)
+            
+            # Step B: Merge all the temporary shapefiles into one master shapefile
+            merged_shp = str(INSHORE_DIR / f"{var_name}_Inshore_Merged.shp")
+            print(f"  Merging {len(temp_shps_to_merge)} vector layers into {var_name}_Inshore_Merged...")
+            arcpy.management.Merge(inputs=temp_shps_to_merge, output=merged_shp)
+            
+            # Step C: Zip and Upload the merged shapefile
+            zip_path = zip_shapefile(merged_shp)
+            upload_and_publish(
+                gis, 
+                zip_path, 
+                title=final_title, 
+                tags=['HydroHealth', 'Inshore', '20m', var_name], 
+                folder_name=AGO_FOLDER_NAME
+            )
+            
+        except Exception as e:
+            print(f"  [Error] Failed processing group {var_name}: {e}")
+            
         finally:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            # Step D: Clean up ALL temporary files (both the individual ER shps and the merged one)
+            print(f"  Cleaning up temporary files for {var_name}...")
+            for shp in temp_shps_to_merge:
+                cleanup_shapefile(shp)
+            if 'merged_shp' in locals():
+                cleanup_shapefile(merged_shp)
 
-    def correct_sed_type(self, row: gpd.GeoSeries) -> str:
-        """Corrects primary sediment type if sediment percerntages do not match grain size"""        
+if __name__ == "__main__":
+    print("Connecting via ArcGIS Pro active session...")
+    try:
+        gis = GIS("pro")
+        print(f"Connected as: {gis.users.me.username} to {gis.properties.name}")
+    except Exception as e:
+        print("Failed to connect via 'pro'. Ensure ArcGIS Pro is open and signed in.")
+        print(f"Error details: {e}")
+        exit()
 
-        # These size classification ranges are based on the Udden-Wentworth grain size chart
-        if 0 < row['sed_size'] < 0.0039:
-            return 'Clay'
-        elif 0.0039 <= row['sed_size'] < 0.0625:
-            return 'Mud'
-        elif 0.0625 <= row['sed_size'] < 2:
-            return 'Sand'
-        elif 2 <= row['sed_size']: 
-            return 'Gravel'
-        else:
-            return row['sed_type']    
+    # --- Check if the user has publishing privileges BEFORE running anything (Warning only) ---
+    user_privs = [priv.lower() for priv in gis.users.me.privileges]
+    has_publish_rights = any('publish' in priv for priv in user_privs)
+    
+    if gis.users.me.role not in ['org_publisher', 'org_admin'] and not has_publish_rights:
+        print("\n" + "!"*60)
+        print("PERMISSION WARNING:")
+        print("It looks like your account might not have Organization-level 'Publisher' privileges.")
+        print("Being a 'Contributor' in a Group is different from being an Org Publisher.")
+        print("The script will attempt to publish anyway, but if it fails with Error 400,")
+        print("you will still need your ArcGIS Administrator to upgrade your account role.")
+        print("!"*60 + "\n")
 
-    def create_point_layer(self) -> None:
-        """Creates a point layer from the sediment GeoDataFrame"""    
-        gdf = gpd.GeoDataFrame(
-            self.sediment_data, 
-            geometry=gpd.points_from_xy(self.sediment_data['Longitude'], self.sediment_data['Latitude'])
-        )  
-        gdf.set_crs(crs="EPSG:4326", inplace=True)
-        gdf_reprojected = gdf.to_crs("EPSG:32617")
-
-        self._modify_gpkg(gdf_reprojected, 'sediment_points', mode='w')
-        print('Created sediment point layer.')
-
-    def determine_sed_types(self) -> None:
-        """Determines the primary and secondarysediment types at each point based on type percentage"""  
-
-        print('Calculating primary and secondary sediment types')
-        prim_values = []
-        sec_values = []
-
-        for _, row in self.sediment_data.iterrows():
-            sediments = row[self.sediment_types]
-            sorted_sediments = sediments.sort_values(ascending=False).index  
-            primary_sed = sorted_sediments[0]
-            secondary_sed = sorted_sediments[1]
-            prim_values.append(primary_sed)
-            sec_values.append(secondary_sed)
-        self.sediment_data['sed_type'] = prim_values  
-        self.sediment_data['sec_sed'] = sec_values    
-
-        self.sediment_data['sed_type'] = self.sediment_data.apply(self.correct_sed_type, axis=1)      
-
-    def download_sediment_data(self) -> None:
-        """Downloads the USGS sediment dataset"""     
-
-        csv_path = f"{self.data_path}/US9_ONE.csv"
-
-        # fsspec works with local and s3 paths
-        fs = fsspec.open(csv_path).fs 
-        if not fs.exists(csv_path):
-            print(f"Downloading sediment data to {csv_path}...")
-            try:
-                url = get_config_item('SEDIMENT', 'DATA_URL')
-                with requests.get(url, stream=True) as r:
-                    r.raise_for_status()
-                    
-                    with fsspec.open(csv_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                print("Sediment data downloaded successfully.")
-            except Exception as e:
-                print(f'Error downloading sediment CSV: {e}')
-                sys.exit(1)
-        else:
-            print("File already exists. Skipping download.")
-
-    def read_sediment_data(self) -> None:   
-        """Reads and stores the data from the USGS sediment dataset CSV"""      
-
-        csv_columns = ['Latitude', 'Longitude', 'Gravel', 'Sand', 'Mud', 'Clay', 'Grainsze']
-        sediment_data_path = f"{self.data_path}/US9_ONE.csv"
-        self.sediment_data = pd.read_csv(sediment_data_path, usecols=csv_columns)
-
-        print('Filtering out rows with missing data') 
-        print(f' - Rows before: {self.sediment_data.shape[0]}')
-        self.sediment_data = self.sediment_data[~((self.sediment_data[self.sediment_types] == -99) | (self.sediment_data[self.sediment_types] == 0)).all(axis=1)]
-        self.sediment_data = self.sediment_data[(self.sediment_data['Grainsze'] != -99)].reset_index(drop=True)
-        print(f' - Rows after: {self.sediment_data.shape[0]}')
-
-    def transform_points_to_polygons(self) -> None:
-        """Polygonize the sediment points and append as a new layer"""    
-        print("Transforming sediment points to polygons...")
+    # --- Check for and create the output folder if it doesn't exist ---
+    print(f"Checking for AGO folder '{AGO_FOLDER_NAME}'...")
+    try:
+        folder_exists = False
         
-        # Pyogrio + fsspec handles the S3 read better than the write
-        gdf = gpd.read_file(self.gpkg_path, layer='sediment_points', engine='pyogrio')
-        
-        coordinates_df = gdf.geometry.apply(lambda geom: geom.centroid.coords[0]).apply(pd.Series)
-        coordinates_df.columns = ['Longitude', 'Latitude']
-        vor = Voronoi(coordinates_df[['Longitude', 'Latitude']].values)
-        polygons = []
-        for point_idx, region_idx in enumerate(vor.point_region):
-            region = vor.regions[region_idx]
-            if -1 in region or len(region) == 0: continue
-            polygons.append({
-                'geometry': Polygon([vor.vertices[i] for i in region]),
-                'sed_type': gdf['sed_int'].iloc[point_idx],
-                'sed_size': gdf['sed_size'].iloc[point_idx]
-            })
+        # Try new API first (avoids caching bugs)
+        if hasattr(gis.content, 'folders'):
+            user_folders = gis.content.folders.get()
+            for f in user_folders:
+                if f.title == AGO_FOLDER_NAME:
+                    folder_exists = True
+                    break
+            
+            if not folder_exists:
+                print(f"Creating missing AGO folder '{AGO_FOLDER_NAME}'...")
+                gis.content.folders.create(AGO_FOLDER_NAME)
+            else:
+                print(f"Found AGO folder '{AGO_FOLDER_NAME}'.")
+                
+        # Fallback to old API
+        else:
+            for f in gis.users.me.folders:
+                if isinstance(f, dict) and f.get('title') == AGO_FOLDER_NAME:
+                    folder_exists = True
+                    break
+            
+            if not folder_exists:
+                print(f"Creating missing AGO folder '{AGO_FOLDER_NAME}'...")
+                gis.content.create_folder(AGO_FOLDER_NAME)
+            else:
+                print(f"Found AGO folder '{AGO_FOLDER_NAME}'.")
+                
+    except Exception as e:
+        # Catch the "not available" error just in case of race conditions
+        if "not available" in str(e).lower():
+            print(f"Found AGO folder '{AGO_FOLDER_NAME}' (already exists).")
+        else:
+            print(f"Warning: Could not verify or create folder '{AGO_FOLDER_NAME}': {e}")
 
-        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:32617')
+    # Enable Spatial Analyst extension to handle the decimal math
+    arcpy.CheckOutExtension("Spatial")
 
-        self._modify_gpkg(gdf_voronoi, 'sediment_polygons', mode='a')
-        print("Appended sediment polygons layer.")
-
-    def run(self) -> None:
-        """Entrypoint for processing the Sediment layer"""
-
-        self.download_sediment_data()
-        self.read_sediment_data()
-        self.add_sed_size_column()
-        self.determine_sed_types()
-        self.add_sediment_mapping_column()
-        self.create_point_layer()
-        self.transform_points_to_polygons()
-        self.convert_polys_to_raster('sed_type')
-        self.convert_polys_to_raster('sed_size')
+    # Set up arcpy workspace for temporary processing
+    arcpy.env.overwriteOutput = True
+    
+    # Run the processors
+    process_offshore(gis)
+    process_inshore(gis)
+    
+    print("\nAll tasks complete.")
