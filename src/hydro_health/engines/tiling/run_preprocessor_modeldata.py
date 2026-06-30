@@ -1,24 +1,17 @@
-import cProfile
-import pstats
 import pathlib
 import sys
-
 
 HYDRO_HEALTH = pathlib.Path(__file__).parents[3]
 sys.path.append(str(HYDRO_HEALTH))
 
-
 from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
 
-
 if __name__ == '__main__':
-    profiler = cProfile.Profile()
-    profiler.enable()
-
     processor = ModelDataPreProcessor(overwrite=True, pilot_mode=True)
-
+    
+    print("Starting processing. (Note: Dask performance_report must be triggered inside ModelDataPreProcessor.py)")
+    
     processor.process()
-
-    profiler.disable()
-    stats = pstats.Stats(profiler)
-    stats.strip_dirs().sort_stats('cumulative').print_stats(10)
+    
+    print("Processing complete!")
+    

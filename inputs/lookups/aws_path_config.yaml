@@ -35,7 +35,13 @@ MODEL:
   PREDICTION_SUB_GRIDS: ER_3/model_subgrids/prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
-  UNCOMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled
+  UNCOMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled_not_filled
+PREPROCESSED:
+  BLUETOPO: ER_3/model_variables/Prediction/pre_processed/BlueTopo
+  HURRICANE: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
+  LIDAR: ER_3/model_variables/Prediction/pre_processed/tiled
+  SEDIMENT: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
+  TSM: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters/
 S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
@@ -48,8 +54,7 @@ SHARED:
   MASTER_GRIDS: Master_Grids.gpkg
   TILES: BlueTopo_Tile_Scheme_20260505_132642
   STATES: USA_Census_States_200km_Overlap
-  ECOREGIONS_50M: EcoRegions_50m
-  ECOREGIONS: EcoRegions
+  ECOREGIONS: EcoRegions_50m
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km

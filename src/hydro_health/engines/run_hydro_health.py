@@ -25,7 +25,6 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'input_directory': Param(''),
             'output_directory': Param(str(OUTPUTS)),
             'eco_regions': Param(''),
-            'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
     elif env == 'remote':
@@ -63,16 +62,14 @@ def run_hydro_health(config_name: str) -> None:
         print(f'Script has been run {len(config["runtimes"])} time(s)')
 
         pilot_mode = config['pilot_mode']
-        output_prefix = config.get('output_prefix', '')
-        resolution = config.get('resolution', [8])
 
         # load ecoregions from config for remote run
-        param_lookup['eco_regions'].value = config['ecoregions']
+        param_lookup['eco_regions'].value = config['ecoregions'] if env in ['remote', 'aws'] else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
-        tiles = get_ecoregion_tiles(param_lookup, low_res=True)
+        tiles = get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
-                runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix=output_prefix, resolution=resolution)
+                runners.run_bluetopo_tile_engine(tiles, param_lookup)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup)
             # TODO Removed laz download until HH 2.0
@@ -81,7 +78,7 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_metadata_engine" and step["run"]:
                 runners.run_metadata_engine(tiles, param_lookup)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
-                runners.run_raster_vrt_engine(param_lookup, skip_existing=False, low_res=True if output_prefix else False)
+                runners.run_raster_vrt_engine(param_lookup, skip_existing=True)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
                 runners.run_raster_mask_engine(param_lookup)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
@@ -119,5 +116,5 @@ def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None
 
 
 if __name__ == "__main__":
-    config_name = "hydro_health_session_06012026.yaml"
+    config_name = "hydro_health_session_08272025.yaml"
     run_hydro_health(config_name)

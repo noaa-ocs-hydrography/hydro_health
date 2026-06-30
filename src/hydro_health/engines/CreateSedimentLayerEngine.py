@@ -12,6 +12,7 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 
+
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
 from rasterio.features import rasterize
@@ -21,7 +22,9 @@ from urllib.parse import urlparse
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
+
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 class CreateSedimentLayerEngine(Engine):
     """Class to hold the logic for processing the Sediment layer"""
@@ -95,26 +98,17 @@ class CreateSedimentLayerEngine(Engine):
 
         print(f"Creating raster for {field_name} at {resolution} m resolution...")
 
-        # Use the requested Master_Grids GeoPackage for bounds and valid area
-        eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
-        print(f"Reading Enhanced_EcoRegions from {eco_path} for valid area mask...")
-        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
-        
-        # Ensure it matches the EPSG:6350 used for sediment polygons
-        target_crs = "EPSG:6350"
-        if eco_gdf.crs != target_crs:
-            eco_gdf = eco_gdf.to_crs(target_crs)
-            
-        bounds = eco_gdf.total_bounds
-        crs = eco_gdf.crs
+        with rasterio.open(self.mask_path) as mask_src:
+            bounds = mask_src.bounds
+            crs = mask_src.crs
 
         xres, yres = resolution, resolution
-        width = int((bounds[2] - bounds[0]) / xres)
-        height = int((bounds[3] - bounds[1]) / yres)
-        transform = from_origin(bounds[0], bounds[3], xres, yres)
+        width = int((bounds.right - bounds.left) / xres)
+        height = int((bounds.top - bounds.bottom) / yres)
+        transform = from_origin(bounds.left, bounds.top, xres, yres)
 
-        # 1. Rasterize sediment polygons
         with fiona.open(self.gpkg_path, layer='sediment_polygons') as src:
+            assert src.crs == crs.to_dict(), "CRS mismatch between mask and vector layer"
             shapes = (
                 (feature["geometry"], feature["properties"][field_name])
                 for feature in src if feature["properties"][field_name] is not None
@@ -129,19 +123,19 @@ class CreateSedimentLayerEngine(Engine):
                 all_touched=False
             )
 
-        # 2. Rasterize Enhanced_EcoRegions to serve as the valid area mask
-        eco_shapes = [(geom, 1) for geom in eco_gdf.geometry]
-        valid_area_mask = rasterize(
-            shapes=eco_shapes,
-            out_shape=(height, width),
-            transform=transform,
-            fill=0,
-            dtype='uint8',
-            all_touched=False
-        )
+        with rasterio.open(self.mask_path) as mask_src:
+            mask_reproj = np.empty((height, width), dtype='float32')
+            rasterio.warp.reproject(
+                source=rasterio.band(mask_src, 1),
+                destination=mask_reproj,
+                src_transform=mask_src.transform,
+                src_crs=mask_src.crs,
+                dst_transform=transform,
+                dst_crs=crs,
+                resampling=Resampling.nearest
+            )
 
-        # Apply Enhanced_EcoRegions mask to nullify non-valid areas
-        rasterized[valid_area_mask == 0] = nodata_val
+        rasterized[mask_reproj == 0] = nodata_val
 
         filename = f"{field_name}_raster_{resolution}m.tif"
 
@@ -169,25 +163,11 @@ class CreateSedimentLayerEngine(Engine):
                 final_local_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(tmp_path, str(final_local_path))
                 print(f"Raster saved locally to {final_local_path}")
-                
-                # Upload the sand_mud_mask to S3 anyway
-                if field_name == 'sand_mud_mask':
-                    s3 = boto3.client('s3')
-                    bucket = "ocs-dev-csdl-hydrohealth"
-                    key = f"low_res/{filename}"
-                    print(f"Uploading {field_name} to s3://{bucket}/{key}...")
-                    s3.upload_file(str(final_local_path), bucket, key)
-                    print(f"Raster uploaded successfully to S3.")
-
             else:
-                # Handle standard S3 vs custom bucket/key for sand_mud_mask
-                if field_name == 'sand_mud_mask':
-                    bucket = "ocs-dev-csdl-hydrohealth"
-                    key = f"low_res/{filename}"
-                else:
-                    p = urlparse(self.raster_path)
-                    bucket = p.netloc
-                    key = f"{p.path.lstrip('/')}/{filename}".replace("//", "/")
+                # EC2/S3: self.raster_path is a string "s3://bucket/path/..."
+                p = urlparse(self.raster_path)
+                bucket = p.netloc
+                key = f"{p.path.lstrip('/')}/{filename}".replace("//", "/")
                 
                 print(f"Uploading to s3://{bucket}/{key}...")
                 s3 = boto3.client('s3')
@@ -220,7 +200,7 @@ class CreateSedimentLayerEngine(Engine):
             geometry=gpd.points_from_xy(self.sediment_data['Longitude'], self.sediment_data['Latitude'])
         )  
         gdf.set_crs(crs="EPSG:4326", inplace=True)
-        gdf_reprojected = gdf.to_crs("EPSG:6350")
+        gdf_reprojected = gdf.to_crs("EPSG:32617")
 
         self._modify_gpkg(gdf_reprojected, 'sediment_points', mode='w')
         print('Created sediment point layer.')
@@ -295,17 +275,13 @@ class CreateSedimentLayerEngine(Engine):
         for point_idx, region_idx in enumerate(vor.point_region):
             region = vor.regions[region_idx]
             if -1 in region or len(region) == 0: continue
-            
-            sed_int_val = gdf['sed_int'].iloc[point_idx]
-            
             polygons.append({
                 'geometry': Polygon([vor.vertices[i] for i in region]),
-                'sed_type': sed_int_val,
-                'sed_size': gdf['sed_size'].iloc[point_idx],
-                'sand_mud_mask': 1 if sed_int_val in [2, 3] else None
+                'sed_type': gdf['sed_int'].iloc[point_idx],
+                'sed_size': gdf['sed_size'].iloc[point_idx]
             })
 
-        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:6350')
+        gdf_voronoi = gpd.GeoDataFrame(polygons, crs='EPSG:32617')
 
         self._modify_gpkg(gdf_voronoi, 'sediment_polygons', mode='a')
         print("Appended sediment polygons layer.")
@@ -320,8 +296,5 @@ class CreateSedimentLayerEngine(Engine):
         self.add_sediment_mapping_column()
         self.create_point_layer()
         self.transform_points_to_polygons()
-        
-        # Rasterize layers
         self.convert_polys_to_raster('sed_type')
         self.convert_polys_to_raster('sed_size')
-        self.convert_polys_to_raster('sand_mud_mask')

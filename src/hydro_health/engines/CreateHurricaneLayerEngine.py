@@ -3,8 +3,6 @@
 import os
 # Allow GDAL/Rasterio to write GeoTIFFs to S3 by using a local temp file under the hood
 os.environ["CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE"] = "YES"
-# Bypass GDAL free disk space checks for large rasters
-os.environ["CHECK_DISK_FREE_SPACE"] = "FALSE"
 
 import requests
 import tempfile
@@ -16,7 +14,6 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import rasterio
-import rasterio.features  # Explicitly imported to resolve AttributeError
 from rasterio.enums import Resampling
 from rasterio.transform import Affine
 from rasterio.transform import from_bounds
@@ -174,6 +171,11 @@ class CreateHurricaneLayerEngine(Engine):
         mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
         cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
 
+        # Check if files already exist before running expensive logic
+        if not self.overwrite and mean_output_path.exists() and cumulative_output_path.exists():
+            print(f"Skipping {output_name} for {start_year}-{end_year}. Files already exist.")
+            return
+
         try:
             # Safely grab matching raster files and keep track of which years were found
             raster_files = []
@@ -233,23 +235,32 @@ class CreateHurricaneLayerEngine(Engine):
         print(f"Saved cumulative raster to: {cumulative_output_path}")
 
     def clip_polygons(self) -> None:
-        """Subtract higher wind radii from lower wind radii to create distinct rings."""
+        """Clip the hurricane polygons to the coastal boundary and save the result."""
 
-        print("Subtracting wind radii from hurricane polygons to create rings...")
+        if not self.coast_boundary_path.exists():
+            raise FileNotFoundError(f"Coast boundary mask file not found at: {self.coast_boundary_path}")
+
+        print("Subtracting wind radii from hurricane polygons...")
         gdf_to_clip = self._read_gpkg_layer('atlantic_polygon_buffer')
+        clip_boundary = gpd.read_file(self._get_gdal_path(self.coast_boundary_path))
+
+        if gdf_to_clip.crs is None or clip_boundary.crs is None:
+            raise ValueError("One or both GeoDataFrames are missing a CRS.")
+        
+        if gdf_to_clip.crs != clip_boundary.crs:
+            clip_boundary = clip_boundary.to_crs(gdf_to_clip.crs)
 
         # Buffer by 0 to clean up invalid topological intersections before iterating
         gdf_to_clip['geometry'] = gdf_to_clip.geometry.buffer(0)
         gdf_to_clip = gdf_to_clip[~gdf_to_clip.geometry.is_empty & gdf_to_clip.geometry.is_valid]
 
         clipped_rows = []
-        # Group by 'area_date' to prevent completely un-related UNNAMED storms from destroying each other
-        for area_date, group in gdf_to_clip.groupby("area_date"):
+        for (name, year), group in gdf_to_clip.groupby(["name", "year"]):
             group = group.sort_values(by="wind_speed", ascending=False).reset_index(drop=True)
             for _, row in group.iterrows():
                 geom = row.geometry
                 for clipped_row in clipped_rows:
-                    if clipped_row["area_date"] == area_date:
+                    if clipped_row["name"] == name and clipped_row["year"] == year:
                         geom = geom.difference(clipped_row.geometry)
                 if not geom.is_empty:
                     new_row = row.copy()
@@ -257,12 +268,14 @@ class CreateHurricaneLayerEngine(Engine):
                     clipped_rows.append(new_row)
 
         clipped_gdf = gpd.GeoDataFrame(clipped_rows, columns=gdf_to_clip.columns, crs=gdf_to_clip.crs)
-        clipped_gdf = clipped_gdf[~clipped_gdf.geometry.is_empty & clipped_gdf.geometry.is_valid]
+        clipped_gdf = clipped_gdf[clipped_gdf.geometry.is_valid]
 
-        # Ensure correct datatypes are propagated downstream
+        # Use GeoPandas optimized clip function to safely clip geometries to the coastal mask
+        print("Applying spatial clip to the coast boundary...")
+        clipped_gdf = gpd.clip(clipped_gdf, clip_boundary)
+
         clipped_gdf['dissolve_id'] = clipped_gdf['dissolve_id'].astype(str)
         clipped_gdf['id'] = clipped_gdf['id'].astype(str)
-        clipped_gdf['area_date'] = clipped_gdf['area_date'].astype(str)
         clipped_gdf['name'] = clipped_gdf['name'].astype(str)
         clipped_gdf['year'] = pd.to_numeric(clipped_gdf['year'], errors='coerce').astype('Int32')
         clipped_gdf['wind_speed'] = pd.to_numeric(clipped_gdf['wind_speed'], errors='coerce').astype('Int32')
@@ -306,41 +319,14 @@ class CreateHurricaneLayerEngine(Engine):
         df = df.map(lambda x: x.strip() if isinstance(x, str) else x)
         df['cyclone_num'] = df['area_date'].apply(lambda x: x[2:4])
         df['year'] = df['date'].apply(lambda x: x[0:4]).astype(int)
-        
         df['latitude'] = df['latitude'].apply(self.convert_coordinates)
         df['longitude'] = df['longitude'].apply(self.convert_coordinates)
 
-        # Convert wind and radii columns to numeric, replacing missing (-999) with NaN temporarily
-        radii_cols = ['r_ne34', 'r_se34', 'r_sw34', 'r_nw34',
-                      'r_ne50', 'r_se50', 'r_sw50', 'r_nw50',
-                      'r_ne64', 'r_se64', 'r_sw64', 'r_nw64']
-        
-        for col in radii_cols + ['max_wind']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(-999)
-
-        # --- APPLY PROXY RADII FOR MISSING HISTORICAL DATA ---
-        
-        # 34-knot proxy (100 nm)
-        missing_34 = (df[['r_ne34', 'r_se34', 'r_sw34', 'r_nw34']] <= 0).all(axis=1)
-        mask_34 = missing_34 & (df['max_wind'] >= 34)
-        df.loc[mask_34, ['r_ne34', 'r_se34', 'r_sw34', 'r_nw34']] = 100
-
-        # 50-knot proxy (50 nm)
-        missing_50 = (df[['r_ne50', 'r_se50', 'r_sw50', 'r_nw50']] <= 0).all(axis=1)
-        mask_50 = missing_50 & (df['max_wind'] >= 50)
-        df.loc[mask_50, ['r_ne50', 'r_se50', 'r_sw50', 'r_nw50']] = 50
-
-        # 64-knot proxy (25 nm)
-        missing_64 = (df[['r_ne64', 'r_se64', 'r_sw64', 'r_nw64']] <= 0).all(axis=1)
-        mask_64 = missing_64 & (df['max_wind'] >= 64)
-        df.loc[mask_64, ['r_ne64', 'r_se64', 'r_sw64', 'r_nw64']] = 25
-
         # Estimate radius for 34 to 0 knots using a 1.5x factor
-        # Safety Check: Use np.maximum(0, ...) so proxy holes don't generate massive negative buffers (-1498)
-        df['r_ne0'] = np.maximum(0, pd.to_numeric(df['r_ne34'])) * 1.5
-        df['r_nw0'] = np.maximum(0, pd.to_numeric(df['r_nw34'])) * 1.5
-        df['r_se0'] = np.maximum(0, pd.to_numeric(df['r_se34'])) * 1.5
-        df['r_sw0'] = np.maximum(0, pd.to_numeric(df['r_sw34'])) * 1.5
+        df['r_ne0'] = pd.to_numeric(df['r_ne34']) * 1.5
+        df['r_nw0'] = pd.to_numeric(df['r_nw34']) * 1.5
+        df['r_se0'] = pd.to_numeric(df['r_se34']) * 1.5
+        df['r_sw0'] = pd.to_numeric(df['r_sw34']) * 1.5
 
         gdf = gpd.GeoDataFrame(df, 
                                 geometry=gpd.points_from_xy(df['longitude'], df['latitude']))  
@@ -381,8 +367,8 @@ class CreateHurricaneLayerEngine(Engine):
         """Create overlapping buffers around hurricane points and save them as polygons."""
 
         print("Creating overlapping buffers...")
-        # Maintain EPSG:5070 (NAD83 / Conus Albers) for SAFE geometrical buffering across the entire US
-        gdf = gdf.to_crs('EPSG:5070') 
+        gdf = gdf[gdf['year'] >= 1998]
+        gdf = gdf.to_crs('EPSG:32617')  # WGS 84 UTM 17N
         
         quadrants = ['ne', 'nw', 'se', 'sw']
         buffer_data = []
@@ -402,11 +388,9 @@ class CreateHurricaneLayerEngine(Engine):
                         buffer_data.append({
                             'geometry': quarter_circle,
                             'label': label,
-                            # Include area_date to uniquely identify storms sharing same name/year
-                            'id': f"{wind_speed}_{quadrant}_{row['area_date']}",
+                            'id': f"{wind_speed}_{quadrant}_{row['name']}_{row['year']}",
                             'name': row['name'],
                             'year': row['year'],
-                            'area_date': row['area_date'],
                             'wind_speed': wind_speed,
                             'longitude': row['longitude'],
                             'latitude': row['latitude'],
@@ -414,23 +398,11 @@ class CreateHurricaneLayerEngine(Engine):
                         })
         
         buffer_data = sorted(buffer_data, key=lambda x: x['id'])
+
+        buffer_gdf = gpd.GeoDataFrame(buffer_data, geometry='geometry', crs=gdf.crs)
+        self._save_gpkg_layer(buffer_gdf, 'atlantic_point_buffer')
         
         merged_buffer_data = []
-        
-        # 1. Pre-load ALL individual point circles first. 
-        # This guarantees storms with only 1 historical record point don't vanish.
-        for poly in buffer_data:
-            merged_buffer_data.append({
-                'geometry': poly['geometry'],
-                'id': poly['id'],
-                'name': poly['name'],
-                'year': poly['year'],
-                'area_date': poly['area_date'],
-                'wind_speed': poly['wind_speed'],
-                'dissolve_id': f"{poly['wind_speed']}_{poly['area_date']}"
-            })
-
-        # 2. Add sweeping connecting swaths between multi-record points
         for i in range(len(buffer_data) - 1):
             current_polygon = buffer_data[i]
             if buffer_data[i]['id'] == buffer_data[i + 1]['id']:
@@ -445,9 +417,8 @@ class CreateHurricaneLayerEngine(Engine):
                 'id': current_polygon['id'],
                 'name': current_polygon['name'],
                 'year': current_polygon['year'],
-                'area_date': current_polygon['area_date'],
                 'wind_speed': current_polygon['wind_speed'],
-                'dissolve_id': f"{current_polygon['wind_speed']}_{current_polygon['area_date']}"
+                'dissolve_id': f"{current_polygon['wind_speed']}_{current_polygon['name']}_{current_polygon['year']}"
             })
 
         buffer_gdf = gpd.GeoDataFrame(merged_buffer_data, geometry='geometry', crs=gdf.crs)
@@ -517,89 +488,64 @@ class CreateHurricaneLayerEngine(Engine):
         print("Download complete.")
 
     def generate_cumulative_rasters(self, output_folder, value) -> None:
-        """Generate cumulative rasters for all possible hurricane years."""
+        """Generate cumulative rasters for hurricane data."""
 
         print(f"Generating cumulative rasters for {value}...")
         input_raster_folder = self.raster_path
+        mask_raster_path = self.mask_pred_path
         
         target_resolution = 100.0
 
-        eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
-        print(f"Reading EcoRegions from {eco_path} for valid area mask...")
-        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
-        
-        # Project EcoRegions to match target CRS (EPSG:32617)
-        print("Projecting EcoRegions to match target projection (EPSG:32617)...")
-        eco_gdf = eco_gdf.to_crs('EPSG:32617')
-        
-        # FIX for topology twisting: Repair self-intersecting lines caused by out-of-bounds projection distortion
-        eco_gdf['geometry'] = eco_gdf.geometry.buffer(0)
-        eco_gdf = eco_gdf[eco_gdf.geometry.is_valid & ~eco_gdf.geometry.is_empty]
-        
-        mask_crs = eco_gdf.crs
-        minx, miny, maxx, maxy = eco_gdf.total_bounds
-        
-        # Recalculate dimensions for exactly 100m resolution based on EcoRegion extent
-        mask_width = int(np.ceil((maxx - minx) / target_resolution))
-        mask_height = int(np.ceil((maxy - miny) / target_resolution))
-        
-        mask_transform = Affine(target_resolution, 0, minx,
-                                0, -target_resolution, maxy)
-        
-        print("Rasterizing EcoRegions directly into EPSG:32617 array to avoid GDAL inverse projection failures...")
-        shapes = [(geom, 1) for geom in eco_gdf.geometry if geom is not None and geom.is_valid and not geom.is_empty]
-        mask_data = rasterio.features.rasterize(
-            shapes,
-            out_shape=(mask_height, mask_width),
-            transform=mask_transform,
-            fill=0,
-            dtype='uint8'
-        )
-        
-        mask_valid = mask_data == 1
+        with rasterio.open(self._get_gdal_path(mask_raster_path)) as mask_src:
+            mask_crs = mask_src.crs
+            
+            minx, miny, maxx, maxy = mask_src.bounds
+            
+            new_width = int(np.ceil((maxx - minx) / target_resolution))
+            new_height = int(np.ceil((maxy - miny) / target_resolution))
+            
+            mask_transform = Affine(target_resolution, 0, minx,
+                                    0, -target_resolution, maxy)
+            
+            mask_data_resampled = np.full((new_height, new_width), np.nan, dtype=np.float32)
+            reproject(
+                source=mask_src.read(1),
+                destination=mask_data_resampled,
+                src_transform=mask_src.transform,
+                src_crs=mask_src.crs,
+                dst_transform=mask_transform,
+                dst_crs=mask_crs,
+                resampling=Resampling.nearest,
+                dst_nodata=np.nan
+            )
+            mask_data = mask_data_resampled
+            mask_height, mask_width = new_height, new_width
+            mask_valid = mask_data == 1
 
         try:
             # Clear fsspec cache since GDAL may have written files behind its back
             if hasattr(input_raster_folder, "fs"):
                 input_raster_folder.fs.invalidate_cache()
+
+            # Use rglob to recursively find all child rasters safely on S3.
+            # Avoid using .glob('*/*.tif') as s3fs struggles with multi-level wildcards
             all_rasters = list(input_raster_folder.rglob('*.tif'))
         except Exception as e:
             print(f"Error accessing {input_raster_folder}: {e}")
-            all_rasters = []
+            return
 
-        # Group the existing rasters by their parent year folder
+        if not all_rasters:
+            print(f"No rasters found in {input_raster_folder}. Skipping cumulative raster generation.")
+            return
+
+        # Group the rasters by their parent year folder
         year_to_rasters = defaultdict(list)
         for r_path in all_rasters:
             year_to_rasters[r_path.parent.name].append(r_path)
 
-        # Query the base dataset to determine ALL possible years
-        print("Querying base dataset to find all possible years...")
-        try:
-            base_gdf = self._read_gpkg_layer('atlantic_hurricane_points')
-            # Extract entire historical range dynamically without clamping to start_year/end_year
-            min_year = int(base_gdf['year'].min())
-            max_year = int(base_gdf['year'].max())
-            all_possible_years = list(range(min_year, max_year + 1))
-            print(f"Generating data for years {min_year} to {max_year}.")
-        except Exception as e:
-            print(f"Warning: Could not query dataset ({e}). Defaulting to existing folders.")
-            if year_to_rasters:
-                found_years = sorted([int(y) for y in year_to_rasters.keys() if y.isdigit()])
-                if not found_years:
-                    return
-                all_possible_years = list(range(min(found_years), max(found_years) + 1))
-            else:
-                return
+        for year_folder, raster_files in year_to_rasters.items():
 
-        # Iterate over ALL possible years, even if no rasters exist for that year
-        for year in all_possible_years:
-            year_folder = str(year)
-            raster_files = year_to_rasters.get(year_folder, [])
-
-            if not raster_files:
-                print(f"No data for year {year_folder}. Skipping raster creation.")
-                continue
-
+            # Determine output paths before processing to allow skipping
             if value == "cumulative_count":
                 output_name = f"cumulative_count_{year_folder}.tif"
             elif value == "cumulative_windspeed":
@@ -607,17 +553,15 @@ class CreateHurricaneLayerEngine(Engine):
             
             output_path = output_folder / output_name
 
-            # ----- NEW CHECK ADDED HERE -----
             if not self.overwrite and output_path.exists():
-                print(f"Skipping cumulative raster for year {year_folder} ({value}) - already exists at {output_path}.")
+                print(f"Skipping {output_name}, already exists.")
                 continue
-            # --------------------------------
 
-            # Default empty rasters
             cumulative_count = np.zeros((mask_height, mask_width), dtype=np.float32)
             cumulative_windspeed = np.zeros((mask_height, mask_width), dtype=np.float32)
 
             for raster_path in raster_files:
+                
                 with rasterio.open(self._get_gdal_path(raster_path)) as src:
                     raster_data = src.read(1)  
                     transform = src.transform
@@ -625,8 +569,6 @@ class CreateHurricaneLayerEngine(Engine):
 
                     raster_data_resampled = np.full((mask_height, mask_width), np.nan, dtype=np.float32)
                     
-                    # Safe to use reproject here because BOTH src and dst are now EPSG:32617.
-                    # Bypasses the PROJ inverse pipeline entirely; acts strictly as an affine aligner.
                     reproject(
                         raster_data, raster_data_resampled,
                         src_transform=transform,
@@ -648,7 +590,6 @@ class CreateHurricaneLayerEngine(Engine):
 
                 print(f"Processed raster: {raster_path.name} for year {year_folder}")
             
-            # Apply Mask bounds constraint
             cumulative_windspeed[~mask_valid] = np.nan
             cumulative_count[~mask_valid] = np.nan
 
@@ -657,7 +598,9 @@ class CreateHurricaneLayerEngine(Engine):
             elif value == "cumulative_windspeed":
                 output_raster = cumulative_windspeed
             
+            # Make sure output directory exists
             output_path.parent.mkdir(parents=True, exist_ok=True)
+
             self.save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs)
             print(f"Cumulative raster for year {year_folder} saved to {output_path}.")
 
@@ -676,7 +619,7 @@ class CreateHurricaneLayerEngine(Engine):
         elif quadrant == 'sw':
             return [coords[0], coords[-1], coords[1]]
 
-    def polygons_to_raster(self, resolution=100.0) -> None:
+    def polygons_to_raster(self, resolution=500) -> None:
         """Convert hurricane polygons to rasters."""
 
         print("Converting trimmed polygons to rasters...")
@@ -686,56 +629,22 @@ class CreateHurricaneLayerEngine(Engine):
         except Exception as e:
             print(f"Error opening 'trimmed_polygons' layer. It may be missing due to empty overlap. Exception: {e}")
             return
-
-        print("Projecting trimmed polygons to target CRS (EPSG:32617) to prevent raster warping failure...")
-        gdf = gdf.to_crs('EPSG:32617')
-        
-        # Repair the vector topology in case the extreme UTM distortion folded any polygons over themselves
-        gdf['geometry'] = gdf.geometry.buffer(0)
-        gdf = gdf[gdf.geometry.is_valid & ~gdf.geometry.is_empty]
-        
-        # Load EcoRegions bounds to constrain massive ocean-wide storm rasterization sizes
-        eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
-        print(f"Reading EcoRegions from {eco_path} to constrain raster bounding boxes...")
-        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
-        eco_gdf = eco_gdf.to_crs('EPSG:32617')
-        eco_minx, eco_miny, eco_maxx, eco_maxy = eco_gdf.total_bounds
             
-        # Group by 'area_date' ensures unique files per storm.
-        grouped = gdf.groupby('area_date')
+        grouped = gdf.groupby(['name', 'year'])
 
-        for area_date, group in grouped:
-            
-            name = group.iloc[0]['name']
-            year = group.iloc[0]['year']
-            safe_name = str(name).strip().replace(" ", "")
+        for (name, year), group in grouped:
             
             output_folder = self.raster_path / str(year)
             output_folder.mkdir(parents=True, exist_ok=True)
-            raster_file = output_folder / f"{safe_name}_{area_date}.tif"
+            raster_file = output_folder / f"{name}_{year}.tif"
             
             if not self.overwrite and raster_file.exists():
-                print(f"Skipping individual raster {safe_name}_{area_date}.tif ({year}) - already exists.")
+                print(f"Skipping {raster_file}, already exists.")
                 continue  
 
-            s_minx, s_miny, s_maxx, s_maxy = group.total_bounds
-            
-            # Constrain raster size to EcoRegion bounds to prevent massive memory/disk blowouts
-            minx = max(s_minx, eco_minx)
-            miny = max(s_miny, eco_miny)
-            maxx = min(s_maxx, eco_maxx)
-            maxy = min(s_maxy, eco_maxy)
-
-            if minx >= maxx or miny >= maxy:
-                print(f"Storm {name} - {year} is completely outside the target EcoRegions bounding box. Skipping rasterization.")
-                continue
-
+            minx, miny, maxx, maxy = group.total_bounds
             width = int(np.ceil((maxx - minx) / resolution))
             height = int(np.ceil((maxy - miny) / resolution))
-            
-            if width <= 0 or height <= 0:
-                continue
-
             transform = from_bounds(minx, miny, maxx, maxy, width, height)
 
             raster_data = np.full((height, width), np.nan, dtype=np.float32)
@@ -746,9 +655,10 @@ class CreateHurricaneLayerEngine(Engine):
                     shapes,
                     out=raster_data,
                     transform=transform,
+                    fill=np.nan, 
                 )
 
-            # Safely save the generated raster via local temp wrapper (Native EPSG:32617)
+            # Safely save the generated raster via local temp wrapper
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_raster = os.path.join(tmpdir, "temp.tif")
                 with rasterio.open(
@@ -761,7 +671,6 @@ class CreateHurricaneLayerEngine(Engine):
                     dtype=raster_data.dtype,
                     crs=gdf.crs,
                     nodata=np.nan,
-                    compress="lzw",  # Ensures we don't eat all disk space for individual storms
                     transform=transform,
                 ) as dst:
                     dst.write(raster_data, 1)
@@ -796,47 +705,22 @@ class CreateHurricaneLayerEngine(Engine):
         """Entrypoint for processing the Hurricane layer"""
         print("Starting Hurricane Layer Engine processing...")
 
-        run_vector_processing = True
-
         if self.overwrite:
-            print("Overwrite is enabled. Removing existing GeoPackage and Rasters to start fresh...")
+            print("Overwrite is enabled. Removing existing GeoPackage to start fresh...")
             try:
                 if self.hurricane_data_path.exists():
                     self.hurricane_data_path.unlink()
             except Exception as e:
                 print(f"Warning: Could not delete existing GPKG: {e}")
 
-            # FIX: Explicitly scrub the base raster path of old run files so tiny old footprints 
-            # don't bleed into the new Conus-wide cumulative footprints
-            try:
-                if self.raster_path.exists():
-                    for tif in self.raster_path.rglob("*.tif"):
-                        # Only delete files inside year folders (e.g., 1851/storm.tif)
-                        if tif.parent.name.isdigit():
-                            tif.unlink()
-            except Exception as e:
-                print(f"Warning: Could not delete existing year rasters: {e}")
-        else:
-            # Short-circuit: Check if we can skip the heavy vector generation steps
-            try:
-                if self.hurricane_data_path.exists():
-                    print("Checking for existing processed vector data...")
-                    _ = self._read_gpkg_layer('trimmed_polygons')
-                    print("Processed vector data found! Skipping download and buffering steps.")
-                    run_vector_processing = False
-            except Exception:
-                print("Vector data incomplete or missing. Proceeding with full generation.")
-
-        if run_vector_processing:
-            self.download_hurricane_data()    
-            
-            # Parse points once and pass the Dataframe down the chain
-            point_gdf = self.convert_text_to_gpkg()
-            self.create_line_layer(point_gdf)
-            self.create_overlapping_buffers(point_gdf)
-            
-            self.clip_polygons()
-            
+        self.download_hurricane_data()    
+        
+        # Parse points once and pass the Dataframe down the chain
+        point_gdf = self.convert_text_to_gpkg()
+        self.create_line_layer(point_gdf)
+        self.create_overlapping_buffers(point_gdf)
+        
+        self.clip_polygons()
         self.polygons_to_raster()
 
         self.generate_cumulative_rasters(
@@ -889,3 +773,4 @@ class CreateHurricaneLayerEngine(Engine):
                     shutil.copyfileobj(f_in, f_out)
             else:
                 shutil.copy(local_raster, path_obj)
+                
