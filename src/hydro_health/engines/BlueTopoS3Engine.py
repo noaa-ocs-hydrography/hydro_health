@@ -20,8 +20,6 @@ from datetime import datetime, date
 from botocore.client import Config
 from botocore import UNSIGNED
 from lxml import etree
-
-# Added osr for vector contour generation / CRS parsing (ogr removed as it was unused)
 from osgeo import gdal, osr
 
 from hydro_health.helpers.tools import get_config_item
@@ -169,25 +167,7 @@ class BlueTopoS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         self.target_crs = "EPSG:6350"
-        
-        # Changed to False to ensure normal execution is no longer bypassed
         self.skip_tiling = False
-
-        # Apply global GDAL S3 Network and Overview Optimizations
-        gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
-        gdal.SetConfigOption('VSI_CACHE', 'YES')
-        gdal.SetConfigOption('CPL_VSIL_CURL_ALLOWED_EXTENSIONS', 'tif,tiff')
-        gdal.SetConfigOption('COMPRESS_OVERVIEW', 'DEFLATE')
-        
-        # FIXED: Drastically reduced GDAL cache to 1GB to prevent EC2 OS thrashing/freezing
-        gdal.SetConfigOption('GDAL_CACHEMAX', '1024MB')
-        
-        # Add HTTP retries to prevent massive mosaics from silently stalling due to network blips
-        gdal.SetConfigOption('GDAL_HTTP_MAX_RETRY', '5')
-        gdal.SetConfigOption('GDAL_HTTP_RETRY_DELAY', '3')
-
-        # Attempt to automatically fix invalid vector geometries (TopologyExceptions) on the fly
-        gdal.SetConfigOption('OGR_ENABLE_MAKE_VALID', 'YES')
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster of unique values for each survey area."""
@@ -547,9 +527,9 @@ class BlueTopoS3Engine(Engine):
         ds = gdal.Open(str(tiff_path), gdal.GA_Update)
         if ds is not None:
             ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
-            ds = None # EXPLICIT CLEANUP
+            ds = None
 
-        ds_trans = gdal.Translate(
+        gdal.Translate(
             str(temp_cog),
             str(tiff_path),
             creationOptions=[
@@ -561,7 +541,6 @@ class BlueTopoS3Engine(Engine):
                 "COPY_SRC_OVERVIEWS=YES"
             ]
         )
-        ds_trans = None # EXPLICIT CLEANUP
 
         if temp_cog.exists():
             tiff_path.unlink()
@@ -589,13 +568,12 @@ class BlueTopoS3Engine(Engine):
         output_name = str(tiff_file_path.name).replace('_mb', band_name_lookup[band])
         singleband_tile_name = tiff_file_path.parents[0] / output_name
 
-        ds_trans = gdal.Translate(
+        gdal.Translate(
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
             creationOptions=["COMPRESS=DEFLATE"]
         )
-        ds_trans = None # EXPLICIT CLEANUP
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
         """Update file name for singleband conversion"""
