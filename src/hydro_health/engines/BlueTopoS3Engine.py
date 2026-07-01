@@ -21,18 +21,13 @@ from botocore.client import Config
 from botocore import UNSIGNED
 from lxml import etree
 
-# Added ogr and osr for vector contour generation
-from osgeo import gdal, ogr, osr
+# Added osr for vector contour generation / CRS parsing (ogr removed as it was unused)
+from osgeo import gdal, osr
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine, supersession, catzoc
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
-
-
-INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
-
 
 
 def _process_tile(param_inputs: list) -> str:
@@ -99,6 +94,15 @@ def _process_tile(param_inputs: list) -> str:
                     if not existing_files['iss_110']:
                         engine.create_catzoc_all(tiff_file_path, increased_scale=True)
                     
+                    if not existing_files['iss_latest']:
+                        engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
+                        
+                    if not existing_files['rugosity']:
+                        engine.create_rugosity(tiff_file_path)
+                        
+                    if not existing_files['slope']:
+                        engine.create_slope(tiff_file_path)
+                    
                     # Only parse the multiband source if we are actively generating the base tile or uncertainty tile
                     if not existing_files['base'] or not existing_files['unc']:
                         mb_tiff_file = engine.rename_multiband(tiff_file_path)
@@ -111,7 +115,7 @@ def _process_tile(param_inputs: list) -> str:
                     
                     if not existing_files['base']:
                         engine.set_ground_to_nodata(tiff_file_path)
-                        engine.finalize_cog(tiff_file_path)     
+                        engine.finalize_cog(tiff_file_path)    
 
                     all_valid = True
                             
@@ -165,8 +169,9 @@ class BlueTopoS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         self.target_crs = "EPSG:6350"
-        # Tiling is bypassed to exclusively remake mosaics
-        self.skip_tiling = True
+        
+        # Changed to False to ensure normal execution is no longer bypassed
+        self.skip_tiling = False
 
         # Apply global GDAL S3 Network and Overview Optimizations
         gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
@@ -488,6 +493,9 @@ class BlueTopoS3Engine(Engine):
         existing = {
             'base': False,
             'iss_110': False,
+            'iss_latest': False,
+            'rugosity': False,
+            'slope': False,
             'survey_end_date': False,
             'unc': False
         }
@@ -517,6 +525,12 @@ class BlueTopoS3Engine(Engine):
                 existing['base'] = True
             elif filename.endswith('_ISS_all_110.tiff'):
                 existing['iss_110'] = True
+            elif filename.endswith('_ISS_latest.tiff'):
+                existing['iss_latest'] = True
+            elif filename.endswith('_rugosity.tiff'):
+                existing['rugosity'] = True
+            elif filename.endswith('_slope.tiff'):
+                existing['slope'] = True
             elif filename.endswith('_survey_end_date.tiff'):
                 existing['survey_end_date'] = True
             elif filename.endswith('_unc.tiff'):
@@ -831,6 +845,12 @@ class BlueTopoS3Engine(Engine):
                 if len(filename.split('_')) == 3 and existing_files.get('base'):
                     continue
                 if filename.endswith('_ISS_all_110.tiff') and existing_files.get('iss_110'):
+                    continue
+                if filename.endswith('_ISS_latest.tiff') and existing_files.get('iss_latest'):
+                    continue
+                if filename.endswith('_rugosity.tiff') and existing_files.get('rugosity'):
+                    continue
+                if filename.endswith('_slope.tiff') and existing_files.get('slope'):
                     continue
                 if filename.endswith('_survey_end_date.tiff') and existing_files.get('survey_end_date'):
                     continue
