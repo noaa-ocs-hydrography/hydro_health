@@ -9,6 +9,7 @@ import shutil
 import concurrent.futures
 import gc
 import numpy as np
+import rasterio
 from botocore.config import Config
 from osgeo import gdal, ogr, osr
 # Make sure to import or define get_config_item in your new engine
@@ -21,6 +22,152 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 class HHMSimpleEngine:
     def __init__(self):
         self.target_crs = "EPSG:6350"
+
+    def create_hurricane_tile(self, tiff_file_path: pathlib.Path, resolution: int) -> None:
+        """
+        Generate a hurricane count raster by evaluating the survey year and 
+        accumulating the corresponding yearly hurricane counts for each cell.
+        """
+
+        print(f"[{tiff_file_path.name}] Creating cumulative hurricane count tile...")
+        stem = tiff_file_path.stem
+        hurricane_tile_path = tiff_file_path.parents[0] / f'{stem}_hurricane.tiff'
+
+        # Local survey path always exists because we are enforcing unconditional local reprocessing
+        local_survey_path = tiff_file_path.parents[0] / f'{stem}_survey_end_date.tiff'
+        survey_ds_path = str(local_survey_path)
+
+        try:
+            with rasterio.open(survey_ds_path) as src:
+                survey_years = src.read(1)
+                transform = src.transform
+                nodata = -9999
+                width = src.width
+                height = src.height
+        except rasterio.errors.RasterioIOError:
+            print(f"[{stem}] Error: Survey end date raster required for Hurricane calculation could not be loaded from {survey_ds_path}")
+            return
+
+        minx = transform.c
+        maxy = transform.f
+        maxx = minx + transform.a * width
+        miny = maxy + transform.e * height
+
+        # Create a rigorous valid mask specifically ignoring 0, nodata, or nan
+        valid_mask = (survey_years != nodata) & (survey_years > 0) & ~np.isnan(survey_years)
+
+        unique_years = np.unique(survey_years[valid_mask])
+        valid_years = [y for y in unique_years]
+
+        hurricane_path_prefix = get_config_item('HURRICANE', 'COUNT_RASTER_PATH')
+
+        # Initialize everything to explicit nodata.
+        result_array = np.full(survey_years.shape, nodata, dtype=np.float32)
+
+        if not valid_years:
+            with rasterio.open(
+                hurricane_tile_path,
+                "w",
+                driver="GTiff",
+                count=1,
+                width=width,
+                height=height,
+                dtype=rasterio.float32,
+                compress="lzw",
+                tiled=True,
+                blockxsize=512,
+                blockysize=512,
+                crs=self.target_crs,
+                transform=transform,
+                nodata=nodata,
+            ) as dst:
+                dst.write(result_array, 1)
+            return
+
+        def get_year_count_array(target_year):
+            # Clamp year to valid data range
+            target_year = max(1851, min(2023, int(target_year)))
+
+            # Construct both the .tiff and the .tif fallbacks
+            s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            s3_uri_tiff = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tiff"
+            s3_uri_tif = f"/vsis3/{s3_bucket}/{hurricane_path_prefix}/cumulative_count_{target_year}.tif"
+
+            warp_options = gdal.WarpOptions(
+                format="MEM",
+                outputBounds=(minx, miny, maxx, maxy),
+                width=width,   
+                height=height,  
+                dstSRS=self.target_crs,
+                resampleAlg=gdal.GRA_NearestNeighbour, # Counts should not be interpolated
+                dstNodata=-9999
+            )
+
+            mem_ds = None
+            gdal.PushErrorHandler('CPLQuietErrorHandler')
+
+            # 1. Attempt the .tiff version first (catching RuntimeError if UseExceptions is active)
+            try:
+                mem_ds = gdal.Warp('', s3_uri_tiff, options=warp_options)
+            except Exception:
+                mem_ds = None
+
+            # 2. If the .tiff version failed, try the .tif version as a fallback
+            if mem_ds is None:
+                try:
+                    mem_ds = gdal.Warp('', s3_uri_tif, options=warp_options)
+                except Exception:
+                    mem_ds = None
+
+            gdal.PopErrorHandler()
+
+            if mem_ds is None:
+                print(f"[{stem}] Warning: Could not load hurricane raster for year {target_year} at either {s3_uri_tiff} or {s3_uri_tif}. Returning zeros.")
+                return np.zeros((height, width), dtype=np.float32)
+
+            arr = mem_ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+            arr[arr == -9999] = 0.0 
+            
+            mem_ds = None # EXPLICIT CLEANUP TO PREVENT LEAK
+            return arr
+
+        # Start hurricane count at 0.0 ONLY for cells with a valid survey year
+        result_array[valid_mask] = 0.0
+
+        min_survey_year = max(1851, int(min(valid_years)))
+        max_hurricane_year = 2023
+
+        print(f"[{stem}] Aggregating yearly hurricane counts from {min_survey_year} to {max_hurricane_year}...")
+        for target_year in range(min_survey_year, max_hurricane_year + 1):
+            year_arr = get_year_count_array(target_year)
+
+            # Add this year's count to any valid pixel whose survey year is <= target_year
+            add_mask = valid_mask & (survey_years <= target_year)
+            result_array[add_mask] += year_arr[add_mask]
+
+        # FINAL SAFETY NET: forcefully reset any invalid cells (like survey_year = 0) back to nodata
+        result_array[~valid_mask] = nodata
+
+        with rasterio.open(
+            hurricane_tile_path,
+            "w",
+            driver="GTiff",
+            count=1,
+            width=width,
+            height=height,
+            dtype=rasterio.float32,
+            compress="lzw",
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            crs=self.target_crs,
+            transform=transform,
+            nodata=nodata,
+        ) as dst:
+            dst.write(result_array, 1)
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
 
     def create_combined_isobaths(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool) -> None:
         """
