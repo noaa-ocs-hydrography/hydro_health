@@ -8,7 +8,7 @@ import sys
 import rasterio
 import re
 import s3fs
-import shutil  # Added for backup/restore of base tiles
+import shutil
 
 import geopandas as gpd
 import pandas as pd
@@ -429,32 +429,20 @@ class BlueTopoS3Engine(Engine):
                 tile_folder = current_file.parents[0]
                 tile_folder.mkdir(parents=True, exist_ok=True)   
                 
-                max_retries = 3
-                attempt = 0
-                is_valid = False
+                self.write_message(f'Downloading: {current_file.name}', output_folder)
                 
-                while attempt < max_retries and not is_valid:
-                    if attempt == 0:
-                        self.write_message(f'Downloading: {current_file.name}', output_folder)
-                    else:
-                        self.write_message(f'Retrying Download: {current_file.name} (Attempt {attempt+1}/{max_retries})', output_folder)
+                try:
+                    if current_file.exists():
+                        current_file.unlink() # Remove partial/corrupt file before retry
                         
-                    try:
-                        if current_file.exists():
-                            current_file.unlink() # Remove partial/corrupt file before retry
-                            
-                        nbs_bucket.download_file(obj_summary.key, str(current_file))
+                    nbs_bucket.download_file(obj_summary.key, str(current_file))
+                    
+                    if current_file.suffix in ('.tiff', '.tif'):
+                        output_tile_path = current_file
                         
-                        is_valid = True
-                        if current_file.suffix in ('.tiff', '.tif'):
-                            output_tile_path = current_file
-                            
-                    except Exception as e:
-                        print(f"[{tile_id}] Download error for {current_file.name}: {e}")
-                        attempt += 1
-
-                if not is_valid:
-                    error_msg = f"[{tile_id}] FAILED to download a valid, uncorrupted copy of {current_file.name} after {max_retries} attempts. Skipping tile."
+                except Exception as e:
+                    print(f"[{tile_id}] Download error for {current_file.name}: {e}")
+                    error_msg = f"[{tile_id}] FAILED to download a valid, uncorrupted copy of {current_file.name}. Skipping tile."
                     print(error_msg)
                     self.write_message(error_msg, output_folder)
                     if current_file.suffix in ('.tiff', '.tif'):
