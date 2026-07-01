@@ -23,6 +23,100 @@ class HHMSimpleEngine:
     def __init__(self):
         self.target_crs = "EPSG:6350"
 
+    def crop_to_ecoregion(self, tiff_path: pathlib.Path, ecoregion_id: str, resolution: int) -> None:
+        """
+        Crop a single tile's TIFF to its ecoregion boundary if resolution is 20m.
+        
+        NOTE: When implementing your file loop, call this method like so:
+        if target_res == 20:
+            stem = tiff_file_path.stem
+            for local_file in tile_folder.glob(f"{stem}*.tiff"):
+                self.crop_to_ecoregion(local_file, ecoregion_id, target_res)
+        """
+
+        if resolution != 20:
+            return
+
+        master_gpkg_path = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
+
+        # Find cutline layer name (Enhanced_EcoRegions)
+        cutline_layer_name = None
+        er_field_name = None
+        ds = ogr.Open(str(master_gpkg_path))
+        if ds is not None:
+            layer_names = [ds.GetLayerByIndex(i).GetName() for i in range(ds.GetLayerCount())]
+            for name in layer_names:
+                if name.lower().replace("_", "").replace(" ", "") == "enhancedecoregions":
+                    cutline_layer_name = name
+                    break
+            if cutline_layer_name:
+                layer = ds.GetLayerByName(cutline_layer_name)
+                layer_defn = layer.GetLayerDefn()
+                field_names = [layer_defn.GetFieldDefn(i).GetName() for i in range(layer_defn.GetFieldCount())]
+                for expected in ['ecoregion_id', 'ecoregion', 'er', 'region', 'name', 'id']:
+                    for field in field_names:
+                        if field.lower() == expected:
+                            er_field_name = field
+                            break
+                    if er_field_name:
+                        break
+            ds = None
+
+        if not cutline_layer_name:
+            print(f"[{tiff_path.name}] Enhanced_EcoRegions layer not found in Master_Grids.gpkg, skipping crop.")
+            return
+
+        temp_cropped = tiff_path.parent / f"crop_{tiff_path.name}"
+
+        # Build query robustly matching various formats (e.g., 'ER_1', 'ER1', '1')
+        match = re.search(r'\d+', str(ecoregion_id))
+        clean_er_num = match.group(0) if match else str(ecoregion_id)
+        er_prefix_val = f"ER_{clean_er_num}"
+        er_val_no_underscore = f"ER{clean_er_num}"
+
+        where_clauses = []
+        if er_field_name:
+            where_clauses.extend([
+                f"{er_field_name} = '{er_prefix_val}'",
+                f"{er_field_name} = '{er_val_no_underscore}'",
+                f"{er_field_name} = '{ecoregion_id}'",
+                f"{er_field_name} = '{clean_er_num}'"
+            ])
+            if clean_er_num.isdigit():
+                where_clauses.append(f"{er_field_name} = {clean_er_num}")
+        else:
+            print(f"[{tiff_path.name}] Warning: Ecoregion ID field name not found. Attempting crop without filter...")
+
+        cutline_where = " OR ".join(where_clauses) if where_clauses else None
+
+        # Pass srcSRS explicitly so GDAL always aligns the source data and cutline CRS correctly
+        warp_kwargs = {
+            "format": "GTiff",
+            "srcSRS": self.target_crs,
+            "dstSRS": self.target_crs,
+            "dstNodata": -9999,
+            "cutlineDSName": str(master_gpkg_path),
+            "cutlineLayer": cutline_layer_name,
+            "cropToCutline": True,
+            "creationOptions": ["COMPRESS=DEFLATE"]
+        }
+        if cutline_where:
+            warp_kwargs["cutlineWhere"] = cutline_where
+
+        warp_options = gdal.WarpOptions(**warp_kwargs)
+
+        try:
+            ds_crop = gdal.Warp(str(temp_cropped), str(tiff_path), options=warp_options)
+            ds_crop = None # EXPLICIT CLEANUP
+            
+            if temp_cropped.exists():
+                tiff_path.unlink()
+                temp_cropped.rename(tiff_path)
+        except Exception as e:
+            print(f"[{tiff_path.name}] Failed to crop to ecoregion: {e}")
+            if temp_cropped.exists():
+                temp_cropped.unlink()
+
     def create_hurricane_tile(self, tiff_file_path: pathlib.Path, resolution: int) -> None:
         """
         Generate a hurricane count raster by evaluating the survey year and 

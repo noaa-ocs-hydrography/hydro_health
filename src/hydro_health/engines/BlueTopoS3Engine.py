@@ -8,22 +8,17 @@ import sys
 import rasterio
 import re
 import s3fs
-import psutil  # Added for memory tracking
 import shutil  # Added for backup/restore of base tiles
-import concurrent.futures # Added for aggressive parallel S3 downloading
-import gc # Added for aggressive RAM purging
 
-from rasterio.session import AWSSession
 import geopandas as gpd
 import pandas as pd
 import numpy as np
 
 from multiprocessing import set_executable
 from hydro_health.helpers import hibase_logging
-from datetime import datetime, date, timezone
+from datetime import datetime, date
 from botocore.client import Config
 from botocore import UNSIGNED
-from botocore.exceptions import ClientError
 from lxml import etree
 
 # Added ogr and osr for vector contour generation
@@ -118,13 +113,6 @@ def _process_tile(param_inputs: list) -> str:
                         engine.set_ground_to_nodata(tiff_file_path)
                         engine.finalize_cog(tiff_file_path)     
 
-                    # Crop intermediate tiffs dynamically if we are in 20m resolution mode
-                    if target_res == 20:
-                        print(f"[{tile_id}] Resolution is 20m. Cropping all local intermediate tiffs to ecoregion {ecoregion_id}...")
-                        stem = tiff_file_path.stem
-                        for local_file in tile_folder.glob(f"{stem}*.tiff"):
-                            engine.crop_to_ecoregion(local_file, ecoregion_id, target_res)
-
                     # ---------------------------------------------------------
                     # VALIDATE ALL GENERATED DERIVATIVES BEFORE S3 UPLOAD
                     # ---------------------------------------------------------
@@ -204,92 +192,6 @@ class BlueTopoS3Engine(Engine):
 
         # Attempt to automatically fix invalid vector geometries (TopologyExceptions) on the fly
         gdal.SetConfigOption('OGR_ENABLE_MAKE_VALID', 'YES')
-
-    def crop_to_ecoregion(self, tiff_path: pathlib.Path, ecoregion_id: str, resolution: int) -> None:
-        """Crop a single tile's TIFF to its ecoregion boundary if resolution is 20m."""
-
-        if resolution != 20:
-            return
-
-        master_gpkg_path = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-
-        # Find cutline layer name (Enhanced_EcoRegions)
-        cutline_layer_name = None
-        er_field_name = None
-        ds = ogr.Open(str(master_gpkg_path))
-        if ds is not None:
-            layer_names = [ds.GetLayerByIndex(i).GetName() for i in range(ds.GetLayerCount())]
-            for name in layer_names:
-                if name.lower().replace("_", "").replace(" ", "") == "enhancedecoregions":
-                    cutline_layer_name = name
-                    break
-            if cutline_layer_name:
-                layer = ds.GetLayerByName(cutline_layer_name)
-                layer_defn = layer.GetLayerDefn()
-                field_names = [layer_defn.GetFieldDefn(i).GetName() for i in range(layer_defn.GetFieldCount())]
-                for expected in ['ecoregion_id', 'ecoregion', 'er', 'region', 'name', 'id']:
-                    for field in field_names:
-                        if field.lower() == expected:
-                            er_field_name = field
-                            break
-                    if er_field_name:
-                        break
-            ds = None
-
-        if not cutline_layer_name:
-            print(f"[{tiff_path.name}] Enhanced_EcoRegions layer not found in Master_Grids.gpkg, skipping crop.")
-            return
-
-        temp_cropped = tiff_path.parent / f"crop_{tiff_path.name}"
-
-        # Build query robustly matching various formats (e.g., 'ER_1', 'ER1', '1')
-        match = re.search(r'\d+', str(ecoregion_id))
-        clean_er_num = match.group(0) if match else str(ecoregion_id)
-        er_prefix_val = f"ER_{clean_er_num}"
-        er_val_no_underscore = f"ER{clean_er_num}"
-
-        where_clauses = []
-        if er_field_name:
-            where_clauses.extend([
-                f"{er_field_name} = '{er_prefix_val}'",
-                f"{er_field_name} = '{er_val_no_underscore}'",
-                f"{er_field_name} = '{ecoregion_id}'",
-                f"{er_field_name} = '{clean_er_num}'"
-            ])
-            if clean_er_num.isdigit():
-                where_clauses.append(f"{er_field_name} = {clean_er_num}")
-        else:
-            print(f"[{tiff_path.name}] Warning: Ecoregion ID field name not found. Attempting crop without filter...")
-
-        cutline_where = " OR ".join(where_clauses) if where_clauses else None
-
-        # Pass srcSRS explicitly so GDAL always aligns the source data and cutline CRS correctly
-        warp_kwargs = {
-            "format": "GTiff",
-            "srcSRS": self.target_crs,
-            "dstSRS": self.target_crs,
-            "dstNodata": -9999,
-            "cutlineDSName": str(master_gpkg_path),
-            "cutlineLayer": cutline_layer_name,
-            "cropToCutline": True,
-            "creationOptions": ["COMPRESS=DEFLATE"]
-        }
-        if cutline_where:
-            warp_kwargs["cutlineWhere"] = cutline_where
-
-        warp_options = gdal.WarpOptions(**warp_kwargs)
-
-        try:
-            ds_crop = gdal.Warp(str(temp_cropped), str(tiff_path), options=warp_options)
-            ds_crop = None # EXPLICIT CLEANUP
-            
-            if temp_cropped.exists():
-                tiff_path.unlink()
-                temp_cropped.rename(tiff_path)
-        except Exception as e:
-            print(f"[{tiff_path.name}] Failed to crop to ecoregion: {e}")
-            if temp_cropped.exists():
-                temp_cropped.unlink()
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster of unique values for each survey area."""
@@ -879,17 +781,6 @@ class BlueTopoS3Engine(Engine):
                         continue
                     
                     tile_id = match.group(1)
-
-                    # Look for BH4 or BH5 anywhere in the tile_id for safe targeting
-                    is_nearshore_band = bool(re.search(r'BH[45]', tile_id, re.IGNORECASE))
-
-                    # For 20m resolution, restrict processing to Band 4 and Band 5 tiles exclusively
-                    if current_res == 20 and not is_nearshore_band:
-                        continue
-
-                    # For 100m resolution, exclude Band 4 and Band 5 tiles entirely
-                    if current_res == 100 and is_nearshore_band:
-                        continue
 
                     param_inputs.append([self.param_lookup, tile_id, normalized_er, output_prefix, current_res])
 
