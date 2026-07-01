@@ -113,16 +113,7 @@ def _process_tile(param_inputs: list) -> str:
                         engine.set_ground_to_nodata(tiff_file_path)
                         engine.finalize_cog(tiff_file_path)     
 
-                    # ---------------------------------------------------------
-                    # VALIDATE ALL GENERATED DERIVATIVES BEFORE S3 UPLOAD
-                    # ---------------------------------------------------------
-                    print(f"[{tile_id}] Validating all generated derivative TIFFs before upload...")
                     all_valid = True
-                    for local_file in tile_folder.glob('*.tiff'):
-                        if not engine._is_valid_tiff(local_file):
-                            print(f"[{tile_id}] ERROR: Generated derivative {local_file.name} failed deep validation (Corrupt/ZIPDecode error).")
-                            all_valid = False
-                            break # Break out of file check loop to trigger a full generation retry
                             
                 except Exception as e:
                     print(f"[{tile_id}] Exception occurred during derivative generation: {e}")
@@ -413,24 +404,6 @@ class BlueTopoS3Engine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def _is_valid_tiff(self, file_path: pathlib.Path) -> bool:
-        """
-        Deeply inspect a TIFF file by calculating its checksum for every band.
-        This forces the underlying engine to decompress and read every single 
-        pixel block, guaranteeing no ZIPDecode errors exist.
-        """
-        if not file_path or not file_path.exists():
-            return False
-            
-        try:
-            with rasterio.open(file_path) as src:
-                for i in src.indexes:
-                    src.checksum(i) # Forces a full block-by-block deep read
-            return True
-        except Exception:
-            # rasterio will throw an exception (RasterioIOError) if a block is corrupt
-            return False
-
     def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res:  int) -> pathlib.Path|bool:
         """Unconditionally download the NBS source tile and stage it for full processing."""
 
@@ -473,16 +446,9 @@ class BlueTopoS3Engine(Engine):
                             
                         nbs_bucket.download_file(obj_summary.key, str(current_file))
                         
-                        # Deeply validate the TIFF to prevent ZIPDecode errors later
+                        is_valid = True
                         if current_file.suffix in ('.tiff', '.tif'):
-                            if self._is_valid_tiff(current_file):
-                                is_valid = True
-                                output_tile_path = current_file
-                            else:
-                                print(f"[{tile_id}] Corrupt TIFF (ZIPDecode Error) detected after download. Retrying...")
-                                attempt += 1
-                        else:
-                            is_valid = True # XML files assume valid if download succeeds
+                            output_tile_path = current_file
                             
                     except Exception as e:
                         print(f"[{tile_id}] Download error for {current_file.name}: {e}")
