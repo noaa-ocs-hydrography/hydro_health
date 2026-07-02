@@ -1,4 +1,0 @@
-{
-  "type" : "FeatureCollection",
-  "features" : [{"type":"Feature","id":1,"geometry":{"type":"Polygon","coordinates":[[[-87.202235362999943,30.243006723000065],[-87.207413255999938,30.388742534000073],[-87.414593825999987,30.347947939000051],[-87.369650870999976,30.204480024000077],[-87.202235362999943,30.243006723000065]]]},"properties":{"OBJECTID":1,"OBJECTID_1":1,"Name":null,"Text":null,"IntegerValue":null,"DoubleValue":null,"DateTime":null,"Shape_Length":0.67912041579548033,"Shape_Area":0.028077558005585479}}]
-}

@@ -53,30 +53,24 @@ def _process_tile(param_inputs: list) -> str:
         
         tile_folder = tiff_file_path.parents[0]
 
-        try:
-            # Explicitly and safely warp the base tile to the target CRS and Resolution
-            print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
-            engine.warp_bluetopo_tile(tiff_file_path, target_res)
-            
-            engine.create_survey_end_date_tiff(tiff_file_path)
-            engine.create_catzoc_all(tiff_file_path, increased_scale=True)
-            engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
-            engine.create_rugosity(tiff_file_path)
-            engine.create_slope(tiff_file_path)
-            
-            mb_tiff_file = engine.rename_multiband(tiff_file_path)
-            engine.multiband_to_singleband(mb_tiff_file, band=1)
-            engine.multiband_to_singleband(mb_tiff_file, band=2)
-            if mb_tiff_file.exists():
-                mb_tiff_file.unlink()
-            
-            engine.set_ground_to_nodata(tiff_file_path)
-            engine.finalize_cog(tiff_file_path)    
-
-        except Exception as e:
-            msg = f"[{tile_id}] Exception occurred during derivative generation: {e}. Aborting S3 upload to protect mosaic."
-            print(msg)
-            return msg
+        # Explicitly and safely warp the base tile to the target CRS and Resolution
+        print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
+        engine.warp_bluetopo_tile(tiff_file_path, target_res)
+        
+        engine.create_survey_end_date_tiff(tiff_file_path)
+        engine.create_catzoc_all(tiff_file_path, increased_scale=True)
+        engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
+        engine.create_rugosity(tiff_file_path)
+        engine.create_slope(tiff_file_path)
+        
+        mb_tiff_file = engine.rename_multiband(tiff_file_path)
+        engine.multiband_to_singleband(mb_tiff_file, band=1)
+        engine.multiband_to_singleband(mb_tiff_file, band=2)
+        if mb_tiff_file.exists():
+            mb_tiff_file.unlink()
+        
+        engine.set_ground_to_nodata(tiff_file_path)
+        engine.finalize_cog(tiff_file_path)    
 
         print(f"[{tile_id}] Uploading newly generated files to S3...")
         engine.upload_current_tiles_to_s3(tile_folder, temp_path)
@@ -291,7 +285,7 @@ class BlueTopoS3Engine(Engine):
         print("  - Creating slope...")
         slope_name = str(tiff_file_path.stem) + '_slope.tiff'
         slope_file_path = tiff_file_path.parents[0] / slope_name
-        gdal.DEMProcessing(str(slope_file_path), str(tiff_file_path), 'slope')            
+        gdal.DEMProcessing(str(slope_file_path), str(tiff_file_path), 'slope')
 
     def create_survey_end_date_tiff(self, tiff_file_path: pathlib.Path) -> None:
         """Create survey end date tiffs from contributor band values in the XML file."""        
@@ -380,22 +374,13 @@ class BlueTopoS3Engine(Engine):
                 
                 self.write_message(f'Downloading: {current_file.name}', output_folder)
                 
-                try:
-                    if current_file.exists():
-                        current_file.unlink() # Remove partial/corrupt file before retry
-                        
-                    nbs_bucket.download_file(obj_summary.key, str(current_file))
+                if current_file.exists():
+                    current_file.unlink() # Remove partial/corrupt file before retry
                     
-                    if current_file.suffix in ('.tiff', '.tif'):
-                        output_tile_path = current_file
-                        
-                except Exception as e:
-                    print(f"[{tile_id}] Download error for {current_file.name}: {e}")
-                    error_msg = f"[{tile_id}] FAILED to download a valid, uncorrupted copy of {current_file.name}. Skipping tile."
-                    print(error_msg)
-                    self.write_message(error_msg, output_folder)
-                    if current_file.suffix in ('.tiff', '.tif'):
-                        return False # Fail the whole tile processing if the base TIFF is fatally corrupt
+                nbs_bucket.download_file(obj_summary.key, str(current_file))
+                
+                if current_file.suffix in ('.tiff', '.tif'):
+                    output_tile_path = current_file
 
         if not found_files:
             error_msg = f"[{tile_id}] CRITICAL: No source files found in NBS S3 bucket for prefix 'BlueTopo/{tile_id}'. Tile missing."
