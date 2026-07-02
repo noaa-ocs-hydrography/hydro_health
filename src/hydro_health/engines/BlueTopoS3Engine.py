@@ -40,74 +40,50 @@ def _process_tile(param_inputs: list) -> str:
 
     engine = BlueTopoS3Engine(param_lookup)
         
-    existing_files = engine.check_s3_existing_files(output_prefix, target_res, ecoregion_id, tile_id, overwrite=False)
-        
-    if all(existing_files.values()):
-        msg = f'[{tile_id}] BlueTopo tile and all derivatives already exist. Skipping download.'
-        print(msg)
-        return msg
-    else:
-        # Determine exactly which files are missing to inform the user
-        missing_files = [k for k, v in existing_files.items() if not v]
-        print(f"[{tile_id}] Missing derivatives detected: {missing_files}. Downloading raw NBS source to generate them...")
+    print(f"[{tile_id}] Downloading raw NBS source to generate derivatives...")
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_path = pathlib.Path(temp_dir)
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = pathlib.Path(temp_dir)
 
-            tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, output_prefix, target_res)
-            if not tiff_file_path:
-                msg = f"[{tile_id}] Processing skipped (Source tile could not be downloaded or was invalid)."
-                print(msg)
-                return msg
-            
-            tile_folder = tiff_file_path.parents[0]
-
-            try:
-                # Explicitly and safely warp the base tile to the target CRS and Resolution
-                print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
-                engine.warp_bluetopo_tile(tiff_file_path, target_res)
-                
-                if not existing_files['survey_end_date']:
-                    engine.create_survey_end_date_tiff(tiff_file_path)
-                    
-                if not existing_files['iss_110']:
-                    engine.create_catzoc_all(tiff_file_path, increased_scale=True)
-                
-                if not existing_files['iss_latest']:
-                    engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
-                    
-                if not existing_files['rugosity']:
-                    engine.create_rugosity(tiff_file_path)
-                    
-                if not existing_files['slope']:
-                    engine.create_slope(tiff_file_path)
-                
-                # Only parse the multiband source if we are actively generating the base tile or uncertainty tile
-                if not existing_files['base'] or not existing_files['unc']:
-                    mb_tiff_file = engine.rename_multiband(tiff_file_path)
-                    if not existing_files['base']:
-                        engine.multiband_to_singleband(mb_tiff_file, band=1)
-                    if not existing_files['unc']:
-                        engine.multiband_to_singleband(mb_tiff_file, band=2)
-                    if mb_tiff_file.exists():
-                        mb_tiff_file.unlink()
-                
-                if not existing_files['base']:
-                    engine.set_ground_to_nodata(tiff_file_path)
-                    engine.finalize_cog(tiff_file_path)    
-
-            except Exception as e:
-                msg = f"[{tile_id}] Exception occurred during derivative generation: {e}. Aborting S3 upload to protect mosaic."
-                print(msg)
-                return msg
-
-            print(f"[{tile_id}] Uploading strictly ONLY the newly generated missing files to S3...")
-            # Pass existing files here to strictly prevent overwriting existing derivatives
-            engine.upload_current_tiles_to_s3(tile_folder, temp_path, existing_files)
-            
-            msg = f"[{tile_id}] Processing successfully completed."
+        tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, output_prefix, target_res)
+        if not tiff_file_path:
+            msg = f"[{tile_id}] Processing skipped (Source tile could not be downloaded or was invalid)."
             print(msg)
             return msg
+        
+        tile_folder = tiff_file_path.parents[0]
+
+        try:
+            # Explicitly and safely warp the base tile to the target CRS and Resolution
+            print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
+            engine.warp_bluetopo_tile(tiff_file_path, target_res)
+            
+            engine.create_survey_end_date_tiff(tiff_file_path)
+            engine.create_catzoc_all(tiff_file_path, increased_scale=True)
+            engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
+            engine.create_rugosity(tiff_file_path)
+            engine.create_slope(tiff_file_path)
+            
+            mb_tiff_file = engine.rename_multiband(tiff_file_path)
+            engine.multiband_to_singleband(mb_tiff_file, band=1)
+            engine.multiband_to_singleband(mb_tiff_file, band=2)
+            if mb_tiff_file.exists():
+                mb_tiff_file.unlink()
+            
+            engine.set_ground_to_nodata(tiff_file_path)
+            engine.finalize_cog(tiff_file_path)    
+
+        except Exception as e:
+            msg = f"[{tile_id}] Exception occurred during derivative generation: {e}. Aborting S3 upload to protect mosaic."
+            print(msg)
+            return msg
+
+        print(f"[{tile_id}] Uploading newly generated files to S3...")
+        engine.upload_current_tiles_to_s3(tile_folder, temp_path)
+        
+        msg = f"[{tile_id}] Processing successfully completed."
+        print(msg)
+        return msg
 
 
 def _parse_survey_date(date_str: str) -> date | None:
@@ -429,53 +405,6 @@ class BlueTopoS3Engine(Engine):
 
         return output_tile_path
 
-    def check_s3_existing_files(self, output_prefix: str|bool, target_res: int, ecoregion_id: str, tile_id: str, overwrite: bool=False) -> dict:
-        """Check which derivatives already exist in S3 for a tile"""
-        existing = {
-            'base': False,
-            'iss_110': False,
-            'iss_latest': False,
-            'rugosity': False,
-            'slope': False,
-            'survey_end_date': False,
-            'unc': False
-        }
-
-        if overwrite:
-            return existing
-            
-        s3_files = s3fs.S3FileSystem()
-        if output_prefix == 'low_res':
-            beginning_prefix = f'{output_prefix}/{target_res}m/{ecoregion_id}'
-        elif output_prefix:
-            beginning_prefix = f'{output_prefix}/{ecoregion_id}'
-        else:
-            beginning_prefix = ecoregion_id
-            
-        bluetopo_tile_folder = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/{beginning_prefix}/{get_config_item("BLUETOPO", "SUBFOLDER")}/BlueTopo/{tile_id}'
-        search_path = f"{bluetopo_tile_folder}/**/*.tiff"
-        found_files = s3_files.glob(search_path)
-        
-        for file in found_files:
-            filename = pathlib.Path(file).name
-                
-            if len(filename.split('_')) == 3:
-                existing['base'] = True
-            elif filename.endswith('_ISS_all_110.tiff'):
-                existing['iss_110'] = True
-            elif filename.endswith('_ISS_latest.tiff'):
-                existing['iss_latest'] = True
-            elif filename.endswith('_rugosity.tiff'):
-                existing['rugosity'] = True
-            elif filename.endswith('_slope.tiff'):
-                existing['slope'] = True
-            elif filename.endswith('_survey_end_date.tiff'):
-                existing['survey_end_date'] = True
-            elif filename.endswith('_unc.tiff'):
-                existing['unc'] = True
-                
-        return existing
-
     def finalize_cog(self, tiff_path: pathlib.Path) -> None:
         """The final pass to ensure perfect COG layout and overviews."""
 
@@ -755,8 +684,8 @@ class BlueTopoS3Engine(Engine):
         raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  
         raster_ds = None
 
-    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, temp_folder: pathlib.Path, existing_files: dict = None) -> None:
-        """Upload all tiff files to s3 for current tile, strictly skipping those that already existed in S3."""
+    def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, temp_folder: pathlib.Path) -> None:
+        """Upload all tiff files to s3 for current tile."""
 
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
@@ -764,23 +693,6 @@ class BlueTopoS3Engine(Engine):
         for tiff_file in tile_folder.glob('*.tiff'):
             filename = tiff_file.name
             
-            # Prevent overwriting existing derivatives if they were already marked as present in S3
-            if existing_files:
-                if len(filename.split('_')) == 3 and existing_files.get('base'):
-                    continue
-                if filename.endswith('_ISS_all_110.tiff') and existing_files.get('iss_110'):
-                    continue
-                if filename.endswith('_ISS_latest.tiff') and existing_files.get('iss_latest'):
-                    continue
-                if filename.endswith('_rugosity.tiff') and existing_files.get('rugosity'):
-                    continue
-                if filename.endswith('_slope.tiff') and existing_files.get('slope'):
-                    continue
-                if filename.endswith('_survey_end_date.tiff') and existing_files.get('survey_end_date'):
-                    continue
-                if filename.endswith('_unc.tiff') and existing_files.get('unc'):
-                    continue
-
             s3_path = tiff_file.relative_to(temp_folder)  # Strip off the temp_folder parts
             self.write_message(f'Uploading {filename} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
             s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
