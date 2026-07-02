@@ -60,71 +60,44 @@ def _process_tile(param_inputs: list) -> str:
                 print(msg)
                 return msg
             
-            # Create a pristine backup of the downloaded base tile. 
-            # If variable generation corrupts a file, we can restore from here and remake them without re-downloading.
-            backup_path = temp_path / f"{tiff_file_path.name}.backup"
-            shutil.copy(tiff_file_path, backup_path)
-            
-            max_proc_retries = 3
-            proc_attempt = 0
-            all_valid = False
             tile_folder = tiff_file_path.parents[0]
 
-            while proc_attempt < max_proc_retries and not all_valid:
-                if proc_attempt > 0:
-                    print(f"[{tile_id}] Retrying derivative generation (Attempt {proc_attempt+1}/{max_proc_retries})...")
-                    # Clean up all potentially corrupt TIFFs generated in the previous attempt
-                    if tile_folder.exists():
-                        for f in tile_folder.glob('*.tiff'):
-                            f.unlink()
-                    # Restore the pristine downloaded base tile
-                    tile_folder.mkdir(parents=True, exist_ok=True)
-                    shutil.copy(backup_path, tiff_file_path)
-
-                try:
-                    # Explicitly and safely warp the base tile to the target CRS and Resolution
-                    print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
-                    engine.warp_bluetopo_tile(tiff_file_path, target_res)
-                    
-                    if not existing_files['survey_end_date']:
-                        engine.create_survey_end_date_tiff(tiff_file_path)
-                        
-                    if not existing_files['iss_110']:
-                        engine.create_catzoc_all(tiff_file_path, increased_scale=True)
-                    
-                    if not existing_files['iss_latest']:
-                        engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
-                        
-                    if not existing_files['rugosity']:
-                        engine.create_rugosity(tiff_file_path)
-                        
-                    if not existing_files['slope']:
-                        engine.create_slope(tiff_file_path)
-                    
-                    # Only parse the multiband source if we are actively generating the base tile or uncertainty tile
-                    if not existing_files['base'] or not existing_files['unc']:
-                        mb_tiff_file = engine.rename_multiband(tiff_file_path)
-                        if not existing_files['base']:
-                            engine.multiband_to_singleband(mb_tiff_file, band=1)
-                        if not existing_files['unc']:
-                            engine.multiband_to_singleband(mb_tiff_file, band=2)
-                        if mb_tiff_file.exists():
-                            mb_tiff_file.unlink()
-                    
-                    if not existing_files['base']:
-                        engine.set_ground_to_nodata(tiff_file_path)
-                        engine.finalize_cog(tiff_file_path)    
-
-                    all_valid = True
-                            
-                except Exception as e:
-                    print(f"[{tile_id}] Exception occurred during derivative generation: {e}")
-                    all_valid = False
+            try:
+                # Explicitly and safely warp the base tile to the target CRS and Resolution
+                print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
+                engine.warp_bluetopo_tile(tiff_file_path, target_res)
                 
-                proc_attempt += 1
-            
-            if not all_valid:
-                msg = f"[{tile_id}] FAILED: One or more generated derivative TIFFs were persistently corrupt after {max_proc_retries} attempts. Aborting S3 upload to protect mosaic."
+                if not existing_files['survey_end_date']:
+                    engine.create_survey_end_date_tiff(tiff_file_path)
+                    
+                if not existing_files['iss_110']:
+                    engine.create_catzoc_all(tiff_file_path, increased_scale=True)
+                
+                if not existing_files['iss_latest']:
+                    engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
+                    
+                if not existing_files['rugosity']:
+                    engine.create_rugosity(tiff_file_path)
+                    
+                if not existing_files['slope']:
+                    engine.create_slope(tiff_file_path)
+                
+                # Only parse the multiband source if we are actively generating the base tile or uncertainty tile
+                if not existing_files['base'] or not existing_files['unc']:
+                    mb_tiff_file = engine.rename_multiband(tiff_file_path)
+                    if not existing_files['base']:
+                        engine.multiband_to_singleband(mb_tiff_file, band=1)
+                    if not existing_files['unc']:
+                        engine.multiband_to_singleband(mb_tiff_file, band=2)
+                    if mb_tiff_file.exists():
+                        mb_tiff_file.unlink()
+                
+                if not existing_files['base']:
+                    engine.set_ground_to_nodata(tiff_file_path)
+                    engine.finalize_cog(tiff_file_path)    
+
+            except Exception as e:
+                msg = f"[{tile_id}] Exception occurred during derivative generation: {e}. Aborting S3 upload to protect mosaic."
                 print(msg)
                 return msg
 
