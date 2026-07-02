@@ -485,9 +485,6 @@ class BlueTopoS3Engine(Engine):
         
         for file in found_files:
             filename = pathlib.Path(file).name
-            # Exclude cropped temporary versions if they somehow got uploaded
-            if filename.startswith('crop_') or filename.startswith('temp_'):
-                continue
                 
             if len(filename.split('_')) == 3:
                 existing['base'] = True
@@ -520,6 +517,7 @@ class BlueTopoS3Engine(Engine):
         gdal.Translate(
             str(temp_cog),
             str(tiff_path),
+            outputSRS=self.target_crs,
             creationOptions=[
                 "COMPRESS=DEFLATE",
                 "PREDICTOR=3",
@@ -560,6 +558,7 @@ class BlueTopoS3Engine(Engine):
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
+            outputSRS=self.target_crs,
             creationOptions=["COMPRESS=DEFLATE"]
         )
 
@@ -644,11 +643,6 @@ class BlueTopoS3Engine(Engine):
             tiff_file_path.unlink()
             final_warp.rename(tiff_file_path)
             
-            if temp_b12_src.exists(): temp_b12_src.unlink()
-            if temp_b3_src.exists(): temp_b3_src.unlink()
-            if temp_b12_warp.exists(): temp_b12_warp.unlink()
-            if temp_b3_warp.exists(): temp_b3_warp.unlink()
-            
             # Restore the RAT XML to the final warped file
             if safe_xml.exists():
                 safe_xml.rename(tiff_file_path.parent / f"{tiff_file_path.name}.aux.xml")
@@ -661,6 +655,7 @@ class BlueTopoS3Engine(Engine):
 
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int] = None) -> None:
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        tile_col = None
         
         # Standardize the ecoregions mapped in param_lookup globally to "ER_#"
         all_ecoregions_raw = self.param_lookup['eco_regions'].value
@@ -674,7 +669,7 @@ class BlueTopoS3Engine(Engine):
             match = re.search(r'\d+', str(er_str))
             return int(match.group(0)) if match else 9999
             
-        all_ecoregions = sorted(list(set(all_ecoregions)), key=_get_er_num)
+        all_ecoregions = sorted(set(all_ecoregions), key=_get_er_num)
         
         print(f"[BlueTopo Engine] Processing ecoregions in sequential order: {all_ecoregions}")
         
@@ -691,7 +686,6 @@ class BlueTopoS3Engine(Engine):
                 param_inputs = []
 
                 # Determine the correct columns in tile_gdf dynamically
-                tile_col = None
                 er_col = None
 
                 for col in tile_gdf.columns:
@@ -771,15 +765,6 @@ class BlueTopoS3Engine(Engine):
                 print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
 
         self.close_dask()
-
-        # Keep logging safe by safely declaring tile_col even if loop is commented
-        tile_col = None
-        if not tile_gdf.empty:
-            for col in tile_gdf.columns:
-                col_lower = str(col).lower()
-                if col_lower in ['tile', 'tile_id', 'name', 'id', 'bluetopo']:
-                    tile_col = col
-                    break
 
         tiles = list(tile_gdf[tile_col]) if tile_col and tile_col in tile_gdf.columns else []
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}

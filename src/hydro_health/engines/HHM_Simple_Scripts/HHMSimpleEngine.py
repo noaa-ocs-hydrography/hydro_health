@@ -12,8 +12,8 @@ import numpy as np
 import rasterio
 from botocore.config import Config
 from osgeo import gdal, ogr, osr
-# Make sure to import or define get_config_item in your new engine
-# from hydro_health.helpers.tools import get_config_item
+
+from hydro_health.helpers.tools import get_config_item
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
