@@ -542,16 +542,16 @@ class BlueTopoS3Engine(Engine):
 
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int] = None) -> None:
         output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        tile_col = None
         
         # Standardize the ecoregions mapped in param_lookup globally to "ER_#"
         all_ecoregions_raw = self.param_lookup['eco_regions'].value
         all_ecoregions = []
         for er in all_ecoregions_raw:
             match = re.search(r'\d+', str(er))
-            all_ecoregions.append(f"ER_{match.group(0)}" if match else str(er))
-
-        # Sort ecoregions in numerical order (ER1 to ER6)
+            if match:
+                all_ecoregions.append(f"ER_{match.group(0)}")
+                
+        # Sort ecoregions in numerical order (ER_1 to ER_6)
         def _get_er_num(er_str):
             match = re.search(r'\d+', str(er_str))
             return int(match.group(0)) if match else 9999
@@ -565,6 +565,13 @@ class BlueTopoS3Engine(Engine):
             return
 
         self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
+        
+        # We explicitly rely on 'EcoRegion' as requested
+        er_col = 'EcoRegion' 
+        
+        # Fallback list to quickly grab the tile ID column without iterating the dataframe
+        tile_col = next((c for c in tile_gdf.columns if str(c).lower() in ['tile', 'tile_id', 'name', 'id', 'bluetopo']), tile_gdf.columns[0])
+
         for current_res in resolution:
             print(f"\n{'='*50}\n[BlueTopo Engine] STARTING PROCESSING FOR {current_res}m\n{'='*50}")
 
@@ -572,72 +579,44 @@ class BlueTopoS3Engine(Engine):
                 print(f'Checking and processing BlueTopo Datasets for {current_res}...')
                 param_inputs = []
 
-                # Determine the correct columns in tile_gdf dynamically
-                er_col = None
-
-                for col in tile_gdf.columns:
-                    col_lower = str(col).lower()
-                    if col_lower in ['tile', 'tile_id', 'name', 'id', 'bluetopo']:
-                        tile_col = col
-                    if col_lower in ['ecoregion', 'ecoregion_id', 'er', 'region', 'eco_region']:
-                        er_col = col
-
-                # Fallback by inspecting data if names don't match
-                if not tile_col or not er_col:
-                    if not tile_gdf.empty:
-                        for col in tile_gdf.columns:
-                            val = str(tile_gdf.iloc[0][col]).upper()
-                            if not tile_col and re.search(r'(B[A-Z0-9]{7})', val):
-                                tile_col = col
-                            elif not er_col and ('ER_' in val or str(val).isdigit()):
-                                er_col = col
-
-                # Absolute fallback to original behavior if everything fails
-                if not tile_col: tile_col = tile_gdf.columns[0]
-                if not er_col: er_col = tile_gdf.columns[1] if len(tile_gdf.columns) > 1 else tile_gdf.columns[0]
-                
-                print(f"[BlueTopo Engine] Dynamically mapped Tile column: '{tile_col}' and EcoRegion column: '{er_col}'")
+                print(f"[BlueTopo Engine] Mapped Tile column: '{tile_col}' and EcoRegion column: '{er_col}'")
 
                 for _, row in tile_gdf.iterrows():
-                    # Handle raw numerical data safely using the dynamically found column names
-                    if pd.isna(row[er_col]):
+                    # Check for NaNs safely
+                    if pd.isna(row.get(er_col)):
                         continue
                     
-                    # Normalize whatever the user inputted (1, "1.0", "ER_1") securely into "ER_1"
-                    raw_er = str(row[er_col]).strip()
-                    er_match = re.search(r'\d+', raw_er)
-                    normalized_er = f"ER_{er_match.group(0)}" if er_match else raw_er
+                    # We can safely assume row[er_col] is an int (1-6) per system design
+                    normalized_er = f"ER_{int(row[er_col])}"
                     
                     if normalized_er not in all_ecoregions:
                         continue
                     
                     raw_id = str(row[tile_col]).strip()
-                    # Remove 'BlueTopo' to prevent the regex from accidentally matching the word 'BlueTopo' instead of the ID
                     clean_id = raw_id.upper().replace('BLUETOPO_', '').replace('BLUETOPO', '')
                     
-                    # Force extract the standard 8-character ID (e.g., BH4K857L)
                     match = re.search(r'(B[A-Z0-9]{7})', clean_id)
                     if not match:
                         print(f"Skipping invalid tile format: {raw_id}")
                         continue
                     
                     tile_id = match.group(1)
-
                     param_inputs.append([self.param_lookup, tile_id, normalized_er, output_prefix, current_res])
 
-                # Sort parallel task configurations to submit them sequentially (ER1 -> ER2 -> ... -> ER6)
-                # x[2] is the properly formatted ecoregion string now
+                # Sort by ecoregion number to group them together logically for Dask
                 param_inputs = sorted(param_inputs, key=lambda x: _get_er_num(x[2]))
 
-                print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
-                future_tiles = self.client.map(_process_tile, param_inputs)
+                if param_inputs:
+                    print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
+                    future_tiles = self.client.map(_process_tile, param_inputs)
 
-                print("Waiting for all Dask workers to complete...")
-                tile_results = self.client.gather(future_tiles)
-                print("All Dask workers finished successfully.")
+                    print("Waiting for all Dask workers to complete...")
+                    tile_results = self.client.gather(future_tiles)
+                    print("All Dask workers finished successfully.")
 
-                self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
-                
+                    self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
+                else:
+                    print(f"[BlueTopo Engine] No tiles to process for {current_res}m.")
 
                 for ecoregion in all_ecoregions:
                     if output_prefix == 'low_res':
