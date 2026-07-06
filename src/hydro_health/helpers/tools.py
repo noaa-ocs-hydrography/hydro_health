@@ -102,12 +102,7 @@ def get_ecoregion_tiles(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFr
     else:
         # get eco region from shapefile that matches drop down choices
         eco_regions = param_lookup['eco_regions'].valueAsText   #.replace("'", "").split(';')
-        
-        # EXTRACT JUST THE NUMBERS AS INTEGERS TO MATCH THE GEOPACKAGE
-        clean_eco_regions = [int(num) for num in re.findall(r'\d+', str(eco_regions))]
-        
-        # Select using the clean integers
-        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(clean_eco_regions)]  
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
     mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
