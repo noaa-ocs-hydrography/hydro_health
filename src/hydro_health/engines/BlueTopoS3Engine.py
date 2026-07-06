@@ -32,8 +32,8 @@ from hydro_health.engines.Engine import Engine, supersession, catzoc
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 
@@ -49,7 +49,7 @@ def _process_tile(param_inputs: list) -> None:
 
     engine = BlueTopoS3Engine(param_lookup)
         
-    if engine.file_in_s3(output_prefix, target_res, ecoregion_id, tile_id):
+    if engine.file_in_s3(output_prefix, target_res, ecoregion_id, tile_id, overwrite=True):
         print(f'BlueTopo tile {tile_id} already exists.  Skipping download.')
     else:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -62,7 +62,7 @@ def _process_tile(param_inputs: list) -> None:
             
             engine.resample_and_reproject(tiff_file_path, target_res)
             engine.create_survey_end_date_tiff(tiff_file_path)
-            engine.create_catzoc_all(tiff_file_path)
+            engine.create_catzoc_all(tiff_file_path, increased_scale=True)
 
             # TODO hurricane logic to another engine
             engine.create_hurricane_tile(tiff_file_path, target_res)
@@ -73,6 +73,7 @@ def _process_tile(param_inputs: list) -> None:
             mb_tiff_file.unlink()
             engine.set_ground_to_nodata(tiff_file_path)
             engine.create_slope(tiff_file_path)
+            engine.create_rugosity(tiff_file_path)
             engine.finalize_cog(tiff_file_path)      
 
             # Crop intermediate tiffs dynamically if we are in 20m resolution mode
@@ -351,7 +352,7 @@ class BlueTopoS3Engine(Engine):
             dst.build_overviews(factors, rasterio.enums.Resampling.average)
             dst.update_tags(ns='rio_overview', resampling='average')
 
-    def create_catzoc_all(self, tiff_file_path: pathlib.Path) -> None:
+    def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster of unique values for each survey area."""
 
         print("  - Creating Initial Survey Score (ISS) all...")
@@ -389,7 +390,8 @@ class BlueTopoS3Engine(Engine):
                 'horiz_uncert_vari': float(row_data.get('horizontal_uncert_var', 0)),
                 'vert_uncert_fixed': float(row_data.get('vertical_uncert_fixed', 0)),
                 'vert_uncert_vari': float(row_data.get('vertical_uncert_var', 0)),
-                'interpolated': ".interpolated" in row_data.get('source_survey_id', '').lower()
+                'interpolated': ".interpolated" in row_data.get('source_survey_id', '').lower(),
+                'increased_scale': increased_scale
             }
             if data['start_date'] or data['end_date']:
                 table_data.append(data)
@@ -409,7 +411,7 @@ class BlueTopoS3Engine(Engine):
         reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
         reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
 
-        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_ISS_all.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_ISS_all{"_110" if increased_scale else ""}.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -432,7 +434,7 @@ class BlueTopoS3Engine(Engine):
             dst.build_overviews(factors, rasterio.enums.Resampling.average)
             dst.update_tags(ns='rio_overview', resampling='average')
 
-    def create_catzoc_latest(self, tiff_file_path: pathlib.Path) -> None:
+    def create_catzoc_latest(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster using the most recent survey date"""
 
         with rasterio.open(tiff_file_path) as src:
@@ -466,7 +468,8 @@ class BlueTopoS3Engine(Engine):
                 "horiz_uncert_vari": float(row_dict.get('horizontal_uncert_var', 0)),
                 "vert_uncert_fixed": float(row_dict.get('vertical_uncert_fixed', 0)),
                 "vert_uncert_vari": float(row_dict.get('vertical_uncert_var', 0)),
-                'interpolated': ".interpolated" in row_dict.get('source_survey_id', '').lower()
+                'interpolated': ".interpolated" in row_dict.get('source_survey_id', '').lower(),
+                'increased_scale': increased_scale
             }
             all_surveys.append(meta)
 
@@ -511,6 +514,7 @@ class BlueTopoS3Engine(Engine):
 
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
+        
         rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
         rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
         gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
@@ -604,8 +608,7 @@ class BlueTopoS3Engine(Engine):
             if current_file.suffix in ('.tiff', '.tif', '.xml'):
                 tile_folder = current_file.parents[0]
                 tile_folder.mkdir(parents=True, exist_ok=True)   
-                # self.write_message(f'Downloading: {current_file.name}', output_folder)
-                self.write_message(f'Full path: {current_file}', output_folder)
+                self.write_message(f'Downloading: {current_file.name}', output_folder)
                 nbs_bucket.download_file(obj_summary.key, str(current_file))
 
                 if current_file.suffix in ('.tiff', '.tif'):
@@ -858,6 +861,7 @@ class BlueTopoS3Engine(Engine):
         Process a massive list of S3 inputs in memory-safe chunks. This handles heterogeneous 
         projections dynamically via Warp without hitting "Too many open files" OS limits.
         """
+
         chunk_size = 250
         path_chunks = [paths[i:i + chunk_size] for i in range(0, len(paths), chunk_size)]
 
@@ -880,7 +884,7 @@ class BlueTopoS3Engine(Engine):
                 gdal.Warp(dest_ds, chunk, options=gdal.WarpOptions(**append_kwargs))
                 dest_ds = None
 
-    def create_and_upload_er_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool, only_offshore: bool = False) -> None:
+    def create_and_upload_er_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool, only_offshore: bool = False, increased_scale: bool=False) -> None:
         """
         Creates isolated mosaics for each individual ecoregion and precisely masks them
         to their specific boundary polygon from the EcoRegions layer.
@@ -947,7 +951,7 @@ class BlueTopoS3Engine(Engine):
             # Map configuration properties dictating regex mapping
             base_mosaics_config = {
                 "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
-                "ISS": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE),
+                "ISS": re.compile(rf'_ISS_all{"_110" if increased_scale else ""}\.tiff$', re.IGNORECASE),
                 "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
                 "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
                 "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
@@ -961,7 +965,7 @@ class BlueTopoS3Engine(Engine):
                 if not only_offshore:
                     mosaics_config[name] = {
                         "regex": regex,
-                        "filename": f"{er_prefix}_{bt_prefix}{name}_Mosaic_{current_res}m.tiff",
+                        "filename": f"{er_prefix}_{bt_prefix}{name}_Mosaic_{current_res}m{'_110' if increased_scale else ''}.tiff",
                         "paths": [],
                         "exclude_bh4": False
                     }
@@ -969,7 +973,7 @@ class BlueTopoS3Engine(Engine):
                 if current_res == 100:
                     mosaics_config[f"{name}_Offshore"] = {
                         "regex": regex,
-                        "filename": f"{er_prefix}_{bt_prefix}{name}_Mosaic_Offshore_{current_res}m.tiff",
+                        "filename": f"{er_prefix}_{bt_prefix}{name}_Mosaic_Offshore_{current_res}m{'_110' if increased_scale else ''}.tiff",
                         "paths": [],
                         "exclude_bh4": True
                     }
@@ -1097,7 +1101,7 @@ class BlueTopoS3Engine(Engine):
 
                 print(f"[{ecoregion_id}] {m_key} ER mosaic fully completed.")
 
-    def create_and_upload_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool) -> None:
+    def create_and_upload_mosaics(self, ecoregion_ids: list[str], s3_bucket: str, current_res: int, output_prefix: str|bool, increased_scale: bool=False) -> None:
         """
         Creates massive mosaics from all base bathy tiles and derivatives across all processed ecoregions,
         masks them securely with the EcoRegions layer, saves locally to low_res, and uploads to S3.
@@ -1110,14 +1114,14 @@ class BlueTopoS3Engine(Engine):
         low_res_dir = OUTPUTS / "low_res" / f'{current_res}m'
         low_res_dir.mkdir(parents=True, exist_ok=True)
 
-        master_gpkg_path = INPUTS / get_config_item('SHARED', 'OUTPUT_BUCKET')
+        master_gpkg_path = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
 
         s3_client = boto3.client('s3')
 
         # Configuration holding the regex mapping
         base_mosaics_config = {
             "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
-            "ISS": re.compile(r'_ISS_all\.tiff$', re.IGNORECASE),
+            "ISS": re.compile(rf'_ISS_all{"_110" if increased_scale else ""}\.tiff$', re.IGNORECASE),
             "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
             "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
             "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
@@ -1130,7 +1134,7 @@ class BlueTopoS3Engine(Engine):
 
             mosaics_config[name] = {
                 "regex": regex,
-                "filename": f"{bt_prefix}{name}_Mosaic_{current_res}m.tiff",
+                "filename": f"{bt_prefix}{name}_Mosaic_{current_res}m{'_110' if increased_scale else ''}.tiff",
                 "paths": [],
                 "exclude_bh4": False
             }
@@ -1138,7 +1142,7 @@ class BlueTopoS3Engine(Engine):
             if current_res == 100:
                 mosaics_config[f"{name}_Offshore"] = {
                     "regex": regex,
-                    "filename": f"{bt_prefix}{name}_Mosaic_Offshore_{current_res}m.tiff",
+                    "filename": f"{bt_prefix}{name}_Mosaic_Offshore_{current_res}m{'_110' if increased_scale else ''}.tiff",
                     "paths": [],
                     "exclude_bh4": True
                 }
@@ -1368,17 +1372,17 @@ class BlueTopoS3Engine(Engine):
             else:   
                 print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
 
-            # TODO need to remove all of the mosaic logic and self.skip_tiling
-            # Generate the unified isobaths from all finished tiles across all ecoregions (ER1 to ER6 order)
+            # # TODO need to remove all of the mosaic logic and self.skip_tiling
+            # # Generate the unified isobaths from all finished tiles across all ecoregions (ER1 to ER6 order)
             self.create_combined_isobaths(all_ecoregions, output_bucket, current_res, output_prefix)
 
             if current_res == 100:
                 # When processing 100m, produce unified big mosaics first, and then ONLY produce offshore ER individual mosaics
-                self.create_and_upload_mosaics(all_ecoregions, output_bucket, current_res, output_prefix)
-                self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, only_offshore=True)
+                self.create_and_upload_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, increased_scale=True)
+                self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, only_offshore=True, increased_scale=True)
             elif current_res == 20:
                 # Generate all individual cleanly masked mosaics per Ecoregion (ER1 to ER6 order)
-                self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, only_offshore=False)
+                self.create_and_upload_er_mosaics(all_ecoregions, output_bucket, current_res, output_prefix, only_offshore=False, increased_scale=True)
                 # NO FULL SIZE MOSAICS CREATED FOR 20M
         self.close_dask()
 
