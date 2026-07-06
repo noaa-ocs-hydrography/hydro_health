@@ -208,10 +208,13 @@ class RasterMaskS3Engine(Engine):
                     # Set to mask_block or keep starting_mask values
                     starting_mask |= (mask_block > 0).astype(np.uint8)
                 
-                # If inside Ecoregion (1) AND has bathymetry (presence > 0) -> Value 2
+                # (prediction_chunk == 1) collects cells inside current prediction mask
+                # (starting_mask > 0) collects cells where there is valid bathymetry
+                # returns True where both inside and has bathymetry
                 mask_indices = (prediction_chunk == 1) & (starting_mask > 0)
                 
                 if np.any(mask_indices):
+                    # Set the found cells to value of 2
                     prediction_chunk[mask_indices] = 2
                     train_band.WriteArray(prediction_chunk, x, y)
 
