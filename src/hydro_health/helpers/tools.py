@@ -70,7 +70,7 @@ def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoData
     output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-    ecoregion_layer = 'ECOREGIONS' if low_res else 'ECOREGIONS_50M'
+    ecoregion_layer = 'ENHANCED_ECOREGIONS'
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)

@@ -364,7 +364,7 @@ class RasterMaskS3Engine(Engine):
         existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
 
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
-        gdf = gpd.read_file(gpkg, layer='EcoRegions_50m').to_crs("EPSG:32617")
+        gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions').to_crs("EPSG:32617")
         gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
 
         for _, row in gdf.iterrows():

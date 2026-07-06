@@ -16,7 +16,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
     
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(str(gpkg))
-    ecoregions_layer = gpkg_ds.GetLayerByName('EcoRegions_50m')
+    ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions')
     
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)

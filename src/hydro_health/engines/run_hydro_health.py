@@ -69,7 +69,7 @@ def run_hydro_health(config_name: str) -> None:
         # load ecoregions from config for remote run
         param_lookup['eco_regions'].value = config['ecoregions']
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
-        tiles = get_ecoregion_tiles(param_lookup, low_res=True)
+        tiles = get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix=output_prefix, resolution=resolution)
