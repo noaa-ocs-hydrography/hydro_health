@@ -61,28 +61,28 @@ def _process_tile(param_inputs: list) -> None:
                 return
             
             engine.resample_and_reproject(tiff_file_path, target_res)
-            # engine.create_survey_end_date_tiff(tiff_file_path)
+            engine.create_survey_end_date_tiff(tiff_file_path)
             engine.create_catzoc_all(tiff_file_path, increased_scale=True)
 
-            # # TODO hurricane logic to another engine
-            # engine.create_hurricane_tile(tiff_file_path, target_res)
+            # TODO hurricane logic to another engine
+            engine.create_hurricane_tile(tiff_file_path, target_res)
             
             mb_tiff_file = engine.rename_multiband(tiff_file_path)
             engine.multiband_to_singleband(mb_tiff_file, band=1)
             engine.multiband_to_singleband(mb_tiff_file, band=2)
             mb_tiff_file.unlink()
             engine.set_ground_to_nodata(tiff_file_path)
-            # engine.create_slope(tiff_file_path)
-            # engine.create_rugosity(tiff_file_path)
-            # engine.finalize_cog(tiff_file_path)      
+            engine.create_slope(tiff_file_path)
+            engine.create_rugosity(tiff_file_path)
+            engine.finalize_cog(tiff_file_path)      
 
-            # # Crop intermediate tiffs dynamically if we are in 20m resolution mode
-            # if target_res == 20:
-            #     print(f"[{tile_id}] Resolution is 20m. Cropping all local intermediate tiffs to ecoregion {ecoregion_id}...")
-            #     tile_folder = tiff_file_path.parent
-            #     stem = tiff_file_path.stem
-            #     for local_file in tile_folder.glob(f"{stem}*.tiff"):
-            #         engine.crop_to_ecoregion(local_file, ecoregion_id, target_res)
+            # Crop intermediate tiffs dynamically if we are in 20m resolution mode
+            if target_res == 20:
+                print(f"[{tile_id}] Resolution is 20m. Cropping all local intermediate tiffs to ecoregion {ecoregion_id}...")
+                tile_folder = tiff_file_path.parent
+                stem = tiff_file_path.stem
+                for local_file in tile_folder.glob(f"{stem}*.tiff"):
+                    engine.crop_to_ecoregion(local_file, ecoregion_id, target_res)
 
             print(f"[{tile_id}] Uploading newly generated tiles to S3...")
             engine.upload_current_tiles_to_s3(tiff_file_path.parents[0], temp_path)
@@ -411,7 +411,7 @@ class BlueTopoS3Engine(Engine):
         reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
         reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
 
-        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_ISS_all{'_110' if increased_scale else ''}.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_ISS_all{"_110" if increased_scale else ""}.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -861,6 +861,7 @@ class BlueTopoS3Engine(Engine):
         Process a massive list of S3 inputs in memory-safe chunks. This handles heterogeneous 
         projections dynamically via Warp without hitting "Too many open files" OS limits.
         """
+
         chunk_size = 250
         path_chunks = [paths[i:i + chunk_size] for i in range(0, len(paths), chunk_size)]
 
@@ -949,11 +950,11 @@ class BlueTopoS3Engine(Engine):
 
             # Map configuration properties dictating regex mapping
             base_mosaics_config = {
-                # "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
-                "ISS": re.compile(rf'_ISS_all{'_110' if increased_scale else ''}\.tiff$', re.IGNORECASE),
-                # "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
-                # "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
-                # "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
+                "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
+                "ISS": re.compile(rf'_ISS_all{"_110" if increased_scale else ""}\.tiff$', re.IGNORECASE),
+                "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
+                "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
+                "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
             }
 
             mosaics_config = {}
@@ -1119,11 +1120,11 @@ class BlueTopoS3Engine(Engine):
 
         # Configuration holding the regex mapping
         base_mosaics_config = {
-            # "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
-            "ISS": re.compile(rf'_ISS_all{'_110' if increased_scale else ''}\.tiff$', re.IGNORECASE),
-            # "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
-            # "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
-            # "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
+            "Bathy": re.compile(r'\d+\.tiff$', re.IGNORECASE),
+            "ISS": re.compile(rf'_ISS_all{"_110" if increased_scale else ""}\.tiff$', re.IGNORECASE),
+            "Survey_Date": re.compile(r'_survey_end_date\.tiff$', re.IGNORECASE),
+            "Hurricane": re.compile(r'_hurricane\.tiff$', re.IGNORECASE),
+            "Slope": re.compile(r'_slope\.tiff$', re.IGNORECASE),
         }
 
         mosaics_config = {}
@@ -1330,50 +1331,50 @@ class BlueTopoS3Engine(Engine):
         for current_res in resolution:
             print(f"\n{'='*50}\n[BlueTopo Engine] STARTING PROCESSING FOR {current_res}m\n{'='*50}")
 
-            # if not self.skip_tiling:
-            #     print(f'Checking and processing BlueTopo Datasets for {current_res}...')
-            #     param_inputs = []
-            #     for _, row in tile_gdf.iterrows():
-            #         if not isinstance(row[1], str):
-            #             continue
-            #         tile_id = str(row[0])
+            if not self.skip_tiling:
+                print(f'Checking and processing BlueTopo Datasets for {current_res}...')
+                param_inputs = []
+                for _, row in tile_gdf.iterrows():
+                    if not isinstance(row[1], str):
+                        continue
+                    tile_id = str(row[0])
 
-            #         is_band4 = bool(re.match(r'^BH4[A-Za-z]', tile_id))
+                    is_band4 = bool(re.match(r'^BH4[A-Za-z]', tile_id))
 
-            #         # For 20m resolution, restrict processing to Band 4 tiles exclusively (BH4 followed by a letter)
-            #         if current_res == 20 and not is_band4:
-            #             continue
+                    # For 20m resolution, restrict processing to Band 4 tiles exclusively (BH4 followed by a letter)
+                    if current_res == 20 and not is_band4:
+                        continue
 
-            #         param_inputs.append([self.param_lookup, tile_id, row[1], output_prefix, current_res])
+                    param_inputs.append([self.param_lookup, tile_id, row[1], output_prefix, current_res])
 
-            #     # Sort parallel task configurations to submit them sequentially (ER1 -> ER2 -> ... -> ER6)
-            #     param_inputs = sorted(param_inputs, key=lambda x: _get_er_num(x[3]))
+                # Sort parallel task configurations to submit them sequentially (ER1 -> ER2 -> ... -> ER6)
+                param_inputs = sorted(param_inputs, key=lambda x: _get_er_num(x[3]))
 
-            #     print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
-            #     future_tiles = self.client.map(_process_tile, param_inputs)
+                print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
+                future_tiles = self.client.map(_process_tile, param_inputs)
 
-            #     print("Waiting for all Dask workers to complete...")
-            #     tile_results = self.client.gather(future_tiles)
-            #     print("All Dask workers finished successfully.")
+                print("Waiting for all Dask workers to complete...")
+                tile_results = self.client.gather(future_tiles)
+                print("All Dask workers finished successfully.")
 
-            #     self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
+                self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
                 
 
-            #     for ecoregion in all_ecoregions:
-            #         if output_prefix == 'low_res':
-            #             beginning_prefix = f'{output_prefix}/{current_res}m'
-            #         elif output_prefix:
-            #             beginning_prefix = output_prefix
-            #         else:
-            #             beginning_prefix = ''
-            #         s3_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
-            #         self.write_run_manifest(s3_path, {'tiles': len(param_inputs)})
-            # else:   
-            #     print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
+                for ecoregion in all_ecoregions:
+                    if output_prefix == 'low_res':
+                        beginning_prefix = f'{output_prefix}/{current_res}m'
+                    elif output_prefix:
+                        beginning_prefix = output_prefix
+                    else:
+                        beginning_prefix = ''
+                    s3_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+                    self.write_run_manifest(s3_path, {'tiles': len(param_inputs)})
+            else:   
+                print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
 
-            # TODO need to remove all of the mosaic logic and self.skip_tiling
-            # Generate the unified isobaths from all finished tiles across all ecoregions (ER1 to ER6 order)
-            # self.create_combined_isobaths(all_ecoregions, output_bucket, current_res, output_prefix)
+            # # TODO need to remove all of the mosaic logic and self.skip_tiling
+            # # Generate the unified isobaths from all finished tiles across all ecoregions (ER1 to ER6 order)
+            self.create_combined_isobaths(all_ecoregions, output_bucket, current_res, output_prefix)
 
             if current_res == 100:
                 # When processing 100m, produce unified big mosaics first, and then ONLY produce offshore ER individual mosaics

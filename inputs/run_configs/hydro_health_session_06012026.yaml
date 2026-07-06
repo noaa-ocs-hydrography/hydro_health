@@ -8,7 +8,7 @@ ecoregions:
 pilot_mode: false
 output_prefix: low_res
 resolution:
-- 20
+- 100
 steps:
 - tool: run_bluetopo_tile_engine
   run: true
@@ -30,5 +30,4 @@ steps:
   run: false
 - tool: run_preprocessor_modeldata
   run: false
-runtimes:
-- '06012026'
+runtimes: []
