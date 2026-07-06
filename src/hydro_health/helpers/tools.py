@@ -1,6 +1,7 @@
 import yaml
 import pathlib
 import geopandas as gpd
+import re
 
 from socket import gethostname
 from osgeo import gdal, osr
@@ -91,7 +92,7 @@ def get_ecoregion_tiles(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFr
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
 
-    ecoregion_layer = 'ECOREGIONS' if low_res else 'ECOREGIONS_50M'
+    ecoregion_layer = 'ENHANCED_ECOREGIONS'
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
@@ -101,7 +102,12 @@ def get_ecoregion_tiles(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFr
     else:
         # get eco region from shapefile that matches drop down choices
         eco_regions = param_lookup['eco_regions'].valueAsText   #.replace("'", "").split(';')
-        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        
+        # EXTRACT JUST THE NUMBERS AS INTEGERS TO MATCH THE GEOPACKAGE
+        clean_eco_regions = [int(num) for num in re.findall(r'\d+', str(eco_regions))]
+        
+        # Select using the clean integers
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(clean_eco_regions)]  
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
     mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)
