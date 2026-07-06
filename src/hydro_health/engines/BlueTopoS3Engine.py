@@ -42,6 +42,10 @@ def _process_tile(param_inputs: list) -> str:
         
     print(f"[{tile_id}] Downloading raw NBS source to generate derivatives...")
 
+    # if engine.file_in_s3(output_prefix, target_res, ecoregion_id, tile_id, overwrite=True):
+    #         print(f'BlueTopo tile {tile_id} already exists.  Skipping download.')
+    # else:
+
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = pathlib.Path(temp_dir)
 
