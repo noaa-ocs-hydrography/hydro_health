@@ -31,5 +31,4 @@ steps:
   run: false
 - tool: run_preprocessor_modeldata
   run: false
-runtimes:
-- '06012026'
+runtimes: []
