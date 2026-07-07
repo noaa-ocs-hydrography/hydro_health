@@ -8,7 +8,7 @@ DIGITALCOAST:
 HURRICANE:
   COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
   CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
-  DATA_PATH: ER_3/original_data_files/hurricane_dataS
+  DATA_PATH: ER_3/original_data_files/hurricane_data
   GPKG_PATH: ER_3/original_data_files/hurricane_data/hurricane_data.gpkg
   RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_rasters
   YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
