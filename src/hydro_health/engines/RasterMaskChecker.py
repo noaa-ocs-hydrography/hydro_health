@@ -53,7 +53,7 @@ class RasterMaskChecker:
         
         return pd.concat(all_gdfs, ignore_index=True) if all_gdfs else None
 
-    def load_ecoregions(self, gpkg_path, layer_name='EcoRegions_50m'):
+    def load_ecoregions(self, gpkg_path, layer_name='Enhanced_EcoRegions'):
         """Loads the specific EcoRegions layer from the local GeoPackage."""
         if not os.path.exists(gpkg_path):
             print(f"Warning: GeoPackage not found at {gpkg_path}")

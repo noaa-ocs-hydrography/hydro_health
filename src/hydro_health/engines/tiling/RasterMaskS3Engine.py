@@ -287,16 +287,19 @@ class RasterMaskS3Engine(Engine):
                 win_x = min(tile_size, cols - x)
                 
                 prediction_chunk = train_band.ReadAsArray(x, y, win_x, win_y)
-                combined_presence = np.zeros((win_y, win_x), dtype=np.uint8)
+                starting_mask = np.zeros((win_y, win_x), dtype=np.uint8)
 
                 for mb in mask_bands:
                     m_tile = mb.ReadAsArray(x, y, win_x, win_y)
-                    combined_presence |= (m_tile > 0).astype(np.uint8)
+                    starting_mask |= (m_tile > 0).astype(np.uint8)
                 
-                # Ecoregion (1) + Bathy Presence (True) = Value 2
-                mask_indices = (prediction_chunk == 1) & (combined_presence > 0)
+                # (prediction_chunk == 1) collects cells inside current prediction mask
+                # (starting_mask > 0) collects cells where there is valid bathymetry
+                # returns True where both inside and has bathymetry
+                mask_indices = (prediction_chunk == 1) & (starting_mask > 0)
                 
                 if np.any(mask_indices):
+                    # Set the found cells to value of 2
                     prediction_chunk[mask_indices] = 2
                     train_band.WriteArray(prediction_chunk, x, y)
 
@@ -330,7 +333,7 @@ class RasterMaskS3Engine(Engine):
         existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
 
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
-        gdf = gpd.read_file(gpkg, layer='EcoRegions_50m').to_crs("EPSG:32617")
+        gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions').to_crs("EPSG:32617")
         gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
 
         for _, row in gdf.iterrows():

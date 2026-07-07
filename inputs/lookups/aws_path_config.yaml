@@ -54,7 +54,9 @@ SHARED:
   MASTER_GRIDS: Master_Grids.gpkg
   TILES: BlueTopo_Tile_Scheme_20260505_132642
   STATES: USA_Census_States_200km_Overlap
-  ECOREGIONS: EcoRegions_50m
+  ECOREGIONS_50M: EcoRegions_50m
+  ECOREGIONS: EcoRegions
+  ENHANCED_ECOREGIONS: Enhanced_EcoRegions
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km

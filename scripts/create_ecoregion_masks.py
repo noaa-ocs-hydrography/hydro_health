@@ -28,7 +28,7 @@ def build_prediction_masks():
     # Project EcoRegions_50m to UTM
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(gpkg)
-    ecoregions_50m = gpkg_ds.GetLayerByName('EcoRegions_50m')
+    ecoregions_50m = gpkg_ds.GetLayerByName('Enhanced_EcoRegions')
     in_memory_driver = ogr.GetDriverByName('Memory')
     # in_memory_driver = ogr.GetDriverByName('ESRI Shapefile')
     

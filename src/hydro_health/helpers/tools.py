@@ -1,11 +1,7 @@
 import yaml
 import pathlib
 import geopandas as gpd
-import s3fs
-import os
-import tempfile
-import json
-import time
+import re
 
 from socket import gethostname
 from osgeo import gdal, osr, ogr
@@ -76,7 +72,8 @@ def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
+    ecoregion_layer = 'ENHANCED_ECOREGIONS'
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
@@ -97,6 +94,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
 
+    ecoregion_layer = 'ENHANCED_ECOREGIONS'
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
@@ -106,7 +104,7 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     else:
         # get eco region from shapefile that matches drop down choices
         eco_regions = param_lookup['eco_regions'].valueAsText   #.replace("'", "").split(';')
-        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
+        selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_ecoregions)
 
     mask_tiles = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=selected_sub_grids)

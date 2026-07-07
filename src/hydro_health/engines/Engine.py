@@ -240,7 +240,7 @@ def _get_feature_detection(metadata: dict) -> float:
     least_depth = metadata['feat_detect'] and metadata['feat_least_depth']
     # size_okay = 'feat_size' in metadata and float(metadata['feat_size']) <= 2
     if metadata['feat_detect'] and least_depth:  # and size_okay:
-        return 100
+        return 110 if metadata['increased_scale'] else 100
     else:
         return 60
 
@@ -250,7 +250,7 @@ def _get_coverage(metadata: dict) -> float:
     Determine the coverage score and return.
     """
     if metadata['complete_coverage']:
-        return 100
+        return 110 if metadata['increased_scale'] else 100
     else:
         return 60
 
@@ -262,15 +262,15 @@ def _get_horizontal_uncertainty(metadata: dict) -> float:
     h_fix = float(metadata['horiz_uncert_fixed'])
     h_var = float(metadata['horiz_uncert_vari'])
     if h_fix <= 5 and h_var <= 0.05:
-        s = 100
+        s = 110 if metadata['increased_scale'] else 100
     elif h_fix <= 20:
-        s = 80
+        s = 85 if metadata['increased_scale'] else 80
     elif h_fix <= 50:
-        s = 60
+        s = 65 if metadata['increased_scale'] else 60
     elif h_fix <= 500:
-        s = 40
+        s = 45 if metadata['increased_scale'] else 40
     else:
-        s = 20
+        s = 25 if metadata['increased_scale'] else 20
     return s
 
 
@@ -281,13 +281,13 @@ def _get_vertical_uncertainty(metadata: dict) -> float:
     v_fix = float(metadata['vert_uncert_fixed'])
     v_var = float(metadata['vert_uncert_vari'])
     if v_fix <= 0.5 and v_var <= 0.01:
-        s = 100
+        s = 110 if metadata['increased_scale'] else 100
     elif v_fix <= 1 and v_var <= 0.02:
-        s = 80
+        s = 85 if metadata['increased_scale'] else 80
     elif v_fix <= 2 and v_var <= 0.05:
-        s = 40
+        s = 55 if metadata['increased_scale'] else 40
     else:
-        s = 20
+        s = 25 if metadata['increased_scale'] else 20
     return s
 
 

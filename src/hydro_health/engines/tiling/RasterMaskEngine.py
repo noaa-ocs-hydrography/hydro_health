@@ -29,9 +29,8 @@ def _create_prediction_mask(param_inputs: list[list]) -> None:
     # Project EcoRegions_50m to UTM
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(str(gpkg))
-    ecoregions_50m = gpkg_ds.GetLayerByName('EcoRegions_50m')
-    in_memory_driver = ogr.GetDriverByName('Memory')
-
+    ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions')
+    
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)
     output_ds = in_memory_driver.CreateDataSource('output_ecoregion')
