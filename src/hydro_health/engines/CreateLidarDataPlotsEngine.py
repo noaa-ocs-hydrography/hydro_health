@@ -2,6 +2,7 @@ import os
 import re
 import math
 import warnings
+import datetime
 import numpy as np
 import geopandas as gpd
 import yaml
@@ -14,17 +15,18 @@ from itertools import combinations
 from shapely.geometry import shape
 from matplotlib.lines import Line2D
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.transform import from_bounds
 from rasterio.features import shapes
-from rasterio.warp import calculate_default_transform, reproject 
+from rasterio.warp import calculate_default_transform, reproject
 
 import dask
 from dask.distributed import Client, print
 
-from osgeo import gdal
+from osgeo import gdal, osr
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
@@ -34,7 +36,7 @@ warnings.filterwarnings("ignore", category=RuntimeWarning, module="matplotlib.co
 
 # Ensure GDAL env vars are set
 os.environ['GDAL_MEM_ENABLE_OPEN'] = 'YES'
-os.environ["GDAL_CACHEMAX"] = "64"
+os.environ["GDAL_CACHEMAX"] = "1024" # Reduced to 1GB to prevent OOM with multiple workers
 # Required to allow GDAL to write directly to S3 via /vsis3/
 os.environ['CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE'] = 'YES'
 
@@ -62,7 +64,8 @@ def _process_all_vrts(params):
             gdal_input = engine._get_gdal_path(vrt_file)
 
             # Use local EC2 temporary file instead of direct vsis3 write to bypasses the S3 5GB upload limit!
-            gdal_output = f"/tmp/{resampled_base_name}"
+            # Avoid /tmp/ as it is often a tmpfs (RAM disk) on Linux which causes OOM crashes.
+            gdal_output = os.path.join(os.getcwd(), resampled_base_name)
             
             # Check existence using s3fs
             exists = engine.fs.exists(output_filename.replace("s3://", ""))
@@ -80,15 +83,31 @@ def _process_all_vrts(params):
 
         print(f"Resampling: {vrt_file}")
 
+        # --- DYNAMIC RESOLUTION FIX ---
+        # Prevent GDAL from attempting to render projected (meter) datasets at a 4.5 millimeter resolution
+        actual_x_res = x_res
+        actual_y_res = y_res
+        try:
+            open_path = engine._get_s3_path(vrt_file)
+            with rasterio.open(open_path) as src:
+                if src.crs and src.crs.is_projected:
+                    actual_x_res = 500.0
+                    actual_y_res = 500.0
+                    print(f"[{base_name}] Projected CRS detected! Swapping degree resolution for ~500.0 meter resolution to prevent memory exhaustion.")
+        except Exception:
+            pass # Failsafe: if rasterio can't read it, fall back to default behavior
+        # ------------------------------
+
         gdal.Warp(
             gdal_output,
             gdal_input,
-            xRes=x_res,
-            yRes=y_res,
+            xRes=actual_x_res,
+            yRes=actual_y_res,
             resampleAlg=resampling_method,
             creationOptions=creation_options,
             warpOptions=[],   
-            multithread=True    
+            multithread=False, # Disable internal GDAL multithreading to avoid thread-explosion with Dask
+            warpMemoryLimit=1024 # Reduced to 1GB to safely accommodate workers on a 30GB system
         )
 
         if engine.is_aws:
@@ -112,6 +131,10 @@ class CreateLidarDataPlotsEngine(Engine):
         self.config = None
         self.client = None
         self.year_datasets = None
+        self.dataset_report_data = {}
+        self.invalid_format_files = [] # TRACK REGEX FAILURES
+        self.corrupted_files = []      # TRACK CORRUPTED/EMPTY TIFS
+        self.missing_config_datasets = [] # TRACK MISSING TIFS CONFIGURED IN YAML
         self.fs = s3fs.S3FileSystem(anon=False)
         self.is_aws = (get_environment() == 'aws')
 
@@ -262,83 +285,64 @@ class CreateLidarDataPlotsEngine(Engine):
         """Obtain dictionary of datasets for all years"""
 
         year_datasets = {}
+        self.dataset_report_data = {}
+        self.invalid_format_files = [] # Reset trackers
+        self.corrupted_files = []      # Reset trackers
+        self.missing_config_datasets = [] # Reset trackers
+        
         filename_pattern = re.compile(r'(.+?)(?:_(\d{4}))?(?:_(\d+))?_resampled\.tif', re.IGNORECASE)
+        found_config_keys = set()
+        
+        # Matplotlib MathText compatible bold formatting tags
+        bullet_missing = r"$\mathbf{Missing}$"
+        bullet_manual = r"$\mathbf{Manual\ Download}$"
+        bullet_ngs_ncei = r"$\mathbf{NGS/NCEI\ Provider}$"
         
         # Determine base folder for DigitalCoast metadata
         if self.is_aws:
             # Assuming structure: bucket/path/to/Resampled -> bucket/path/to/DigitalCoast
             input_folder_str = str(input_folder).replace('\\', '/').rstrip('/')
             parent_folder = input_folder_str.replace("s3://", "").rsplit('/', 1)[0]
-            base_folder = f"{parent_folder}/DigitalCoast"
+            base_folders = [f"{parent_folder}/DigitalCoast", f"{parent_folder}/DigitalCoast_manual_downloads"]
             files_list = self.fs.ls(input_folder_str.replace("s3://", ""))
             filenames = [f.replace('\\', '/').split('/')[-1] for f in files_list]
         else:
-            base_folder = os.path.dirname(input_folder)
-            base_folder = os.path.join(base_folder, 'DigitalCoast')
+            parent_folder = os.path.dirname(input_folder)
+            base_folders = [os.path.join(parent_folder, 'DigitalCoast'), os.path.join(parent_folder, 'DigitalCoast_manual_downloads')]
             filenames = [f for f in os.listdir(input_folder) if f.endswith('.tif')]
+
+        # --- Resolve VRT input directories for orphan checking ---
+        raw_vrt_dir = get_config_item("LIDAR_PLOTS", "INPUT_VRTS")
+        raw_vrt_dir_str = str(raw_vrt_dir)
+        if "DigitalCoast" in raw_vrt_dir_str and "manual_downloads" not in raw_vrt_dir_str:
+            manual_vrt_dir_str = raw_vrt_dir_str.replace("DigitalCoast", "DigitalCoast_manual_downloads")
+        else:
+            parent_vrt = "/".join(raw_vrt_dir_str.replace('\\', '/').rstrip('/').split('/')[:-1])
+            manual_vrt_dir_str = f"{parent_vrt}/DigitalCoast_manual_downloads"
+
+        vrt_dirs_clean = []
+        if self.is_aws:
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            for d in [raw_vrt_dir_str, manual_vrt_dir_str]:
+                d_clean = d.replace('\\', '/').replace("s3://", "")
+                if not d_clean.startswith(bucket):
+                    vrt_dirs_clean.append(f"{bucket}/{d_clean.lstrip('/')}")
+                else:
+                    vrt_dirs_clean.append(d_clean)
+        else:
+            vrt_dirs_clean = [raw_vrt_dir_str, manual_vrt_dir_str]
+        # ---------------------------------------------------------
 
         for filename in filenames:
             if not filename.endswith('.tif'):
                 continue
 
-            should_skip = False
-            for config_key, dataset_settings in config.items():
+            # Flag all found keys IMMEDIATELY so corrupted files aren't double-counted as "Missing" later
+            for config_key in config.keys():
                 if config_key in filename:
-                    if dataset_settings and dataset_settings.get('use') is False:
-                        print(f"INFO: Skipping '{filename}' due to config for component '{config_key}'.")
-                        should_skip = True
-                        break 
-            
-            if should_skip:
-                continue
+                    found_config_keys.add(config_key)
 
-            match = filename_pattern.search(filename)
-            if not match:
-                continue
-                
-            dataset_info, year_from_filename, unique_id = match.groups()
-
-            if "USACE" in dataset_info and "NCMP" in dataset_info:
-                dataset_name = "USACE"
-            else:
-                dataset_name = dataset_info.split('_')[-1]
-            
-            acquisition_date = None
-            
-            # Metadata search logic
-            if self.is_aws:
-                if self.fs.exists(base_folder):
-                    subfolders = self.fs.ls(base_folder)
-                    for folder_path in subfolders:
-                        folder_name = folder_path.replace('\\', '/').split('/')[-1]
-                        
-                        # Check logic matches local
-                        if year_from_filename in folder_name and f'_{unique_id}' in folder_name:
-                            metadata_path = f"s3://{folder_path}/metadata.txt"
-                            acquisition_date = self.extract_date_from_metadata(metadata_path)
-                            if acquisition_date:
-                                break
-                else:
-                    print(f"Warning: Base folder 's3://{base_folder}' not found.")
-            else:
-                if os.path.isdir(base_folder):
-                    for folder_name in os.listdir(base_folder):
-                        potential_path = os.path.join(base_folder, folder_name)
-                        if os.path.isdir(potential_path) and year_from_filename in folder_name and f'_{unique_id}' in folder_name:
-                            metadata_path = os.path.join(potential_path, 'metadata.txt')
-                            acquisition_date = self.extract_date_from_metadata(metadata_path)
-                            if acquisition_date:
-                                break
-                else:
-                    print(f"Warning: Base folder '{base_folder}' not found.")
-            
-            grouping_year = year_from_filename if year_from_filename else 'No Year Found'
-            title_str = year_from_filename if year_from_filename else 'Date Not in Filename'
-
-            if grouping_year not in year_datasets:
-                year_datasets[grouping_year] = []
-            
-            # Construct full path
+            # Construct full path EARLY so we can test the file
             if self.is_aws:
                 input_folder_clean = str(input_folder).replace('\\', '/')
                 full_path = f"{input_folder_clean.rstrip('/')}/{filename}"
@@ -347,6 +351,164 @@ class CreateLidarDataPlotsEngine(Engine):
             else:
                 full_path = os.path.join(input_folder, filename)
 
+            # --- Orphaned TIF check (delete if no VRT exists) ---
+            vrt_filename = filename.replace('_resampled.tif', '.vrt')
+            is_orphaned = True
+            
+            if self.is_aws:
+                for d in vrt_dirs_clean:
+                    if self.fs.exists(f"{d.rstrip('/')}/{vrt_filename}"):
+                        is_orphaned = False
+                        break
+            else:
+                for d in vrt_dirs_clean:
+                    if os.path.exists(os.path.join(d, vrt_filename)):
+                        is_orphaned = False
+                        break
+                        
+            if is_orphaned:
+                print(f"INFO: Deleting orphaned mosaic (no corresponding VRT found): {filename}")
+                try:
+                    if self.is_aws:
+                        self.fs.rm(full_path.replace("s3://", ""))
+                    else:
+                        os.remove(full_path)
+                except Exception as e:
+                    print(f"WARNING: Could not delete orphaned file {filename}: {e}")
+                continue
+            # ----------------------------------------------------
+
+            # 1. Regex Validation
+            match = filename_pattern.search(filename)
+            if not match:
+                self.invalid_format_files.append(filename)
+                continue
+
+            # 2. Corruption / Empty Data Check
+            is_corrupted = False
+            try:
+                # Do NOT use pathlib.Path() here on AWS strings as it strips the double slashes from URIs
+                # e.g., pathlib converts "s3://bucket" -> "s3:/bucket", which instantly fails the rasterio check.
+                with rasterio.open(full_path) as src:
+                    # Check if it has dimensions and bands
+                    if src.width == 0 or src.height == 0 or src.count == 0:
+                        is_corrupted = True
+            except Exception as e:
+                # Added print statement so we don't swallow silent failures anymore
+                print(f"WARNING: Validation check failed for {full_path}: {e}")
+                is_corrupted = True
+
+            if is_corrupted:
+                self.corrupted_files.append(filename)
+                continue # File is unreadable or empty, log it and skip
+
+            dataset_info, year_from_filename, unique_id = match.groups()
+
+            if "USACE" in dataset_info and "NCMP" in dataset_info:
+                dataset_name = "USACE"
+            else:
+                dataset_name = dataset_info.split('_')[-1]
+
+            grouping_year = year_from_filename if year_from_filename else 'No Year Found'
+            
+            # Using dictionaries to group filenames natively instead of deduping strings
+            if grouping_year not in self.dataset_report_data:
+                self.dataset_report_data[grouping_year] = {'used': {}, 'unused': {}}
+
+            is_unspecified = True
+            should_skip = False
+            is_manual = False
+            is_use_true = False
+            matched_key = None
+            
+            for config_key, dataset_settings in config.items():
+                if config_key in filename:
+                    is_unspecified = False
+                    matched_key = config_key
+                    
+                    if dataset_settings:
+                        # Robust string and bool casting for YAML parsing quirks
+                        use_val = dataset_settings.get('use')
+                        if use_val is not None:
+                            if str(use_val).strip().lower() in ['false', 'no', '0']:
+                                print(f"INFO: Skipping '{filename}' due to config for component '{config_key}'.")
+                                should_skip = True
+                            elif str(use_val).strip().lower() in ['true', 'yes', '1']:
+                                is_use_true = True
+                        
+                        manual_val = dataset_settings.get('manual')
+                        if manual_val is not None and str(manual_val).strip().lower() in ['true', 'yes', '1']:
+                            is_manual = True
+                            
+            # Globally identify and skip NGS / NCEI providers
+            is_ngs_ncei = "NGS" in dataset_name.upper() or "NCEI" in dataset_name.upper() or "NGS" in filename.upper() or "NCEI" in filename.upper()
+            if is_ngs_ncei:
+                should_skip = True
+            
+            if is_unspecified:
+                display_name = f"{dataset_name} (Unlisted in Config - Defaulting to Used)"
+            else:
+                display_name = f"{dataset_name} (Key: {matched_key})"
+            
+            # Append flags so they render cleanly in the PDF table
+            if is_manual:
+                display_name += f"\n  • {bullet_manual}"
+                
+            # If the user's config explicitly asked to use it but we are overriding to skip the provider, alert them visually
+            if is_ngs_ncei and is_use_true:
+                display_name += f"\n  • {bullet_ngs_ncei}"
+            
+            if should_skip:
+                if display_name not in self.dataset_report_data[grouping_year]['unused']:
+                    self.dataset_report_data[grouping_year]['unused'][display_name] = []
+                self.dataset_report_data[grouping_year]['unused'][display_name].append(filename)
+                continue
+
+            if display_name not in self.dataset_report_data[grouping_year]['used']:
+                self.dataset_report_data[grouping_year]['used'][display_name] = []
+            self.dataset_report_data[grouping_year]['used'][display_name].append(filename)
+            
+            acquisition_date = None
+            
+            # Metadata search logic
+            if self.is_aws:
+                for base_folder in base_folders:
+                    if self.fs.exists(base_folder):
+                        subfolders = self.fs.ls(base_folder)
+                        for folder_path in subfolders:
+                            folder_name = folder_path.replace('\\', '/').split('/')[-1]
+                            
+                            # Check logic matches local
+                            if year_from_filename in folder_name and f'_{unique_id}' in folder_name:
+                                metadata_path = f"s3://{folder_path}/metadata.txt"
+                                acquisition_date = self.extract_date_from_metadata(metadata_path)
+                                if acquisition_date:
+                                    break
+                        if acquisition_date:
+                            break
+                    else:
+                        pass # Silently skip missing manual folders to avoid clutter
+            else:
+                for base_folder in base_folders:
+                    if os.path.isdir(base_folder):
+                        for folder_name in os.listdir(base_folder):
+                            potential_path = os.path.join(base_folder, folder_name)
+                            if os.path.isdir(potential_path) and year_from_filename in folder_name and f'_{unique_id}' in folder_name:
+                                metadata_path = os.path.join(potential_path, 'metadata.txt')
+                                acquisition_date = self.extract_date_from_metadata(metadata_path)
+                                if acquisition_date:
+                                    break
+                        if acquisition_date:
+                            break
+                    else:
+                        pass # Silently skip missing manual folders to avoid clutter
+            
+            grouping_year = year_from_filename if year_from_filename else 'No Year Found'
+            title_str = year_from_filename if year_from_filename else 'Date Not in Filename'
+
+            if grouping_year not in year_datasets:
+                year_datasets[grouping_year] = []
+
             year_datasets[grouping_year].append({
                 'path': full_path,
                 'dataset_name': dataset_name,
@@ -354,8 +516,228 @@ class CreateLidarDataPlotsEngine(Engine):
                 'title': title_str
             })
             
+        # 3. Identify missing items configured to be used, but not found in the input folder
+        for config_key, dataset_settings in config.items():
+            if config_key not in found_config_keys:
+                
+                if dataset_settings:
+                    use_val = dataset_settings.get('use')
+                    # If 'use' is explicitly set to True
+                    is_use_true = str(use_val).strip().lower() in ['true', 'yes', '1'] if use_val is not None else False
+                    
+                    if is_use_true:
+                        self.missing_config_datasets.append(config_key)
+                        
+                        # Try to extract year from the config key to group it in the right table row
+                        year_match = re.search(r'((?:19|20)\d{2})', config_key)
+                        grouping_year = year_match.group(1) if year_match else 'Unknown Year'
+                        
+                        if grouping_year not in self.dataset_report_data:
+                            self.dataset_report_data[grouping_year] = {'used': {}, 'unused': {}}
+                            
+                        if "USACE" in config_key and "NCMP" in config_key:
+                            dataset_name = "USACE"
+                        else:
+                            # Clean up config key string if possible to approximate dataset name
+                            dataset_name = re.sub(r'_(?:19|20)\d{2}.*', '', config_key)
+                            
+                        display_name = f"{dataset_name} (Key: {config_key})\n  • {bullet_missing}"
+                        
+                        manual_val = dataset_settings.get('manual')
+                        is_manual_missing = str(manual_val).strip().lower() in ['true', 'yes', '1'] if manual_val is not None else False
+                        if is_manual_missing:
+                            display_name += f"\n  • {bullet_manual}"
+                            
+                        is_ngs_ncei = "NGS" in dataset_name.upper() or "NCEI" in dataset_name.upper() or "NGS" in config_key.upper() or "NCEI" in config_key.upper()
+                        
+                        # If a missing item is an NGS or NCEI provider, ban it globally and send it to 'unused'
+                        if is_ngs_ncei:
+                            display_name += f"\n  • {bullet_ngs_ncei}"
+                            if display_name not in self.dataset_report_data[grouping_year]['unused']:
+                                self.dataset_report_data[grouping_year]['unused'][display_name] = []
+                        else:
+                            if display_name not in self.dataset_report_data[grouping_year]['used']:
+                                self.dataset_report_data[grouping_year]['used'][display_name] = []
+            
         return year_datasets
     
+    def generate_dataset_report(self, output_folder, ecoregion_name) -> None:
+        """Generates a condensed PDF report detailing which datasets were used and skipped per year."""
+        if not self.dataset_report_data and not self.invalid_format_files and not self.corrupted_files and not self.missing_config_datasets:
+            print("No dataset data available to generate report.")
+            return
+
+        if self.is_aws:
+            output_folder_clean = str(output_folder).replace('\\', '/')
+            pdf_path_str = f"{output_folder_clean.rstrip('/')}/Ecoregion_3_Lidar_Datasets_Report.pdf"
+            if not pdf_path_str.startswith("s3://"): pdf_path_str = f"s3://{pdf_path_str}"
+            buf = io.BytesIO()
+            pdf_target = buf
+        else:
+            pdf_path_str = os.path.join(output_folder, 'Ecoregion_3_Lidar_Datasets_Report.pdf')
+            os.makedirs(os.path.dirname(pdf_path_str), exist_ok=True)
+            pdf_target = pdf_path_str
+
+        # Calculate absolute file totals by traversing the stored lists
+        total_used_count = sum(sum(len(f_list) for f_list in self.dataset_report_data[y]['used'].values()) for y in self.dataset_report_data)
+        total_unused_count = sum(sum(len(f_list) for f_list in self.dataset_report_data[y]['unused'].values()) for y in self.dataset_report_data)
+        total_err_regex = len(self.invalid_format_files)
+        total_err_corrupt = len(self.corrupted_files)
+        total_missing_configs = len(self.missing_config_datasets)
+        
+        # This will perfectly match the count of .tif files in the directory
+        total_count = total_used_count + total_unused_count + total_err_regex + total_err_corrupt
+
+        def _format_cell_text(d_name, f_list):
+            parts = d_name.split('\n', 1)
+            f_count_str = f"[{len(f_list)} file{'s' if len(f_list) != 1 else ''}]"
+            res = f"{parts[0]} {f_count_str}"
+            if len(parts) > 1:
+                res += f"\n{parts[1]}"
+            return res
+
+        with PdfPages(pdf_target) as pdf:
+            cell_text = []
+            
+            for year in sorted(self.dataset_report_data.keys()):
+                used_list = [_format_cell_text(d_name, f_list) for d_name, f_list in sorted(self.dataset_report_data[year]['used'].items())]
+                unused_list = [_format_cell_text(d_name, f_list) for d_name, f_list in sorted(self.dataset_report_data[year]['unused'].items())]
+                
+                max_len = max(len(used_list), len(unused_list))
+                if max_len == 0:
+                    cell_text.append([year, "None", "None"])
+                    continue
+                    
+                # Chunk large years (like 2016) so they don't break Matplotlib's single-page cell rendering limit
+                chunk_size = 6 
+                for i in range(0, max_len, chunk_size):
+                    u_chunk = used_list[i:i+chunk_size]
+                    un_chunk = unused_list[i:i+chunk_size]
+                    
+                    used_str = "\n".join(u_chunk) if u_chunk else ("None" if i == 0 else "")
+                    unused_str = "\n".join(un_chunk) if un_chunk else ("None" if i == 0 else "")
+                    
+                    display_year = year if i == 0 else f"{year} (cont.)"
+                    cell_text.append([display_year, used_str, unused_str])
+                
+            col_labels = ["Year", "Used Datasets", "Unused / Skipped Datasets"]
+            
+            # --- DYNAMIC PAGINATION LOGIC ---
+            # Matplotlib tables break down when rendering too much text on one axis.
+            # We must paginate based on the total number of lines, not just a fixed number of rows.
+            max_lines_per_page = 35 
+            pages_data = []
+            current_page = []
+            current_lines = 0
+            
+            for row in cell_text:
+                # Calculate maximum vertical lines this specific row will occupy
+                lines_in_row = max(len(str(row[1]).split('\n')), len(str(row[2]).split('\n')), 1)
+                
+                # If adding this row exceeds max lines and we already have rows on this page, start a new page
+                if current_lines + lines_in_row > max_lines_per_page and current_page:
+                    pages_data.append(current_page)
+                    current_page = [row]
+                    current_lines = lines_in_row
+                else:
+                    current_page.append(row)
+                    current_lines += lines_in_row
+                    
+            if current_page:
+                pages_data.append(current_page)
+            
+            current_date = datetime.datetime.now().strftime("%B %d, %Y")
+            
+            for i, page_data in enumerate(pages_data):
+                # Portrait orientation (8.5 x 11) using exact axes dimensions to control layout
+                fig = plt.figure(figsize=(8.5, 11))
+                ax = fig.add_axes([0.05, 0.05, 0.9, 0.83]) # Leave top 17% for title padding
+                ax.axis('off')
+                
+                title_suffix = f" (Page {i + 1})" if len(pages_data) > 1 else ""
+                report_title = (
+                    f"{ecoregion_name} Lidar Datasets Report{title_suffix}\n"
+                    f"Total .tif Files: {total_count} ({total_used_count} Used, {total_unused_count} Skipped, {total_err_regex} Regex Failed, {total_err_corrupt} Corrupted) | {total_missing_configs} Missing\n"
+                    f"* Note: NGS and NCEI providers are not used *"
+                )
+                
+                # Use fig.suptitle to place the text reliably at the top (97% height)
+                fig.suptitle(report_title, fontsize=11, fontweight='bold', y=0.97)
+                
+                # Anchor table to upper center instead of bbox. This prevents it from stretching
+                # out to fill the entire page when there are only a few rows.
+                table = ax.table(cellText=page_data, colLabels=col_labels, loc='upper center', cellLoc='left')
+                table.auto_set_font_size(False)
+                table.set_fontsize(8) 
+                
+                # Dynamically calculate heights based on number of lines per row to prevent text overflow
+                row_heights = {0: 0.04} # Header height
+                for row_idx, row_data in enumerate(page_data):
+                    max_lines = max(len(str(row_data[1]).split('\n')), len(str(row_data[2]).split('\n')), 1)
+                    # Assign height dynamically: minimum 0.04, adding space for each newline
+                    row_heights[row_idx + 1] = max(0.04, (0.02 * max_lines) + 0.01)
+                
+                # Explicitly set all column widths and row heights
+                for (row, col), cell in table.get_celld().items():
+                    if col == 0:
+                        cell.set_width(0.15) # 15% width for the Year
+                    elif col == 1 or col == 2:
+                        cell.set_width(0.425) # Equal 42.5% width for Used and Unused
+                    
+                    if row in row_heights:
+                        cell.set_height(row_heights[row])
+                        
+                    if row == 0: # Header styling
+                        cell.set_text_props(weight='bold', ha='center', va='center')
+                        cell.set_facecolor('#d3d3d3')
+                    else:
+                        cell.set_text_props(va='center') # Center vertically for clean multi-line stacking padding
+                            
+                pdf.savefig(fig)
+                plt.close(fig)
+
+            # --- Append Error Logs Page ---
+            if self.invalid_format_files or self.corrupted_files or self.missing_config_datasets:
+                fig_err = plt.figure(figsize=(8.5, 11))
+                ax_err = fig_err.add_axes([0.1, 0.1, 0.8, 0.8])
+                ax_err.axis('off')
+                
+                fig_err.suptitle("Processing Exceptions & Errors", fontsize=14, fontweight='bold', y=0.92)
+                
+                error_text = ""
+                
+                if self.missing_config_datasets:
+                    error_text += "Missing Configured Datasets (Configured to 'use', but no matching .tif found):\n"
+                    for f in self.missing_config_datasets:
+                        error_text += f"  - {f}\n"
+                    error_text += "\n"
+                
+                if self.invalid_format_files:
+                    error_text += "Files failing expected Regex format (Skipped):\n"
+                    for f in self.invalid_format_files:
+                        error_text += f"  - {f}\n"
+                    error_text += "\n"
+                    
+                if self.corrupted_files:
+                    error_text += "Files corrupted, missing data, or unable to be opened (Skipped):\n"
+                    for f in self.corrupted_files:
+                        error_text += f"  - {f}\n"
+                
+                # Add text to the page, wrapping nicely
+                ax_err.text(0, 0.95, error_text, fontsize=9, va='top', ha='left', wrap=True, family='monospace')
+                
+                pdf.savefig(fig_err)
+                plt.close(fig_err)
+        
+        if self.is_aws:
+            buf.seek(0)
+            s3_out = pdf_path_str.replace("s3://", "").replace('\\', '/')
+            with self.fs.open(s3_out, 'wb') as f:
+                f.write(buf.read())
+            buf.close()
+            
+        print(f"Dataset usage report saved to: {pdf_path_str}")
+
     def load_config(self, ecoregion_key: str) -> dict:
         """Load lidar config file"""
 
@@ -369,6 +751,35 @@ class CreateLidarDataPlotsEngine(Engine):
             if full_config is None:
                 return {}
             return full_config.get(ecoregion_key, {})
+
+    def _get_dynamic_colors(self) -> dict:
+        """
+        Generates a dynamic color palette based on all unique dataset names across all years.
+        This guarantees each dataset gets a distinct, consistent color. 
+        Scales to support any number of datasets without throwing errors.
+        """
+        if not self.year_datasets:
+            return {}
+            
+        unique_dataset_names = sorted(list(set([
+            ds['dataset_name']
+            for year in self.year_datasets
+            for ds in self.year_datasets[year]
+        ])))
+        num_unique = len(unique_dataset_names)
+        
+        # Use colormaps that fit the number of datasets to ensure visual distinction
+        if num_unique <= 10:
+            cmap = plt.colormaps['tab10']
+            dataset_colors = {name: cmap(i) for i, name in enumerate(unique_dataset_names)}
+        elif num_unique <= 20:
+            cmap = plt.colormaps['tab20']
+            dataset_colors = {name: cmap(i) for i, name in enumerate(unique_dataset_names)}
+        else:
+            cmap = plt.colormaps['turbo']
+            dataset_colors = {name: cmap(i / max(1, num_unique - 1)) for i, name in enumerate(unique_dataset_names)}
+            
+        return dataset_colors
 
     def plot_rasters_by_year(self, output_folder, mask_path, shp_path) -> None:
         """
@@ -421,7 +832,9 @@ class CreateLidarDataPlotsEngine(Engine):
 
         cmap = plt.colormaps['ocean'].copy()
         cmap.set_bad(color='white')
-        colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown', 'cyan', 'magenta', 'yellow', 'pink']
+        
+        dataset_colors = self._get_dynamic_colors()
+
         sorted_years = sorted(self.year_datasets.keys())
         num_years = len(sorted_years)
         cols = math.ceil(math.sqrt(num_years))
@@ -442,14 +855,16 @@ class CreateLidarDataPlotsEngine(Engine):
                 current_area_mask = np.logical_and(destination != nodata, destination < 0)
                 final_area_mask = np.logical_or(final_area_mask, current_area_mask)
                 
+                ds_color = dataset_colors[dataset['dataset_name']]
+
                 data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=common_transform) if val > 0]
                 for geom in data_geometries:
                     x, y = geom.exterior.xy
-                    ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
+                    ax.plot(x, y, color=ds_color, linewidth=0.5, zorder=12)
                 
                 date_str = f" ({dataset['date']})" if dataset.get('date') else ""
                 label_text = f"{dataset['dataset_name']}{date_str}"
-                legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
+                legend_handles.append(Line2D([0], [0], color=ds_color, lw=2, label=label_text))
                 
                 display_mask = np.logical_or.reduce((
                     destination == nodata, 
@@ -538,7 +953,9 @@ class CreateLidarDataPlotsEngine(Engine):
 
         cmap = plt.colormaps['ocean'].copy()
         cmap.set_bad(color='white')
-        colors = ['red', 'blue', 'green', 'purple', 'orange', 'brown', 'cyan', 'magenta', 'yellow', 'pink']
+        
+        dataset_colors = self._get_dynamic_colors()
+
         sorted_years = sorted(self.year_datasets.keys())
         num_years = len(sorted_years)
         cols = math.ceil(math.sqrt(num_years))
@@ -571,14 +988,16 @@ class CreateLidarDataPlotsEngine(Engine):
                 current_area_mask = np.logical_and(destination != nodata, destination < 0)
                 final_area_mask = np.logical_or(final_area_mask, current_area_mask)
                 
+                ds_color = dataset_colors[dataset['dataset_name']]
+
                 data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=local_transform) if val > 0]
                 for geom in data_geometries:
                     x, y = geom.exterior.xy
-                    ax.plot(x, y, color=colors[j % len(colors)], linewidth=0.5, zorder=12)
+                    ax.plot(x, y, color=ds_color, linewidth=0.5, zorder=12)
 
                 date_str = f" ({dataset['date']})" if dataset.get('date') else ""
                 label_text = f"{dataset['dataset_name']}{date_str}"
-                legend_handles.append(Line2D([0], [0], color=colors[j % len(colors)], lw=2, label=label_text))
+                legend_handles.append(Line2D([0], [0], color=ds_color, lw=2, label=label_text))
                 
                 display_mask = np.logical_or.reduce((
                     destination == nodata, 
@@ -617,63 +1036,6 @@ class CreateLidarDataPlotsEngine(Engine):
 
         self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Raster Datasets by Year (Individual Extent)", output_file_path, 600)
     
-    # def process_single_vrt(self, vrt_file, output_dir, x_res, y_res, resampling_method, creation_options, warpOptions, multithread) -> None:
-        # """Processes a single VRT file. This function will be executed by a Dask worker."""
-        
-        # try:
-        #     if self.is_aws:
-        #         # Use standard string manipulation for S3 paths to prevent os.path from adding backslashes
-        #         base_name = str(vrt_file).replace('\\', '/').split('/')[-1]
-        #         resampled_base_name = base_name.replace('.vrt', '_resampled.tif')
-        #         output_dir_clean = str(output_dir).replace('\\', '/')
-        #         output_filename = f"{output_dir_clean.rstrip('/')}/{resampled_base_name}"
-        #         if not output_filename.startswith("s3://"): output_filename = f"s3://{output_filename}"
-                
-        #         # Convert to GDAL VSI paths
-        #         gdal_input = self._get_gdal_path(vrt_file)
-                
-        #         # Use local EC2 temporary file instead of direct vsis3 write to bypasses the S3 5GB upload limit!
-        #         gdal_output = f"/tmp/{resampled_base_name}"
-                
-        #         # Check existence using s3fs
-        #         exists = self.fs.exists(output_filename.replace("s3://", ""))
-        #     else:
-        #         base_name = os.path.basename(vrt_file)
-        #         output_filename = os.path.join(output_dir, base_name.replace(".vrt", "_resampled.tif"))
-        #         gdal_input = vrt_file
-        #         gdal_output = output_filename
-        #         exists = os.path.exists(output_filename)
-
-        #     if exists:
-        #         skip_message = f"Output file {output_filename} already exists. Skipping {vrt_file}."
-        #         print(skip_message)
-        #         return
-
-        #     print(f"Resampling: {vrt_file}")
-
-        #     gdal.Warp(
-        #         gdal_output,
-        #         gdal_input,
-        #         xRes=x_res,
-        #         yRes=y_res,
-        #         resampleAlg=resampling_method,
-        #         creationOptions=creation_options,
-        #         warpOptions=warpOptions,   
-        #         multithread=multithread     
-        #     )
-
-        #     if self.is_aws:
-        #         print(f"Uploading resampled file to S3: {output_filename}...")
-        #         self.fs.put(gdal_output, output_filename.replace("s3://", ""))
-        #         os.remove(gdal_output)
-
-        #     print(f"Successfully resampled {vrt_file} to {output_filename}")
-        # except Exception as e:
-        #     print(f"Error processing {vrt_file}: {e}")
-        #     # Ensure the local temporary file is deleted even if the upload or GDAL process fails
-        #     if self.is_aws and 'gdal_output' in locals() and os.path.exists(gdal_output):
-        #         os.remove(gdal_output)
-
     def reprojectToGrid(self, path, transform, shape, target_crs, resampling_method=Resampling.bilinear) -> tuple[np.zeros, int]:
         """
         Reprojects a raster to a specified grid.
@@ -710,16 +1072,19 @@ class CreateLidarDataPlotsEngine(Engine):
 
         input_dir = get_config_item("LIDAR_PLOTS", "INPUT_VRTS")
         output_dir = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
+        
+        input_dir_str = str(input_dir)
+        if "DigitalCoast" in input_dir_str and "manual_downloads" not in input_dir_str:
+            manual_input_dir = input_dir_str.replace("DigitalCoast", "DigitalCoast_manual_downloads")
+        else:
+            parent = "/".join(input_dir_str.replace('\\', '/').rstrip('/').split('/')[:-1])
+            manual_input_dir = f"{parent}/DigitalCoast_manual_downloads"
+            
+        input_dirs = [input_dir_str, manual_input_dir]
+        vrt_files = []
 
         if self.is_aws:
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-            
-            # Prepend bucket to directories for s3fs globbing and saving
-            input_dir_clean = str(input_dir).replace('\\', '/').replace("s3://", "")
-            if not input_dir_clean.startswith(bucket):
-                input_dir_s3 = f"{bucket}/{input_dir_clean.lstrip('/')}"
-            else:
-                input_dir_s3 = input_dir_clean
                 
             output_dir_clean = str(output_dir).replace('\\', '/').replace("s3://", "")
             if not output_dir_clean.startswith(bucket):
@@ -727,24 +1092,35 @@ class CreateLidarDataPlotsEngine(Engine):
             else:
                 output_dir = f"s3://{output_dir_clean}"
 
-            # glob returns list of bucket/path/file.vrt
-            vrt_files = [f"s3://{f}" for f in self.fs.glob(f"{input_dir_s3}/*.vrt")]
+            for i_dir in input_dirs:
+                # Prepend bucket to directories for s3fs globbing and saving
+                i_dir_clean = i_dir.replace('\\', '/').replace("s3://", "")
+                if not i_dir_clean.startswith(bucket):
+                    i_dir_s3 = f"{bucket}/{i_dir_clean.lstrip('/')}"
+                else:
+                    i_dir_s3 = i_dir_clean
+                    
+                # glob returns list of bucket/path/file.vrt
+                vrt_files.extend([f"s3://{f}" for f in self.fs.glob(f"{i_dir_s3}/*.vrt")])
         else:
             os.makedirs(output_dir, exist_ok=True)
-            vrt_files = glob.glob(os.path.join(input_dir, "*.vrt"))
+            for i_dir in input_dirs:
+                vrt_files.extend(glob.glob(os.path.join(i_dir, "*.vrt")))
 
         if not vrt_files:
-            search_path = input_dir_s3 if self.is_aws else input_dir
-            print(f"No .vrt files found in {search_path}")
+            print(f"No .vrt files found in {input_dirs}")
             return
 
         print(f"Found {len(set(vrt_files))} VRT files to process.")
 
+        # ADDED BLOCKXSIZE and BLOCKYSIZE to prevent the GDAL 2GB Offset Array error 
         creation_options = [
             "COMPRESS=LZW",
             "TILED=YES",
             "BIGTIFF=YES",
-            "NUM_THREADS=ALL_CPUS" # Moved NUM_THREADS here from warpOptions
+            "BLOCKXSIZE=2048", # Lowered from 8192 to 2048 to drastically reduce memory spikes per tile
+            "BLOCKYSIZE=2048", # Lowered from 8192 to 2048 to drastically reduce memory spikes per tile
+            "NUM_THREADS=1" # Changed from ALL_CPUS to prevent thread explosion when used with Dask
         ]
 
         vrt_params = [[vrt_file,
@@ -758,20 +1134,6 @@ class CreateLidarDataPlotsEngine(Engine):
         future_tiles = self.client.map(_process_all_vrts, vrt_params)
         _ = self.client.gather(future_tiles)
 
-        # for vrt_file in vrt_files:
-        #     task = self.client.delayed(self.process_single_vrt)(
-        #         vrt_file,
-        #         output_dir,
-        #         x_res,
-        #         y_res,
-        #         resampling_method,
-        #         creation_options,
-        #         warpOptions=[], # Cleaned out the unused warp option that threw the warning
-        #         multithread=True
-        #     )
-        #     tasks.append(task)
-
-        # self.client.compute(*tasks)
         print("All vrts have been resampled.")
 
     def plot_difference(self, output_folder, mask_path, shp_path, mode, use_individual_extent=False) -> None:
@@ -948,13 +1310,7 @@ class CreateLidarDataPlotsEngine(Engine):
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
-        self.setup_dask(get_environment(), memory_limit="16GB")
-
-        # self.client = Client(
-        #     n_workers=8, 
-        #     threads_per_worker=2, 
-        #     memory_limit="32GB"
-        # )
+        self.setup_dask(get_environment(), memory_limit="28GB") # Adjusted to match available 30GB system memory
 
         self.resample_vrt_files()
         self.close_dask()
@@ -971,17 +1327,20 @@ class CreateLidarDataPlotsEngine(Engine):
             mask_path = get_config_item("MASK", "MASK_TRAINING_PATH")
             shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
 
+        ecoregion_name = 'Ecoregion 3'
         self.config = self.load_config('EcoRegion-3') 
         self.year_datasets = self.getYearDatasets(raster_folder, self.config)
 
+        self.generate_dataset_report(plot_output_folder, ecoregion_name)
+
         self.plot_rasters_by_year(plot_output_folder, mask_path, shp_path)
-        self.plot_rasters_by_year_individual(plot_output_folder, mask_path, shp_path)
+        # self.plot_rasters_by_year_individual(plot_output_folder, mask_path, shp_path)
 
         self.plot_difference(plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=False)
-        self.plot_difference(plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
+        # self.plot_difference(plot_output_folder, mask_path, shp_path, 'consecutive', use_individual_extent=True)
 
         self.plot_difference(plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=False)
-        self.plot_difference(plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
+        # self.plot_difference(plot_output_folder, mask_path, shp_path, 'all', use_individual_extent=True)
 
         print("Lidar Data Plots processing complete.")
 
