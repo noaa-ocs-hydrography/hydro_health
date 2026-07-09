@@ -15,7 +15,7 @@ S3_PRICE_PER_GB = 0.023  # us-east-2 standard tier
 # --- EMAIL CONFIGURATION ---
 # Replace these with your actual destination email addresses
 SENDER_EMAIL = "stephen.patterson.lx@localhost"
-RECIPIENT_EMAILS = ["stephen.patterson@noaa.gov", "aubrey.mccutchan@noaa.gov"]
+RECIPIENT_EMAILS = ["stephen.patterson@noaa.gov", "aubrey.mccutchan@noaa.gov", "stephanie.watson@noaa.gov"]
 
 def get_s3_bucket_size_gb(bucket_name):
     """Uses local AWS CLI to check bucket size."""
