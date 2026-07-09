@@ -50,15 +50,16 @@ class MetadataEngine:
                 self.write_message(f'#####################\nMetadata error: {full_list_url}', outputs)
                 pass
         else:
-            # handle CUDEM data
-            cudem_tiffs = provider_folder.rglob('*.tif')  # will CUDEM files not end in "YYYYv1.tif"?
-            years = sorted([tif.stem[-6:-2] for tif in cudem_tiffs])
-            start = years[0]
-            end = years[-1]  # if only 1 year, -1 will still work
-            with open(provider_folder / 'metadata.txt', 'w') as writer:
-                writer.write(f'Description: CUDEM\n')
-                writer.write(f'{start}, {end}\n')
-            self.write_message(f' - stored metadata: {provider_folder}', outputs)
+            self.write_message(f' - skipping invalid metdata: {label}', outputs)
+            # # handle CUDEM data
+            # cudem_tiffs = provider_folder.rglob('*.tif')  # will CUDEM files not end in "YYYYv1.tif"?
+            # years = sorted([tif.stem[-6:-2] for tif in cudem_tiffs])
+            # start = years[0]
+            # end = years[-1]  # if only 1 year, -1 will still work
+            # with open(provider_folder / 'metadata.txt', 'w') as writer:
+            #     writer.write(f'Description: CUDEM\n')
+            #     writer.write(f'{start}, {end}\n')
+            # self.write_message(f' - stored metadata: {provider_folder}', outputs)
 
     def read_json_files(self, digital_coast_folder: pathlib.Path, ecoregion: str, outputs: str) -> None:
         """Read JSON files to download metadata information"""

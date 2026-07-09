@@ -13,14 +13,17 @@ import tempfile
 import logging
 import platform
 import s3fs
+import gc
+import rasterio
+import rasterio.shutil
 
+from rasterio.enums import Resampling
 from multiprocessing import set_executable
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from collections import defaultdict
-from botocore.client import Config
 from botocore import UNSIGNED
-from io import BytesIO
+from botocore.client import Config
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
@@ -66,68 +69,116 @@ def _download_tile_index(param_inputs: list[list]) -> None:
                     lidar_bucket.download_fileobj(obj_summary.key, tile_index)
 
 
-def _download_intersected_datasets(param_inputs: list[list]) -> None:
-    """Parallel process spatial filter and download of datasets"""
+def _download_intersected_datasets(param_inputs: list) -> str:
+    """
+    Safely download DigitalCoast files that intersect the input polygon.
+    Files are downloaded to /home/"user"/temp_scratch instead of RAM.
+    """
 
-    tile_gdf, shp_path, outputs, param_lookup = param_inputs
-
+    ecoregion, tile_gdf, shp_path, outputs, param_lookup = param_inputs
+    shp_path_obj = pathlib.Path(shp_path)
     engine = DigitalCoastS3Engine(param_lookup)
+    
+    scratch_dir = pathlib.Path.home() / "temp_scratch"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    # Force GDAL to write to /home as well
+    gdal_config = {
+        "GDAL_TMPDIR": str(scratch_dir),
+        "GDAL_CACHEMAX": 512
+    }
 
     shp_df = gpd.read_file(shp_path, engine="pyogrio")
     shp_df['geometry'] = shp_df.geometry.make_valid()
     shp_df = shp_df.to_crs(4326)
+    shp_df.columns = shp_df.columns.str.lower()
 
-    shp_df.columns = shp_df.columns.str.lower()  # make url column all lowercase
-    if 'tile' in shp_df.columns:
-        # drop previous tile merged column
-        shp_df.drop('tile', axis=1, inplace=True)
+    cols_to_clear = ['tile', 'idx_right', 'index_right', 'index_left']
+    laundered_cols = [c for c in shp_df.columns if c.startswith('ecoregio_')]
+    shp_df = shp_df.drop(columns=cols_to_clear + laundered_cols, errors='ignore')
+
     df_joined = shp_df.sjoin(df=tile_gdf, how='left')
 
     if 'index_right' in df_joined.columns:
         df_joined = df_joined.rename(columns={'index_right': 'idx_right'})
-    shp_df = None
-    df_joined.to_file(shp_path, driver='ESRI Shapefile')
-    if df_joined['url'].any():
-        df_joined = df_joined.loc[df_joined['tile'].notnull()]
-        shp_folder = shp_path.parents[0]
-        urls = df_joined['url'].unique()
-        engine.write_message(f'{shp_path.name} URLs: {len(urls)}', outputs)
-        for i, url in enumerate(urls):
-            cleansed_url = engine.cleansed_url(url)
-            # Only download .tif files
-            if not cleansed_url.endswith('.tif'):
-                continue
-            dataset_name = cleansed_url.split('/')[-1]
-            output_file = shp_folder / dataset_name
-            try:
-                retry_strategy = Retry(
-                    total=3,  # retries
-                    backoff_factor=1,  # delay in seconds
-                    status_forcelist=[404],  # Status codes to retry on
-                    allowed_methods=["GET"]
-                )
-                adapter = HTTPAdapter(max_retries=retry_strategy)
-                request_session = requests.Session()
-                request_session.mount("https://", adapter)
-                request_session.mount("http://", adapter)
 
-                intersected_response = request_session.get(cleansed_url, timeout=5)
-            except requests.exceptions.ConnectionError:
-                engine.write_message(f'Timeout error: {cleansed_url}', outputs)
-                continue
-                
-            if intersected_response.status_code == 200:
-                # TODO The Solution: Calculate the MD5 hash of your BytesIO content before uploading. Compare it against the ETag of the current version in S3. If they match, skip the upload.
-                output_object = BytesIO(intersected_response.content)
-                ecoregion_folder = output_file.parents[8]
-                s3_prefix = str(output_file.relative_to(ecoregion_folder)).replace("\\", "/")
-                engine.upload_bytes_to_s3(output_object, s3_prefix)
-            else:
-                return f'Failed to download: {cleansed_url}'
-        return f'- {shp_path.stem}'
-    else:
-        return f'- No intersect: {shp_path.stem}'
-        
+    df_joined = df_joined.loc[:, ~df_joined.columns.duplicated()].copy()
+    df_joined.to_file(shp_path, driver='ESRI Shapefile')
+    
+    urls = []
+    if not df_joined.empty and 'url' in df_joined.columns:
+        urls = df_joined.loc[df_joined['tile'].notnull(), 'url'].unique().tolist()
+    
+    # Aggressive memory cleanup
+    del shp_df
+    del df_joined
+    gc.collect()
+
+    if urls:
+        retry_strategy = Retry(
+            total=3, 
+            backoff_factor=1, 
+            status_forcelist=[429, 500, 502, 503, 504]
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        request_session = requests.Session()
+        request_session.mount("https://", adapter)
+
+        with rasterio.Env(**gdal_config):
+            for url in urls:
+                cleansed_url = engine.cleansed_url(url)
+                if not cleansed_url.endswith('.tif'): 
+                    continue
+
+                try:
+                    with tempfile.NamedTemporaryFile(suffix='.tif', dir=scratch_dir, delete=True) as tmp_raw:
+                        with request_session.get(cleansed_url, timeout=15, stream=True) as r:
+                            r.raise_for_status()
+                            for chunk in r.iter_content(chunk_size=1024 * 1024): 
+                                tmp_raw.write(chunk)
+                            tmp_raw.flush()
+
+                        with rasterio.open(tmp_raw.name) as src:
+                            dst_profile = src.profile.copy()
+                            dst_profile.update({
+                                "driver": "GTiff", 
+                                "tiled": True, 
+                                "blockxsize": 512, 
+                                "blockysize": 512,
+                                "compress": "deflate", 
+                                "predictor": 3, 
+                                "interleave": "pixel"
+                            })
+
+                            with tempfile.NamedTemporaryFile(suffix='.tif', dir=scratch_dir, delete=True) as tmp_cog:
+                                rasterio.shutil.copy(src, tmp_cog.name, **dst_profile)
+                                
+                                with rasterio.open(tmp_cog.name, 'r+') as dst:
+                                    min_dim = min(dst.width, dst.height)
+                                    potential_ov = [2, 4, 8, 16]
+                                    valid_ov = [o for o in potential_ov if (min_dim // o) >= 4]
+                                    
+                                    if valid_ov:
+                                        dst.build_overviews(valid_ov, Resampling.average)
+                                
+                                dataset_name = cleansed_url.split('/')[-1]
+                                path_parts = shp_path_obj.parts
+                                try:
+                                    eco_idx = path_parts.index(ecoregion)
+                                    s3_path = "/".join(path_parts[eco_idx:-1])
+                                    s3_prefix = f"{s3_path}/{dataset_name}"
+                                    
+                                    engine.upload_file_to_s3(tmp_cog.name, s3_prefix)
+                                except ValueError:
+                                    engine.write_message(f"Path Error: {ecoregion} not in {shp_path}", outputs)
+                    gc.collect()
+                except Exception as e:
+                    engine.write_message(f"Error processing {cleansed_url}: {e}", outputs)
+                    continue
+
+        request_session.close()
+    return f'- {shp_path_obj.stem}'
+
 
 class DigitalCoastS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
@@ -137,10 +188,13 @@ class DigitalCoastS3Engine(Engine):
         self.param_lookup = param_lookup
 
     def breakup_cudem(self, ecoregion: str) -> None:
-        """Create unique year folders for CUDEM data"""
+        """
+        THIS IS NOT USED
+        Create unique year folders for CUDEM data
+        """
 
         s3_files = s3fs.S3FileSystem()
-        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/testing/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
         cudem_folders = s3_files.glob(f"{digital_coast_path}/NOAA_NCEI_0*")
         for folder in cudem_folders:
             year_tifs = defaultdict(list)
@@ -284,7 +338,7 @@ class DigitalCoastS3Engine(Engine):
                                 print(f'Skipping already processed provider: {provider}')
                                 continue
                             
-                            param_inputs = [[ecoregion_tile_gdf, shp_path, outputs, self.param_lookup] for shp_path in current_files]
+                            param_inputs = [[ecoregion, ecoregion_tile_gdf, shp_path, outputs, self.param_lookup] for shp_path in current_files]
                             future_intersected_datasets = self.client.map(_download_intersected_datasets, param_inputs)
                             self.client.gather(future_intersected_datasets)
                             with open(provider_log, "a") as f:
@@ -297,7 +351,7 @@ class DigitalCoastS3Engine(Engine):
                             provider_folder = pathlib.Path(*provider_path_parts[:digital_coast_index + 2])
                             self.upload_files_to_s3(provider_folder)
 
-                self.breakup_cudem(ecoregion)
+                # self.breakup_cudem(ecoregion)
         self.close_dask()
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
@@ -319,20 +373,22 @@ class DigitalCoastS3Engine(Engine):
             # Delete zip file after extract
             zipped_file.unlink()
 
-    def upload_bytes_to_s3(self, file_object: BytesIO, s3_prefix: str) -> None:
-        """Stream object to S3"""
+    def upload_file_to_s3(self, temp_file_path: str, s3_prefix: str) -> None:
+        """Simple S3 file upload with only region setting"""
 
-        s3_client = boto3.client('s3')
+        s3_client = boto3.client('s3', region_name='us-east-2')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        s3_client.upload_fileobj(file_object, bucket_name, f'testing/{s3_prefix}')
+        
+        s3_client.upload_file(str(temp_file_path), bucket_name, s3_prefix.lstrip('/'))
 
     def upload_files_to_s3(self, provider_folder: pathlib.Path) -> None:
         """Upload all tiff files to s3 for current tile"""
         
-        s3_client = boto3.client('s3')
+        s3_client = boto3.client('s3', region_name='us-east-2')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        
         for found_file in provider_folder.rglob('*'):
             if found_file.is_file():
                 s3_prefix = "/".join(found_file.parts[3:])
                 print(f'Uploading {found_file} to {s3_prefix}')
-                s3_client.upload_file(str(found_file), bucket_name, f'testing/{s3_prefix}')
+                s3_client.upload_file(str(found_file), bucket_name, f'{s3_prefix}')
