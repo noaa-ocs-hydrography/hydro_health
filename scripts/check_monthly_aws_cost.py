@@ -4,6 +4,15 @@ import subprocess
 import re
 from email.message import EmailMessage
 
+
+"""
+SETUP
+1. Install mail server if using a new EC2 - sudo dnf install postfix
+2. sudo postfix check
+3. sudo systemctl restart postfix
+"""
+
+
 # --- COST CONFIGURATION ---
 EC2_RATES = {
     'i-06ebb5b58864f157f': 0.6120,  # c6a.4xlarge in us-east-1
