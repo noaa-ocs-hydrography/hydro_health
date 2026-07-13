@@ -10,12 +10,14 @@ import shutil
 import gc # <--- Added for manual memory management
 import logging # <--- Added for standard logging
 import psutil # <--- Added for tracking RAM utilization
+import ctypes # <--- Added for C-level unmanaged memory trimming
 from logging.handlers import RotatingFileHandler
 from typing import List, Tuple, Literal
 from pathlib import Path
 from rasterio.features import shapes # Removed geometry_mask as it was causing the CPU/RAM stall
 from rasterio.warp import transform_bounds
-from shapely.geometry import shape
+from shapely.geometry import shape, Point, box, Polygon, MultiPolygon, GeometryCollection
+from shapely.ops import unary_union # <--- ADDED: Needed to merge geometries at the chunk level to save RAM
 import s3fs
 from scipy.ndimage import convolve, uniform_filter # <--- Added for TSM smoothing
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
@@ -25,9 +27,8 @@ import numpy as np
 import pandas as pd
 import rasterio
 import dask
-from dask.distributed import Client, LocalCluster
+from dask.distributed import Client, LocalCluster, performance_report, WorkerPlugin # <--- ADDED WorkerPlugin
 from osgeo import gdal
-from shapely.geometry import Point, box, Polygon, MultiPolygon, GeometryCollection
 from upath import UPath 
 
 from hydro_health.helpers.tools import get_config_item, get_environment
@@ -49,8 +50,8 @@ os.environ["AWS_MAX_CONNECTIONS"] = "32"
 os.environ["VSI_CACHE"] = "TRUE"
 os.environ["VSI_CACHE_SIZE"] = "67108864"       # Lowered to 64 MB VSI Cache
 os.environ["CHECK_DISK_FREE_SPACE"] = "FALSE"    # <--- ADDED to prevent aggressive disk space check crashes
-
-from dask.distributed import Client, LocalCluster, performance_report
+os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR" # <--- CRITICAL: Prevents GDAL from caching entire S3 directories in unmanaged RAM
+os.environ["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"] = ".tif,.tiff,.vrt,.gpkg,.parquet" # <--- Prevents sidecar file hunting
 
 # ==========================================
 # LOGGING CONFIGURATION
@@ -69,11 +70,46 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Suppress noisy third-party logs (like AWS IAM credential fetches)
+# Suppress noisy third-party logs (like AWS IAM credential fetches) in the main process
 logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
 logging.getLogger('botocore').setLevel(logging.WARNING)
 logging.getLogger('boto3').setLevel(logging.WARNING)
 logging.getLogger('s3fs').setLevel(logging.WARNING)
+
+# ==========================================
+# DASK WORKER C-LEVEL MEMORY MANAGEMENT
+# ==========================================
+class CLevelMemoryCleanupPlugin(WorkerPlugin):
+    """Dask worker plugin to aggressively clean unmanaged C-level memory and suppress worker logs."""
+    def setup(self, worker):
+        import os
+        import logging
+        import ctypes
+        
+        # 1. Suppress boto3/s3fs logs leaking from worker processes (fixes the IAM credential spam)
+        logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
+        logging.getLogger('botocore').setLevel(logging.WARNING)
+        logging.getLogger('boto3').setLevel(logging.WARNING)
+        logging.getLogger('s3fs').setLevel(logging.WARNING)
+        
+        # 2. Re-apply memory constraints inside the worker sandbox environment
+        os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
+        os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR"
+        
+        # 3. Setup C-level memory trim function
+        self.libc = None
+        try:
+            self.libc = ctypes.CDLL('libc.so.6')
+        except Exception:
+            pass
+
+    def transition(self, key, start, finish, *args, **kwargs):
+        # When a task finishes and leaves memory, force C-level garbage collection 
+        # This explicitly fixes the "Unmanaged memory use is high" Dask warning
+        if finish == 'released' or finish == 'forgotten':
+            if self.libc:
+                self.libc.malloc_trim(0)
+
 
 class ModelDataPreProcessor(Engine):
     """Class for parallel preprocessing all model data"""
@@ -186,6 +222,9 @@ class ModelDataPreProcessor(Engine):
             memory_limit='8GB'     # Increased from 2GB to allow GDAL to breathe safely
         )
         client = Client(cluster)
+        
+        # Register the new C-level Memory & Log Cleanup plugin to all workers
+        client.register_plugin(CLevelMemoryCleanupPlugin())
         logger.info(f"Dask Dashboard: {client.dashboard_link}")
 
         try:        
@@ -343,9 +382,25 @@ class ModelDataPreProcessor(Engine):
             logger.info("No new prediction rasters to process.")
 
         # --- 5. Run Seabed Terrain Layer Engine ---
+        # HARD FLUSH: Clear out any accumulated VSI Cache / memory blocks before handing off to the Engine
+        logger.info("Restarting Dask client to aggressively flush unmanaged memory before starting Seabed Engine...")
+        try:
+            client = dask.distributed.client.default_client()
+            client.restart()
+        except Exception as e:
+            logger.warning(f"Could not restart client before Seabed Engine: {e}")
+
         logger.info("Running Seabed Terrain Layer Engine...")
         engine = CreateSeabedTerrainLayerEngine()
         engine.process()
+
+        # HARD FLUSH #2: Clean up after the Seabed Engine completes to keep training isolated
+        logger.info("Restarting Dask client to flush memory after Seabed Engine completion...")
+        try:
+            client = dask.distributed.client.default_client()
+            client.restart()
+        except Exception as e:
+            logger.warning(f"Could not restart client after Seabed Engine: {e}")
 
         # --- 6. Gather Training Inputs (from Prediction Outputs) ---
         potential_train_inputs = list(self.prediction_out_dir.rglob("*"))
@@ -1141,12 +1196,24 @@ class ModelDataPreProcessor(Engine):
                     win_transform = src.window_transform(window)
                     shapes_gen = shapes(mask_chunk, mask=valid_mask, transform=win_transform)  
 
+                    # ---- THE FIX IS HERE ----
+                    # Instead of appending millions of tiny objects to `geometries` directly,
+                    # we load the chunk, union it immediately, and append the single merged object.
+                    chunk_geoms = []
                     for geom, _ in shapes_gen:
-                        geometries.append(shape(geom))
+                        chunk_geoms.append(shape(geom))
+                        
+                    if chunk_geoms:
+                        merged_chunk = unary_union(chunk_geoms)
+                        geometries.append(merged_chunk)
+                        
+                    # Explicit memory cleanup per-chunk
+                    del chunk_geoms
+                    gc.collect()
                         
             crs = src.crs
 
-        logger.info(f" -> Extracted {len(geometries)} geometries. Building GeoDataFrame...")
+        logger.info(f" -> Extracted {len(geometries)} unified geometries. Building GeoDataFrame...")
         
         # Geopandas union_all() later in process() will cleanly stitch any polygons that got split by block boundaries
         gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)

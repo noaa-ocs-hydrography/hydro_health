@@ -17,6 +17,16 @@ from collections import defaultdict
 from pathlib import Path
 from typing import List, Dict, Optional
 
+# [NETWORK FIX 1]: Prevent AWS EC2 DNS limits (1024 pps) and connection exhaustion.
+# Apply globally so that any UPath/s3fs calls inherit these robust retry mechanics.
+import fsspec
+fsspec.config.conf['s3'] = {
+    "config_kwargs": {
+        "max_pool_connections": 200,
+        "retries": {"max_attempts": 10, "mode": "adaptive"}
+    }
+}
+
 import s3fs
 from upath import UPath
 import numpy as np
@@ -104,9 +114,9 @@ def _run_combination_task(paths, out_path_str, overwrite, pilot_mode):
     engine = _get_worker_engine(overwrite, pilot_mode)
     return engine.process_combination_task(paths, out_path_str)
 
-def _run_terrain_task(bathy_file, best_radii, dictionary_output_dir, main_output_dir, overwrite, pilot_mode):
+def _run_terrain_task(bathy_file, best_radii, dictionary_output_dir, main_output_dir, overwrite, pilot_mode, task_idx, total_tasks):
     engine = _get_worker_engine(overwrite, pilot_mode)
-    return engine.generate_terrain_products_python(bathy_file, best_radii, dictionary_output_dir, main_output_dir)
+    return engine.generate_terrain_products_python(bathy_file, best_radii, dictionary_output_dir, main_output_dir, task_idx, total_tasks)
 
 
 class ModelDataPreProcessor(Engine):
@@ -130,8 +140,14 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         self.local_tmp_dir = Path.home() / "hydro_health_local_tmp"
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize s3fs auth purely for side-effect (don't store it on self to prevent Dask graph bloat)
-        _ = s3fs.S3FileSystem(anon=False)
+        # Initialize s3fs auth purely for side-effect with robust botocore configs
+        _ = s3fs.S3FileSystem(
+            anon=False,
+            config_kwargs={
+                "max_pool_connections": 200,
+                "retries": {"max_attempts": 10, "mode": "adaptive"}
+            }
+        )
         
         # Initialize WhiteboxTools
         self.wbt = WhiteboxTools()
@@ -215,8 +231,14 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         if hasattr(self, 'local_tmp_dir'):
             self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Re-initialize s3fs auth side-effect
-        _ = s3fs.S3FileSystem(anon=False)
+        # Re-initialize s3fs auth side-effect with robust pool/retry config
+        _ = s3fs.S3FileSystem(
+            anon=False,
+            config_kwargs={
+                "max_pool_connections": 200,
+                "retries": {"max_attempts": 10, "mode": "adaptive"}
+            }
+        )
         
         # Re-initialize WhiteboxTools locally on the worker
         self.wbt = WhiteboxTools()
@@ -227,7 +249,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
     #  PRIVATE HELPER FUNCTIONS
     # ==============================================================================
 
-    def _save_raster_da(self, da: xr.DataArray, out_path: str, **kwargs):
+    def _save_raster_da(self, da: xr.DataArray, out_path: str, log_prefix: str = "", **kwargs):
         """Safely saves an xarray DataArray to S3 by writing locally first."""
         out_u = UPath(out_path)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False, dir=str(self.local_tmp_dir)) as tmp_file:
@@ -239,17 +261,20 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 da.rio.to_raster(local_tmp_path, **kwargs)
             
             if out_u.protocol == "s3":
-                out_u.fs.put(local_tmp_path, str(out_u))
+                # [NETWORK FIX 2]: Use put_file instead of put.
+                # .put() implicitly calls ListObjectsV2 to check if the path is a directory.
+                # .put_file() skips this, saving a massive amount of DNS queries and S3 API calls.
+                out_u.fs.put_file(local_tmp_path, str(out_u))
             else:
                 shutil.copyfile(local_tmp_path, str(out_path))
             
-            # Standard print goes to worker log safely
-            logger.info(f"Successfully wrote raster DataArray file to: {out_path}")
+            # Standard print goes to worker log safely with optional prefix tracking string
+            logger.info(f"{log_prefix}Successfully wrote raster DataArray file to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
 
-    def _save_numpy_to_raster(self, data_array: np.ndarray, out_path: str, profile: dict):
+    def _save_numpy_to_raster(self, data_array: np.ndarray, out_path: str, profile: dict, log_prefix: str = ""):
         """Safely saves a numpy array to S3 by writing locally first."""
         out_u = UPath(out_path)
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False, dir=str(self.local_tmp_dir)) as tmp_file:
@@ -260,12 +285,13 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 dst.write(data_array, 1)
                 
             if out_u.protocol == "s3":
-                out_u.fs.put(local_tmp_path, str(out_u))
+                # [NETWORK FIX 2]: Use put_file to bypass S3 directory listing checks
+                out_u.fs.put_file(local_tmp_path, str(out_u))
             else:
                 shutil.copyfile(local_tmp_path, str(out_path))
                 
-            # Standard print goes to worker log safely
-            logger.info(f"Successfully wrote NumPy array file to: {out_path}")
+            # Standard print goes to worker log safely with optional prefix tracking string
+            logger.info(f"{log_prefix}Successfully wrote NumPy array file to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
@@ -512,6 +538,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         # 2. Process each year group
         for year, files in year_groups.items():
+            dict_path = UPath(self._join_paths(output_dir, f"dictionary_{year}.csv"))
+            if not getattr(self, 'overwrite', False) and dict_path.exists():
+                logger.info(f"\n  - Skipping group: {year} (Dictionary already exists: {dict_path.name})")
+                continue
+
             logger.info(f"\n  - Processing group: {year} ({len(files)} files found)")
 
             file_data = [(f, self._getsize(f)) for f in files]
@@ -570,7 +601,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 broad_agg = np.concatenate(all_samples['bpi_broad_std'])
                 
                 year_dictionary = self.create_classification_dictionary(broad_agg, fine_agg, slope_agg)
-                dict_path = UPath(self._join_paths(output_dir, f"dictionary_{year}.csv"))
                 
                 with dict_path.open('w') as fh:
                     year_dictionary.to_csv(fh, index=False)
@@ -590,8 +620,9 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         nodata = ds.rio.nodata
         
         # [DIMENSIONALITY FIX]: Explicitly select band 0 to guarantee a 2D array.
-        # squeeze() fails to drop the band dimension if the raster has multiple bands.
-        da = ds.isel(band=0).squeeze().astype("float32")
+        # DO NOT use .squeeze() as it drops 'x' or 'y' if the tile is only 1 pixel wide/tall,
+        # which causes binary_erosion to crash with "dimensionality must match" errors.
+        da = ds.isel(band=0).astype("float32")
         da = da.where(da != nodata)
         
         logger.info("Checking for interior gaps...")
@@ -681,10 +712,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         self._save_raster_da(r_mean, str(out_mean), driver="GTiff", compress="LZW")
         self._save_raster_da(r_sd, str(out_sd), driver="GTiff", compress="LZW")
 
-    def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir, main_output_dir) -> str:
+    def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir, main_output_dir, task_idx=None, total_tasks=None) -> str:
         """Main function to process one bathymetry raster."""
         base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
         output_dir = self._join_paths(main_output_dir, 'BTM_outputs')
+        
+        progress_str = f"[{task_idx}/{total_tasks}] " if task_idx and total_tasks else ""
         
         out_dir_path = UPath(output_dir)
         out_dir_path.mkdir(parents=True, exist_ok=True)
@@ -737,26 +770,26 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 logger.info(f"Skipped (All exist): {base_name}")
                 return f"Skipped (All exist): {base_name}"
 
-            logger.info(f"Processing terrain classification for: {base_name}")
+            logger.info(f"{progress_str}Processing terrain classification for: {base_name}")
 
             with UPath(bathy_path).open('rb') as f_in:
                 with open(local_bathy, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
 
             if missing_wbt:
-                logger.info(f"[{base_name}] Generating {len(missing_wbt)} required WBT layer(s)...")
+                logger.info(f"[{base_name}] {progress_str}Generating {len(missing_wbt)} required WBT layer(s)...")
             for out_s3, wbt_func, local_out in missing_wbt:
                 try:
                     wbt_func(local_bathy, local_out)
                     if os.path.exists(local_out):
                         with open(local_out, 'rb') as f_in, UPath(out_s3).open('wb') as f_out:
                             shutil.copyfileobj(f_in, f_out)
-                        logger.info(f"Successfully wrote WBT layer file to: {out_s3}")
+                        logger.info(f"{progress_str}Successfully wrote WBT layer file to: {out_s3}")
                 except Exception as e:
                     logger.error(f"❌ WBT Error on {base_name} for {out_s3}: {e}")
 
             if missing_tci:
-                logger.info(f"[{base_name}] Generating TCI layer...")
+                logger.info(f"[{base_name}] {progress_str}Generating TCI layer...")
                 try: 
                     self.wbt.convergence_index(local_bathy, local_tci)
                 except AttributeError:
@@ -770,10 +803,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 if os.path.exists(local_tci):
                     with open(local_tci, 'rb') as f_in, UPath(out_tci).open('wb') as f_out:
                         shutil.copyfileobj(f_in, f_out)
-                    logger.info(f"Successfully wrote TCI layer file to: {out_tci}")
+                    logger.info(f"{progress_str}Successfully wrote TCI layer file to: {out_tci}")
 
             if missing_shear:
-                logger.info(f"[{base_name}] Generating Shear Proxy layer...")
+                logger.info(f"[{base_name}] {progress_str}Generating Shear Proxy layer...")
                 try:
                     slope_src = local_slope if os.path.exists(local_slope) else None
                     plan_src = local_plan if os.path.exists(local_plan) else None
@@ -796,14 +829,14 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         
                         shear = slope_arr * np.abs(plan_arr)
                         meta.update(compress='LZW')
-                        self._save_numpy_to_raster(shear.astype("float32"), out_shear, meta)
+                        self._save_numpy_to_raster(shear.astype("float32"), out_shear, meta, log_prefix=progress_str)
                     else:
                         logger.warning(f"⚠️ Skipping Shear Proxy for {base_name}: Inputs missing (could not resolve local copies)")
                 except Exception as e:
                     logger.error(f"❌ Shear Proxy Calc Error {base_name}: {e}")
 
             if missing_numpy:
-                logger.info(f"[{base_name}] Generating NumPy BTM classification layers...")
+                logger.info(f"[{base_name}] {progress_str}Generating NumPy BTM classification layers...")
                 
                 # Fix parsing to ensure BlueTopo files look for the correct dictionary
                 if 'bluetopo' in base_name.lower():
@@ -852,7 +885,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 if self.overwrite or not self._exists(out_path_rug):
                     rugosity = self.calculate_tri(bathy_array)
                     profile.update(dtype=rugosity.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(rugosity, out_path_rug, profile)
+                    self._save_numpy_to_raster(rugosity, out_path_rug, profile, log_prefix=progress_str)
                     del rugosity  # FREE MEMORY EARLY
                     gc.collect()
 
@@ -875,7 +908,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     del bpi_fine_std_raw
                     
                     profile.update(dtype=bpi_fine_std.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(bpi_fine_std, out_path_fine, profile)
+                    self._save_numpy_to_raster(bpi_fine_std, out_path_fine, profile, log_prefix=progress_str)
                     gc.collect()
                 else:
                     # If skipped, load a read-only memmap for classification
@@ -895,7 +928,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     del bpi_broad_std_raw
                     
                     profile.update(dtype=bpi_broad_std.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(bpi_broad_std, out_path_broad, profile)
+                    self._save_numpy_to_raster(bpi_broad_std, out_path_broad, profile, log_prefix=progress_str)
                 else:
                     # If skipped, load a read-only memmap for classification
                     with rasterio.open(out_path_broad) as src_b:
@@ -930,7 +963,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                                 c_chunk[matches & (c_chunk == 0)] = rule['Class_ID']
                         
                     profile.update(dtype=classified_array.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(classified_array, out_path_class, profile)
+                    self._save_numpy_to_raster(classified_array, out_path_class, profile, log_prefix=progress_str)
                     del classified_array
 
                 # Final cleanup
@@ -938,7 +971,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 gc.collect()
 
         # Target 1 status print over the network per successful file
-        logger.info(f"✅ Successfully finished terrain processing: {base_name}")
+        logger.info(f"✅ {progress_str}Successfully finished terrain processing: {base_name}")
         
         # [MEMORY FIX 2]: Force OS to reclaim the memory pool at the end of heavy worker tasks
         try:
@@ -946,7 +979,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         except Exception:
             pass
             
-        return f"Success: {base_name}"
+        return f"Success: {base_name} ({progress_str.strip()})"
 
     def group_files(self) -> Dict:
         """Groups files by Tile and Variable, then by Year."""
@@ -1110,10 +1143,9 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         logger.info(f"{len(filled_files)} lidar and {len(found_bluetopo_files)} Bluetopo files found for dictionaries.")
 
         best_radii = {'fine': (8, 32), 'broad': (80, 240)}
-        # self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
+        self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
         logger.info("\n--- PHASE 2: Pre-flight Check for Terrain Products ---")
-        tasks = []
         
         # Accumulators for summary output
         total_missing_wbt = 0
@@ -1125,6 +1157,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         # Optimization: Fetch existing files once to avoid repeated network calls
         output_dir = self._join_paths(main_output_dir, 'BTM_outputs')
         existing_files = {UPath(f).name for f in self._safe_ls(output_dir)}
+
+        files_to_process = []
 
         # Sequentially check all files BEFORE queueing Dask tasks
         for bathy_file in bathy_files_to_process:
@@ -1151,16 +1185,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             needs_processing = len(missing_wbt) > 0 or missing_tci or missing_shear or missing_numpy
 
             if needs_processing:
-                # OPTIMIZATION: Dask delayed now targets the top-level wrapper function 
-                task = dask.delayed(_run_terrain_task)(
-                    str(bathy_file), 
-                    best_radii, 
-                    str(dictionary_output_dir), 
-                    str(main_output_dir), 
-                    self.overwrite, 
-                    self.pilot_mode
-                )
-                tasks.append(task)
+                files_to_process.append(bathy_file)
             else:
                 total_skipped += 1
                 
@@ -1170,8 +1195,26 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         logger.info(f"Total missing Shear layers: {total_missing_shear}")
         logger.info(f"Total missing NumPy layers: {total_missing_numpy}")
         logger.info(f"Files skipped (All exist):  {total_skipped}")
-            
-        logger.info(f"\n--- Queuing {len(tasks)} parallel tasks for terrain processing ---")
+
+        # Queue tasks with exact indices calculated out of total
+        total_tasks = len(files_to_process)
+        tasks = []
+        
+        logger.info(f"\n--- Queuing {total_tasks} parallel tasks for terrain processing ---")
+        for idx, bathy_file in enumerate(files_to_process, 1):
+            # OPTIMIZATION: Dask delayed now targets the top-level wrapper function 
+            task = dask.delayed(_run_terrain_task)(
+                str(bathy_file), 
+                best_radii, 
+                str(dictionary_output_dir), 
+                str(main_output_dir), 
+                self.overwrite, 
+                self.pilot_mode,
+                idx,
+                total_tasks
+            )
+            tasks.append(task)
+
         if tasks:
             results = dask.compute(*tasks)
             # The return statements from the delayed functions will print here in the main thread
