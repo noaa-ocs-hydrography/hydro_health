@@ -1,4 +1,1 @@
-{
-  "type" : "FeatureCollection",
-  "features" : [{"type":"Feature","id":1,"geometry":{"type":"Polygon","coordinates":[[[-87.202235362999943,30.243006723000065],[-87.207413255999938,30.388742534000073],[-87.414593825999987,30.347947939000051],[-87.369650870999976,30.204480024000077],[-87.202235362999943,30.243006723000065]]]},"properties":{"OBJECTID":1,"OBJECTID_1":1,"Name":null,"Text":null,"IntegerValue":null,"DoubleValue":null,"DateTime":null,"Shape_Length":0.67912041579548033,"Shape_Area":0.028077558005585479}}]
-}
+{"type":"FeatureCollection","features":[{"type":"Feature","id":1,"geometry":{"type":"Polygon","coordinates":[[[-82.69599782399996,27.592442681000023],[-82.699006002999965,27.627212318000034],[-82.720473341999934,27.622688763000042],[-82.71782167799995,27.587723794000055],[-82.69599782399996,27.592442681000023]]]},"properties":{"OBJECTID":1,"OBJECTID_1":1,"Name":null,"Text":null,"IntegerValue":null,"DoubleValue":null,"DateTime":null,"Shape_Length":0.11423185694574561,"Shape_Area":0.00076780126444456556}}]}

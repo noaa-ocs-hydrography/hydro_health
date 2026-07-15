@@ -106,13 +106,13 @@ class Engine:
             # print(feature['attributes']['DataType'], feature['attributes']['Year'], feature['attributes']['provider_results_name'])
             if not self.approved_dataset(feature):
                 continue
-            # folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
-            # TODO make new folder_name
             attrs = feature['attributes']
-            inport_number = attrs['Metalink'].split('/')[-1] if attrs.get('Metalink') else 'No_InPort'
+            metalink = attrs.get('Metalink') or ''
+            inport_number = metalink.rstrip('/').split('/')[-1]
+            inport_suffix = inport_number if inport_number else 'No_InPort'
             cleaned_provider = self.remove_special_chars(attrs.get('provider_details', 'No_Provider'))
-            folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_number}"
-            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / f"{folder_name}_{feature['attributes']['ID']}"
+            folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_suffix}"
+            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / folder_name
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON

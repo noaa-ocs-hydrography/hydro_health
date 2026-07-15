@@ -116,7 +116,7 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
             
         parts = geotiff_prefix.split('/')
         try:
-            dc_index = parts.index('DigitalCoast_manual_downloads') if data_folder else parts.index('DigitalCoast')
+            dc_index = parts.index('Digital_Coast_Manual_Downloads') if data_folder else parts.index('DigitalCoast')
             provider = parts[dc_index + 1]
         except (ValueError, IndexError):
             provider = parts[-4]

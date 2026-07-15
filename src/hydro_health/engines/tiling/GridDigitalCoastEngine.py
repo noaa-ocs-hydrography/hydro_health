@@ -197,7 +197,7 @@ class GridDigitalCoastEngine(Engine):
             bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
             
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-            digital_coast_folder = 'DigitalCoast_manual_downloads' if manual_download else 'DigitalCoast'
+            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
             print('vrt files:', f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
 
