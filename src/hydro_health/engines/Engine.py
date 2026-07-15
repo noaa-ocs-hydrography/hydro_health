@@ -132,8 +132,10 @@ class Engine:
                 ecoregion_group_web_mercator['geom_type'] = 'Polygon'
                 tile_geometries = ecoregion_group_web_mercator[['geom_type', 'geometry']]
                 tile_boundary = tile_geometries.dissolve(by='geom_type')
+                print('boundary:', tile_boundary)
                 tile_wkt = tile_boundary.iloc[0].geometry
                 geometry_coords.append(tile_wkt)
+                print('wkt:', tile_wkt)
 
         return geometry_coords
 
