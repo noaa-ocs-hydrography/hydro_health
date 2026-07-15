@@ -10,6 +10,7 @@ import boto3
 import geopandas as gpd
 import dask
 import math
+import string
 
 from datetime import date
 from osgeo import osr, gdal
@@ -105,7 +106,12 @@ class Engine:
             # print(feature['attributes']['DataType'], feature['attributes']['Year'], feature['attributes']['provider_results_name'])
             if not self.approved_dataset(feature):
                 continue
-            folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
+            # folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
+            # TODO make new folder_name
+            attrs = feature['attributes']
+            inport_number = attrs['Metalink'].split('/')[-1] if attrs.get('Metalink') else 'No_InPort'
+            cleaned_provider = self.remove_special_chars(attrs.get('provider_details', 'No_Provider'))
+            folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_number}"
             output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / f"{folder_name}_{feature['attributes']['ID']}"
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
@@ -129,13 +135,11 @@ class Engine:
         for er_id, ecoregion_group in ecoregion_groups:
             if er_id == ecoregion:
                 ecoregion_group_web_mercator = ecoregion_group.to_crs(4269)  # POST request only allows this EPSG
-                ecoregion_group_web_mercator['geom_type'] = 'Polygon'
+                ecoregion_group_web_mercator['geom_type'] = 'Polygon'   # TODO seems like "geom_type" is missing.  Maybe geojson creation method issue.
                 tile_geometries = ecoregion_group_web_mercator[['geom_type', 'geometry']]
                 tile_boundary = tile_geometries.dissolve(by='geom_type')
-                print('boundary:', tile_boundary)
                 tile_wkt = tile_boundary.iloc[0].geometry
                 geometry_coords.append(tile_wkt)
-                print('wkt:', tile_wkt)
 
         return geometry_coords
 
@@ -155,6 +159,15 @@ class Engine:
         for result in results:
             if result:
                 self.write_message(f'Result: {result}', output_folder)
+
+    def remove_special_chars(self, attr: str) -> str:
+        """Remove any illegal special characters"""
+
+        illegal_chars = string.punctuation
+        illegal_chars = illegal_chars.replace('_', '')
+        illegal_chars_translation = str.maketrans("", "", illegal_chars)
+        attr = attr.replace(' ', '_')
+        return attr.translate(illegal_chars_translation)
 
     def resample_and_reproject(self, tiff_path: pathlib.Path, target_res: int) -> None:
         """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""

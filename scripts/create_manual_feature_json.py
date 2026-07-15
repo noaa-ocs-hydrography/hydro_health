@@ -59,11 +59,6 @@ def build_manual_feature_json(folder_path, full_match, partial_matches) -> None:
             # print(f'    New name: {provider_folder_name}')
 
 
-def clean_folder_name(provider_folder_name) -> str:
-    """Remove illegal chars from string"""
-
-
-
 def get_wkt_bbox_from_shapefile(shp_path: pathlib.Path) -> str:
     """
     Reads a shapefile, forces/projects it to EPSG:4269, 
@@ -140,7 +135,7 @@ def find_matching_datasets(folder_path: pathlib.Path, shp_path: pathlib.Path, ex
             if data_type != 'LIDAR' or 'CUDEM' in attrs['Name']:
                 continue
 
-            metalink_filename = attrs['Metalink'].split('/')[-1] if attrs.get('Metalink') else 'No_Metalink'
+            # metalink_filename = attrs['Metalink'].split('/')[-1] if attrs.get('Metalink') else 'No_Metalink'
             # if attrs['Year'] == 0:
             #     print('     ', attrs['Name'])
             # print(f"    [API Diagnostic Sample] {attrs['Year']}_{attrs['provider_results_name'].replace(' ', '_')}_{attrs['DataType']}_{metalink_filename}")

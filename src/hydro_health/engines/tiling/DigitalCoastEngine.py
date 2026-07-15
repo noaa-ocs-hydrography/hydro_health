@@ -210,7 +210,6 @@ class DigitalCoastEngine(Engine):
 
         self.write_message('Download Support Files', outputs)
         ecoregion_geom_strings = self.get_ecoregion_geometry_strings(tile_gdf, ecoregion)
-
         for geometry_coords in ecoregion_geom_strings:
             tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
             bulk_download_params = [[link_dict['link'], link_dict['provider_path'], self.param_lookup, outputs] for link_dict in tile_index_links if link_dict['label'] == 'Bulk Download']

@@ -6,6 +6,8 @@ import yaml
 
 from datetime import datetime
 
+os.environ['PROJ_NETWORK'] = 'OFF'
+
 HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
 
