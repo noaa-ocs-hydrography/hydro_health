@@ -1,6 +1,7 @@
 import os
-# [MEMORY FIX 1]: Force glibc to release memory back to the OS immediately
-os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
+# [MEMORY FIX 1]: Release large blocks of memory back to the OS immediately, 
+# but keep small allocations (<= 64KB) to prevent CPU sys-lock thrashing.
+os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
 # [GDAL FIX 1]: Allow extremely large GeoJSON features to be parsed
 os.environ["OGR_GEOJSON_MAX_OBJ_SIZE"] = "0"
 
@@ -18,7 +19,6 @@ from pathlib import Path
 from typing import List, Dict, Optional
 
 # [NETWORK FIX 1]: Prevent AWS EC2 DNS limits (1024 pps) and connection exhaustion.
-# Apply globally so that any UPath/s3fs calls inherit these robust retry mechanics.
 import fsspec
 fsspec.config.conf['s3'] = {
     "config_kwargs": {
@@ -49,25 +49,21 @@ from scipy.ndimage import binary_erosion, uniform_filter, convolve
 # ==============================================================================
 def get_logger():
     """Sets up a logger that writes to both the console and a file in the home directory."""
-    # Suppress noisy external library logs (e.g. AWS credential loading)
     logging.getLogger('botocore').setLevel(logging.WARNING)
     logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
     logging.getLogger('s3fs').setLevel(logging.WARNING)
     logging.getLogger('urllib3').setLevel(logging.WARNING)
 
     logger = logging.getLogger("SeabedTerrainEngine")
-    # Prevent duplicate handlers if the module is reloaded
     if not logger.handlers:
         logger.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(processName)s - %(message)s')
 
-        # File Handler (Home Directory)
         log_file = Path.home() / "hydro_health.log"
         fh = logging.FileHandler(log_file)
         fh.setFormatter(formatter)
         logger.addHandler(fh)
 
-        # Console Handler
         ch = logging.StreamHandler(sys.stdout)
         ch.setFormatter(formatter)
         logger.addHandler(ch)
@@ -76,7 +72,6 @@ def get_logger():
 
 logger = get_logger()
 
-# Check for WhiteboxTools dependency
 try:
     from whitebox import WhiteboxTools
 except ImportError:
@@ -91,9 +86,6 @@ from hydro_health.helpers.tools import get_config_item, get_environment
 # ==============================================================================
 #  WORKER SINGLETONS AND DASK WRAPPERS
 # ==============================================================================
-# By moving these functions to the top level, Dask no longer serializes
-# the entire Class instance for each task. This eliminates the massive delay.
-
 _worker_engine = None
 
 def _get_worker_engine(overwrite, pilot_mode):
@@ -102,19 +94,21 @@ def _get_worker_engine(overwrite, pilot_mode):
     if _worker_engine is None:
         _worker_engine = CreateSeabedTerrainLayerEngine(overwrite=overwrite, pilot_mode=pilot_mode)
         _worker_engine.create_file_paths()
-    # Always ensure overwrite flag is synced
     _worker_engine.overwrite = overwrite
     return _worker_engine
 
 def _run_gap_fill_task(input_file, output_dir, max_iters, overwrite, pilot_mode):
+    """Dask wrapper to run the gap fill task using the worker singleton."""
     engine = _get_worker_engine(overwrite, pilot_mode)
     return engine.run_gap_fill(input_file, output_dir, max_iters)
 
 def _run_combination_task(paths, out_path_str, overwrite, pilot_mode):
+    """Dask wrapper to process combination tasks using the worker singleton."""
     engine = _get_worker_engine(overwrite, pilot_mode)
     return engine.process_combination_task(paths, out_path_str)
 
 def _run_terrain_task(bathy_file, best_radii, dictionary_output_dir, main_output_dir, overwrite, pilot_mode, task_idx, total_tasks):
+    """Dask wrapper to generate terrain products using the worker singleton."""
     engine = _get_worker_engine(overwrite, pilot_mode)
     return engine.generate_terrain_products_python(bathy_file, best_radii, dictionary_output_dir, main_output_dir, task_idx, total_tasks)
 
@@ -132,15 +126,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
     """Class to hold the logic for processing the Seabed Terrain layer"""
 
     def __init__(self, overwrite: bool = False, pilot_mode: bool = False):
-        # Inherit settings (including overwrite) from the preprocessor class
         super().__init__(overwrite=overwrite, pilot_mode=pilot_mode)
         self.is_aws = (get_environment() == 'aws')
         
-        # Ensure our custom temp directory exists
         self.local_tmp_dir = Path.home() / "hydro_health_local_tmp"
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Initialize s3fs auth purely for side-effect with robust botocore configs
         _ = s3fs.S3FileSystem(
             anon=False,
             config_kwargs={
@@ -149,63 +140,26 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             }
         )
         
-        # Initialize WhiteboxTools
         self.wbt = WhiteboxTools()
         self.wbt.verbose = False
         self.wbt.set_compress_rasters(True)
 
-        # Variables that do not change regardless of time step
         self.static_vars = [
-            "grain_size_layer.tif",
-            "prim_sed_layer.tif",
-            "survey_end_date.tif",
-            "bt.UC.tif",
-            "bt.bathy.tif",
-            "bt.bpi_broad.tif",
-            "bt.bpi_fine.tif",
-            "bt.curv_plan.tif",
-            "bt.curv_profile.tif",
-            "bt.curv_total.tif",
-            "bt.flowacc.tif",
-            "bt.flowdir.tif",
-            "bt.gradmag.tif",
-            "bt.rugosity.tif",
-            "bt.shearproxy.tif",
-            "bt.slope.tif",
-            "bt.slope_deg.tif",
-            "bt.tci.tif",
+            "grain_size_layer.tif", "prim_sed_layer.tif", "survey_end_date.tif",
+            "bt.UC.tif", "bt.bathy.tif", "bt.bpi_broad.tif", "bt.bpi_fine.tif",
+            "bt.curv_plan.tif", "bt.curv_profile.tif", "bt.curv_total.tif",
+            "bt.flowacc.tif", "bt.flowdir.tif", "bt.gradmag.tif", "bt.rugosity.tif",
+            "bt.shearproxy.tif", "bt.slope.tif", "bt.slope_deg.tif", "bt.tci.tif",
             "bt.terrain_classification.tif"
         ]
 
-        # Variables formatted as {stem}_{start_year}.tif
         self.dynamic_single_year_stems = [
-            "bathy_{}_filled", 
-            "bpi_broad",
-            "bpi_fine",
-            "curv_plan",
-            "curv_profile",
-            "curv_total",
-            "flowacc",
-            "flowdir",
-            "gradmag",
-            "rugosity",
-            "shearproxy",
-            "slope",
-            "slope_deg",
-            "tci",
-            "terrain_classification"
+            "bathy_{}_filled", "bpi_broad", "bpi_fine", "curv_plan", "curv_profile",
+            "curv_total", "flowacc", "flowdir", "gradmag", "rugosity", "shearproxy",
+            "slope", "slope_deg", "tci", "terrain_classification"
         ]
 
-        # Variables formatted as {stem}_{start_year}_{end_year}.tif
-        self.dynamic_range_stems = [
-            "hurr_count",
-            "hurr_strength",
-            "tsm"
-        ]
-
-    # ==============================================================================
-    #  STATE MANAGEMENT FOR DASK GRAPH EFFICIENCY
-    # ==============================================================================
+        self.dynamic_range_stems = ["hurr_count", "hurr_strength", "tsm"]
 
     def __getstate__(self):
         """
@@ -213,11 +167,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         Removes large, cached, or unpicklable state to prevent Dask graph bloat.
         """
         state = self.__dict__.copy()
-        
-        # Drop WhiteboxTools instance and re-init on workers to be absolutely safe
         if 'wbt' in state:
             del state['wbt']
-            
         return state
 
     def __setstate__(self, state):
@@ -226,12 +177,9 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         Re-initializes the dropped objects with fresh caches so the worker can process the task.
         """
         self.__dict__.update(state)
-        
-        # Guarantee the local temp directory exists physically on this specific worker node
         if hasattr(self, 'local_tmp_dir'):
             self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        # Re-initialize s3fs auth side-effect with robust pool/retry config
         _ = s3fs.S3FileSystem(
             anon=False,
             config_kwargs={
@@ -240,39 +188,33 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             }
         )
         
-        # Re-initialize WhiteboxTools locally on the worker
         self.wbt = WhiteboxTools()
         self.wbt.verbose = False
         self.wbt.set_compress_rasters(True)
 
-    # ==============================================================================
-    #  PRIVATE HELPER FUNCTIONS
-    # ==============================================================================
 
     def _save_raster_da(self, da: xr.DataArray, out_path: str, log_prefix: str = "", **kwargs):
         """Safely saves an xarray DataArray to S3 by writing locally first."""
         out_u = UPath(out_path)
+        # Using NamedTemporaryFile guarantees the file is immediately wiped on close
         with tempfile.NamedTemporaryFile(suffix='.tif', delete=False, dir=str(self.local_tmp_dir)) as tmp_file:
             local_tmp_path = tmp_file.name
 
         try:
-            # [MEMORY FIX 6]: Run the actual rasterization single-threaded to prevent internal hidden threads
             with dask.config.set(scheduler='single-threaded'):
-                da.rio.to_raster(local_tmp_path, **kwargs)
+                # Stream directly to local disk (chunk by chunk)
+                da.rio.to_raster(local_tmp_path, lock=False, **kwargs)
             
             if out_u.protocol == "s3":
-                # [NETWORK FIX 2]: Use put_file instead of put.
-                # .put() implicitly calls ListObjectsV2 to check if the path is a directory.
-                # .put_file() skips this, saving a massive amount of DNS queries and S3 API calls.
                 out_u.fs.put_file(local_tmp_path, str(out_u))
             else:
                 shutil.copyfile(local_tmp_path, str(out_path))
             
-            # Standard print goes to worker log safely with optional prefix tracking string
             logger.info(f"{log_prefix}Successfully wrote raster DataArray file to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
+
 
     def _save_numpy_to_raster(self, data_array: np.ndarray, out_path: str, profile: dict, log_prefix: str = ""):
         """Safely saves a numpy array to S3 by writing locally first."""
@@ -285,16 +227,15 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 dst.write(data_array, 1)
                 
             if out_u.protocol == "s3":
-                # [NETWORK FIX 2]: Use put_file to bypass S3 directory listing checks
                 out_u.fs.put_file(local_tmp_path, str(out_u))
             else:
                 shutil.copyfile(local_tmp_path, str(out_path))
                 
-            # Standard print goes to worker log safely with optional prefix tracking string
             logger.info(f"{log_prefix}Successfully wrote NumPy array file to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
+
 
     def _exists(self, path) -> bool:
         """Checks if a file exists, natively compatible with both local and S3 paths via UPath."""
@@ -311,24 +252,23 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
     def _get_variable_type(self, filename: str) -> Optional[str]:
         """Determines if file matches target variables."""
         fname_lower = filename.lower()
-        # Fallback to empty list if target_vars isn't defined
         for var in getattr(self, 'target_vars', []):
             if var in fname_lower:
                 return var
         return None
 
     def _get_year(self, filename: str) -> Optional[int]:
-        """Extracts the 4-digit year."""
+        """Extracts the 4-digit year from the filename."""
         pattern = r"(?P<year>199\d|20[0-2]\d)"
         match = re.search(pattern, filename)
         return int(match.group("year")) if match else None
 
     def _getsize(self, path) -> int:
-        """Gets size of file safely using UPath"""
+        """Gets size of file safely using UPath."""
         return UPath(path).stat().st_size
 
     def _join_paths(self, *args) -> str:
-        """Safely joins paths for any protocol returning string layout"""
+        """Safely joins paths for any protocol returning string layout."""
         if not args:
             return ""
         return str(UPath(args[0]).joinpath(*args[1:]))
@@ -343,9 +283,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         except FileNotFoundError:
             return []
 
-    # ==============================================================================
-    #  PUBLIC FUNCTIONS
-    # ==============================================================================
 
     def calculate_bpi(self, bathy_array, cell_size, inner_radius, outer_radius) -> np.ndarray:
         """Calculates the Bathymetric Position Index chunked purely in Dask to prevent massive mem allocation."""
@@ -357,21 +294,15 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         mask[x**2 + y**2 <= inner_cells**2] = False
         
         kernel = mask.astype(np.float32)
-        
         chunk_size = 1024
         d_bathy = da.from_array(bathy_array, chunks=(chunk_size, chunk_size))
         
-        # Lazy map blocks replaces massive in-memory valid_mask array
         d_valid = da.map_blocks(lambda b: (~np.isnan(b)).astype(np.float32), d_bathy, dtype=np.float32)
-        
-        # Lazy zero fill replaces massive in-memory zero array
         d_bathy_zeroed = da.where(da.isnan(d_bathy), 0.0, d_bathy)
         
         def _conv(block):
             return convolve(block, kernel, mode='mirror')
             
-        # [MEMORY FIX 2]: Use scheduler='single-threaded' inside the worker task 
-        # to prevent thread-arena memory bloat from "nested Dask".
         sum_array = d_bathy_zeroed.map_overlap(_conv, depth=outer_cells, boundary='reflect')
         count_array = d_valid.map_overlap(_conv, depth=outer_cells, boundary='reflect')
         
@@ -382,36 +313,34 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             warnings.simplefilter("ignore", category=RuntimeWarning)
             return bpi_lazy.compute(scheduler='single-threaded')
 
+
     def calculate_slope(self, bathy_array, cell_size) -> np.ndarray:
         """Calculates slope (in degrees) using inplace operations to minimize memory."""
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            
-            # Manual float32 gradient using slicing prevents upcasting to float64
             gy = np.empty_like(bathy_array, dtype=np.float32)
             gx = np.empty_like(bathy_array, dtype=np.float32)
             
-            # Y-gradient
             gy[1:-1, :] = (bathy_array[2:, :] - bathy_array[:-2, :]) / (2 * cell_size)
             gy[0, :] = (bathy_array[1, :] - bathy_array[0, :]) / cell_size
             gy[-1, :] = (bathy_array[-1, :] - bathy_array[-2, :]) / cell_size
             
-            # X-gradient
             gx[:, 1:-1] = (bathy_array[:, 2:] - bathy_array[:, :-2]) / (2 * cell_size)
             gx[:, 0] = (bathy_array[:, 1] - bathy_array[:, 0]) / cell_size
             gx[:, -1] = (bathy_array[:, -1] - bathy_array[:, -2]) / cell_size
             
             np.square(gx, out=gx)
             np.square(gy, out=gy)
-            gx += gy  # gx now holds gx^2 + gy^2
+            gx += gy 
             
-            del gy    # Free memory immediately
+            del gy 
             
             np.sqrt(gx, out=gx)
             np.arctan(gx, out=gx)
             slope_deg = np.degrees(gx, out=gx)
             
         return slope_deg
+
 
     def calculate_tri(self, bathy_array) -> np.ndarray:
         """Calculates Terrain Ruggedness Index (TRI) using vectorized slices natively."""
@@ -451,6 +380,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             
         return tri
 
+
     def create_classification_dictionary(self, bpi_broad_std_sample, bpi_fine_std_sample, slope_sample) -> pd.DataFrame:
         """Creates a data-driven classification dictionary from representative sample arrays."""
         valid_broad = bpi_broad_std_sample[~np.isnan(bpi_broad_std_sample)]
@@ -480,14 +410,15 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 'Slope_Lower': -9999, 'Slope_Upper': 9999}, inplace=True)
         return df
 
+
     def create_file_paths(self):
+        """Sets up directory paths dynamically based on configuration and environment."""
         filled_dir = get_config_item('TERRAIN', 'FILLED_DIR')
         combined_dir = get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR')
         uncombined_dir = get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR')
         processed_dir = get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')
 
         if get_environment() == 'remote':
-            # Strictly enforcing strings directly off UPath evaluation keeps Dask payload clean
             self.filled_dir = str(UPath(filled_dir))
             self.combined = str(UPath(combined_dir))
             self.uncombined_dir = str(UPath(uncombined_dir))
@@ -501,6 +432,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             self.uncombined_dir = str(base_path / uncombined_dir.strip('/'))
             self.processed_dir = str(base_path / processed_dir.strip('/'))
 
+
     def create_regionally_consistent_dictionaries(self, all_files, best_radii, output_dir, max_sample_files=10, pixels_per_file=20000) -> None:
         """Scans files, groups by year, samples pixels, and creates dictionaries."""
         logger.info("\n--- PHASE 1: Creating Regionally Consistent Dictionaries ---")
@@ -509,9 +441,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         out_path.mkdir(parents=True, exist_ok=True)
 
         valid_years = {year for year_pair in self.year_ranges for year in year_pair}
-        logger.debug(f"Valid years mapped from engine.year_ranges: {sorted(list(valid_years))}")   
-
-        # 1. Group files by year
         year_groups = {}
         all_found_years = set()
         
@@ -527,16 +456,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         year_groups[year] = []
                     year_groups[year].append(f)
                     
-        logger.debug(f"All actual years extracted from filenames: {sorted(list(all_found_years))}")
-        
-        # Handle the generic 'BlueTopo.tif' case (using case-insensitive matching)
         generic_bathy = [f for f in all_files if 'bluetopo' in os.path.basename(str(f)).lower()]
         if generic_bathy:
             year_groups['BlueTopo'] = generic_bathy
             
-        logger.debug(f"Final grouped year-keys intended for processing: {list(year_groups.keys())}")
-
-        # 2. Process each year group
         for year, files in year_groups.items():
             dict_path = UPath(self._join_paths(output_dir, f"dictionary_{year}.csv"))
             if not getattr(self, 'overwrite', False) and dict_path.exists():
@@ -544,7 +467,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 continue
 
             logger.info(f"\n  - Processing group: {year} ({len(files)} files found)")
-
             file_data = [(f, self._getsize(f)) for f in files]
             all_sizes = [x[1] for x in file_data]
             size_threshold = np.percentile(all_sizes, 30)
@@ -566,27 +488,21 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         bathy_array[bathy_array == src.nodata] = np.nan
                         cell_size = src.res[0]
                         
-                        logger.info(f"      - Extracting up to {pixels_per_file} random valid pixels...")
                         valid_pixels = np.argwhere(~np.isnan(bathy_array))
                         if len(valid_pixels) > pixels_per_file:
                             sample_indices = valid_pixels[np.random.choice(len(valid_pixels), pixels_per_file, replace=False)]
                         else:
                             sample_indices = valid_pixels
                         
-                        logger.info("      - Calculating derivatives for sampled pixels...")
                         slope_sample = self.calculate_slope(bathy_array, cell_size)
-                        logger.info("      - Calculating BPI for sampled pixels...")
-                        
                         bpi_fine_sample = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
                         bpi_broad_sample = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
                         
-                        logger.info("      - Collecting sampled values...")
                         rows, cols = sample_indices[:, 0], sample_indices[:, 1]
                         all_samples['slope'].append(slope_sample[rows, cols])
                         all_samples['bpi_fine_std'].append(self.standardize_raster_array(bpi_fine_sample)[rows, cols])
                         all_samples['bpi_broad_std'].append(self.standardize_raster_array(bpi_broad_sample)[rows, cols])
 
-                        # Explicitly release large arrays 
                         del bathy_array, slope_sample, bpi_fine_sample, bpi_broad_sample
                         gc.collect()
 
@@ -594,7 +510,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     logger.warning(f"    - Warning: Could not sample from {os.path.basename(str(f))}. Reason: {e}")
                     continue
             
-            # Create and save the dictionary for this year
             if all_samples['slope']:
                 slope_agg = np.concatenate(all_samples['slope'])
                 fine_agg = np.concatenate(all_samples['bpi_fine_std'])
@@ -611,6 +526,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 
         logger.info("\n--- PHASE 1 Complete ---")
 
+
     def fill_with_fallback(self, input_file, output_file, max_iters=5, chunk_size=512) -> None:
         """Performs chunked iterative focal fill on a raster file using Dask and rioxarray."""
         logger.info(f"Attempting chunked fill for {os.path.basename(str(input_file))}")
@@ -619,16 +535,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         ds = rioxarray.open_rasterio(str(input_file), chunks=da_chunk)
         nodata = ds.rio.nodata
         
-        # [DIMENSIONALITY FIX]: Explicitly select band 0 to guarantee a 2D array.
-        # DO NOT use .squeeze() as it drops 'x' or 'y' if the tile is only 1 pixel wide/tall,
-        # which causes binary_erosion to crash with "dimensionality must match" errors.
         da = ds.isel(band=0).astype("float32")
         da = da.where(da != nodata)
         
         logger.info("Checking for interior gaps...")
         
-        # [MEMORY FIX 6]: single threaded compute on boolean mask
-        # [DIMENSIONALITY FIX]: use .values so scipy.ndimage gets a raw NumPy array
         nan_mask = da.isnull().compute(scheduler='single-threaded').values
         
         if not binary_erosion(nan_mask, structure=np.ones((3,3))).any():
@@ -645,8 +556,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         for i in range(max_iters):
             da_prev = da
-            
-            # Use dask.config context around ufunc to prevent threaded bloat
             with dask.config.set(scheduler='single-threaded'):
                 da = xr.apply_ufunc(
                     self.focal_fill_block,
@@ -658,7 +567,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     dask_gufunc_kwargs={"allow_rechunk": True},
                     output_dtypes=[da.dtype],
                 )
-
             da = xr.where(np.isnan(da_prev), da, da_prev)
 
         da = da.fillna(nodata)
@@ -670,6 +578,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         
         self._save_raster_da(da, output_file, compress='LZW')
         logger.info(f"✅ Filled raster process completed for: {os.path.basename(str(output_file))}")
+
 
     def focal_fill_block(self, block: np.ndarray, w=3) -> np.ndarray:
         """Performs a single, efficient, nan-aware focal mean on a NumPy array block."""
@@ -684,11 +593,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         return np.where(nan_mask, filled, block)
 
+
     def generate_neighborhood_statistics(self, file_path: Path) -> None:
         """Calculates focal mean and standard deviation for a given raster file."""
         logger.info(f"Calculating neighborhood statistics for: {file_path.name}")
         size = 3
-
         base_name = file_path.stem 
         out_dir = file_path.parent
         
@@ -696,11 +605,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         out_mean = out_dir / f"{base_name}_mean{size}.tif"
 
         if 'mean' in file_path.name or (not self.overwrite and self._exists(out_sd)):
-            logger.info(f"Output files already exist, skipping: {out_sd.name}")
             return 
-        
         if 'sd3' in file_path.name or (not self.overwrite and self._exists(out_mean)):
-            logger.info(f"Output files already exist, skipping: {out_mean.name}")
             return
         
         rds = rioxarray.open_rasterio(str(file_path), chunks=True).isel(band=0)
@@ -712,11 +618,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         self._save_raster_da(r_mean, str(out_mean), driver="GTiff", compress="LZW")
         self._save_raster_da(r_sd, str(out_sd), driver="GTiff", compress="LZW")
 
+
     def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir, main_output_dir, task_idx=None, total_tasks=None) -> str:
         """Main function to process one bathymetry raster."""
         base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
         output_dir = self._join_paths(main_output_dir, 'BTM_outputs')
-        
         progress_str = f"[{task_idx}/{total_tasks}] " if task_idx and total_tasks else ""
         
         out_dir_path = UPath(output_dir)
@@ -838,7 +744,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             if missing_numpy:
                 logger.info(f"[{base_name}] {progress_str}Generating NumPy BTM classification layers...")
                 
-                # Fix parsing to ensure BlueTopo files look for the correct dictionary
                 if 'bluetopo' in base_name.lower():
                     year = 'BlueTopo'
                 else:
@@ -849,7 +754,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     
                 dict_path = UPath(self._join_paths(dictionary_dir, f"dictionary_{year}.csv"))
                 if not dict_path.exists():
-                    # Fallback to case-insensitive scan of the directory
                     dict_files = self._safe_ls(dictionary_dir)
                     found = False
                     expected_suffix = f"dictionary_{year.lower()}.csv"
@@ -874,7 +778,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     cell_size = src.res[0]
                     shape_2d = (src.height, src.width)
                     
-                    # Create memory mapped array to prevent loading 1.6GB+ into RAM
                     bathy_array = np.memmap(os.path.join(tmpdir, "bathy.dat"), dtype='float32', mode='w+', shape=shape_2d)
                     src.read(1, out=bathy_array)
                     if nodata_val is not None:
@@ -886,10 +789,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     rugosity = self.calculate_tri(bathy_array)
                     profile.update(dtype=rugosity.dtype.name, nodata=np.nan, count=1, compress='LZW')
                     self._save_numpy_to_raster(rugosity, out_path_rug, profile, log_prefix=progress_str)
-                    del rugosity  # FREE MEMORY EARLY
+                    del rugosity  
                     gc.collect()
 
-                # Process 2: Slope (Memmapped to avoid RAM accumulation)
+                # Process 2: Slope
                 slope_raw = self.calculate_slope(bathy_array, cell_size)
                 slope = np.memmap(os.path.join(tmpdir, "slope.dat"), dtype='float32', mode='w+', shape=shape_2d)
                 slope[:] = slope_raw[:]
@@ -911,7 +814,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     self._save_numpy_to_raster(bpi_fine_std, out_path_fine, profile, log_prefix=progress_str)
                     gc.collect()
                 else:
-                    # If skipped, load a read-only memmap for classification
                     with rasterio.open(out_path_fine) as src_f:
                         bpi_fine_std = np.memmap(os.path.join(tmpdir, "fine.dat"), dtype='float32', mode='w+', shape=shape_2d)
                         src_f.read(1, out=bpi_fine_std)
@@ -930,19 +832,21 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     profile.update(dtype=bpi_broad_std.dtype.name, nodata=np.nan, count=1, compress='LZW')
                     self._save_numpy_to_raster(bpi_broad_std, out_path_broad, profile, log_prefix=progress_str)
                 else:
-                    # If skipped, load a read-only memmap for classification
                     with rasterio.open(out_path_broad) as src_b:
                         bpi_broad_std = np.memmap(os.path.join(tmpdir, "broad.dat"), dtype='float32', mode='w+', shape=shape_2d)
                         src_b.read(1, out=bpi_broad_std)
 
-                # WE ARE COMPLETELY DONE WITH BATHY ARRAY - HUGE MEMORY WIN
+                # WE ARE COMPLETELY DONE WITH BATHY ARRAY - EXPLICITLY DELETE FILE TO SAVE EBS DISK SPACE
                 del bathy_array
                 gc.collect()
+                try:
+                    os.remove(os.path.join(tmpdir, "bathy.dat"))
+                except OSError:
+                    pass
                 
                 # Process 5: Terrain Classification
                 out_path_class = self._join_paths(output_dir, base_name + "_terrain_classification.tif")
                 if self.overwrite or not self._exists(out_path_class):
-                    # Memmap classified array and iterate in chunks to prevent boolean math RAM spikes
                     classified_array = np.memmap(os.path.join(tmpdir, "class.dat"), dtype='float32', mode='w+', shape=shape_2d)
                     classified_array[:] = 0.0
                     
@@ -966,20 +870,24 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     self._save_numpy_to_raster(classified_array, out_path_class, profile, log_prefix=progress_str)
                     del classified_array
 
-                # Final cleanup
+                # Final cleanup - EXPLICITLY DELETE FILES TO SAVE EBS DISK SPACE
                 del slope, bpi_fine_std, bpi_broad_std
                 gc.collect()
+                for tmp_file in ["slope.dat", "fine.dat", "broad.dat", "class.dat"]:
+                    try:
+                        os.remove(os.path.join(tmpdir, tmp_file))
+                    except OSError:
+                        pass
 
-        # Target 1 status print over the network per successful file
         logger.info(f"✅ {progress_str}Successfully finished terrain processing: {base_name}")
         
-        # [MEMORY FIX 2]: Force OS to reclaim the memory pool at the end of heavy worker tasks
         try:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except Exception:
             pass
             
         return f"Success: {base_name} ({progress_str.strip()})"
+
 
     def group_files(self) -> Dict:
         """Groups files by Tile and Variable, then by Year."""
@@ -1007,6 +915,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 
                 groups[tile_id][var][year].append(f_path)
         return groups
+
 
     def group_files_simple(self) -> Dict:
         """Groups files strictly by Tile ID and Year."""
@@ -1041,13 +950,18 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 groups[tile_id][year].append(str(f_path))
         return groups
 
-    # [MEMORY FIX 3]: Close datasets cleanly to release open file handles in xarray
+
+    # [MEMORY FIX 3]: Removed the memory-spiking `.load()` operation and `masked=True` 
     def load_and_average(self, paths: List[str]) -> xr.DataArray:
-        """Loads a list of rasters, ALIGNS them to a common grid, and returns the mean."""
+        """Loads a list of rasters lazily, ALIGNS them to a common grid, and returns the mean."""
         das = []
         for p in paths:
-            # Masked=True can be memory intensive, be cautious
-            da = rioxarray.open_rasterio(str(p), chunks={"x": 512, "y": 512}, masked=True).isel(band=0)
+            # Replaced masked=True with lazy manual masking, as masked=True creates numpy.ma which bloats memory.
+            da = rioxarray.open_rasterio(str(p), chunks={"x": 1024, "y": 1024}, lock=False).isel(band=0)
+            
+            # Apply nodata mask lazily
+            if da.rio.nodata is not None:
+                da = da.where(da != da.rio.nodata)
             das.append(da)
         
         if not das:
@@ -1062,20 +976,16 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             aligned_das.append(da)
 
         combined = xr.concat(aligned_das, dim="merge_dim")
+        
+        # skipna=True automatically ignores the NaN values we set earlier
         averaged = combined.mean(dim="merge_dim", keep_attrs=True, skipna=True)
         
         if master.rio.crs:
             averaged.rio.write_crs(master.rio.crs, inplace=True)
             
-        # Force computation to memory so we can close the file handles
-        with dask.config.set(scheduler='single-threaded'):
-            averaged.load() 
-            
-        # Close all opened file handles to free unmanaged memory
-        for da in das:
-            da.close()
-            
+        # The file will remain lazy and will be computed safely in chunk streams when `_save_raster_da` writes it.
         return averaged
+
 
     def process(self) -> None:
         """Main function to find all bathy files and process them in parallel."""
@@ -1116,7 +1026,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             logger.info("Starting gap fill process in parallel...")
             tasks = []
             for file in lidar_data_paths:
-                # OPTIMIZATION: Dask delayed now targets the top-level wrapper function
                 task = dask.delayed(_run_gap_fill_task)(str(file), str(self.filled_dir), 3, self.overwrite, self.pilot_mode)
                 tasks.append(task)
             
@@ -1147,20 +1056,17 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         logger.info("\n--- PHASE 2: Pre-flight Check for Terrain Products ---")
         
-        # Accumulators for summary output
         total_missing_wbt = 0
         total_missing_tci = 0
         total_missing_shear = 0
         total_missing_numpy = 0
         total_skipped = 0
 
-        # Optimization: Fetch existing files once to avoid repeated network calls
         output_dir = self._join_paths(main_output_dir, 'BTM_outputs')
         existing_files = {UPath(f).name for f in self._safe_ls(output_dir)}
 
         files_to_process = []
 
-        # Sequentially check all files BEFORE queueing Dask tasks
         for bathy_file in bathy_files_to_process:
             base_name = os.path.splitext(os.path.basename(str(bathy_file)))[0]
 
@@ -1169,7 +1075,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 "_curv_profile.tif", "_curv_plan.tif", "_curv_total.tif", "_flowacc.tif"
             ]
             
-            # Sub-second O(1) set lookup instead of self._exists()
             missing_wbt = [s for s in wbt_suffixes if self.overwrite or (base_name + s) not in existing_files]
             missing_tci = self.overwrite or (base_name + "_tci.tif") not in existing_files
             missing_shear = self.overwrite or (base_name + "_shearproxy.tif") not in existing_files
@@ -1196,13 +1101,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         logger.info(f"Total missing NumPy layers: {total_missing_numpy}")
         logger.info(f"Files skipped (All exist):  {total_skipped}")
 
-        # Queue tasks with exact indices calculated out of total
         total_tasks = len(files_to_process)
         tasks = []
         
         logger.info(f"\n--- Queuing {total_tasks} parallel tasks for terrain processing ---")
         for idx, bathy_file in enumerate(files_to_process, 1):
-            # OPTIMIZATION: Dask delayed now targets the top-level wrapper function 
             task = dask.delayed(_run_terrain_task)(
                 str(bathy_file), 
                 best_radii, 
@@ -1217,7 +1120,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         if tasks:
             results = dask.compute(*tasks)
-            # The return statements from the delayed functions will print here in the main thread
             for res in results:
                 logger.info(res)
 
@@ -1260,13 +1162,13 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         
         logger.info("\n--- Processing Complete ---")
 
+
     def process_combination_task(self, paths: List[str], out_path_str: str) -> str:
         """Loads one or more rasters, averages them, and saves to new name."""
         out_path = UPath(out_path_str)
         if not self.overwrite and self._exists(out_path):
             return f"Skipped (Exists): {out_path.name}"
 
-        da_avg = None # initialize early for finally block cleanup safety
         try:
             da_avg = self.load_and_average(paths)
             da_avg.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
@@ -1289,10 +1191,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         except Exception as e:
             logger.error(f"❌ Error combining {out_path.name}: {str(e)}")
             return f"Error on {out_path.name}: {str(e)}"
-        
-        finally:
-            if da_avg is not None:
-                da_avg.close()
+
 
     def process_delta_task(self, paths_t0: List[str], paths_t1: List[str], out_path_str: str) -> str:
         """Calculates delta between two sets of file paths."""
@@ -1326,6 +1225,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             logger.error(f"❌ Error creating delta {out_path.name}: {str(e)}")
             return f"Error on {out_path.name}: {str(e)}"
 
+
     def run_bathy_combination(self):
         """Orchestrates the finding, averaging, and renaming of bathy files."""
         groups = self.group_files_simple()
@@ -1339,7 +1239,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 out_name = f"combined{len(paths)}_bathy_{tile_id}_{year}.tif"
                 out_path_str = self._join_paths(self.combined, out_name)
                 
-                # OPTIMIZATION: Dask delayed now targets the top-level wrapper function
                 task = dask.delayed(_run_combination_task)(paths, out_path_str, self.overwrite, self.pilot_mode)
                 delayed_tasks.append(task)
 
@@ -1351,6 +1250,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         results = dask.compute(*delayed_tasks)
         for res in results:
             logger.info(res)
+
 
     def run_gap_fill(self, input_file, output_dir, max_iters) -> None:
         """The main entry point for the gap-filling process."""
@@ -1367,6 +1267,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             output_file=output_file,
             max_iters=max_iters
         )
+
 
     def standardize_raster_array(self, input_array) -> np.ndarray:
         """Standardizes a numpy array (mean=0, sd=1)."""

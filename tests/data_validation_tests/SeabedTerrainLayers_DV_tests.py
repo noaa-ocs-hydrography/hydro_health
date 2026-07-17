@@ -2,12 +2,11 @@
 S3 Output Validation Test Suite for Seabed Terrain Engine.
 
 Instructions for running:
-1. Install dependencies: pip install pytest rasterio s3fs universal-pathlib boto3
-2. Set your AWS credentials in your environment (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
-3. Set the target S3 path as an environment variable:
-   export TEST_S3_BTM_PATH="s3://your-bucket-name/path/to/BTM_outputs"
+1. Install dependencies: pip install pytest rasterio s3fs universal-pathlib boto3 fpdf
+2. Ensure you have access to the 'hydro_health' module in your PYTHONPATH.
+3. Set your AWS credentials in your environment (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)
 4. Run the tests:
-   pytest test_s3_outputs.py -v
+   python test_seabed_terrain_outputs.py
 """
 
 import os
@@ -17,11 +16,118 @@ import rasterio
 from upath import UPath
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+
+# Import the project's configuration tools
+try:
+    from hydro_health.helpers.tools import get_config_item
+except ImportError:
+    raise ImportError("Could not import get_config_item. Make sure 'hydro_health' is in your PYTHONPATH.")
+
+
+# --- GLOBAL REPORT TRACKER ---
+REPORT_DATA = {}
+REPORT_FILENAME = "Seabed_Terrain_Validation_Report"
+
+# --- PDF REPORT GENERATOR ---
+def generate_pdf_report(data, filename=REPORT_FILENAME):
+    """
+    Generates a PDF using fpdf if available. 
+    Falls back to a Markdown (.md) file if fpdf is not installed.
+    Silently overwrites the file each time it's called so progress is saved.
+    """
+    try:
+        from fpdf import FPDF
+        
+        pdf = FPDF()
+        pdf.add_page()
+        pdf.set_font("Arial", 'B', 16)
+        pdf.cell(0, 10, "Seabed Terrain Validation Test Report", ln=True, align='C')
+        pdf.ln(10)
+        
+        for test_name, errors in data.items():
+            pdf.set_font("Arial", 'B', 12)
+            pdf.cell(0, 10, txt=f"Test: {test_name}", ln=True)
+            pdf.set_font("Arial", size=10)
+            
+            if not errors:
+                pdf.set_text_color(0, 150, 0) # Green
+                pdf.cell(0, 10, txt="Status: PASSED", ln=True)
+                pdf.set_text_color(0, 0, 0)
+            elif errors and errors[0].startswith("SKIPPED"):
+                pdf.set_text_color(200, 120, 0) # Orange
+                pdf.cell(0, 10, txt=errors[0], ln=True)
+                pdf.set_text_color(0, 0, 0)
+            else:
+                pdf.set_text_color(200, 0, 0) # Red
+                pdf.cell(0, 10, txt=f"Status: FAILED ({len(errors)} errors)", ln=True)
+                pdf.set_text_color(0, 0, 0)
+                for err in errors:
+                    # encode to handle special characters gracefully
+                    safe_txt = f"- {err}".encode('latin-1', 'replace').decode('latin-1')
+                    pdf.multi_cell(0, 8, txt=safe_txt)
+            pdf.ln(5)
+        
+        pdf_path = f"{filename}.pdf"
+        pdf.output(pdf_path)
+        
+    except ImportError:
+        # Fallback to Markdown
+        md_path = f"{filename}.md"
+        with open(md_path, "w") as f:
+            f.write("# Seabed Terrain Validation Test Report\n\n")
+            for test_name, errors in data.items():
+                f.write(f"### Test: {test_name}\n")
+                if not errors:
+                    f.write("**Status:** PASSED\n\n")
+                elif errors and errors[0].startswith("SKIPPED"):
+                    f.write(f"**Status:** {errors[0]}\n\n")
+                else:
+                    f.write(f"**Status:** FAILED ({len(errors)} errors)\n\n")
+                    for err in errors:
+                        f.write(f"- {err}\n")
+                    f.write("\n")
+
+def fail_with_errors(errors, test_name="Test"):
+    """Helper to fail tests cleanly and record all full paths for the PDF."""
+    REPORT_DATA[test_name] = errors
+    generate_pdf_report(REPORT_DATA)  # Write to PDF immediately
+    
+    if errors:
+        error_msg = f"{test_name} found {len(errors)} error(s):\n" + "\n".join(errors[:50])
+        if len(errors) > 50:
+            error_msg += f"\n...and {len(errors) - 50} more errors omitted from console. See generated PDF report."
+        pytest.fail(error_msg)
+
+def skip_test(reason, test_name="Test"):
+    """Helper to skip tests and record the skip reason for the PDF."""
+    REPORT_DATA[test_name] = [f"SKIPPED: {reason}"]
+    generate_pdf_report(REPORT_DATA)  # Write to PDF immediately
+    pytest.skip(reason)
+
+def log_error(errors_list, msg):
+    """Helper to instantly print out a failure to the console and track it."""
+    print(f"\n[FAIL] {msg}")
+    errors_list.append(msg)
+
 
 # --- CONFIGURATION ---
-# Default to an empty string to force the user to set it, or fallback for local dev
-S3_BTM_PATH = os.environ.get("TEST_S3_BTM_PATH", "s3://my-hydro-bucket/BTM_outputs")
-S3_DICT_PATH = os.environ.get("TEST_S3_DICT_PATH", "s3://my-hydro-bucket/dictionaries")
+# Dynamically fetch the paths using the original project configuration
+bucket = get_config_item('S3', 'BUCKET_NAME').strip('/')
+raw_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
+clean_out_dir = str(raw_output_dir).replace("s3://", "").strip('/')
+
+if not clean_out_dir.startswith(bucket):
+    main_output_dir = f"s3://{bucket}/{clean_out_dir}"
+else:
+    main_output_dir = f"s3://{clean_out_dir}"
+
+default_btm_path = f"{main_output_dir}/BTM_outputs"
+default_dict_path = f"{main_output_dir}/dictionaries"
+
+# We still allow env var overrides for flexible CI/CD testing, but default to the dynamic config
+S3_BTM_PATH = os.environ.get("TEST_S3_BTM_PATH", default_btm_path)
+S3_DICT_PATH = os.environ.get("TEST_S3_DICT_PATH", default_dict_path)
 
 # The exact 13 derivatives created by the CreateSeabedTerrainLayerEngine
 EXPECTED_DERIVATIVE_SUFFIXES = [
@@ -57,7 +163,7 @@ def s3_all_files():
     
     # Check if path exists to prevent immediate failure on empty environments
     if not base_path.exists():
-        pytest.skip(f"S3 Path does not exist or is inaccessible: {S3_BTM_PATH}")
+        skip_test(f"S3 Path does not exist or is inaccessible: {S3_BTM_PATH}", "Fixture: s3_all_files")
         
     all_files = list(base_path.rglob("*.tif"))
     return all_files
@@ -89,7 +195,11 @@ def base_file_groups(s3_all_files):
 
 def test_files_exist_in_bucket(s3_all_files):
     """Ensure that the engine actually wrote files to the bucket."""
-    assert len(s3_all_files) > 0, f"No .tif files found in {S3_BTM_PATH}!"
+    errors = []
+    if len(s3_all_files) == 0:
+        log_error(errors, f"No .tif files found in {S3_BTM_PATH}!")
+        
+    fail_with_errors(errors, "Files Exist in Bucket")
 
 
 def test_derivative_counts(base_file_groups):
@@ -97,15 +207,16 @@ def test_derivative_counts(base_file_groups):
     For every unique base bathymetry file processed, ensure exactly 
     13 derivative files were created and output.
     """
-    assert len(base_file_groups) > 0, "No valid derivative groups found to test."
-    
-    failed_bases = []
+    if len(base_file_groups) == 0:
+        skip_test("No valid derivative groups found to test.", "Derivative Counts")
+        
+    errors = []
     for base_name, found_suffixes in base_file_groups.items():
         missing_suffixes = set(EXPECTED_DERIVATIVE_SUFFIXES) - set(found_suffixes)
         if missing_suffixes:
-            failed_bases.append(f"{base_name} is missing: {missing_suffixes}")
+            log_error(errors, f"{base_name} is missing: {missing_suffixes}")
             
-    assert not failed_bases, f"Some base files did not generate all 13 derivatives:\n" + "\n".join(failed_bases)
+    fail_with_errors(errors, "Derivative Counts")
 
 
 def test_total_derivative_count(s3_all_files, base_file_groups):
@@ -114,6 +225,9 @@ def test_total_derivative_count(s3_all_files, base_file_groups):
     based on the number of unique base bathymetry files, and verifies the 
     bucket contains exactly that number.
     """
+    if len(base_file_groups) == 0:
+        skip_test("No valid derivative groups found to test.", "Total Derivative Count")
+        
     num_base_files = len(base_file_groups)
     num_suffixes = len(EXPECTED_DERIVATIVE_SUFFIXES)
     
@@ -125,11 +239,13 @@ def test_total_derivative_count(s3_all_files, base_file_groups):
         if any(f.name.endswith(suffix) for suffix in EXPECTED_DERIVATIVE_SUFFIXES)
     ]
     
-    assert len(actual_derivatives) == expected_total_derivatives, (
-        f"Expected {expected_total_derivatives} total derivatives "
-        f"({num_base_files} base files * {num_suffixes} suffixes), "
-        f"but found {len(actual_derivatives)}."
-    )
+    errors = []
+    if len(actual_derivatives) != expected_total_derivatives:
+        log_error(errors, f"Expected {expected_total_derivatives} total derivatives "
+                          f"({num_base_files} base files * {num_suffixes} suffixes), "
+                          f"but found {len(actual_derivatives)}.")
+                          
+    fail_with_errors(errors, "Total Derivative Count")
 
 
 def test_no_rogue_files(s3_all_files):
@@ -137,12 +253,12 @@ def test_no_rogue_files(s3_all_files):
     Ensures that ONLY valid derivatives exist in the output directory.
     Catches stray temporary files, .aux.xml, or accidentally exported intermediate steps.
     """
-    rogue_files = []
+    errors = []
     for f in s3_all_files:
         if not any(f.name.endswith(suffix) for suffix in EXPECTED_DERIVATIVE_SUFFIXES):
-            rogue_files.append(f.name)
+            log_error(errors, f"Unexpected rogue file found: {f.name}")
             
-    assert not rogue_files, f"Found {len(rogue_files)} unexpected rogue files in the bucket:\n" + "\n".join(rogue_files)
+    fail_with_errors(errors, "No Rogue Files")
 
 
 def _check_raster_metadata(file_path):
@@ -208,30 +324,41 @@ def test_all_raster_metadata_and_sizes(s3_all_files):
     Concurrently opens ALL output files to check sizes, CRS, Resolution, and Bounds.
     No sampling - every single file is verified concurrently to speed up network requests.
     """
-    assert len(s3_all_files) > 0, "No files to test."
+    if len(s3_all_files) == 0:
+        skip_test("No files to test.", "Raster Metadata and Sizes")
     
-    failed_files = []
+    errors = []
+    total_files = len(s3_all_files)
     
     # Use a ThreadPoolExecutor to parallelize S3 reads
-    print(f"\nChecking metadata for all {len(s3_all_files)} files using {MAX_WORKERS} threads...")
+    print(f"\nChecking metadata for all {total_files} files using {MAX_WORKERS} threads...")
+    completed = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         future_to_file = {executor.submit(_check_raster_metadata, fp): fp for fp in s3_all_files}
         for future in as_completed(future_to_file):
+            completed += 1
+            print(f"\rTesting metadata {completed}/{total_files}...   ", end="", flush=True)
+            
             error_msg = future.result()
             if error_msg:
-                failed_files.append(error_msg)
+                log_error(errors, error_msg)
                 
-    assert not failed_files, f"{len(failed_files)} files failed metadata checks:\n" + "\n".join(failed_files)
+    print("\nFinished checking metadata.")
+    fail_with_errors(errors, "Raster Metadata and Sizes")
 
 
 def test_dictionaries_created(base_file_groups):
     """Ensure the regional classification dictionaries were output for all processed years."""
     dict_dir = UPath(S3_DICT_PATH)
     if not dict_dir.exists():
-        pytest.skip(f"Dictionary directory does not exist: {S3_DICT_PATH}")
+        skip_test(f"Dictionary directory does not exist: {S3_DICT_PATH}", "Dictionaries Created")
         
+    errors = []
     csv_files = list(dict_dir.glob("*.csv"))
-    assert len(csv_files) > 0, f"No classification dictionaries (*.csv) found in {S3_DICT_PATH}"
+    if len(csv_files) == 0:
+        log_error(errors, f"No classification dictionaries (*.csv) found in {S3_DICT_PATH}")
+        fail_with_errors(errors, "Dictionaries Created")
+        return
     
     csv_names = [f.name for f in csv_files]
     
@@ -247,15 +374,51 @@ def test_dictionaries_created(base_file_groups):
                 if part.isdigit() and len(part) == 4:
                     expected_years.add(part)
     
-    missing_dicts = []
     for year in expected_years:
         expected_csv = f"dictionary_{year}.csv"
         # Fallback for lowercase/uppercase variations
         if expected_csv not in csv_names and expected_csv.lower() not in [n.lower() for n in csv_names]:
-            missing_dicts.append(expected_csv)
+            log_error(errors, f"Missing classification dictionary for expected year: {expected_csv}")
             
-    assert not missing_dicts, f"Missing classification dictionaries for expected years: {missing_dicts}"
-    
     # Spot check that they have some size
     for csv in csv_files:
-        assert csv.stat().st_size > 50, f"Dictionary {csv.name} is empty or invalid."
+        if csv.stat().st_size <= 50:
+            log_error(errors, f"Dictionary {csv.name} is empty or invalid (<= 50 bytes).")
+            
+    fail_with_errors(errors, "Dictionaries Created")
+
+
+# --- CUSTOM TEST RUNNER ---
+# Run via `python test_seabed_terrain_outputs.py` to use this block!
+
+if __name__ == "__main__":
+    import sys
+
+    # Comment out any test in this list that you want to skip.
+    tests_to_run = [
+        "test_files_exist_in_bucket",
+        "test_derivative_counts",
+        "test_total_derivative_count",
+        "test_no_rogue_files",
+        "test_all_raster_metadata_and_sizes",
+        "test_dictionaries_created"
+    ]
+
+    print("--- custom test runner ---")
+    
+    if not tests_to_run:
+        print("No tests selected to run. Uncomment tests in the `tests_to_run` list.")
+        sys.exit(0)
+
+    # Build the pytest arguments
+    file_path = str(Path(__file__).absolute())
+    pytest_args = ["-v", "-s"] + [f"{file_path}::{test}" for test in tests_to_run]
+    
+    print(f"Executing {len(tests_to_run)} test(s)...\n")
+    
+    # Pass control to pytest (runs tests in the same process, populating REPORT_DATA)
+    exit_code = pytest.main(pytest_args)
+    
+    print(f"\n[+] Testing finished. Final report generated at {REPORT_FILENAME}.pdf (or .md)")
+    
+    sys.exit(exit_code)

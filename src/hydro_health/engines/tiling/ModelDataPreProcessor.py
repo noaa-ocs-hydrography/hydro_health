@@ -7,27 +7,36 @@ import yaml
 import warnings
 import tempfile
 import shutil
-import gc # <--- Added for manual memory management
-import logging # <--- Added for standard logging
-import psutil # <--- Added for tracking RAM utilization
-import ctypes # <--- Added for C-level unmanaged memory trimming
+import logging 
+import psutil 
+import gc
+import platform
+import ctypes
 from logging.handlers import RotatingFileHandler
 from typing import List, Tuple, Literal
 from pathlib import Path
-from rasterio.features import shapes # Removed geometry_mask as it was causing the CPU/RAM stall
+
+# Rasterio imports for array masking and vectorization
+import rasterio
+from rasterio.features import shapes, rasterize 
 from rasterio.warp import transform_bounds
+from rasterio.transform import from_origin
+from rasterio.vrt import WarpedVRT
+from rasterio.enums import Resampling
+
 from shapely.geometry import shape, Point, box, Polygon, MultiPolygon, GeometryCollection
-from shapely.ops import unary_union # <--- ADDED: Needed to merge geometries at the chunk level to save RAM
+from shapely.ops import unary_union 
 import s3fs
-from scipy.ndimage import convolve, uniform_filter # <--- Added for TSM smoothing
+from scipy.ndimage import convolve, uniform_filter 
+
+# Tell glibc to return freed memory to the OS immediately
 os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
-import rasterio
 import dask
-from dask.distributed import Client, LocalCluster, performance_report, WorkerPlugin # <--- ADDED WorkerPlugin
+from dask.distributed import Client, LocalCluster, performance_report, as_completed
 from osgeo import gdal
 from upath import UPath 
 
@@ -35,23 +44,36 @@ from hydro_health.helpers.tools import get_config_item, get_environment
 from hydro_health.engines.CreateSeabedTerrainLayerEngine import CreateSeabedTerrainLayerEngine
 from hydro_health.engines.Engine import Engine
 
-dask.config.set({"distributed.worker.memory.terminate": 0.95})
-dask.config.set({"distributed.worker.memory.pause": 0.85})
-dask.config.set({"distributed.worker.memory.spill": 0.80})
+# Maximizing worker memory usage limits
+dask.config.set({"distributed.worker.memory.terminate": 0.98})
+dask.config.set({"distributed.worker.memory.pause": 0.95})
+dask.config.set({"distributed.worker.memory.spill": 0.92})
 
-# Must be set before starting the Dask cluster
-# os.environ["MALLOC_TRIM_THRESHOLD_"] = "65536"
+# =========================================================================
+# GDAL CONFIGURATION & S3 NETWORK OPTIMIZATIONS
+# =========================================================================
+GDAL_ENV_VARS = {
+    "GDAL_CACHEMAX": "128",                       # Lowered to 128 MB Cache
+    "GDAL_HTTP_MAX_RETRY": "10",                  # Increased to 10 retries for transient S3 errors
+    "GDAL_HTTP_RETRY_DELAY": "5",                 # Delay between retries
+    "AWS_MAX_CONNECTIONS": "16",                  # Reduced to 16 to avoid exhausting S3 connection limits per worker
+    "VSI_CACHE": "TRUE",
+    "VSI_CACHE_SIZE": "67108864",                 # 64 MB VSI Cache
+    "CHECK_DISK_FREE_SPACE": "FALSE",    
+    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR", 
+    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.vrt,.gpkg,.parquet", 
+    "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",  # Avoids tiny contiguous read requests
+    "CPL_VSIL_CURL_CHUNK_SIZE": "1048576",         # 1MB blocks to significantly cut down request round-trips
+    "GDAL_HTTP_MULTIPLEX": "YES",                  # Enables HTTP/2 multiplexing over single TCP connection
+    "GDAL_HTTP_TIMEOUT": "30",                     # Prevent silent hanging connections
+    "GDAL_HTTP_CONNECTTIMEOUT": "10",              # Fail-fast on stale connections
+    "CPL_VSIL_CURL_USE_HEAD": "NO",               # Drastically reduces rate-limiting HEAD requests to S3
+    "GDAL_INGested_BYTES_AT_OPEN": "32768"         # Caches metadata header bytes to minimize initial range requests
+}
 
-# GDAL Configuration and S3 Network Optimizations (Memory Footprint Reduced)
-os.environ["GDAL_CACHEMAX"] = "128"             # Lowered to 128 MB Cache to prevent Dask unmanaged memory kills
-os.environ["GDAL_HTTP_MAX_RETRY"] = "5"
-os.environ["GDAL_HTTP_RETRY_DELAY"] = "3"
-os.environ["AWS_MAX_CONNECTIONS"] = "32"
-os.environ["VSI_CACHE"] = "TRUE"
-os.environ["VSI_CACHE_SIZE"] = "67108864"       # Lowered to 64 MB VSI Cache
-os.environ["CHECK_DISK_FREE_SPACE"] = "FALSE"    # <--- ADDED to prevent aggressive disk space check crashes
-os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR" # <--- CRITICAL: Prevents GDAL from caching entire S3 directories in unmanaged RAM
-os.environ["CPL_VSIL_CURL_ALLOWED_EXTENSIONS"] = ".tif,.tiff,.vrt,.gpkg,.parquet" # <--- Prevents sidecar file hunting
+# Apply env configurations globally to the master process
+for key, val in GDAL_ENV_VARS.items():
+    os.environ[key] = val
 
 # ==========================================
 # LOGGING CONFIGURATION
@@ -64,51 +86,17 @@ logging.basicConfig(
     handlers=[
         RotatingFileHandler(
             LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3
-        ), # Rotates file when it hits 10MB, keeping the last 3 backups
-        logging.StreamHandler()            # Prints to console
+        ), 
+        logging.StreamHandler()            
     ]
 )
 logger = logging.getLogger(__name__)
 
-# Suppress noisy third-party logs (like AWS IAM credential fetches) in the main process
+# Suppress noisy third-party logs
 logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
 logging.getLogger('botocore').setLevel(logging.WARNING)
 logging.getLogger('boto3').setLevel(logging.WARNING)
 logging.getLogger('s3fs').setLevel(logging.WARNING)
-
-# ==========================================
-# DASK WORKER C-LEVEL MEMORY MANAGEMENT
-# ==========================================
-class CLevelMemoryCleanupPlugin(WorkerPlugin):
-    """Dask worker plugin to aggressively clean unmanaged C-level memory and suppress worker logs."""
-    def setup(self, worker):
-        import os
-        import logging
-        import ctypes
-        
-        # 1. Suppress boto3/s3fs logs leaking from worker processes (fixes the IAM credential spam)
-        logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
-        logging.getLogger('botocore').setLevel(logging.WARNING)
-        logging.getLogger('boto3').setLevel(logging.WARNING)
-        logging.getLogger('s3fs').setLevel(logging.WARNING)
-        
-        # 2. Re-apply memory constraints inside the worker sandbox environment
-        os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
-        os.environ["GDAL_DISABLE_READDIR_ON_OPEN"] = "EMPTY_DIR"
-        
-        # 3. Setup C-level memory trim function
-        self.libc = None
-        try:
-            self.libc = ctypes.CDLL('libc.so.6')
-        except Exception:
-            pass
-
-    def transition(self, key, start, finish, *args, **kwargs):
-        # When a task finishes and leaves memory, force C-level garbage collection 
-        # This explicitly fixes the "Unmanaged memory use is high" Dask warning
-        if finish == 'released' or finish == 'forgotten':
-            if self.libc:
-                self.libc.malloc_trim(0)
 
 
 class ModelDataPreProcessor(Engine):
@@ -130,9 +118,23 @@ class ModelDataPreProcessor(Engine):
         self.excluded_keys = self._load_exclusion_config()
         self.is_aws = (get_environment() == 'aws')
 
+    @staticmethod
+    def _trim_memory() -> None:
+        """
+        Aggressively forces garbage collection and tells the OS to reclaim freed memory.
+        This resolves Dask's 'Unmanaged memory' warnings caused by glibc hoarding memory
+        from pandas DataFrames and numpy arrays.
+        """
+        gc.collect()
+        if platform.system() == "Linux":
+            try:
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            except Exception:
+                pass
+
     def create_file_paths(self):
         """Creates unified UPath objects that work both locally and on S3."""
-        # Determine the base prefix depending on the environment
         prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
         logger.info(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
         logger.info(f"Mode detected: {'Pilot' if self.pilot_mode else 'Full'}")
@@ -161,7 +163,6 @@ class ModelDataPreProcessor(Engine):
             'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', pilot_mode=self.pilot_mode)}")
         }
         
-        # Use the user's home directory to guarantee write permissions and use the large EBS volume
         self.local_tmp_dir = Path.home() / "hydro_health_local_tmp"
 
     def _clean_local_tmp(self) -> None:
@@ -197,58 +198,45 @@ class ModelDataPreProcessor(Engine):
             logger.exception(f"Loading exclusion config failed: {e}")
             return set()
 
-    def _clean_geometry(self, geom):
-        """Fix geometric artifacts caused by union_all() and enforce MultiPolygon."""
-        if geom.geom_type == 'GeometryCollection':
-            polys = [g for g in geom.geoms if g.geom_type in ['Polygon', 'MultiPolygon']]
-            if not polys:
-                raise ValueError("No polygons found in the mask geometry.")
-            return MultiPolygon(polys)
-        elif geom.geom_type == 'Polygon':
-            return MultiPolygon([geom])
-        
-        return geom
-
     def process(self) -> None:
         """Main function to process model data."""   
         logger.info(f"Starting ModelDataPreProcessor. Logs are being saved to: {LOG_FILE_PATH}")
         self.create_file_paths()
         self._clean_local_tmp()
 
-        # UPDATED: More memory per worker, fewer workers to balance overall system memory
+        # NOTE: Phase 1 is for Raster operations which are block-based and use less working memory
+        logger.info("Initializing Phase 1 Cluster: Heavy Raster Processing (8 workers, standard memory)")
         cluster = LocalCluster(
-            n_workers=8,           # Reduced from 16 to free up system RAM
+            n_workers=8,            
             threads_per_worker=1,  
-            memory_limit='8GB'     # Increased from 2GB to allow GDAL to breathe safely
+            memory_limit='3.5GB',
+            env=GDAL_ENV_VARS,
+            local_directory=str(self.local_tmp_dir) # Route Dask spills to cleanable local tmp
         )
         client = Client(cluster)
         
-        # Register the new C-level Memory & Log Cleanup plugin to all workers
-        client.register_plugin(CLevelMemoryCleanupPlugin())
-        logger.info(f"Dask Dashboard: {client.dashboard_link}")
+        logger.info(f"Phase 1 Dask Dashboard: {client.dashboard_link}")
 
         try:        
-            report_file = "dask_performance_report.html"
-            logger.info(f"Saving Dask performance report to: {report_file}")
+            report_file_raster = "dask_performance_report_rasters.html"
+            logger.info(f"Saving Phase 1 Dask performance report to: {report_file_raster}")
             
-            # This is the new context manager tracking the live client!
-            with performance_report(filename=report_file):
+            with performance_report(filename=report_file_raster):
                 mask_pred_gdf = gpd.read_parquet(str(self.mask_prediction_pq))
                 mask_train_gdf = gpd.read_parquet(str(self.mask_training_pq))
 
-                logger.info("Cleaning and preparing mask geometries...")
-                mask_pred_clean = self._clean_geometry(mask_pred_gdf.union_all())
-                mask_train_clean = self._clean_geometry(mask_train_gdf.union_all())
+                # Replaced .union_all() with direct bounding box calculation and raw shape export.
+                logger.info("Extracting bounds and exporting geometries...")
+                mask_pred_bounds = mask_pred_gdf.total_bounds
+                mask_train_bounds = mask_train_gdf.total_bounds
 
-                logger.info("Generating single shared cutline files...")
-                pred_cutline_path = str(self.local_tmp_dir / "pred_cutline.geojson")
-                train_cutline_path = str(self.local_tmp_dir / "train_cutline.geojson")
+                logger.info("Generating cutline files (using GeoPackage for fast spatial indexing)...")
+                pred_cutline_path = str(self.local_tmp_dir / "pred_cutline.gpkg")
+                train_cutline_path = str(self.local_tmp_dir / "train_cutline.gpkg")
                 
-                gpd.GeoDataFrame(geometry=[mask_pred_clean], crs=self.target_crs).to_file(pred_cutline_path, driver='GeoJSON')
-                gpd.GeoDataFrame(geometry=[mask_train_clean], crs=self.target_crs).to_file(train_cutline_path, driver='GeoJSON')
-
-                mask_pred_bounds = mask_pred_clean.bounds
-                mask_train_bounds = mask_train_clean.bounds
+                # Using GPKG natively builds a spatial R-Tree index
+                mask_pred_gdf.to_file(pred_cutline_path, driver='GPKG')
+                mask_train_gdf.to_file(train_cutline_path, driver='GPKG')
 
                 self.parallel_processing_rasters(
                     self.preprocessed_dir, 
@@ -258,25 +246,101 @@ class ModelDataPreProcessor(Engine):
                     train_cutline_path
                 )
 
-                self.clip_rasters_by_tile(
-                    raster_dir=self.prediction_out_dir, 
-                    output_dir=self.prediction_tiles_dir, 
-                    data_type="prediction"
-                )
+            # --- PHASE 2 CLUSTER TRANSITION ---
+            logger.info("Phase 1 Complete. Shutting down raster cluster and re-initializing for Parquet Subtiling...")
+            client.close()
+            cluster.close()
+            
+            logger.info("Initializing Phase 2 Cluster: Parquet Subtiling & Transforms (Balanced workers, standard memory)")
+            cluster = LocalCluster(
+                n_workers=8,            
+                threads_per_worker=1,  
+                memory_limit='3.5GB',
+                env=GDAL_ENV_VARS,
+                local_directory=str(self.local_tmp_dir) # Route Dask spills to cleanable local tmp
+            )
+            client = Client(cluster)
+            logger.info(f"Phase 2 Dask Dashboard: {client.dashboard_link}")
+            
+            report_file_tiling = "dask_performance_report_tiling.html"
+            logger.info(f"Saving Phase 2 Dask performance report to: {report_file_tiling}")
 
-                self.clip_rasters_by_tile(
-                    raster_dir=self.training_out_dir, 
-                    output_dir=self.training_tiles_dir, 
-                    data_type="training"
-                )
+            with performance_report(filename=report_file_tiling):
+                # self.clip_rasters_by_tile(
+                #     raster_dir=self.prediction_out_dir, 
+                #     output_dir=self.prediction_tiles_dir, 
+                #     data_type="prediction"
+                # )
+
+                # self.clip_rasters_by_tile(
+                #     raster_dir=self.training_out_dir, 
+                #     output_dir=self.training_tiles_dir, 
+                #     data_type="training"
+                # )
                 
+                self.batch_long_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
                 self.batch_long_format_transformation(base_dir=self.training_tiles_dir, mode="training")
 
         except Exception as e:
             logger.exception("A critical error occurred in the main process loop.")
         finally:
-            client.close()
+            try:
+                client.close()
+                cluster.close()
+            except:
+                pass
             
+    def _create_binary_mask_raster(self, cutline_path, bounds, output_path) -> str:
+        """
+        Creates a global binary raster mask (1 for valid, 0 for invalid) 
+        from a vector layer before running Dask distributed processes.
+        """
+        logger.info(f"Burning vector mask into binary raster: {output_path}")
+        gdf = gpd.read_file(cutline_path)
+        
+        minx, miny, maxx, maxy = bounds
+        res = self.target_res
+        
+        # Snap bounds to target resolution grid
+        minx = np.floor(minx / res) * res
+        maxy = np.ceil(maxy / res) * res
+        maxx = np.ceil(maxx / res) * res
+        miny = np.floor(miny / res) * res
+        
+        width = int((maxx - minx) / res)
+        height = int((maxy - miny) / res)
+        
+        # Generate the affine transform
+        transform = from_origin(minx, maxy, res, res)
+        
+        # Rasterize shapes (burn value 1)
+        shapes_gen = ((geom, 1) for geom in gdf.geometry)
+        mask_arr = rasterize(
+            shapes=shapes_gen,
+            out_shape=(height, width),
+            transform=transform,
+            fill=0,
+            dtype='uint8'
+        )
+        
+        meta = {
+            'driver': 'GTiff',
+            'height': height,
+            'width': width,
+            'count': 1,
+            'dtype': 'uint8',
+            'crs': self.target_crs,
+            'transform': transform,
+            'compress': 'lzw',
+            'tiled': True,
+            'nodata': 0
+        }
+        
+        with rasterio.open(output_path, 'w', **meta) as dst:
+            dst.write(mask_arr, 1)
+            
+        return output_path
+
     def parallel_processing_rasters(self, input_directory, mask_pred_bounds, mask_train_bounds, pred_cutline_path, train_cutline_path) -> None:
         """Process prediction and training rasters in parallel using Dask."""
         input_directory = UPath(input_directory)
@@ -285,7 +349,6 @@ class ModelDataPreProcessor(Engine):
             self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
             self.training_out_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- 1. Identify Existing Outputs ---
         existing_pred_outputs = {
             f.name for f in self.prediction_out_dir.rglob("*")
             if f.suffix.lower() in {'.tif', '.tiff'}
@@ -301,7 +364,6 @@ class ModelDataPreProcessor(Engine):
             if f.suffix.lower() in {'.tif', '.tiff'}
         }
 
-        # --- 2. Scan for Source Files ---
         potential_files = []
         logger.info(f"Scanning for preprocessed input rasters in: {self.preprocessed_dir}")
 
@@ -322,7 +384,6 @@ class ModelDataPreProcessor(Engine):
 
         logger.info(f"Found {len(potential_files)} total potential source files in input directories.")
 
-        # --- 3. Filter Source Files Based on Exclusions ---
         excluded_folders = {'filled_tifs', 'combined_lidar_tifs'}
         valid_source_files = []
         removed_folders = 0
@@ -346,7 +407,6 @@ class ModelDataPreProcessor(Engine):
         logger.info(f" -> Valid source files for processing: {len(valid_source_files)}")
         logger.info(f"------------------------------------")
 
-        # --- 4. Queue Prediction Tasks ---
         prediction_files = []
         removed_existing_pred = 0
         
@@ -362,26 +422,48 @@ class ModelDataPreProcessor(Engine):
         logger.info(f"Outputting prediction rasters to: {self.prediction_out_dir}")
         logger.info(f"Queuing {len(prediction_files)} prediction files{skip_pred_msg}...")
         
-        prediction_tasks = []
-        for file_path in prediction_files:
+        # -------------------------------------------------------------
+        # DYNAMIC DASK TASK STREAM (PREDICTION)
+        # Prevents idle workers by instantly replacing completed tasks
+        # -------------------------------------------------------------
+        client = dask.distributed.client.default_client()
+        max_concurrent = 200 # Optimal buffer to keep scheduler fast while workers stay saturated
+        total_pred = len(prediction_files)
+        prediction_iterator = iter(enumerate(prediction_files))
+        seq = as_completed()
+        
+        def submit_pred_task(item):
+            i, file_path = item
             base_out = self.uncombined_lidar_dir if "mosaic" in file_path.name.lower() else self.prediction_out_dir
             output_path = base_out / file_path.name
-            
-            task = dask.delayed(self.process_prediction_raster)(
+            return client.submit(
+                self.process_prediction_raster,
                 str(file_path), 
                 mask_pred_bounds, 
                 str(output_path),
                 pred_cutline_path
             )
-            prediction_tasks.append(task)
 
-        if prediction_tasks:
-            dask.compute(*prediction_tasks)
+        # Initial queue fill
+        for _ in range(min(max_concurrent, total_pred)):
+            try:
+                seq.add(submit_pred_task(next(prediction_iterator)))
+            except StopIteration:
+                break
+
+        # Process stream
+        for future in seq:
+            future.result() # Raise exceptions if any occurred
+            try:
+                seq.add(submit_pred_task(next(prediction_iterator)))
+            except StopIteration:
+                pass
+
+        if total_pred > 0:
             logger.info("[SUCCESS] Prediction raster processing complete.")
         else:
             logger.info("No new prediction rasters to process.")
 
-        # --- 5. Run Seabed Terrain Layer Engine ---
         # HARD FLUSH: Clear out any accumulated VSI Cache / memory blocks before handing off to the Engine
         logger.info("Restarting Dask client to aggressively flush unmanaged memory before starting Seabed Engine...")
         try:
@@ -402,7 +484,10 @@ class ModelDataPreProcessor(Engine):
         except Exception as e:
             logger.warning(f"Could not restart client after Seabed Engine: {e}")
 
-        # --- 6. Gather Training Inputs (from Prediction Outputs) ---
+        # GENERATE BINARY TRAINING MASK PRIOR TO DASK WORKERS
+        global_mask_path = str(self.local_tmp_dir / "global_train_mask.tif")
+        self._create_binary_mask_raster(train_cutline_path, mask_train_bounds, global_mask_path)
+
         potential_train_inputs = list(self.prediction_out_dir.rglob("*"))
         training_candidates = [
             f for f in potential_train_inputs
@@ -413,7 +498,6 @@ class ModelDataPreProcessor(Engine):
         removed_existing_train = 0
         
         for f in training_candidates:
-            # Do not process uncombined mosaics for training
             if 'mosaic' in f.name.lower() and 'filled' not in f.name.lower():
                 continue
                 
@@ -428,161 +512,205 @@ class ModelDataPreProcessor(Engine):
         logger.info(f"Outputting training rasters to: {self.training_out_dir}")
         logger.info(f"Queuing {len(training_files)} training files{skip_train_msg}...")
 
-        training_tasks = []
-        for file_path in training_files:
+        # -------------------------------------------------------------
+        # DYNAMIC DASK TASK STREAM (TRAINING)
+        # Prevents idle workers by instantly replacing completed tasks
+        # -------------------------------------------------------------
+        client = dask.distributed.client.default_client()
+        total_train = len(training_files)
+        training_iterator = iter(enumerate(training_files))
+        seq_train = as_completed()
+        
+        def submit_train_task(item):
+            i, file_path = item
             output_path = self.training_out_dir / file_path.name
-            
-            task = dask.delayed(self.process_training_raster)(
+            return client.submit(
+                self.process_training_raster,
                 str(file_path), 
                 mask_train_bounds, 
                 str(output_path),
-                train_cutline_path
+                global_mask_path,
+                current_index=i + 1,
+                total_count=total_train
             )
-            training_tasks.append(task)
 
-        if training_tasks:
-            dask.compute(*training_tasks)
+        # Initial queue fill
+        for _ in range(min(max_concurrent, total_train)):
+            try:
+                seq_train.add(submit_train_task(next(training_iterator)))
+            except StopIteration:
+                break
+
+        # Process stream
+        for future in seq_train:
+            future.result() 
+            try:
+                seq_train.add(submit_train_task(next(training_iterator)))
+            except StopIteration:
+                pass
+
+        if total_train > 0:
             logger.info("[SUCCESS] Training raster processing complete.")
         else:
             logger.info("No new training rasters to process.")
 
     def process_prediction_raster(self, raster_path, mask_bounds, output_path, cutline_path) -> None:
         """Reprojects, resamples, and crops a raster for prediction."""
-        raster_name = pathlib.Path(raster_path).name.lower()
-        
-        logger.info(f"-> [STARTING] Worker executing prediction on: {raster_name}")
-
         try:
-            with rasterio.open(raster_path) as src:
-                src_nodata = src.nodata
-                raster_crs = src.crs
-                raster_bounds = src.bounds
-        except Exception as e:
-            logger.exception(f"Could not open {raster_name} with rasterio. File might be corrupted.")
-            return
+            raster_name = pathlib.Path(raster_path).name.lower()
+            open_path = str(raster_path)
+            
+            if self.is_aws and open_path.startswith('s3://'):
+                open_path = open_path.replace('s3://', '/vsis3/')
+                
+            logger.info(f"-> [STARTING] Worker executing prediction on: {raster_name}")
 
-        # CRS Reprojection Fix: Transform raster bounds to the target CRS before checking for intersection
-        if raster_crs is not None:
             try:
-                target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
-                if raster_crs != target_crs_obj:
-                    left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
-                    bounds_geom = box(left, bottom, right, top)
-                else:
-                    bounds_geom = box(*raster_bounds)
+                with rasterio.open(open_path) as src:
+                    src_nodata = src.nodata
+                    raster_crs = src.crs
+                    raster_bounds = src.bounds
             except Exception as e:
-                logger.warning(f"Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.")
-                bounds_geom = box(*raster_bounds)
-        else:
-            bounds_geom = box(*raster_bounds)
-
-        try:
-            mask_box = box(*mask_bounds)
-            if not mask_box.intersects(bounds_geom):
-                logger.info(f"- [SKIP] Bounding box does not intersect prediction raster {raster_name}.")
+                logger.exception(f"Could not open {raster_name} with rasterio. File might be corrupted.")
                 return
-        except Exception as e:
-            logger.exception(f"Bounding box check failed for {raster_name}.")
-            return
 
-        logger.info(f" [PROCESSING] Starting warp on prediction file {raster_name}...")
-        should_crop = any(k in raster_name for k in ["tsm", "sed", "hurr"])
-        is_tsm = "tsm" in raster_name or "strength" in raster_name
+            if raster_crs is not None:
+                try:
+                    target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
+                    if raster_crs != target_crs_obj:
+                        left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
+                        bounds_geom = box(left, bottom, right, top)
+                    else:
+                        bounds_geom = box(*raster_bounds)
+                except Exception as e:
+                    logger.warning(f"Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.")
+                    bounds_geom = box(*raster_bounds)
+            else:
+                bounds_geom = box(*raster_bounds)
 
-        try:
-            self._warp_to_cutline(
-                raster_path, 
-                output_path, 
-                cutline_path, 
-                dst_crs=self.target_crs, 
-                x_res=self.target_res, 
-                y_res=self.target_res,
-                crop_to_cutline=should_crop,
-                src_nodata=src_nodata,
-                apply_tsm_smoothing=is_tsm
-            )
-        except Exception as e:
-            logger.exception(f"Unexpected failure during _warp_to_cutline for {raster_name}.")
-        finally:
-            gc.collect()
-
-    def process_training_raster(self, raster_path, mask_bounds, output_path, cutline_path) -> None:
-        """Process a training raster by clipping it with a mask."""
-        raster_name = pathlib.Path(raster_path).name.lower()
-
-        logger.info(f"-> [STARTING] Worker executing training mask on already processed prediction file: {raster_name}")
-
-        try:
-            with rasterio.open(raster_path) as src:
-                src_nodata = src.nodata
-                raster_crs = src.crs
-                raster_bounds = src.bounds
-        except Exception as e:
-            logger.exception(f"Could not open training raster {raster_name}.")
-            return
-
-        if raster_crs is not None:
             try:
-                target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
-                if raster_crs != target_crs_obj:
-                    left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
-                    bounds_geom = box(left, bottom, right, top)
-                else:
-                    bounds_geom = box(*raster_bounds)
+                mask_box = box(*mask_bounds)
+                if not mask_box.intersects(bounds_geom):
+                    logger.info(f"- [SKIP] Bounding box does not intersect prediction raster {raster_name}.")
+                    return
             except Exception as e:
-                logger.warning(f"Failed to transform bounds for {raster_name}: {e}. Falling back to native bounds.")
-                bounds_geom = box(*raster_bounds)
-        else:
-            bounds_geom = box(*raster_bounds)
-
-        try:
-            mask_box = box(*mask_bounds)
-            if not mask_box.intersects(bounds_geom):
-                logger.info(f"- [SKIP] Bounding box does not intersect raster {raster_name}. Skipping.")
+                logger.exception(f"Bounding box check failed for {raster_name}.")
                 return
-        except Exception as e:
-            logger.exception(f"Bounding box check failed for {raster_name}.")
-            return
 
-        logger.info(f'- [PROCESSING] Fast-cropping training file {raster_name} (skipping reproj/smoothing)...')
-        
-        should_crop = any(k in raster_name for k in ["tsm", "sed", "hurr"])
+            logger.info(f" [PROCESSING] Starting warp on prediction file {raster_name}...")
+            should_crop = any(k in raster_name for k in ["tsm", "sed", "hurr"])
+            is_tsm = "tsm" in raster_name or "strength" in raster_name
 
-        try:
-            self._warp_to_cutline(
-                raster_path,
-                output_path,
-                cutline_path,
-                # OMITTING dst_crs, x_res, y_res because input is the prediction raster
-                # meaning it is ALREADY in the correct target CRS and target resolution!
-                src_nodata=src_nodata,
-                dst_nodata=np.nan,
-                crop_to_cutline=should_crop,
-                apply_tsm_smoothing=False # MASSIVE SPEEDUP: It was already smoothed in prediction step!
-            )
-        except Exception as e:
-            logger.exception(f"Unexpected failure during _warp_to_cutline for {raster_name}.")
+            try:
+                self._warp_to_cutline(
+                    raster_path, 
+                    output_path, 
+                    cutline_path, 
+                    dst_crs=self.target_crs, 
+                    x_res=self.target_res, 
+                    y_res=self.target_res,
+                    crop_to_cutline=should_crop,
+                    src_nodata=src_nodata,
+                    apply_tsm_smoothing=is_tsm,
+                    resample_alg='bilinear' 
+                )
+            except Exception as e:
+                logger.exception(f"Unexpected failure during _warp_to_cutline for {raster_name}.")
         finally:
-            gc.collect()
+            self._trim_memory()
+
+    def process_training_raster(self, raster_path, mask_bounds, output_path, global_mask_path, current_index=None, total_count=None) -> None:
+        """Process a training raster by extracting array blocks and masking them mathematically."""
+        try:
+            raster_name = pathlib.Path(raster_path).name.lower()
+            open_path = str(raster_path)
+            
+            progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
+            
+            if self.is_aws and open_path.startswith('s3://'):
+                open_path = open_path.replace('s3://', '/vsis3/')
+
+            logger.info(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}")
+
+            try:
+                with rasterio.open(open_path) as src_pred:
+                    src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
+                    
+                    # Check bounding box intersections quickly
+                    raster_bounds_geom = box(*src_pred.bounds)
+                    mask_box = box(*mask_bounds)
+                    if not mask_box.intersects(raster_bounds_geom):
+                        logger.info(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.")
+                        return
+                    
+                    meta = src_pred.meta.copy()
+                    meta.update({
+                        'nodata': np.nan if np.isnan(src_nodata) else src_nodata,
+                        'compress': 'lzw',
+                        'tiled': True
+                    })
+
+                    # Setup temporary local path if interacting with S3 to avoid streaming writes
+                    tmp_dst_path = str(output_path)
+                    if self.is_aws:
+                        tmp_out = tempfile.NamedTemporaryFile(dir=self.local_tmp_dir, suffix='.tif', delete=False)
+                        tmp_dst_path = tmp_out.name
+                        tmp_out.close()
+
+                    with rasterio.open(global_mask_path) as src_mask:
+                        # Virtual re-alignment ensures the mask array is perfectly registered 
+                        # to the incoming prediction raster (even if it was cropped/offset slightly)
+                        with WarpedVRT(src_mask, crs=src_pred.crs, transform=src_pred.transform, 
+                                       height=src_pred.height, width=src_pred.width, 
+                                       resampling=Resampling.nearest) as vrt_mask:
+                            
+                            with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
+                                with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
+                                    
+                                    # Evaluate the arrays safely in memory chunks to prevent Dask limits from being exceeded
+                                    for ji, window in src_pred.block_windows(1):
+                                        pred_arr = src_pred.read(1, window=window)
+                                        mask_arr = vrt_mask.read(1, window=window)
+
+                                        # Cast integers to floats if the nodata value is NaN
+                                        if np.isnan(meta['nodata']) and pred_arr.dtype not in (np.float32, np.float64):
+                                            pred_arr = pred_arr.astype(np.float32)
+
+                                        # Apply mask logic via numpy 
+                                        masked_data = np.where(mask_arr == 1, pred_arr, meta['nodata'])
+                                        dest.write(masked_data, 1, window=window)
+                    
+                    # If on AWS, push complete file from fast local disk to S3 bucket
+                    if self.is_aws:
+                        self.fs.put(tmp_dst_path, str(output_path))
+                        os.remove(tmp_dst_path)
+
+                logger.info(f" - [✓ SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}")
+                
+            except Exception as e:
+                logger.exception(f"Unexpected failure during array masking for {raster_name}.")
+                # Cleanup temp files if exception occurred
+                if self.is_aws and 'tmp_dst_path' in locals() and os.path.exists(tmp_dst_path):
+                    os.remove(tmp_dst_path)
+        finally:
+            self._trim_memory()
 
     def _warp_to_cutline(self, src_path, dst_path, cutline_path, **kwargs):
         """Helper to handle GDAL Warp boilerplate."""
-        
-        # --- 1. PREPARE PATHS FOR GDAL ---
         src_str = str(src_path)
         dst_str = str(dst_path)
 
         if self.is_aws and src_str.startswith('s3://'):
             src_str = src_str.replace('s3://', '/vsis3/')
 
-        # --- 2. SETUP TEMP OUTPUT PATH FOR AWS ---
         if self.is_aws:
             with tempfile.NamedTemporaryFile(dir=self.local_tmp_dir, suffix='.tif', delete=False) as tmp_out:
                 gdal_dst_str = tmp_out.name
         else:
             gdal_dst_str = dst_str
 
-        # --- 3. CONFIGURE WARP ---
+        resample_alg = kwargs.pop('resample_alg', None) 
+
         warp_opts = {
             'cutlineDSName': cutline_path,
             'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'],
@@ -595,11 +723,13 @@ class ModelDataPreProcessor(Engine):
                 'NUM_THREADS=1'
             ],
             'multithread': False,
-            'warpMemoryLimit': 128,                     # LOWERED to 128MB to prevent unmanaged memory crashes
-            'resampleAlg': 'bilinear',
-            'outputType': gdal.GDT_Float32              # <--- ADDED: FORCE 32-BIT FLOAT OUTPUT
+            'warpMemoryLimit': 1024, # 512 MB
+            'outputType': gdal.GDT_Float32 
         }
         
+        if resample_alg:
+            warp_opts['resampleAlg'] = resample_alg 
+            
         if 'dst_crs' in kwargs: warp_opts['dstSRS'] = kwargs.pop('dst_crs')
         if 'x_res' in kwargs: warp_opts['xRes'] = kwargs.pop('x_res')
         if 'y_res' in kwargs: warp_opts['yRes'] = kwargs.pop('y_res')
@@ -609,15 +739,33 @@ class ModelDataPreProcessor(Engine):
         
         apply_tsm_smoothing = kwargs.pop('apply_tsm_smoothing', False)
         
-        # --- 4. EXECUTE WARP ---
         try:
             ds = gdal.Warp(gdal_dst_str, src_str, **warp_opts)
 
             if ds is None:
                 raise RuntimeError(f"gdal.Warp returned None for {os.path.basename(src_str)}")
 
-            # --- 6. OPTIONAL TSM SMOOTHING PASS ---
+            # Release dataset handle explicitly if it matches a bathymetry layer so that
+            # we can run the positive-elevation land filtering block in read+write mode safely.
+            src_basename = os.path.basename(src_str).lower()
+            apply_bathy_filter = any(k in src_basename for k in ["lidar", "bathy", "bluetopo"])
+
+            if apply_bathy_filter:
+                ds = None  # Release the dataset lock
+                logger.info(f" [BATHY FILTER] Applying elevation filter (values >= 0 -> nodata) on: {os.path.basename(src_str)}")
+                with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
+                    with rasterio.open(gdal_dst_str, 'r+') as dst:
+                        nodata_val = dst.nodata if dst.nodata is not None else -9999.0
+                        for ji, window in dst.block_windows(1):
+                            arr = dst.read(1, window=window)
+                            mask_invalid = (arr >= 0.0)
+                            if mask_invalid.any():
+                                arr[mask_invalid] = nodata_val
+                                dst.write(arr, 1, window=window)
+
             if apply_tsm_smoothing:
+                if ds is None:
+                    ds = gdal.Open(gdal_dst_str)
                 mem = psutil.virtual_memory()
                 logger.info(f" [SMOOTHING INIT] {os.path.basename(src_str)} | Sys RAM: {mem.percent}% ({mem.used / 1024**3:.1f}GB / {mem.total / 1024**3:.1f}GB)")
 
@@ -632,29 +780,26 @@ class ModelDataPreProcessor(Engine):
                 with rasterio.open(gdal_dst_str) as src:
                     kwargs = src.meta.copy()
                     kwargs.update({
-                        'dtype': 'float32',     # <--- ADDED: Explicitly ensure Float32 in Rasterio Writer
+                        'dtype': 'float32', 
                         'tiled': True,
                         'blockxsize': 512,
                         'blockysize': 512,
-                        'compress': 'lzw',      # <--- ADDED: Explicitly ensure LZW compression here
-                        'bigtiff': 'yes'        # <--- ADDED: Ensure BigTIFF format
+                        'compress': 'lzw', 
+                        'bigtiff': 'yes' 
                     })
                     nodata = src.nodata if src.nodata is not None else warp_opts.get('dstNodata', warp_opts.get('srcNodata', -9999.0))
                     
-                    # Calculate tracking statistics
                     block_size = 1024
                     total_chunks_x = (src.width + block_size - 1) // block_size
                     total_chunks_y = (src.height + block_size - 1) // block_size
                     total_chunks = total_chunks_x * total_chunks_y
                     current_chunk = 0
                     
-                    # <--- ADDED: Wrap inside Env to ensure workers don't crash on disk checks
                     with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"): 
                         with rasterio.open(smoothed_tmp, 'w', **kwargs) as dst:
                             for y in range(0, src.height, block_size):
                                 for x in range(0, src.width, block_size):
                                     
-                                    # -- Progress Logging Module -- 
                                     current_chunk += 1
                                     if current_chunk % max(1, total_chunks // 10) == 0 or current_chunk == total_chunks:
                                         mem = psutil.virtual_memory()
@@ -695,10 +840,6 @@ class ModelDataPreProcessor(Engine):
                                     col_offset = int(x - read_xoff)
                                     core_array = final_array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
                                     
-                                    # 🚀 MASSIVE OPTIMIZATION: 
-                                    # GDAL warp already strictly applied the geometry cutline to the source image before we opened it.
-                                    # Instead of doing complex MultiPolygon intersection math on every single loop iteration, 
-                                    # we simply grab the NoData footprint of the pre-cropped GDAL output and re-apply it instantly.
                                     original_core = array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
                                     
                                     if pd.isna(nodata):
@@ -733,10 +874,8 @@ class ModelDataPreProcessor(Engine):
             except Exception as e:
                 logger.warning(f"Failed to cleanup temp files: {e}")
             
-            # CLEAR THE UNMANAGED C-LEVEL CACHE TO PREVENT WORKER CRASHES
             if hasattr(gdal, 'VSICurlClearCache'):
                 gdal.VSICurlClearCache() 
-            gc.collect()
 
     def clip_rasters_by_tile(self, raster_dir, output_dir, data_type) -> None:
         """Clip raster files by tile and save data in memory-managed batches."""
@@ -767,38 +906,95 @@ class ModelDataPreProcessor(Engine):
         ]
         logger.info(f"Found {len(all_raster_files)} raster files.")
 
-        tasks = []
-        results_list = []
-        batch_size = 25 
-        
-        logger.info(f"Building Dask task graph in batches of {batch_size}...")
-        for i, (_, sub_grid) in enumerate(sub_grids.iterrows()):
+        # ---------------------------------------------------------------------
+        # PARQUET COUNTING & PRE-CALCULATIONS
+        # ---------------------------------------------------------------------
+        all_tasks = []
+        write_counter = 0
+        for _, sub_grid in sub_grids.iterrows():
             tile_name = sub_grid['tile_id']
-            
             output_folder = output_dir / tile_name
             expected_output_path = output_folder / f"{tile_name}_{data_type}_clipped_data.parquet"
+            
+            should_write = self.overwrite or not expected_output_path.exists()
+            if should_write:
+                write_counter += 1
+                all_tasks.append({
+                    'sub_grid': sub_grid,
+                    'output_folder': output_folder,
+                    'tile_name': tile_name,
+                    'should_write': True,
+                    'write_index': write_counter
+                })
+            else:
+                all_tasks.append({
+                    'sub_grid': sub_grid,
+                    'output_folder': output_folder,
+                    'tile_name': tile_name,
+                    'should_write': False,
+                    'expected_output_path': expected_output_path
+                })
+        
+        total_to_write = write_counter
+        logger.info(f"--- Subtiling Wide Parquet Summary ({data_type}) ---")
+        logger.info(f" -> Total subgrid tiles: {len(sub_grids)}")
+        logger.info(f" -> Tiles needing Wide Parquet generation: {total_to_write}")
+        logger.info(f" -> Existing tiles (skipped): {len(sub_grids) - total_to_write}")
+        logger.info(f"--------------------------------------------------")
 
-            if not self.overwrite and expected_output_path.exists():
+        # -------------------------------------------------------------
+        # DYNAMIC DASK TASK STREAM (TILE CLIPPING)
+        # -------------------------------------------------------------
+        client = dask.distributed.client.default_client()
+        max_concurrent = 25 
+        logger.info(f"Building dynamic Dask task stream (max {max_concurrent} concurrent)...")
+        
+        sub_grid_iterator = iter(all_tasks)
+        total_grids = len(all_tasks)
+        seq = as_completed()
+        results_list = []
+        
+        def submit_next_tile(task_item):
+            tile_name = task_item['tile_name']
+            if not task_item['should_write']:
+                expected_output_path = task_item['expected_output_path']
                 logger.info(f" [SKIP] Tile already clipped: {tile_name}. Queuing stats generation only.")
                 stats_task = dask.delayed(self._generate_stats_from_existing)(str(expected_output_path), tile_name)
-                tasks.append(stats_task)
+                return client.compute(stats_task)
             else:
-                gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, all_raster_files)
-                ungridded_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, all_raster_files)
+                sub_grid = task_item['sub_grid']
+                output_folder = task_item['output_folder']
+                write_idx = task_item['write_index']
                 
-                tasks.append(
-                    self.save_combined_data(gridded_task, ungridded_task, output_folder, data_type, tile_id=tile_name)
+                gridded_task = dask.delayed(self.subtile_process_gridded)(sub_grid, all_raster_files)
+                combined_task = dask.delayed(self.subtile_process_ungridded)(sub_grid, all_raster_files, gridded_task)
+                return client.compute(
+                    self.save_combined_data(
+                        combined_task, 
+                        output_folder, 
+                        data_type, 
+                        tile_id=tile_name,
+                        current_index=write_idx,
+                        total_count=total_to_write
+                    )
                 )
 
-            if len(tasks) >= batch_size or i == (len(sub_grids) - 1):
-                logger.info(f"Executing batch of {len(tasks)} tile tasks via Dask...")
-                batch_results = dask.compute(*tasks)
-                results_list.extend(batch_results)
+        # Initial queue fill
+        for _ in range(min(max_concurrent, total_grids)):
+            try:
+                seq.add(submit_next_tile(next(sub_grid_iterator)))
+            except StopIteration:
+                break
                 
-                tasks = []
-                gc.collect()
+        # Process stream
+        for future in seq:
+            results_list.append(future.result())
+            try:
+                seq.add(submit_next_tile(next(sub_grid_iterator)))
+            except StopIteration:
+                pass
 
-        logger.info("Dask computation across all batches finished successfully.")
+        logger.info("Dask computation across dynamic task stream finished successfully.")
 
         logger.info(f"Combining {data_type} tile results and calculating statistics...")
         logger.info(f"Concatenating {len(results_list)} tile result dataframes...")
@@ -813,67 +1009,132 @@ class ModelDataPreProcessor(Engine):
         logger.info(f"Finished clipping {data_type} rasters by tile.")
 
     def subtile_process_gridded(self, sub_grid, raster_files) -> pd.DataFrame:
-        """Process gridded rasters for a single tile."""
+        """Process gridded rasters for a single tile dynamically and avoid sequential merging."""
         original_tile = sub_grid['original_tile']
                 
         filtered_files = [
             f for f in raster_files
             if original_tile in Path(f).name
         ]
-
-        tile_extent = sub_grid.geometry.bounds
-        dfs = []
-        for file in filtered_files:
-            df = self._extract_raster_to_df(file, tile_extent)
-            if not df.empty:
-                col_name = df['Raster'].iloc[0]
-                df = df.rename(columns={'Value': col_name}).drop(columns=['Raster'])
-                df['X'] = df['X'].round(3)
-                df['Y'] = df['Y'].round(3)
-                df = df.drop_duplicates(subset=['X', 'Y'])
-                dfs.append(df)
         
-        if not dfs:
+        if not filtered_files:
             return pd.DataFrame()
 
-        combined_data = dfs[0]
-        for next_df in dfs[1:]:
-            combined_data = pd.merge(combined_data, next_df, on=['X', 'Y'], how='outer')
-
-        del dfs
-        gc.collect()
+        tile_extent = sub_grid.geometry.bounds
         
+        data_arrays = {}
+        common_window = None
+        common_transform = None
+        
+        # Read all aligned band arrays in a single open/read pass
+        for file in filtered_files:
+            try:
+                with rasterio.open(file) as src:
+                    if common_window is None:
+                        common_window = src.window(*tile_extent)
+                        common_transform = src.window_transform(common_window)
+                    
+                    # FIX: Add boundless=True to pad dimensions when the window crosses the raster edges,
+                    # ensuring that all array dimensions match exactly for the master_mask |= mask bitwise operator.
+                    data = src.read(1, window=common_window, boundless=True, fill_value=src.nodata)
+                    
+                    col_name = pathlib.Path(file).stem
+                    data_arrays[col_name] = (data, src.nodata)
+            except Exception as e:
+                logger.warning(f"Error reading gridded file {file}: {e}")
+                
+        if not data_arrays:
+            return pd.DataFrame()
+            
+        # Create a unified master mask across all bands (implements Outer Join fast)
+        master_mask = None
+        for col_name, (data, nodata) in data_arrays.items():
+            if nodata is not None and not np.isnan(nodata):
+                mask = data != nodata
+            else:
+                mask = ~np.isnan(data)
+            if master_mask is None:
+                master_mask = mask.copy()
+            else:
+                master_mask |= mask
+                
+        if master_mask is None or not master_mask.any():
+            return pd.DataFrame()
+            
+        # Compute spatial coordinates only ONCE for the whole tile
+        rows, cols = np.where(master_mask)
+        xs, ys = rasterio.transform.xy(common_transform, rows, cols, offset='center')
+        
+        # Instantiate the DataFrame in one go to bypass intermediate allocation
+        df_dict = {
+            'X': np.round(xs, 3),
+            'Y': np.round(ys, 3)
+        }
+        
+        for col_name, (data, nodata) in data_arrays.items():
+            vals = data[master_mask].astype(np.float32)
+            if nodata is not None and not np.isnan(nodata):
+                vals[vals == nodata] = np.nan
+            df_dict[col_name] = vals
+            
+        combined_data = pd.DataFrame(df_dict)
+        combined_data = combined_data.drop_duplicates(subset=['X', 'Y'])
         return combined_data
 
-    def subtile_process_ungridded(self, sub_grid, raster_files) -> pd.DataFrame:
-        """Process ungridded rasters for a single tile."""
-        dfs = []
+    def subtile_process_ungridded(self, sub_grid, raster_files, gridded_df) -> pd.DataFrame:
+        """Process ungridded rasters by translating spatial locations directly to pixel indices instead of merging."""
+        if gridded_df is None or gridded_df.empty:
+            return pd.DataFrame()
+
+        # Copy dataframe structure to insert matching ungridded bands directly
+        combined_df = gridded_df.copy()
+        
+        xs = combined_df['X'].values
+        ys = combined_df['Y'].values
         tile_extent = sub_grid.geometry.bounds
 
         for pattern in self.static_patterns:
             current_files = [f for f in raster_files if pattern in Path(f).name]
 
             for file in current_files:
-                df = self._extract_raster_to_df(file, tile_extent)
-                if not df.empty:
-                    col_name = df['Raster'].iloc[0]
-                    df = df.rename(columns={'Value': col_name}).drop(columns=['Raster'])
-                    df['X'] = df['X'].round(3)
-                    df['Y'] = df['Y'].round(3)
-                    df = df.drop_duplicates(subset=['X', 'Y'])
-                    dfs.append(df)
+                col_name = pathlib.Path(file).stem
+                try:
+                    with rasterio.open(file) as src:
+                        window = src.window(*tile_extent)
+                        
+                        # Guard against non-intersecting / empty coordinate windows
+                        if window.width <= 0 or window.height <= 0:
+                            combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
+                            continue
 
-        if not dfs:
-            return pd.DataFrame()
+                        win_data = src.read(1, window=window)
+                        win_transform = src.window_transform(window)
+                        
+                        # Translate spatial coordinates directly into row-column positions on this band
+                        win_rows, win_cols = rasterio.transform.rowcol(win_transform, xs, ys)
+                        win_rows = np.array(win_rows)
+                        win_cols = np.array(win_cols)
+                        
+                        # Check inside-image boundary conditions
+                        win_valid = (win_rows >= 0) & (win_rows < win_data.shape[0]) & \
+                                    (win_cols >= 0) & (win_cols < win_data.shape[1])
+                        
+                        vals = np.full(len(xs), np.nan, dtype=np.float32)
+                        
+                        if win_valid.any():
+                            extracted_vals = win_data[win_rows[win_valid], win_cols[win_valid]].astype(np.float32)
+                            if src.nodata is not None:
+                                nodata_val = src.nodata
+                                if not np.isnan(nodata_val):
+                                    extracted_vals[extracted_vals == nodata_val] = np.nan
+                            vals[win_valid] = extracted_vals
+                            
+                        combined_df[col_name] = vals
+                except Exception as e:
+                    logger.warning(f"Failed to sample ungridded raster {file}: {e}")
+                    combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
 
-        combined_data = dfs[0]
-        for next_df in dfs[1:]:
-            combined_data = pd.merge(combined_data, next_df, on=['X', 'Y'], how='outer')
-
-        del dfs
-        gc.collect()
-        
-        return combined_data
+        return combined_df
 
     def _extract_raster_to_df(self, raster_path, tile_extent) -> pd.DataFrame:
         """Helper to read a window of a raster and convert to DataFrame."""
@@ -899,27 +1160,27 @@ class ModelDataPreProcessor(Engine):
             return pd.DataFrame()
 
     @dask.delayed
-    def save_combined_data(self, gridded_df, ungridded_df, output_folder, data_type, tile_id) -> pd.DataFrame:
+    def save_combined_data(self, combined_df, output_folder, data_type, tile_id, current_index=None, total_count=None) -> pd.DataFrame:
         """Combine dataframes and save to parquet."""
-        if gridded_df is None or gridded_df.empty:
-            return pd.DataFrame()
+        try:
+            if combined_df is None or combined_df.empty:
+                return pd.DataFrame()
 
-        output_folder_path = UPath(output_folder)
-        
-        if not self.is_aws: 
-            output_folder_path.mkdir(parents=True, exist_ok=True)
+            output_folder_path = UPath(output_folder)
             
-        output_path = output_folder_path / f"{tile_id}_{data_type}_clipped_data.parquet"
-        save_path = str(output_path)
+            if not self.is_aws: 
+                output_folder_path.mkdir(parents=True, exist_ok=True)
+                
+            output_path = output_folder_path / f"{tile_id}_{data_type}_clipped_data.parquet"
+            save_path = str(output_path)
 
-        if ungridded_df is not None and not ungridded_df.empty:
-            combined = pd.merge(gridded_df, ungridded_df, on=['X', 'Y'], how='left')
-        else:
-            combined = gridded_df
-
-        combined.to_parquet(save_path, engine="pyarrow", index=False)
-        logger.info(f" [SUCCESS] Saved combined tile data to: {save_path}")
-        return self.create_nan_stats_csv(combined, tile_id)
+            combined_df.to_parquet(save_path, engine="pyarrow", index=False)
+            
+            progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
+            logger.info(f"{progress_str} [SUCCESS] Saved combined tile data to: {save_path}")
+            return self.create_nan_stats_csv(combined_df, tile_id)
+        finally:
+            self._trim_memory()
 
     def create_nan_stats_csv(self, df, tile_id) -> pd.DataFrame:
         """Calculates NaN stats for a tile."""
@@ -957,11 +1218,42 @@ class ModelDataPreProcessor(Engine):
         logger.info(f"Outputting transformed {mode} long-format tiles to: {base_dir}")
         logger.info(f"Queueing {len(files_to_process)} tiles...")
 
-        tasks = []
-        for fp in files_to_process:
-            tasks.append(dask.delayed(self._transform_tile_task)(str(fp), mode))
+        # -------------------------------------------------------------
+        # DYNAMIC DASK TASK STREAM (LONG FORMAT TRANSFORMATION)
+        # Reduced max_concurrent to prevent memory pileups in scheduler and Dask workers
+        # -------------------------------------------------------------
+        client = dask.distributed.client.default_client()
+        max_concurrent = 100 
+        total_files = len(files_to_process)
+        tasks_iterator = iter(enumerate(files_to_process))
+        seq = as_completed()
+        results = []
+        
+        def submit_long_format_task(item):
+            i, fp = item
+            return client.submit(
+                self._transform_tile_task, 
+                str(fp), 
+                mode, 
+                current_index=i + 1, 
+                total_count=total_files
+            )
 
-        results = dask.compute(*tasks)
+        # Initial queue fill
+        for _ in range(min(max_concurrent, total_files)):
+            try:
+                seq.add(submit_long_format_task(next(tasks_iterator)))
+            except StopIteration:
+                break
+
+        # Process stream
+        for future in seq:
+            results.append(future.result())
+            future.release() # Release future to prevent metadata accumulation in scheduler
+            try:
+                seq.add(submit_long_format_task(next(tasks_iterator)))
+            except StopIteration:
+                pass
 
         success = sum(1 for r in results if r.startswith("Success"))
         failed = len(results) - success
@@ -970,38 +1262,44 @@ class ModelDataPreProcessor(Engine):
         if failed > 0:
             logger.error("Transformation Errors:\n" + "\n".join([r for r in results if not r.startswith("Success")]))
 
-    def _transform_tile_task(self, f_path: str, mode: Literal["training", "prediction"]) -> str:
+    def _transform_tile_task(self, f_path: str, mode: Literal["training", "prediction"], current_index=None, total_count=None) -> str:
         """Dask Worker: Reads file -> Calls specific processor -> Returns status."""
+        gdf = None
         try:
             tile_name = os.path.basename(f_path).split("_")[0]
             output_dir = os.path.dirname(f_path)
 
             try:
-                gdf = gpd.read_parquet(f_path)
+                # Engine 'pyarrow' explicitly set to map parquet files far more memory-efficiently
+                gdf = gpd.read_parquet(f_path, engine="pyarrow")
             except Exception:
-                df = pd.read_parquet(f_path)
+                df = pd.read_parquet(f_path, engine="pyarrow")
                 geometry_col = 'geometry' if 'geometry' in df.columns else None
                 gdf = gpd.GeoDataFrame(df, geometry=geometry_col)
 
             if mode == "training":
-                saved = self._process_and_save_training_tile(gdf, output_dir, tile_name)
+                saved = self._process_and_save_training_tile(gdf, output_dir, tile_name, current_index, total_count)
             else:
-                saved = self._process_and_save_prediction_tile(gdf, output_dir, tile_name)
+                saved = self._process_and_save_prediction_tile(gdf, output_dir, tile_name, current_index, total_count)
             
-            del gdf
             return f"Success: {tile_name} ({len(saved)} pairs)"
 
         except Exception as e:
             return f"Failed: {os.path.basename(f_path)} - {str(e)}"
+        finally:
+            if gdf is not None:
+                del gdf
+            self._trim_memory()
 
-    def _process_and_save_training_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str) -> List[str]:
+    def _process_and_save_training_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> List[str]:
         """Processes a training tile and writes outputs immediately to disk."""
         self._transform_flowdir_cols_inplace(gdf)
         col_meta = self._get_column_metadata(gdf.columns.tolist())
         
         saved_files = []
+        progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-        for y0, y1 in self.year_ranges:
+        for y0, y1 in getattr(self, 'year_ranges', []): # Using getattr to avoid undeclared issues
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
 
@@ -1009,24 +1307,25 @@ class ModelDataPreProcessor(Engine):
             out_path = str(UPath(output_dir) / out_name)
 
             if not self.overwrite and UPath(out_path).exists():
-                logger.info(f" [SKIP] Long-format training tile already exists: {out_path}")
+                logger.info(f"{progress_str} [SKIP] Long-format training tile already exists: {out_path}")
                 saved_files.append(out_name)
                 continue
 
             cols_t_meta = col_meta[col_meta["year"] == y0]
             cols_t1_meta = col_meta[col_meta["year"] == y1]
 
-            common_vars = set(cols_t_meta["var_base"]).intersection(cols_t1_meta["var_base"])
+            # Use union instead of intersection so we keep columns even if missing in one year
+            union_vars = set(cols_t_meta["var_base"]).union(cols_t1_meta["var_base"])
             
-            if "bathy_filled" not in common_vars:
+            if "bathy_filled" not in union_vars and "bathy" not in union_vars:
                 continue
 
             t_map = dict(zip(cols_t_meta["var_base"], cols_t_meta["colname"]))
             t1_map = dict(zip(cols_t1_meta["var_base"], cols_t1_meta["colname"]))
 
-            sorted_common = sorted(common_vars)
-            cols_t_exist = [t_map[v] for v in sorted_common]
-            cols_t1_exist = [t1_map[v] for v in sorted_common]
+            sorted_union = sorted(union_vars)
+            cols_t_exist = [t_map[v] for v in sorted_union if v in t_map]
+            cols_t1_exist = [t1_map[v] for v in sorted_union if v in t1_map]
 
             forcing_pattern = f"{y0_str}_{y1_str}$"
             forcing_cols = [c for c in gdf.columns if re.search(forcing_pattern, c)]
@@ -1043,14 +1342,20 @@ class ModelDataPreProcessor(Engine):
             if delta_bathy_col in gdf.columns:
                 cols_to_grab.append(delta_bathy_col)
 
-            if any(c not in gdf.columns for c in cols_to_grab):
+            # Ensure we only grab columns that actually exist in the dataframe to prevent KeyError
+            cols_to_grab = [c for c in cols_to_grab if c in gdf.columns]
+
+            if not cols_to_grab:
                 continue
 
             pair_gdf = gdf[cols_to_grab].drop_duplicates()
 
-            new_names_t = [f"{v}_t" for v in sorted_common]
-            new_names_t1 = [f"{v}_t1" for v in sorted_common]
-            rename_map = dict(zip(cols_t_exist + cols_t1_exist, new_names_t + new_names_t1))
+            rename_map = {}
+            for v in sorted_union:
+                if v in t_map and t_map[v] in pair_gdf.columns:
+                    rename_map[t_map[v]] = f"{v}_t"
+                if v in t1_map and t1_map[v] in pair_gdf.columns:
+                    rename_map[t1_map[v]] = f"{v}_t1"
             
             pair_gdf.rename(columns=rename_map, inplace=True)
             
@@ -1060,12 +1365,19 @@ class ModelDataPreProcessor(Engine):
             pair_gdf["year_t"] = y0
             pair_gdf["year_t1"] = y1
 
-            if "delta_bathy" not in pair_gdf.columns and "bathy_t" in pair_gdf.columns and "bathy_t1" in pair_gdf.columns:
-                pair_gdf["delta_bathy"] = pair_gdf["bathy_t1"] - pair_gdf["bathy_t"]
-
+            # Strip the _filled suffix before executing the delta logic
             filled_cols = [c for c in pair_gdf.columns if "_filled" in c]
             if filled_cols:
                 pair_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
+
+            # Calculate delta if bathy exists for both years
+            if "delta_bathy" not in pair_gdf.columns and "bathy_t" in pair_gdf.columns and "bathy_t1" in pair_gdf.columns:
+                pair_gdf["delta_bathy"] = pair_gdf["bathy_t1"] - pair_gdf["bathy_t"]
+
+            # Pad missing critical columns with NaNs to ensure consistent schema across tiles
+            for critical_col in ["bathy_t", "bathy_t1", "delta_bathy"]:
+                if critical_col not in pair_gdf.columns:
+                    pair_gdf[critical_col] = np.nan
 
             target_col = "bathy_t1"
             predictor_cols_t = [c for c in pair_gdf.columns if c.endswith("_t")]
@@ -1074,14 +1386,17 @@ class ModelDataPreProcessor(Engine):
             final_cols = id_cols + ["year_t", "year_t1", target_col] + predictor_cols_t + predictor_cols_delta + forcing_cols + static_cols
             final_cols = [c for c in final_cols if c in pair_gdf.columns]
             
-            pair_gdf[final_cols].to_parquet(out_path, index=None)
-            logger.info(f" [SUCCESS] Saved training long-format tile to: {out_path}")
+            pair_gdf[final_cols].to_parquet(out_path, index=None, engine="pyarrow")
+            logger.info(f"{progress_str} [SUCCESS] Saved training long-format tile to: {out_path}")
             saved_files.append(out_name)
+            
+            # Critical Cleanup: delete temporary dataframe view immediately before iterating the next year range.
             del pair_gdf
+            gc.collect()
 
         return saved_files
 
-    def _process_and_save_prediction_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str) -> List[str]:
+    def _process_and_save_prediction_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> List[str]:
         """Processes a prediction tile and writes outputs immediately."""
         self._transform_flowdir_cols_inplace(gdf)
         
@@ -1091,8 +1406,9 @@ class ModelDataPreProcessor(Engine):
         gdf.rename(columns=dict(zip(bt_cols, new_t_names)), inplace=True)
         
         saved_files = []
+        progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-        for y0, y1 in self.year_ranges:
+        for y0, y1 in getattr(self, 'year_ranges', []): # Using getattr to avoid undeclared issues
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
             
@@ -1100,7 +1416,7 @@ class ModelDataPreProcessor(Engine):
             out_path = str(UPath(output_dir) / out_name)
 
             if not self.overwrite and UPath(out_path).exists():
-                logger.info(f" [SKIP] Long-format prediction tile already exists: {out_path}")
+                logger.info(f"{progress_str} [SKIP] Long-format prediction tile already exists: {out_path}")
                 saved_files.append(out_name)
                 continue
                 
@@ -1116,10 +1432,18 @@ class ModelDataPreProcessor(Engine):
 
             pair_gdf = gdf[final_cols].drop_duplicates()
             
-            pair_gdf.to_parquet(out_path, index=None)
-            logger.info(f" [SUCCESS] Saved prediction long-format tile to: {out_path}")
+            # Strip _filled from names exactly like the training tile for consistency
+            filled_cols = [c for c in pair_gdf.columns if "_filled" in c]
+            if filled_cols:
+                pair_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
+            
+            pair_gdf.to_parquet(out_path, index=None, engine="pyarrow")
+            logger.info(f"{progress_str} [SUCCESS] Saved prediction long-format tile to: {out_path}")
             saved_files.append(out_name)
+            
+            # Critical Cleanup: explicit memory free immediately.
             del pair_gdf
+            gc.collect()
 
         return saved_files
 
@@ -1129,12 +1453,14 @@ class ModelDataPreProcessor(Engine):
         if not flow_cols:
             return
 
-        radians = np.deg2rad(df[flow_cols])
+        # Explicitly enforce float32 to prevent automatic float64 casting from eating extra memory
+        radians = np.deg2rad(df[flow_cols].astype(np.float32))
         for col in flow_cols:
-            df[f"{col}_sin"] = np.sin(radians[col])
-            df[f"{col}_cos"] = np.cos(radians[col])
+            df[f"{col}_sin"] = np.sin(radians[col]).astype(np.float32)
+            df[f"{col}_cos"] = np.cos(radians[col]).astype(np.float32)
 
         df.drop(columns=flow_cols, inplace=True)
+        del radians
 
     def _get_column_metadata(self, columns: List[str]) -> pd.DataFrame:
         """Efficiently parses column names to extract variables and years."""
@@ -1158,14 +1484,12 @@ class ModelDataPreProcessor(Engine):
 
         open_path = str(raster_path)
         
-        # Use GDAL's virtual file system for fast AWS reading
         if self.is_aws and open_path.startswith("s3://"):
             open_path = open_path.replace("s3://", "/vsis3/")
 
         geometries = []
         
         with rasterio.open(open_path) as src:
-            # Process in 4096x4096 chunks to prevent loading massive Ecoregion TIFFs into RAM
             block_size = 4096
             
             for y in range(0, src.height, block_size):
@@ -1176,7 +1500,6 @@ class ModelDataPreProcessor(Engine):
                         min(block_size, src.height - y)
                     )
                     
-                    # Only read this small block into memory
                     mask_chunk = src.read(1, window=window, out_dtype='uint8')
 
                     if process_type == 'prediction':
@@ -1185,20 +1508,14 @@ class ModelDataPreProcessor(Engine):
                         if self.pilot_mode:
                             valid_mask = mask_chunk == 1
                         else:
-                            # TODO we need to double check what er3 mask uses
                             valid_mask = mask_chunk == 2
 
-                    # Skip empty blocks entirely
                     if not valid_mask.any():
                         continue
 
-                    # Transform shapes based on the current window offset
                     win_transform = src.window_transform(window)
                     shapes_gen = shapes(mask_chunk, mask=valid_mask, transform=win_transform)  
 
-                    # ---- THE FIX IS HERE ----
-                    # Instead of appending millions of tiny objects to `geometries` directly,
-                    # we load the chunk, union it immediately, and append the single merged object.
                     chunk_geoms = []
                     for geom, _ in shapes_gen:
                         chunk_geoms.append(shape(geom))
@@ -1207,15 +1524,10 @@ class ModelDataPreProcessor(Engine):
                         merged_chunk = unary_union(chunk_geoms)
                         geometries.append(merged_chunk)
                         
-                    # Explicit memory cleanup per-chunk
-                    del chunk_geoms
-                    gc.collect()
-                        
             crs = src.crs
 
         logger.info(f" -> Extracted {len(geometries)} unified geometries. Building GeoDataFrame...")
         
-        # Geopandas union_all() later in process() will cleanly stitch any polygons that got split by block boundaries
         gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
         gdf = gdf.to_crs(self.target_crs)   
 
@@ -1241,6 +1553,8 @@ class ModelDataPreProcessor(Engine):
         logger.info(f" -> Reading mask GeoDataFrame from: {mask_gdf_path}")
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=self.fs if self.is_aws else None)
+        
+        # We can still union the small number of subgrids here because this is tiny compared to raster data
         combined_geometry = mask_gdf_df.union_all()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
