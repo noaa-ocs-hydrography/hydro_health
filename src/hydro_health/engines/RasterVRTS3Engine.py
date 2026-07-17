@@ -122,7 +122,8 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
             provider = parts[-4]
             
         return {
-            'bin_key': f"{bin_id}_{provider}",
+            # Use provider to keep single VRT for each provider folder
+            'bin_key': provider, 
             'vsi_path': vsi_path,
             'nodata': nodata,
             'wkt': src_srs.ExportToWkt()
