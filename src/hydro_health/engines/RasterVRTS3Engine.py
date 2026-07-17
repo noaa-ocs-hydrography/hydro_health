@@ -245,7 +245,6 @@ class RasterVRTS3Engine(Engine):
         else:
             provider_folders = s3_files.glob(f"{base_s3}/*")
             for provider_path in provider_folders:
-                print(provider_path)
                 # if provider_path ==  'ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/raw/DigitalCoast/NOAA_NGS_2018_9060':
                 #     print(i, provider_path)
                 geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")

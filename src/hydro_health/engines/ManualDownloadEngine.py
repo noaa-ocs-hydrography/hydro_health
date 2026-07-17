@@ -61,9 +61,13 @@ class ManualDownloadEngine:
             now = time.time()
             os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
         
+        # TODO this process creates missing Manual Download VRTs
+        # Need to run normal VRT process before
         self.process_vrt()
-        self.process_masks()
+        self.process_masks()  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()
+        # TODO this grid tiling process only does the manual downloads
+        # Need to run both folders separately or fix code
         self.process_grid_tiles()
         print('Done')
 

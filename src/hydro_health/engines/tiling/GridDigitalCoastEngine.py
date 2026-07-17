@@ -6,7 +6,6 @@ import s3fs
 import pandas as pd
 import geopandas as gpd
 from osgeo import gdal
-from distributed import LocalCluster, Client
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
@@ -18,7 +17,6 @@ INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 def _grid_single_vrt_s3(params: list) -> str:
     """Grid a single S3 VRT"""
 
-    # blue_topo_gdf is now a Future or the object itself if scattered correctly
     vrt_s3_path, ecoregion_prefix, bluetopo_grids, blue_topo_gdf, param_lookup = params
 
     engine = GridDigitalCoastEngine(param_lookup)
@@ -40,8 +38,12 @@ def _grid_single_vrt_s3(params: list) -> str:
         
         vrt_data_suffix = '_'.join(vrt_stem.split('_')[3:])
         vrt_parent = vrt_s3_path.rsplit('/', 1)[0]
-        shp_search_path = f"{vrt_parent}/{vrt_data_suffix}/**/*_dis.shp"
+        
+        shp_search_path = f"{vrt_parent}/{vrt_data_suffix}/**/*.shp"
         shp_matches = s3_files.glob(shp_search_path)
+        
+        # Filter out any lingering dissolved files if they exist
+        shp_matches = [f for f in shp_matches if not f.endswith('_dis.shp')]
 
         if not shp_matches:
             return f" - Skipped: No shapefile for {vrt_stem}"
@@ -54,11 +56,12 @@ def _grid_single_vrt_s3(params: list) -> str:
                 if s3_files.exists(s3_target):
                     s3_files.get(s3_target, f"{local_base}{ext}")
             
-            dissolve_gdf = gpd.read_file(f"{local_base}.shp")
-            if dissolve_gdf.crs != blue_topo_gdf.crs:
-                dissolve_gdf = dissolve_gdf.to_crs(blue_topo_gdf.crs)
+            # Read the raw local tileindex shapefile
+            raw_gdf = gpd.read_file(f"{local_base}.shp")
+            if raw_gdf.crs != blue_topo_gdf.crs:
+                raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
             
-            dissolve_geom = dissolve_gdf.union_all()
+            dissolve_geom = raw_gdf.union_all()
 
         intersecting_tiles = blue_topo_gdf[
             (blue_topo_gdf['tile'].isin(bluetopo_grids)) & 
@@ -199,8 +202,6 @@ class GridDigitalCoastEngine(Engine):
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
             digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
-            print('vrt files:', f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
-
             if vrt_files:
                 # We pass the Future (blue_topo_gdf_future) instead of the full object
                 params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in vrt_files]
