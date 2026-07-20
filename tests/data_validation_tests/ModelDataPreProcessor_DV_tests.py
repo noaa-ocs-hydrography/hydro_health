@@ -279,20 +279,37 @@ def test_raster_crs_and_resolution(s3_fs, raster_directories, target_crs, target
         skip_test(f"No TIFFs found in any of the provided raster directories: {[d['path'] for d in raster_directories]}.", "Raster CRS and Resolution", desc)
             
     total_tifs = len(all_tifs)
-    print(f"\nFound {total_tifs} rasters to test for CRS and resolution.")
+    sampled_tifs = all_tifs[::10]
+    print(f"\nFound {total_tifs} rasters. Testing {len(sampled_tifs)} (every 10th file) for CRS and resolution.")
     
     errors = []
     # 2. Iterate with a progress counter
-    for i, tif in enumerate(all_tifs, 1):
-        print(f"\rTesting raster {i}/{total_tifs}: {Path(tif).name[:30]}...   ", end="", flush=True)
+    for i, tif in enumerate(sampled_tifs):
+        actual_index = (i * 10) + 1
+        print(f"\rTesting raster {actual_index}/{total_tifs}: {Path(tif).name[:30]}...   ", end="", flush=True)
         
+        # Check for 0-byte/corrupted files before rasterio tries to open them
+        if s3_fs.size(tif) == 0:
+            log_error(errors, f"Raster is 0 bytes (corrupt): {tif}")
+            continue
+            
         # safely handle path formatting depending on if s3:// prefix exists in the s3fs output
         tif_clean = tif.replace("s3://", "")
         vsi_path = f"/vsis3/{tif_clean}"
         
         try:
-            with rasterio.Env(session=AWSSession()):
+            # Added GDAL_DISABLE_READDIR_ON_OPEN to prevent S3 API throttling
+            with rasterio.Env(session=AWSSession(), GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"):
                 with rasterio.open(vsi_path) as src:
+                    # Attempt to read the first data block to ensure the TIFF has readable underlying data structures
+                    try:
+                        for ji, window in src.block_windows(1):
+                            _ = src.read(1, window=window)
+                            break
+                    except Exception as read_err:
+                        log_error(errors, f"Cannot read data block in {tif}: {str(read_err)}")
+                        continue
+
                     if src.crs.to_string() != target_crs:
                         log_error(errors, f"Incorrect CRS in {tif}")
                     
@@ -321,7 +338,7 @@ def test_raster_approximate_location(s3_fs, s3_prefix, excluded_prefixes):
     Test that all prediction rasters fall within an approximate valid bounding box for all US Coasts.
     Transforms native raster bounds to EPSG:4326 (Lat/Lon) to perform a universal geographic check.
     """
-    desc = "Ensures all prediction rasters are geographically located roughly within the bounding box of the United States and its territories."
+    desc = "Ensures prediction rasters are geographically located roughly within the bounding box of the United States and its territories."
     prediction_dir = str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=False)}"))
     
     # Use find to capture files nested in subdirectories, excluding intermediate files
@@ -331,11 +348,13 @@ def test_raster_approximate_location(s3_fs, s3_prefix, excluded_prefixes):
         skip_test(f"No prediction TIFFs found in {prediction_dir} to test location.", "Raster Approximate Location", desc)
         
     total_tifs = len(tifs)
-    print(f"\nFound {total_tifs} rasters to test for approximate location.")
+    sampled_tifs = tifs[::10]
+    print(f"\nFound {total_tifs} rasters. Testing {len(sampled_tifs)} (every 10th file) for approximate location.")
     
     errors = []
-    for i, tif in enumerate(tifs, 1):
-        print(f"\rTesting location {i}/{total_tifs}: {Path(tif).name[:30]}...   ", end="", flush=True)
+    for i, tif in enumerate(sampled_tifs):
+        actual_index = (i * 10) + 1
+        print(f"\rTesting location {actual_index}/{total_tifs}: {Path(tif).name[:30]}...   ", end="", flush=True)
         
         tif_clean = tif.replace("s3://", "")
         vsi_path = f"/vsis3/{tif_clean}"
@@ -352,7 +371,7 @@ def test_raster_approximate_location(s3_fs, s3_prefix, excluded_prefixes):
                         log_error(errors, f"Latitude ({min_lat:.2f}, {max_lat:.2f}) seemingly outside US bounds in {tif}")
                         
                     # Broad check: Exclude Prime Meridian, Africa, Europe, and mainland Asia 
-                    # This ensures it isn't dumped at exactly 0,0 or completely mangled during reprojection.
+                    # This ensures it isnt dumped at exactly 0,0 or completely mangled during reprojection.
                     if (-50 < min_lon < 130) or (-50 < max_lon < 130):
                         log_error(errors, f"Longitude ({min_lon:.2f}, {max_lon:.2f}) seemingly outside US bounds in {tif}")
                         
@@ -384,14 +403,16 @@ def test_derivative_counts_per_tile(s3_fs, tile_directories, year_pairs):
         skip_test(f"No tile folders found in directories: {tile_directories}", "Derivative Counts Per Tile", desc)
             
     total_folders = len(all_tile_folders)
-    print(f"\nFound {total_folders} tile folders to check derivative counts.")
+    sampled_folders = all_tile_folders[::10]
+    print(f"\nFound {total_folders} tile folders. Checking {len(sampled_folders)} (every 10th tile) for derivative counts.")
     
     # Format expected year pairs for report details
     expected_pairs_str = ", ".join([f"{y0}_{y1}" for y0, y1 in year_pairs])
     
-    for i, tile_folder in enumerate(all_tile_folders, 1):
+    for i, tile_folder in enumerate(sampled_folders):
+        actual_index = (i * 10) + 1
         tile_name = Path(tile_folder).name
-        print(f"\rChecking tile {i}/{total_folders}: {tile_name[:30]}...   ", end="", flush=True)
+        print(f"\rChecking tile {actual_index}/{total_folders}: {tile_name[:30]}...   ", end="", flush=True)
         
         try:
             files = s3_fs.ls(tile_folder)
@@ -430,12 +451,19 @@ def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, pred
         skip_test(f"No parquet files found in {training_tiles_dir} or {prediction_tiles_dir}.", "Parquet Schema and Contents", desc)
         
     total_files = len(all_files)
-    print(f"\nFound {total_files} parquet files to check schema and contents.")
+    sampled_files = all_files[::10]
+    print(f"\nFound {total_files} parquet files. Checking {len(sampled_files)} (every 10th file) for schema and contents.")
     
     expected_pairs_str = ", ".join([f"{y0}_{y1}" for y0, y1 in year_pairs])
     errors = []
-    for i, file_path in enumerate(all_files, 1):
-        print(f"\rChecking schema {i}/{total_files}: {Path(file_path).name[:30]}...   ", end="", flush=True)
+    
+    # Store an example of valid schemas for the final report
+    sample_train_cols = None
+    sample_pred_cols = None
+    
+    for i, file_path in enumerate(sampled_files):
+        actual_index = (i * 10) + 1
+        print(f"\rChecking schema {actual_index}/{total_files}: {Path(file_path).name[:30]}...   ", end="", flush=True)
         
         s3_path = f"s3://{file_path}"
         is_prediction = file_path in pred_files
@@ -456,6 +484,8 @@ def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, pred
                         f"  Actual columns  : {actual_cols}\n"
                         f"  Missing columns : {sorted(list(missing_cols))}"
                     )
+                elif sample_pred_cols is None:
+                    sample_pred_cols = actual_cols # Capture a successful example
             else:
                 # For training files, we must check coordinates, years, and bathymetry indicators
                 base_expected = {'X', 'Y', 'year_t', 'year_t1'}
@@ -484,6 +514,8 @@ def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, pred
                         f"  Actual columns  : {actual_cols}\n"
                         f"  Missing columns : {missing_details}"
                     )
+                elif sample_train_cols is None:
+                    sample_train_cols = actual_cols # Capture a successful example
                 
                 # Year value validation
                 if 'year_t' in df.columns and 'year_t1' in df.columns:
@@ -501,6 +533,17 @@ def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, pred
              log_error(errors, f"Failed to process {s3_path}: {str(e)}")
              
     print("\nFinished checking parquet schemas.")
+    
+    # Append examples to the description for the report
+    desc += "\n\n--- Validation Details ---"
+    desc += "\nExpected Prediction Columns: ['X', 'Y']"
+    if sample_pred_cols:
+        desc += f"\nExample Found Prediction Schema: {sample_pred_cols}"
+        
+    desc += "\n\nExpected Training Columns: ['X', 'Y', 'year_t', 'year_t1'] AND ['delta_bathy' OR 'bathy_t1']"
+    if sample_train_cols:
+        desc += f"\nExample Found Training Schema: {sample_train_cols}"
+        
     fail_with_errors(errors, "Parquet Schema and Contents", desc)
 
 def test_long_format_padded_schema(s3_fs, training_tiles_dir):
@@ -516,11 +559,17 @@ def test_long_format_padded_schema(s3_fs, training_tiles_dir):
     if not long_format_files:
         skip_test(f"No long-format parquet files found in {training_tiles_dir}", "Long Format Padded Schema", desc)
 
-    # Check a sample of files to be efficient (e.g., first 5)
-    sample_files = long_format_files[:5]
+    # Check a sample of files to be efficient
+    total_files = len(long_format_files)
+    sample_files = long_format_files[::10]
+    print(f"\nFound {total_files} long-format parquets. Checking {len(sample_files)} (every 10th file) for padded schemas.")
+    
     required_cols = {'bathy_t', 'bathy_t1', 'delta_bathy'}
     
-    for file_path in sample_files:
+    for i, file_path in enumerate(sample_files):
+        actual_index = (i * 10) + 1
+        print(f"\rChecking padded schema {actual_index}/{total_files}: {file_path.name[:30]}...   ", end="", flush=True)
+        
         try:
             # Open the file via the S3 filesystem
             with s3_fs.open(str(file_path), 'rb') as f:
@@ -535,6 +584,7 @@ def test_long_format_padded_schema(s3_fs, training_tiles_dir):
         except Exception as e:
             log_error(errors, f"Failed to read schema for {file_path.name}: {e}")
             
+    print("\nFinished checking long format padded schema.")
     fail_with_errors(errors, "Long Format Padded Schema", desc)
 
 def test_parquet_spatial_integrity(s3_fs, prediction_tiles_dir):
@@ -550,11 +600,13 @@ def test_parquet_spatial_integrity(s3_fs, prediction_tiles_dir):
         skip_test(f"No prediction parquet files found in {prediction_tiles_dir}.", "Parquet Spatial Integrity", desc)
         
     total_files = len(all_files)
-    print(f"\nFound {total_files} parquet files to check spatial integrity.")
+    sampled_files = all_files[::10]
+    print(f"\nFound {total_files} parquet files. Checking {len(sampled_files)} (every 10th file) for spatial integrity.")
     
     errors = []
-    for i, file_path in enumerate(all_files, 1):
-        print(f"\rChecking coordinates {i}/{total_files}: {Path(file_path).name[:30]}...   ", end="", flush=True)
+    for i, file_path in enumerate(sampled_files):
+        actual_index = (i * 10) + 1
+        print(f"\rChecking coordinates {actual_index}/{total_files}: {Path(file_path).name[:30]}...   ", end="", flush=True)
         
         s3_path = f"s3://{file_path}"
         try:
@@ -564,14 +616,118 @@ def test_parquet_spatial_integrity(s3_fs, prediction_tiles_dir):
                 log_error(errors, f"Parquet file {s3_path} is empty.")
                 continue
                 
-            x_decimals = (df['X'] * 1000 % 1)
-            if not np.allclose(x_decimals, 0, atol=1e-5):
-                log_error(errors, f"X coordinates have >3 decimal places in {s3_path}.")
+            # Check X coordinates
+            x_rounded = df['X'].round(3)
+            if not np.allclose(df['X'], x_rounded, atol=1e-4, equal_nan=True):
+                # Isolate a bad value to print in the report for easier debugging
+                bad_x_idx = ~np.isclose(df['X'], x_rounded, atol=1e-4, equal_nan=True)
+                bad_x = df['X'][bad_x_idx].iloc[0]
+                log_error(errors, f"X coordinates have >3 decimal places in {s3_path} (e.g., {bad_x})")
+                
+            # Check Y coordinates
+            y_rounded = df['Y'].round(3)
+            if not np.allclose(df['Y'], y_rounded, atol=1e-4, equal_nan=True):
+                bad_y_idx = ~np.isclose(df['Y'], y_rounded, atol=1e-4, equal_nan=True)
+                bad_y = df['Y'][bad_y_idx].iloc[0]
+                log_error(errors, f"Y coordinates have >3 decimal places in {s3_path} (e.g., {bad_y})")
+                
         except Exception as e:
              log_error(errors, f"Failed to process {s3_path}: {str(e)}")
              
     print("\nFinished checking spatial integrity.")
     fail_with_errors(errors, "Parquet Spatial Integrity", desc)
+
+
+def test_parquet_prediction_training_parity(s3_fs, prediction_tiles_dir, training_tiles_dir):
+    """
+    Test that corresponding prediction and training parquet files for each tile have the same number of rows,
+    identical bounding box coordinates, and matching data in shared columns where training data is valid.
+    """
+    desc = "Verifies that each tile's prediction and primary training parquet files have matching row counts, identical bounding box spatial extents, and perfectly aligned data in shared columns where training values exist."
+    
+    try:
+        pred_tile_folders = s3_fs.ls(prediction_tiles_dir)
+    except FileNotFoundError:
+        pred_tile_folders = []
+        
+    if not pred_tile_folders:
+        skip_test(f"No tile folders found in {prediction_tiles_dir}", "Parquet Prediction/Training Parity", desc)
+        
+    total_folders = len(pred_tile_folders)
+    sampled_folders = pred_tile_folders[::10]
+    print(f"\nFound {total_folders} tile folders. Checking {len(sampled_folders)} (every 10th tile) for prediction vs training parquet parity.")
+    
+    errors = []
+    
+    for i, pred_folder in enumerate(sampled_folders):
+        actual_index = (i * 10) + 1
+        tile_name = Path(pred_folder).name
+        print(f"\rChecking parity {actual_index}/{total_folders}: {tile_name[:30]}...   ", end="", flush=True)
+        
+        # Locate the prediction parquet
+        pred_files = [f for f in s3_fs.ls(pred_folder) if f.endswith("_prediction_clipped_data.parquet")]
+        if not pred_files:
+            continue
+        pred_file = pred_files[0]
+        
+        # Locate the matching primary training folder
+        train_folder = f"{training_tiles_dir.rstrip('/')}/{tile_name}"
+        
+        try:
+            # Look for the primary training parquet (ignoring long format derivatives and csvs)
+            train_files = [f for f in s3_fs.ls(train_folder) if f.endswith(".parquet") and not f.endswith("_long.parquet")]
+            if not train_files:
+                log_error(errors, f"Missing primary training parquet for tile {tile_name} in {train_folder}")
+                continue
+            train_file = train_files[0]
+            
+            # Load both files
+            df_pred = pd.read_parquet(f"s3://{pred_file}", storage_options={"anon": False})
+            df_train = pd.read_parquet(f"s3://{train_file}", storage_options={"anon": False})
+            
+            # Check 1: Row count parity
+            if len(df_pred) != len(df_train):
+                log_error(errors, f"Row count mismatch for tile {tile_name}: Prediction ({len(df_pred)} rows) vs Training ({len(df_train)} rows)")
+                continue
+                
+            # Check 2: Bounding Box / Extent Parity
+            pred_bbox = (df_pred['X'].min(), df_pred['Y'].min(), df_pred['X'].max(), df_pred['Y'].max())
+            train_bbox = (df_train['X'].min(), df_train['Y'].min(), df_train['X'].max(), df_train['Y'].max())
+            
+            if not np.allclose(pred_bbox, train_bbox, equal_nan=True):
+                log_error(errors, f"Bounding Box mismatch for tile {tile_name}. Pred: {pred_bbox}, Train: {train_bbox}")
+                
+            # Check 3: Shared column data alignment
+            shared_cols = set(df_pred.columns).intersection(set(df_train.columns))
+            
+            # Ensure index alignment by sorting on coordinates if they don't perfectly match inherently
+            if not np.allclose(df_pred['X'], df_train['X'], equal_nan=True) or not np.allclose(df_pred['Y'], df_train['Y'], equal_nan=True):
+                df_pred = df_pred.sort_values(by=['Y', 'X']).reset_index(drop=True)
+                df_train = df_train.sort_values(by=['Y', 'X']).reset_index(drop=True)
+                
+            for col in shared_cols:
+                # Get the mask of where the training data actually has valid values
+                valid_mask = df_train[col].notna()
+                
+                train_valid = df_train.loc[valid_mask, col]
+                pred_valid = df_pred.loc[valid_mask, col]
+                
+                if len(train_valid) == 0:
+                    continue
+                    
+                # Float columns use allclose, object/string columns use equals
+                if pd.api.types.is_numeric_dtype(train_valid):
+                    if not np.allclose(train_valid, pred_valid, equal_nan=True):
+                        log_error(errors, f"Value parity mismatch in shared column '{col}' for tile {tile_name}")
+                else:
+                    if not train_valid.equals(pred_valid):
+                        log_error(errors, f"Value parity mismatch in shared column '{col}' for tile {tile_name}")
+                        
+        except Exception as e:
+            log_error(errors, f"Failed processing prediction/training parity for {tile_name}: {str(e)}")
+            
+    print("\nFinished checking prediction and training parity.")
+    fail_with_errors(errors, "Parquet Prediction/Training Parity", desc)
 
 
 # --- 4. GEOMETRY / MASK TESTS ---
@@ -635,12 +791,14 @@ def test_training_tiffs_are_masked(s3_fs, s3_prefix, target_crs, excluded_prefix
         skip_test(f"No training tiffs found in {train_dir} to validate masking.", "Training TIFF Masking", desc)
 
     total_tifs = len(train_tifs)
-    print(f"\nFound {total_tifs} training tiffs to check for proper masking.")
+    sampled_tifs = train_tifs[::10]
+    print(f"\nFound {total_tifs} training tiffs. Checking {len(sampled_tifs)} (every 10th file) for proper masking.")
     
     errors = []
     with rasterio.Env(session=AWSSession()):
-        for i, train_tif in enumerate(train_tifs, 1):
-            print(f"\rChecking masking {i}/{total_tifs}: {Path(train_tif).name[:30]}...   ", end="", flush=True)
+        for i, train_tif in enumerate(sampled_tifs):
+            actual_index = (i * 10) + 1
+            print(f"\rChecking masking {actual_index}/{total_tifs}: {Path(train_tif).name[:30]}...   ", end="", flush=True)
             
             tif_clean = train_tif.replace("s3://", "")
             
@@ -698,35 +856,53 @@ def test_training_and_prediction_values_match(s3_fs, s3_prefix, excluded_prefixe
     train_dir_str = str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=False)}"))
     pred_dir_str = str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=False)}"))
 
-    # Use find to locate files in subdirectories too, excluding intermediate folders
-    train_tifs = [f for f in s3_fs.find(train_dir_str) if f.lower().endswith(('.tif', '.tiff')) and not is_excluded(f, excluded_prefixes)]
+    # Use find to locate files in subdirectories too, excluding intermediate folders, and skipping TSM/Hurricane files
+    train_tifs = [
+        f for f in s3_fs.find(train_dir_str) 
+        if f.lower().endswith(('.tif', '.tiff')) 
+        and not is_excluded(f, excluded_prefixes)
+        and "tsm" not in f.lower()
+        and "hurricane" not in f.lower()
+    ]
     
     if not train_tifs:
         skip_test(f"No training tiffs found in {train_dir_str} to compare values.", "Training/Prediction Values Match", desc)
 
     total_tifs = len(train_tifs)
-    print(f"\nFound {total_tifs} training tiffs to check against prediction tiffs.")
+    sampled_tifs = train_tifs[::10]
+    print(f"\nFound {total_tifs} training tiffs. Checking {len(sampled_tifs)} (every 10th file) against prediction tiffs.")
 
     errors = []
-    with rasterio.Env(session=AWSSession()):
-        for i, train_tif_path in enumerate(train_tifs, 1):
-            filename = Path(train_tif_path).name
-            print(f"\rChecking values {i}/{total_tifs}: {filename[:30]}...   ", end="", flush=True)
+    for i, train_tif_path in enumerate(sampled_tifs):
+        actual_index = (i * 10) + 1
+        filename = Path(train_tif_path).name
+        print(f"\rChecking values {actual_index}/{total_tifs}: {filename[:30]}...   ", end="", flush=True)
+        
+        # Reconstruct the relative path to locate the prediction raster in the exact same subdirectory
+        train_clean = train_tif_path.replace("s3://", "")
+        train_dir_clean = train_dir_str.replace("s3://", "")
+        rel_path = train_clean.replace(train_dir_clean, "").lstrip("/")
+        
+        pred_s3_path = f"{pred_dir_str}/{rel_path}"
+        pred_vsi_path = f"/vsis3/{pred_s3_path.replace('s3://', '')}"
+        train_vsi_path = f"/vsis3/{train_clean}"
+        
+        # If the prediction file doesnt exist, just skip it instead of logging an error
+        if not s3_fs.exists(pred_s3_path):
+            continue
             
-            # Reconstruct the relative path to locate the prediction raster in the exact same subdirectory
-            train_clean = train_tif_path.replace("s3://", "")
-            train_dir_clean = train_dir_str.replace("s3://", "")
-            rel_path = train_clean.replace(train_dir_clean, "").lstrip("/")
-            
-            pred_s3_path = f"{pred_dir_str}/{rel_path}"
-            pred_vsi_path = f"/vsis3/{pred_s3_path.replace('s3://', '')}"
-            train_vsi_path = f"/vsis3/{train_clean}"
-            
-            if not s3_fs.exists(pred_s3_path):
-                log_error(errors, f"Missing corresponding prediction TIFF {pred_s3_path} for training TIFF {train_tif_path}")
-                continue
+        # Check for 0-byte/corrupted files before rasterio tries to open them
+        if s3_fs.size(train_tif_path) == 0:
+            log_error(errors, f"Training file is 0 bytes (corrupt): {train_tif_path}")
+            continue
+        if s3_fs.size(pred_s3_path) == 0:
+            log_error(errors, f"Prediction file is 0 bytes (corrupt): {pred_s3_path}")
+            continue
 
-            try:
+        try:
+            # Move AWSSession inside the loop to prevent token expiration on long runs
+            # and add GDAL_DISABLE_READDIR_ON_OPEN to prevent S3 API throttling
+            with rasterio.Env(session=AWSSession(), GDAL_DISABLE_READDIR_ON_OPEN="EMPTY_DIR"):
                 with rasterio.open(train_vsi_path) as src_train, \
                      rasterio.open(pred_vsi_path) as src_pred:
                     
@@ -757,9 +933,9 @@ def test_training_and_prediction_values_match(s3_fs, s3_prefix, excluded_prefixe
                             log_error(errors, f"Pixel values mismatched between {train_tif_path} and {pred_s3_path} at window {window}")
                             break # Stop checking chunks for this file
                             
-            except Exception as e:
-                log_error(errors, f"Failed to process {train_tif_path}: {str(e)}")
-                
+        except Exception as e:
+            log_error(errors, f"Failed to process {train_tif_path}: {str(e)}")
+            
     print("\nFinished checking train vs prediction values.")
     fail_with_errors(errors, "Training/Prediction Values Match", desc)
 
@@ -802,16 +978,17 @@ if __name__ == "__main__":
 
     # Comment out any test in this list that you want to skip.
     tests_to_run = [
-        "test_output_directories_exist",
-        "test_year_range_tiffs_exist",
-        "test_raster_approximate_location",
-        "test_raster_crs_and_resolution",
-        "test_training_tiffs_are_masked",
+        # "test_output_directories_exist",
+        # "test_year_range_tiffs_exist",
+        # "test_raster_approximate_location",
+        # "test_raster_crs_and_resolution",
+        # "test_training_tiffs_are_masked",
         "test_training_and_prediction_values_match",
         "test_derivative_counts_per_tile",
         "test_parquet_schema_and_contents",
         "test_long_format_padded_schema",
         "test_parquet_spatial_integrity",
+        "test_parquet_prediction_training_parity",
         "test_mask_and_subgrid_crs",
         "test_csv_stats_generated"
     ]

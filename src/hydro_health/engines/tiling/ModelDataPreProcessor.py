@@ -238,13 +238,13 @@ class ModelDataPreProcessor(Engine):
                 mask_pred_gdf.to_file(pred_cutline_path, driver='GPKG')
                 mask_train_gdf.to_file(train_cutline_path, driver='GPKG')
 
-                self.parallel_processing_rasters(
-                    self.preprocessed_dir, 
-                    mask_pred_bounds, 
-                    mask_train_bounds,
-                    pred_cutline_path,
-                    train_cutline_path
-                )
+                # self.parallel_processing_rasters(
+                #     self.preprocessed_dir, 
+                #     mask_pred_bounds, 
+                #     mask_train_bounds,
+                #     pred_cutline_path,
+                #     train_cutline_path
+                # )
 
             # --- PHASE 2 CLUSTER TRANSITION ---
             logger.info("Phase 1 Complete. Shutting down raster cluster and re-initializing for Parquet Subtiling...")
@@ -253,9 +253,9 @@ class ModelDataPreProcessor(Engine):
             
             logger.info("Initializing Phase 2 Cluster: Parquet Subtiling & Transforms (Balanced workers, standard memory)")
             cluster = LocalCluster(
-                n_workers=8,            
+                n_workers=4,            
                 threads_per_worker=1,  
-                memory_limit='3.5GB',
+                memory_limit='7GB',
                 env=GDAL_ENV_VARS,
                 local_directory=str(self.local_tmp_dir) # Route Dask spills to cleanable local tmp
             )
@@ -266,17 +266,17 @@ class ModelDataPreProcessor(Engine):
             logger.info(f"Saving Phase 2 Dask performance report to: {report_file_tiling}")
 
             with performance_report(filename=report_file_tiling):
-                # self.clip_rasters_by_tile(
-                #     raster_dir=self.prediction_out_dir, 
-                #     output_dir=self.prediction_tiles_dir, 
-                #     data_type="prediction"
-                # )
+                self.clip_rasters_by_tile(
+                    raster_dir=self.prediction_out_dir, 
+                    output_dir=self.prediction_tiles_dir, 
+                    data_type="prediction"
+                )
 
-                # self.clip_rasters_by_tile(
-                #     raster_dir=self.training_out_dir, 
-                #     output_dir=self.training_tiles_dir, 
-                #     data_type="training"
-                # )
+                self.clip_rasters_by_tile(
+                    raster_dir=self.training_out_dir, 
+                    output_dir=self.training_tiles_dir, 
+                    data_type="training"
+                )
                 
                 self.batch_long_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
                 self.batch_long_format_transformation(base_dir=self.training_tiles_dir, mode="training")
@@ -1206,6 +1206,12 @@ class ModelDataPreProcessor(Engine):
         """Orchestrator for transforming wide tiles to long year-pair format."""
         logger.info(f"Starting Long Format Transformation (Batch: {mode})...")
 
+        # ** DEBUG ADDITION: LOG YEAR RANGES IMMEDIATELY **
+        year_ranges_val = getattr(self, 'year_ranges', None)
+        logger.info(f"-> Validating 'year_ranges' config: {year_ranges_val}")
+        if not year_ranges_val:
+            logger.error("!!! CRITICAL WARNING: 'self.year_ranges' is empty or not defined. No files will be processed !!!")
+
         file_suffix = f"_{mode}_clipped_data.parquet"
 
         base_dir_upath = UPath(base_dir)
@@ -1220,7 +1226,6 @@ class ModelDataPreProcessor(Engine):
 
         # -------------------------------------------------------------
         # DYNAMIC DASK TASK STREAM (LONG FORMAT TRANSFORMATION)
-        # Reduced max_concurrent to prevent memory pileups in scheduler and Dask workers
         # -------------------------------------------------------------
         client = dask.distributed.client.default_client()
         max_concurrent = 100 
@@ -1255,12 +1260,32 @@ class ModelDataPreProcessor(Engine):
             except StopIteration:
                 pass
 
-        success = sum(1 for r in results if r.startswith("Success"))
-        failed = len(results) - success
+        # ** DEBUG ADDITION: EXPOSE SILENT FAILURES **
+        success_count = 0
+        zero_pairs = 0
+        failed_msgs = []
         
-        logger.info(f"[SUCCESS] Transformation Complete. Success: {success}, Failed: {failed}")
-        if failed > 0:
-            logger.error("Transformation Errors:\n" + "\n".join([r for r in results if not r.startswith("Success")]))
+        for r in results:
+            if r.startswith("Success"):
+                success_count += 1
+                if "(0 pairs)" in r:
+                    zero_pairs += 1
+            else:
+                failed_msgs.append(r)
+        
+        logger.info(f"--------------------------------------------------")
+        logger.info(f"[TRANSFORMATION SUMMARY] Mode: {mode.upper()}")
+        logger.info(f" -> Total Attempted Tasks: {len(results)}")
+        logger.info(f" -> Successful Tasks: {success_count}")
+        logger.info(f" -> Failed/Error Tasks: {len(failed_msgs)}")
+        logger.info(f"--------------------------------------------------")
+        
+        if zero_pairs > 0:
+            logger.warning(f"!!! WARNING: {zero_pairs} tasks completed successfully but generated ZERO output files (0 pairs). Check inner loop conditions in logs.")
+            
+        if failed_msgs:
+            logger.error("Transformation Errors:\n" + "\n".join(failed_msgs))
+
 
     def _transform_tile_task(self, f_path: str, mode: Literal["training", "prediction"], current_index=None, total_count=None) -> str:
         """Dask Worker: Reads file -> Calls specific processor -> Returns status."""
@@ -1299,26 +1324,40 @@ class ModelDataPreProcessor(Engine):
         saved_files = []
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-        for y0, y1 in getattr(self, 'year_ranges', []): # Using getattr to avoid undeclared issues
+        # ** DEBUG ADDITION: CHECK YEAR RANGES ON THE WORKER **
+        year_ranges = getattr(self, 'year_ranges', [])
+        if not year_ranges:
+             logger.warning(f"{progress_str} [WARNING] 'year_ranges' is empty or missing! No pairs will be processed for {tile_name}.")
+
+        for y0, y1 in year_ranges: 
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
 
             out_name = f"{tile_name}_{pair_name}_long.parquet"
             out_path = str(UPath(output_dir) / out_name)
 
-            if not self.overwrite and UPath(out_path).exists():
-                logger.info(f"{progress_str} [SKIP] Long-format training tile already exists: {out_path}")
-                saved_files.append(out_name)
-                continue
-
             cols_t_meta = col_meta[col_meta["year"] == y0]
             cols_t1_meta = col_meta[col_meta["year"] == y1]
 
-            # Use union instead of intersection so we keep columns even if missing in one year
-            union_vars = set(cols_t_meta["var_base"]).union(cols_t1_meta["var_base"])
-            
-            if "bathy_filled" not in union_vars and "bathy" not in union_vars:
+            # --- NEW BATHY CONSOLIDATION LOGIC ---
+            # Find all raw columns that represent bathymetry for t and t1
+            bathy_cols_t = [c for c in cols_t_meta["colname"] if "bathy" in c.lower()]
+            bathy_cols_t1 = [c for c in cols_t1_meta["colname"] if "bathy" in c.lower()]
+
+            if not bathy_cols_t and not bathy_cols_t1:
+                all_avail = list(cols_t_meta['colname']) + list(cols_t1_meta['colname'])
+                logger.info(f"{progress_str} [SKIP] {tile_name} {pair_name} - No bathy columns found for either year. Available: {all_avail}")
                 continue
+
+            # Filter out the bathy variables from the standard union_vars mapping 
+            # so we can handle them manually (avoids combined1_bathy vs combined2_bathy mismatches)
+            bathy_var_bases_t = set(cols_t_meta[cols_t_meta["colname"].isin(bathy_cols_t)]["var_base"])
+            bathy_var_bases_t1 = set(cols_t1_meta[cols_t1_meta["colname"].isin(bathy_cols_t1)]["var_base"])
+            
+            standard_vars_t = set(cols_t_meta["var_base"]) - bathy_var_bases_t
+            standard_vars_t1 = set(cols_t1_meta["var_base"]) - bathy_var_bases_t1
+            
+            union_vars = standard_vars_t.union(standard_vars_t1)
 
             t_map = dict(zip(cols_t_meta["var_base"], cols_t_meta["colname"]))
             t1_map = dict(zip(cols_t1_meta["var_base"], cols_t1_meta["colname"]))
@@ -1338,18 +1377,43 @@ class ModelDataPreProcessor(Engine):
             
             id_cols = [c for c in ["X", "Y", "FID", "tile_id", "geometry"] if c in gdf.columns]
 
-            cols_to_grab = id_cols + cols_t_exist + cols_t1_exist + forcing_cols + static_cols
+            # Include the raw bathy columns in the initial grab
+            cols_to_grab = id_cols + cols_t_exist + cols_t1_exist + forcing_cols + static_cols + bathy_cols_t + bathy_cols_t1
             if delta_bathy_col in gdf.columns:
                 cols_to_grab.append(delta_bathy_col)
 
-            # Ensure we only grab columns that actually exist in the dataframe to prevent KeyError
+            cols_to_grab = list(set(cols_to_grab)) # remove duplicates
             cols_to_grab = [c for c in cols_to_grab if c in gdf.columns]
 
             if not cols_to_grab:
+                logger.info(f"{progress_str} [SKIP] {tile_name} {pair_name} - None of the required columns matched dataframe columns.")
                 continue
 
             pair_gdf = gdf[cols_to_grab].drop_duplicates()
 
+            # --- MANUAL BATHYMETRY CONSOLIDATION ---
+            def consolidate_bathy(df, cols):
+                valid_cols = [c for c in cols if c in df.columns]
+                if not valid_cols:
+                    return pd.Series(np.nan, index=df.index, dtype=np.float32)
+                
+                filled_cols = [c for c in valid_cols if "filled" in c.lower()]
+                target_cols = filled_cols if filled_cols else valid_cols
+                
+                if len(target_cols) == 1:
+                    return df[target_cols[0]]
+                
+                # Combine multiple surveys by taking the first non-null value across columns (coalesce)
+                return df[target_cols].bfill(axis=1).iloc[:, 0]
+
+            pair_gdf["bathy_t"] = consolidate_bathy(pair_gdf, bathy_cols_t)
+            pair_gdf["bathy_t1"] = consolidate_bathy(pair_gdf, bathy_cols_t1)
+            
+            # Drop raw bathy cols now that we have our clean 'bathy_t' and 'bathy_t1'
+            raw_to_drop = [c for c in bathy_cols_t + bathy_cols_t1 if c in pair_gdf.columns]
+            pair_gdf.drop(columns=raw_to_drop, inplace=True)
+
+            # --- STANDARD RENAMING ---
             rename_map = {}
             for v in sorted_union:
                 if v in t_map and t_map[v] in pair_gdf.columns:
@@ -1365,19 +1429,14 @@ class ModelDataPreProcessor(Engine):
             pair_gdf["year_t"] = y0
             pair_gdf["year_t1"] = y1
 
-            # Strip the _filled suffix before executing the delta logic
+            # Strip the _filled suffix from remaining non-bathy columns
             filled_cols = [c for c in pair_gdf.columns if "_filled" in c]
             if filled_cols:
                 pair_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
 
-            # Calculate delta if bathy exists for both years
-            if "delta_bathy" not in pair_gdf.columns and "bathy_t" in pair_gdf.columns and "bathy_t1" in pair_gdf.columns:
+            # Calculate delta if not already pre-calculated
+            if "delta_bathy" not in pair_gdf.columns:
                 pair_gdf["delta_bathy"] = pair_gdf["bathy_t1"] - pair_gdf["bathy_t"]
-
-            # Pad missing critical columns with NaNs to ensure consistent schema across tiles
-            for critical_col in ["bathy_t", "bathy_t1", "delta_bathy"]:
-                if critical_col not in pair_gdf.columns:
-                    pair_gdf[critical_col] = np.nan
 
             target_col = "bathy_t1"
             predictor_cols_t = [c for c in pair_gdf.columns if c.endswith("_t")]
@@ -1386,9 +1445,14 @@ class ModelDataPreProcessor(Engine):
             final_cols = id_cols + ["year_t", "year_t1", target_col] + predictor_cols_t + predictor_cols_delta + forcing_cols + static_cols
             final_cols = [c for c in final_cols if c in pair_gdf.columns]
             
-            pair_gdf[final_cols].to_parquet(out_path, index=None, engine="pyarrow")
-            logger.info(f"{progress_str} [SUCCESS] Saved training long-format tile to: {out_path}")
-            saved_files.append(out_name)
+            # ** DEBUG ADDITION: TRY/EXCEPT BLOCK AROUND PARQUET SAVE **
+            try:
+                pair_gdf[final_cols].to_parquet(out_path, index=None, engine="pyarrow")
+                logger.info(f"{progress_str} [SUCCESS] Saved training long-format tile to: {out_path}")
+                saved_files.append(out_name)
+            except Exception as e:
+                logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path}: {str(e)}")
+                raise e # re-raise so the task is counted as failed in the results aggregator
             
             # Critical Cleanup: delete temporary dataframe view immediately before iterating the next year range.
             del pair_gdf
@@ -1408,17 +1472,17 @@ class ModelDataPreProcessor(Engine):
         saved_files = []
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-        for y0, y1 in getattr(self, 'year_ranges', []): # Using getattr to avoid undeclared issues
+        # ** DEBUG ADDITION: CHECK YEAR RANGES ON THE WORKER **
+        year_ranges = getattr(self, 'year_ranges', [])
+        if not year_ranges:
+             logger.warning(f"{progress_str} [WARNING] 'year_ranges' is empty or missing! No pairs will be processed for {tile_name}.")
+
+        for y0, y1 in year_ranges: 
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
             
             out_name = f"{tile_name}_{pair_name}_prediction_long.parquet"
             out_path = str(UPath(output_dir) / out_name)
-
-            if not self.overwrite and UPath(out_path).exists():
-                logger.info(f"{progress_str} [SKIP] Long-format prediction tile already exists: {out_path}")
-                saved_files.append(out_name)
-                continue
                 
             forcing_pattern = f"{y0_str}_{y1_str}$"
             forcing_cols = [c for c in gdf.columns if re.search(forcing_pattern, c)]
@@ -1437,9 +1501,14 @@ class ModelDataPreProcessor(Engine):
             if filled_cols:
                 pair_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
             
-            pair_gdf.to_parquet(out_path, index=None, engine="pyarrow")
-            logger.info(f"{progress_str} [SUCCESS] Saved prediction long-format tile to: {out_path}")
-            saved_files.append(out_name)
+            # ** DEBUG ADDITION: TRY/EXCEPT BLOCK AROUND PARQUET SAVE **
+            try:
+                pair_gdf.to_parquet(out_path, index=None, engine="pyarrow")
+                logger.info(f"{progress_str} [SUCCESS] Saved prediction long-format tile to: {out_path}")
+                saved_files.append(out_name)
+            except Exception as e:
+                logger.error(f"{progress_str} [ERROR] Failed to save prediction parquet file {out_path}: {str(e)}")
+                raise e
             
             # Critical Cleanup: explicit memory free immediately.
             del pair_gdf
