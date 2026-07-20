@@ -73,13 +73,13 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs' / 'lookups'
 def _process_all_vrts(params):
     """Processes a single VRT file. This function will be executed by a Dask worker."""
 
-    vrt_file, output_dir, x_res, y_res, resampling_method, creation_options = params
-    
-    # Skip resampling for NGS datasets
-    if "NGS" in str(vrt_file).upper():
-        logger.info(f"Skipping resampling for NGS dataset: {vrt_file}")
-        return
+    vrt_file, output_dir, target_resolution_m, resampling_method, creation_options = params
         
+    # Skip resampling for NCEI datasets
+    if "NCEI" in str(vrt_file).upper():
+        logger.info(f"Skipping resampling for NCEI dataset: {vrt_file}")
+        return
+
     engine = CreateLidarDataPlotsEngine()
 
     max_retries = 3
@@ -117,16 +117,17 @@ def _process_all_vrts(params):
             logger.info(f"Resampling: {vrt_file} (Attempt {attempt + 1}/{max_retries})")
 
             # --- DYNAMIC RESOLUTION FIX ---
-            # Prevent GDAL from attempting to render projected (meter) datasets at a 4.5 millimeter resolution
-            actual_x_res = x_res
-            actual_y_res = y_res
+            # Set default resolution in degrees (approximate conversion)
+            degree_res = target_resolution_m / 111320.0
+            actual_x_res = degree_res
+            actual_y_res = degree_res
             try:
                 open_path = engine._get_s3_path(vrt_file)
                 with rasterio.open(open_path) as src:
                     if src.crs and src.crs.is_projected:
-                        actual_x_res = 500.0
-                        actual_y_res = 500.0
-                        logger.info(f"[{base_name}] Projected CRS detected! Swapping degree resolution for ~500.0 meter resolution to prevent memory exhaustion.")
+                        actual_x_res = float(target_resolution_m)
+                        actual_y_res = float(target_resolution_m)
+                        logger.info(f"[{base_name}] Projected CRS detected! Swapping degree resolution for {target_resolution_m} meter resolution to prevent memory exhaustion.")
             except Exception:
                 pass # Failsafe: if rasterio can't read it, fall back to default behavior
             # ------------------------------
@@ -168,6 +169,7 @@ class CreateLidarDataPlotsEngine(Engine):
         super().__init__()
         self.config = None
         self.client = None
+        self.target_resolution_m = 100.0  # Changeable target resolution for resampling in meters
         self.year_datasets = None
         self.dataset_report_data = {}
         self.invalid_format_files = [] # TRACK REGEX FAILURES
@@ -455,11 +457,11 @@ class CreateLidarDataPlotsEngine(Engine):
                 dataset_name = "USACE"
             else:
                 dataset_name = clean_info.split('_')[-1]
-                
-            # --- GLOBAL SKIP FOR NGS DATASETS ---
-            # Intercept and ignore any NGS/NCEI dataset so they never enter the logs, unused lists, or processing logic
-            is_ngs_ncei = "NGS" in dataset_name.upper() or "NCEI" in dataset_name.upper() or "NGS" in filename.upper() or "NCEI" in filename.upper()
-            if is_ngs_ncei:
+
+            # --- GLOBAL SKIP FOR NCEI DATASETS ---
+            # Intercept and ignore any NCEI dataset so they never enter the logs, unused lists, or processing logic
+            is_ncei = "NCEI" in dataset_name.upper() or "NCEI" in filename.upper()
+            if is_ncei:
                 continue
             # ------------------------------------
 
@@ -579,15 +581,14 @@ class CreateLidarDataPlotsEngine(Engine):
                     is_use_true = str(use_val).strip().lower() in ['true', 'yes', '1'] if use_val is not None else False
                     
                     if is_use_true:
-                        # Ensure we do not log missing NGS configurations either
                         if "USACE" in config_key and "NCMP" in config_key:
                             dataset_name = "USACE"
                         else:
                             # Clean up config key string if possible to approximate dataset name
                             dataset_name = re.sub(r'_(?:18|19|20)\d{2}.*', '', config_key)
                             
-                        is_ngs_ncei = "NGS" in dataset_name.upper() or "NCEI" in dataset_name.upper() or "NGS" in config_key.upper() or "NCEI" in config_key.upper()
-                        if is_ngs_ncei:
+                        is_ncei = "NCEI" in dataset_name.upper() or "NCEI" in config_key.upper()
+                        if is_ncei:
                             continue
                             
                         self.missing_config_datasets.append(config_key)
@@ -650,8 +651,9 @@ class CreateLidarDataPlotsEngine(Engine):
                 cell_text.append([year, "None", "None"])
                 continue
                 
-            # Chunk large years (like 2016) so they don't break Matplotlib's single-page cell rendering limit
-            chunk_size = 6 
+            # Chunk large years so they don't break Matplotlib's single-page cell rendering limit
+            # Increased chunk size from 6 to 15 so years with lots of data (like 2016) don't get arbitrarily split into two boxes
+            chunk_size = 15 
             for i in range(0, max_len, chunk_size):
                 u_chunk = used_list[i:i+chunk_size]
                 un_chunk = unused_list[i:i+chunk_size]
@@ -693,14 +695,17 @@ class CreateLidarDataPlotsEngine(Engine):
         for i, page_data in enumerate(pages_data):
             # Portrait orientation (8.5 x 11) using exact axes dimensions to control layout
             fig = plt.figure(figsize=(8.5, 11))
-            ax = fig.add_axes([0.05, 0.05, 0.9, 0.83]) # Leave top 17% for title padding
+            ax = fig.add_axes([0.05, 0.05, 0.9, 0.81]) # Leave top 19% for title padding
             ax.axis('off')
             
             title_suffix = f" (Page {i + 1})" if len(pages_data) > 1 else ""
+            
+            # Formatted to break resolution onto its own line to prevent overflow clipping
             report_title = (
                 f"{ecoregion_name} Lidar Datasets Report{title_suffix} | Generated: {current_date}\n"
+                f"Resolution: {self.target_resolution_m}m\n"
                 f"Total .tif Files: {total_count} ({total_used_count} Used, {total_unused_count} Skipped, {total_err_regex} Regex Failed, {total_err_corrupt} Corrupted) | {total_missing_configs} Missing\n"
-                f"* Note: NGS and NCEI providers are not used *"
+                f"* Note: NCEI providers are not used *"
             )
             
             # Use fig.suptitle to place the text reliably at the top (97% height)
@@ -1052,13 +1057,11 @@ class CreateLidarDataPlotsEngine(Engine):
             )
             return destination, src.nodata
 
-    def resample_vrt_files(self, x_res=0.0359/8, y_res=0.0359/8, resampling_method='nearest') -> None:
+    def resample_vrt_files(self, resampling_method='nearest') -> None:
         """
         Resample all .vrt files in the input directory in parallel using Dask
-        and save them to the output directory. x_res=0.0359/8 ~ 500 meters
-        param x_res: Horizontal resolution for resampling
-        param y_res: Vertical resolution for resampling
-        param resampling_method: Resampling method to use (e.g., 'bilinear', 'cubic')
+        and save them to the output directory.
+        param resampling_method: Resampling method to use (e.g., 'bilinear', 'nearest')
         """
 
         input_dir = get_config_item("LIDAR_PLOTS", "INPUT_VRTS")
@@ -1115,8 +1118,7 @@ class CreateLidarDataPlotsEngine(Engine):
 
         vrt_params = [[vrt_file,
                 output_dir,
-                x_res,
-                y_res,
+                self.target_resolution_m,
                 resampling_method,
                 creation_options, 
             ] for vrt_file in vrt_files ]

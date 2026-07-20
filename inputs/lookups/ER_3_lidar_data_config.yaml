@@ -1,41 +1,41 @@
 EcoRegion-3:
-  mosaic_NCMP_6344_1885_DEM_USGS_67613_resampled:
+  NCMP_6344_1885_DEM_USGS_67613:
     use: false
     date: 1885
     year: 
     manual: 
     note: Thin vertical slice of data, don't use
-  mosaic_NCMP_6346_1998_Lidar_USGS_48152_resampled:
+  NCMP_6346_1998_Lidar_USGS_48152:
     use: true
     date: 
     year: 1998
     manual: True
     note: Valid dataset    
-  mosaic_NCMP_2779_2001_Lidar_USGS_50098_resampled:
+  NCMP_2779_2001_Lidar_USGS_50098:
     use: true
     date: 
     year: 
     manual: True
     note: Valid dataset 
-  mosaic_NCMP_3746_2004_Lidar_USGS_50100_resampled:
+  NCMP_3746_2004_Lidar_USGS_50100:
     use: false
     date: 
     year: 
     manual: True
     note: Smaller mostly land dataset it looks like
-  mosaic_NCMP_3747_2004_Lidar_USACE_50050_resampled:
+  NCMP_3747_2004_Lidar_USACE_50050:
     use: false
     date: 
     year: 
     manual: True
-    note: Duplicate dataset like mosaic_NCMP_3747_2004_Lidar_USACE_50049_resampled, but smaller coverage area
-  mosaic_NCMP_3747_2004_Lidar_USACE_50049_resampled:
+    note: Duplicate dataset like NCMP_3747_2004_Lidar_USACE_50049, but smaller coverage area
+  NCMP_3747_2004_Lidar_USACE_50049:
     use: true
     date: 
     year: 
     manual: True
-    note: Valid dataset, larger coverage than mosaic_NCMP_3747_2004_Lidar_USACE_50050_resampled
-  mosaic_NCMP_3747_2006_Lidar_USACE_50059_resampled:
+    note: Valid dataset, larger coverage than NCMP_3747_2004_Lidar_USACE_50050
+  NCMP_3747_2006_Lidar_USACE_50059:
     use: true
     date: 
     year: 
@@ -53,85 +53,181 @@ EcoRegion-3:
     year: null
     manual: false
     note: Valid dataset, however no 2009 datasets in the most recent download
-  mosaic_NCMP_4269_2010_DEM_USACE_NCMP_66659_resampled:
+  NCMP_4269_2010_DEM_USACE_NCMP_66659:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset
-  mosaic_NCMP_4269_2010_DEM_USACE_NCMP_66680_resampled:
+  NCMP_4269_2010_DEM_USACE_NCMP_66680:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset 
-  mosaic_NCMP_2883_2015_DEM_SRWMD_USGS_62877_resampled:
+  NCMP_2883_2015_DEM_SRWMD_USGS_62877:
     use: false
     date: 
     year: 
     manual: 
     note: Don't use, small inland dataset
-  mosaic_NCMP_1116_2015_DEM_USACE_USACE_NCMP_49581_resampled:
+  NCMP_1116_2015_DEM_USACE_USACE_NCMP_49581:
+    use: true
+    date: 
+    year: 
+    manual: 
+    note: Valid dataset, smaller but keep for now
+  NCMP_26917_2015_DEM_NOAA_NGS_48371:
+    use: true
+    date: 
+    year: 2015
+    manual: 
+    note: Valid dataset, smaller but keep for now
+  NCMP_1116_2016_DEM_USACE_USACE_NCMP_49427:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset
-  mosaic_NCMP_1116_2016_DEM_USACE_USACE_NCMP_49427_resampled:
+  NCMP_32617_2016_DEM_NOAA_NGS_48372:
     use: true
     date: 
-    year: 
+    year: 2016
     manual: 
     note: Valid dataset
-  mosaic_NCMP_2238_2017_DEM_SRWMD_USGS_62980_resampled:
+  NCMP_32617_2016_DEM_NOAA_NGS_49423:
+    use: true
+    date: 
+    year: 2016
+    manual: 
+    note: Valid dataset
+  NCMP_32617_2016_DEM_NOAA_NGS_48373:
+    use: true
+    date: 
+    year: 2016
+    manual: 
+    note: Valid dataset
+  NCMP_1116_2016_DEM_NOAA_NGS_56744:
+    use: true
+    date: 
+    year: 2016
+    manual: 
+    note: Valid dataset
+  NCMP_32617_2016_DEM_NOAA_NGS_48374:
+    use: true
+    date: 
+    year: 2016
+    manual: 
+    note: Valid dataset
+  NCMP_6346_2016_DEM_NOAA_NGS_57075:
+    use: true
+    date: 
+    year: 2016
+    manual: 
+    note: Valid dataset
+  NCMP_26917_2016_DEM_NOAA_NGS_53125:
+    use: true
+    date: 
+    year: 2016
+    manual: 
+    note: Valid dataset
+  NCMP_2238_2017_DEM_SRWMD_USGS_62980:
     use: false
     date: 
     year: 
     manual: 
     note: Don't use, small inland dataset
-  mosaic_NCMP_6318_2017_DEM_USACE_49424_resampled:
+  NCMP_6318_2017_DEM_USACE_49424:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset
-  mosaic_NCMP_6318_2018_DEM_USACE_54685_resampled:
+  NCMP_6346_2017_DEM_NOAA_NGS_51529:
+    use: true
+    date: 
+    year: 2017
+    manual: 
+    note: Valid dataset
+  NCMP_6318_2018_DEM_USACE_54685:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset
-  mosaic_NCMP_6350_2018_DEM_USDA_NRCS_USGS_59010_resampled:
+  NCMP_6350_2018_DEM_USDA_NRCS_USGS_59010:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset
-  mosaic_NCMP_6345_2020_DEM_USACE_NCMP_64385_resampled:
+  NCMP_6346_2018_DEM_NOAA_NGS_63018:
+    use: true
+    date: 
+    year: 2018
+    manual: 
+    note: Valid dataset
+  NCMP_6346_2019_DEM_NOAA_NGS_69338:
+    use: true
+    date: 
+    year: 2019
+    manual: 
+    note: Valid dataset
+  NCMP_6346_2019_DEM_NOAA_NGS_64532:
+    use: true
+    date: 
+    year: 2019
+    manual: 
+    note: Valid dataset
+  NCMP_6345_2019_DEM_NOAA_NGS_69338:
+    use: true
+    date: 
+    year: 2019
+    manual: 
+    note: Valid dataset
+  NCMP_6345_2020_DEM_USACE_NCMP_64385:
     use: true
     date: 
     year: 
     manual: 
     note: Valid dataset
-  mosaic_NCMP_6346_2022_DEM_USACE_71740_resampled:
+  NCMP_6346_2021_DEM_NOAA_NGS_66914:
+    use: true
+    date: 
+    year: 2021
+    manual: 
+    note: Valid dataset
+  NCMP_6346_2022_DEM_USACE_71740:
     use: false
     date: 
     year: 
     manual: 
-    note: Don't use, duplicate dataset like mosaic_NCMP_6346_2022_DEM_USACE_NCMP_71772_resampled
-  mosaic_NCMP_6345_2022_DEM_USACE_NCMP_75692_resampled:
+    note: Don't use, duplicate dataset like NCMP_6346_2022_DEM_USACE_NCMP_71772
+  NCMP_6345_2022_DEM_USACE_NCMP_75692:
     use: True
     date: 
     year: 
     manual: 
     note: Valid dataset that is not a duplicate
-  mosaic_NCMP_6346_2022_DEM_USACE_NCMP_71772_resampled:
+  NCMP_6346_2022_DEM_USACE_NCMP_71772:
     use: true
     date: 
     year: 
     manual: 
-    note: Valid dataset, duplicate dataset like mosaic_NCMP_6346_2022_DEM_USACE_71740_resampled 
-  mosaic_NCMP_6346_2024_DEM_USACE_NCMP_73835_resampled:
+    note: Valid dataset, duplicate dataset like NCMP_6346_2022_DEM_USACE_71740 
+  NCMP_6346_2022_DEM_NOAA_NGS_73048:
+    use: true
+    date: 
+    year: 2022
+    manual: 
+    note: Valid dataset
+  NCMP_6346_2022_DEM_NOAA_NGS_73051:
+    use: true
+    date: 
+    year: 2022
+    manual: 
+    note: Valid dataset
+  NCMP_6346_2024_DEM_USACE_NCMP_73835:
     use: true
     date: 2024
     year: 
