@@ -4,7 +4,7 @@ import geopandas as gpd
 import re
 
 from socket import gethostname
-from osgeo import gdal, osr
+from osgeo import gdal, osr, ogr
 
 
 gdal.UseExceptions()
@@ -29,10 +29,12 @@ def get_environment() -> str:
     hostname = gethostname()
     if 'L' in hostname:
         return  'local'
-    elif 'OCS-VS-HydroVDA' in hostname:
+    elif 'VS' in hostname:
         return 'remote'
-    else:
+    elif 'hydrohealth' in hostname or 'ip' in hostname: # issue with aws instance hostnames not being consistent
         return 'aws'
+    else:
+        return 'remote'
 
 
 def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode: bool=False) -> str:
@@ -51,8 +53,8 @@ def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_
     if env is None:
         env = get_environment()
 
-    config_name = f'{env}_{pilot_mode}_path_config.yaml' if pilot_mode else f'{env}_path_config.yaml'
-    file_path = str(INPUTS / 'lookups' / config_name) 
+    config_name = f'{env}_{"pilot_path" if pilot_mode else "path"}_config.yaml'
+    file_path = str(INPUTS / 'lookups' / config_name)
 
     with open(file_path, 'r') as lookup:
         config = yaml.safe_load(lookup)
@@ -64,7 +66,7 @@ def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_
             return parent_item
 
 
-def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFrame:
+def get_ecoregion_folders(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     """Obtain the intersected EcoRegion folders"""
 
     output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
@@ -74,7 +76,7 @@ def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoData
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), mask=drawn_layer_gdf)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
     else:
         # get eco region from shapefile that matches drop down choices
@@ -85,7 +87,7 @@ def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoData
     return list(selected_ecoregions['EcoRegion'].unique())
 
 
-def get_ecoregion_tiles(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFrame:
+def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
     """Obtain a subset of tiles based on selected eco regions"""
 
     output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
@@ -94,10 +96,10 @@ def get_ecoregion_tiles(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFr
 
     ecoregion_layer = 'ENHANCED_ECOREGIONS'
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), mask=drawn_layer_gdf)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ECOREGIONS'), mask=drawn_layer_gdf)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
     else:
         # get eco region from shapefile that matches drop down choices
@@ -134,7 +136,4 @@ def project_raster_wgs84(raster_path: pathlib.Path, raster_ds: gdal.Dataset, wgs
         dstSRS=wgs84_srs
     )
     return raster_wgs84
-
-
-
 

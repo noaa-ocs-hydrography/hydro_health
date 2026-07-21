@@ -1,3 +1,4 @@
+from logging import config
 import os
 import pathlib
 import time
@@ -5,6 +6,8 @@ import sys
 import yaml
 
 from datetime import datetime
+
+from tests.helpers.test_tools import param_lookup
 
 HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
@@ -67,7 +70,7 @@ def run_hydro_health(config_name: str) -> None:
         resolution = config.get('resolution', [8])
 
         # load ecoregions from config for remote run
-        param_lookup['eco_regions'].value = config['ecoregions']
+        param_lookup['eco_regions'].value = config['ecoregions'] if env in ['remote', 'aws'] else ''
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
         tiles = get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
@@ -119,5 +122,5 @@ def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None
 
 
 if __name__ == "__main__":
-    config_name = "hydro_health_session_06012026.yaml"
+    config_name = "hydro_health_session_08272025.yaml"
     run_hydro_health(config_name)
