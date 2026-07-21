@@ -11,7 +11,7 @@ import pathlib
 import io
 import glob
 import s3fs
-from itertools import combinations
+from itertools import combinations, zip_longest
 
 from shapely.geometry import shape
 from matplotlib.lines import Line2D
@@ -568,7 +568,8 @@ class CreateLidarDataPlotsEngine(Engine):
                 'dataset_name': dataset_name,
                 'date': acquisition_date,
                 'title': title_str,
-                'is_use_true': is_use_true
+                'is_use_true': is_use_true,
+                'legend_label': display_name.split('\n')[0] # Grab the unique key title for legend
             })
             
         # 3. Identify missing items configured to be used, but not found in the input folder
@@ -641,26 +642,44 @@ class CreateLidarDataPlotsEngine(Engine):
             return res
 
         cell_text = []
+        max_cell_lines = 30 # Strict line limit before chunking is forced (prevents rendering cut-offs)
         
         for year in sorted(self.dataset_report_data.keys()):
             used_list = [_format_cell_text(d_name, f_list) for d_name, f_list in sorted(self.dataset_report_data[year]['used'].items())]
             unused_list = [_format_cell_text(d_name, f_list) for d_name, f_list in sorted(self.dataset_report_data[year]['unused'].items())]
             
-            max_len = max(len(used_list), len(unused_list))
-            if max_len == 0:
+            if not used_list and not unused_list:
                 cell_text.append([year, "None", "None"])
                 continue
                 
-            # Chunk large years so they don't break Matplotlib's single-page cell rendering limit
-            # Increased chunk size from 6 to 15 so years with lots of data (like 2016) don't get arbitrarily split into two boxes
-            chunk_size = 15 
-            for i in range(0, max_len, chunk_size):
-                u_chunk = used_list[i:i+chunk_size]
-                un_chunk = unused_list[i:i+chunk_size]
-                
+            # Dynamic chunking based on actual lines of text instead of arbitrary dataset counts
+            chunks = []
+            curr_used, curr_unused = [], []
+            curr_lines = 0
+
+            for u, un in zip_longest(used_list, unused_list, fillvalue=""):
+                u_lines = len(u.split('\n')) if u else 0
+                un_lines = len(un.split('\n')) if un else 0
+                row_lines = max(u_lines, un_lines)
+
+                # If adding this item pushes us over the safety limit, flush the current chunk
+                if curr_lines + row_lines > max_cell_lines and (curr_used or curr_unused):
+                    chunks.append((curr_used, curr_unused))
+                    curr_used, curr_unused = [], []
+                    curr_lines = 0
+
+                if u: curr_used.append(u)
+                if un: curr_unused.append(un)
+                curr_lines += row_lines
+
+            # Flush any remaining items
+            if curr_used or curr_unused:
+                chunks.append((curr_used, curr_unused))
+
+            for i, (u_chunk, un_chunk) in enumerate(chunks):
                 used_str = "\n".join(u_chunk) if u_chunk else ("None" if i == 0 else "")
                 unused_str = "\n".join(un_chunk) if un_chunk else ("None" if i == 0 else "")
-                
+
                 display_year = year if i == 0 else f"{year} (cont.)"
                 cell_text.append([display_year, used_str, unused_str])
             
@@ -802,7 +821,7 @@ class CreateLidarDataPlotsEngine(Engine):
             return {}
             
         unique_dataset_names = sorted(list(set([
-            ds['dataset_name']
+            ds['legend_label']
             for year in self.year_datasets
             for ds in self.year_datasets[year]
         ])))
@@ -886,15 +905,17 @@ class CreateLidarDataPlotsEngine(Engine):
                 current_area_mask = np.logical_and(destination != nodata, destination < 0)
                 final_area_mask = np.logical_or(final_area_mask, current_area_mask)
                 
-                ds_color = dataset_colors[dataset['dataset_name']]
+                ds_color = dataset_colors[dataset['legend_label']]
 
                 data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=common_transform) if val > 0]
                 for geom in data_geometries:
                     x, y = geom.exterior.xy
                     ax.plot(x, y, color=ds_color, linewidth=0.5, zorder=12)
                 
-                date_str = f" ({dataset['date']})" if dataset.get('date') else ""
-                label_text = f"{dataset['dataset_name']}{date_str}"
+                label_text = dataset['legend_label']
+                if dataset.get('date'):
+                    label_text += f" ({dataset['date']})"
+                    
                 legend_handles.append(Line2D([0], [0], color=ds_color, lw=2, label=label_text))
                 
                 display_mask = np.logical_or.reduce((
@@ -918,7 +939,7 @@ class CreateLidarDataPlotsEngine(Engine):
             )
             
             ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.3), 
-                    fancybox=True, shadow=False, ncol=1, fontsize=8)
+                    fancybox=True, shadow=False, ncol=1, fontsize=6)
 
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
@@ -996,15 +1017,17 @@ class CreateLidarDataPlotsEngine(Engine):
                 current_area_mask = np.logical_and(destination != nodata, destination < 0)
                 final_area_mask = np.logical_or(final_area_mask, current_area_mask)
                 
-                ds_color = dataset_colors[dataset['dataset_name']]
+                ds_color = dataset_colors[dataset['legend_label']]
 
                 data_geometries = [shape(geom) for geom, val in shapes(current_area_mask.astype(np.uint8), transform=local_transform) if val > 0]
                 for geom in data_geometries:
                     x, y = geom.exterior.xy
                     ax.plot(x, y, color=ds_color, linewidth=0.5, zorder=12)
 
-                date_str = f" ({dataset['date']})" if dataset.get('date') else ""
-                label_text = f"{dataset['dataset_name']}{date_str}"
+                label_text = dataset['legend_label']
+                if dataset.get('date'):
+                    label_text += f" ({dataset['date']})"
+                    
                 legend_handles.append(Line2D([0], [0], color=ds_color, lw=2, label=label_text))
                 
                 display_mask = np.logical_or.reduce((
@@ -1025,7 +1048,7 @@ class CreateLidarDataPlotsEngine(Engine):
             ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.0f} km$^2$", fontsize=8)
             
             ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
-                    fancybox=True, shadow=False, ncol=1, fontsize=2)
+                    fancybox=True, shadow=False, ncol=1, fontsize=4)
 
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
