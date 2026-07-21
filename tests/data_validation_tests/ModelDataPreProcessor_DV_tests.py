@@ -433,6 +433,189 @@ def test_derivative_counts_per_tile(s3_fs, tile_directories, year_pairs):
     print("\nFinished checking derivative counts.")
     fail_with_errors(errors, "Derivative Counts Per Tile", desc)
 
+
+def test_primary_training_parquet_schema(s3_fs, year_pairs, training_tiles_dir):
+    """
+    Test that primary (wide format) training parquets contain all the dynamic
+    and static columns correctly generated for the specified year pairs.
+    """
+    desc = "Checks that wide-format primary training parquet files contain all the correct static columns and dynamic environmental columns generated for every unique year and year pair configuration."
+    
+    # Get all primary training parquets (not the _long ones)
+    all_files = [f for f in s3_fs.glob(f"{training_tiles_dir}/**/*.parquet") if not f.endswith("_long.parquet")]
+    
+    if not all_files:
+        skip_test(f"No primary training parquet files found in {training_tiles_dir}.", "Primary Training Parquet Schema", desc)
+        
+    total_files = len(all_files)
+    sampled_files = all_files[::10]
+    print(f"\nFound {total_files} primary training parquets. Checking {len(sampled_files)} (every 10th file) for full wide schema.")
+    
+    # Build the expected schema dynamically based on year_pairs
+    unique_years = sorted(list(set([y for pair in year_pairs for y in pair])))
+    
+    static_cols = {'X', 'Y', 'grain_size_layer', 'prim_sed_layer', 'survey_end_date', 'FID', 'tile_id'}
+    single_year_templates = [
+        'bathy_{}_filled', 'bpi_broad_{}', 'bpi_fine_{}', 'curv_plan_{}',
+        'curv_profile_{}', 'curv_total_{}', 'flowacc_{}', 'flowdir_{}',
+        'gradmag_{}', 'rugosity_{}', 'shearproxy_{}', 'slope_{}',
+        'slope_deg_{}', 'tci_{}', 'terrain_classification_{}'
+    ]
+    pair_year_templates = [
+        'hurr_strength_mean_{}_{}', 'tsm_mean_{}_{}', 'delta_bathy_{}_{}'
+    ]
+    
+    expected_cols = set(static_cols)
+    for y in unique_years:
+        for template in single_year_templates:
+            expected_cols.add(template.format(y))
+            
+    for y1, y2 in year_pairs:
+        for template in pair_year_templates:
+            expected_cols.add(template.format(y1, y2))
+            
+    errors = []
+    sample_actual_cols = None
+    
+    for i, file_path in enumerate(sampled_files):
+        actual_index = (i * 10) + 1
+        print(f"\rChecking primary schema {actual_index}/{total_files}: {Path(file_path).name[:30]}...   ", end="", flush=True)
+        
+        s3_path = f"s3://{file_path}"
+        
+        try:
+            # Use pyarrow to read schema quickly without loading all data into memory
+            import pyarrow.parquet as pq
+            with s3_fs.open(s3_path, 'rb') as f:
+                schema = pq.read_schema(f)
+                actual_cols = set(schema.names)
+                
+            missing_cols = expected_cols - actual_cols
+            if missing_cols:
+                log_error(
+                    errors,
+                    f"Primary schema violation in {s3_path}.\n"
+                    f"  Missing required columns: {sorted(list(missing_cols))}"
+                )
+            elif sample_actual_cols is None:
+                sample_actual_cols = sorted(list(actual_cols))
+                
+        except Exception as e:
+            # Fallback to pandas if pyarrow import fails
+            try:
+                df = pd.read_parquet(s3_path, storage_options={"anon": False})
+                actual_cols = set(df.columns)
+                missing_cols = expected_cols - actual_cols
+                if missing_cols:
+                    log_error(
+                        errors,
+                        f"Primary schema violation in {s3_path}.\n"
+                        f"  Missing required columns: {sorted(list(missing_cols))}"
+                    )
+                elif sample_actual_cols is None:
+                    sample_actual_cols = sorted(list(actual_cols))
+            except Exception as inner_e:
+                log_error(errors, f"Failed to process {s3_path}: {str(inner_e)}")
+             
+    print("\nFinished checking primary training schemas.")
+    
+    # Append examples to the description for the report
+    desc += f"\n\n--- Validation Details ---\nGenerated {len(expected_cols)} expected columns dynamically from {len(unique_years)} unique years and {len(year_pairs)} year pairs."
+    desc += f"\nExpected Schema (Total {len(expected_cols)} cols): {sorted(list(expected_cols))}"
+    if sample_actual_cols:
+        desc += f"\nExample Found Schema (Total {len(sample_actual_cols)} cols): {sample_actual_cols}"
+        
+    fail_with_errors(errors, "Primary Training Parquet Schema", desc)
+
+
+def test_primary_prediction_parquet_schema(s3_fs, year_pairs, prediction_tiles_dir):
+    """
+    Test that primary prediction parquets contain all the static (BlueTopo)
+    and dynamic (year pair) columns correctly generated for the specified year pairs.
+    """
+    desc = "Checks that primary prediction parquet files contain all the correct static BlueTopo columns and dynamic environmental columns generated for every unique year pair configuration."
+    
+    # Get all prediction parquets
+    all_files = list(s3_fs.glob(f"{prediction_tiles_dir}/**/*_prediction_clipped_data.parquet"))
+    
+    if not all_files:
+        skip_test(f"No primary prediction parquet files found in {prediction_tiles_dir}.", "Primary Prediction Parquet Schema", desc)
+        
+    total_files = len(all_files)
+    sampled_files = all_files[::10]
+    print(f"\nFound {total_files} primary prediction parquets. Checking {len(sampled_files)} (every 10th file) for full wide schema.")
+    
+    static_cols = {
+        'X', 'Y', 'bt.bathy', 'bt.bpi_broad', 'bt.bpi_fine', 'bt.curv_plan',
+        'bt.curv_profile', 'bt.curv_total', 'bt.flowacc', 'bt.flowdir',
+        'bt.gradmag', 'bt.rugosity', 'bt.shearproxy', 'bt.slope', 'bt.slope_deg',
+        'bt.tci', 'bt.terrain_classification', 'bt.unc',
+        'grain_size_layer', 'prim_sed_layer', 'survey_end_date', 'FID', 'tile_id'
+    }
+    
+    pair_year_templates = [
+        'hurr_strength_mean_{}_{}', 'tsm_mean_{}_{}'
+    ]
+    
+    expected_cols = set(static_cols)
+    for y1, y2 in year_pairs:
+        for template in pair_year_templates:
+            expected_cols.add(template.format(y1, y2))
+            
+    errors = []
+    sample_actual_cols = None
+    
+    for i, file_path in enumerate(sampled_files):
+        actual_index = (i * 10) + 1
+        print(f"\rChecking prediction schema {actual_index}/{total_files}: {Path(file_path).name[:30]}...   ", end="", flush=True)
+        
+        s3_path = f"s3://{file_path}"
+        
+        try:
+            # Use pyarrow to read schema quickly without loading all data into memory
+            import pyarrow.parquet as pq
+            with s3_fs.open(s3_path, 'rb') as f:
+                schema = pq.read_schema(f)
+                actual_cols = set(schema.names)
+                
+            missing_cols = expected_cols - actual_cols
+            if missing_cols:
+                log_error(
+                    errors,
+                    f"Prediction schema violation in {s3_path}.\n"
+                    f"  Missing required columns: {sorted(list(missing_cols))}"
+                )
+            elif sample_actual_cols is None:
+                sample_actual_cols = sorted(list(actual_cols))
+                
+        except Exception as e:
+            # Fallback to pandas if pyarrow import fails
+            try:
+                df = pd.read_parquet(s3_path, storage_options={"anon": False})
+                actual_cols = set(df.columns)
+                missing_cols = expected_cols - actual_cols
+                if missing_cols:
+                    log_error(
+                        errors,
+                        f"Prediction schema violation in {s3_path}.\n"
+                        f"  Missing required columns: {sorted(list(missing_cols))}"
+                    )
+                elif sample_actual_cols is None:
+                    sample_actual_cols = sorted(list(actual_cols))
+            except Exception as inner_e:
+                log_error(errors, f"Failed to process {s3_path}: {str(inner_e)}")
+             
+    print("\nFinished checking prediction schemas.")
+    
+    # Append examples to the description for the report
+    desc += f"\n\n--- Validation Details ---\nGenerated {len(expected_cols)} expected columns dynamically from {len(year_pairs)} year pairs."
+    desc += f"\nExpected Schema (Total {len(expected_cols)} cols): {sorted(list(expected_cols))}"
+    if sample_actual_cols:
+        desc += f"\nExample Found Schema (Total {len(sample_actual_cols)} cols): {sample_actual_cols}"
+        
+    fail_with_errors(errors, "Primary Prediction Parquet Schema", desc)
+
+
 def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, prediction_tiles_dir):
     """
     Test that EVERY generated training and prediction parquet file contains the exact required schema:
@@ -440,7 +623,7 @@ def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, pred
     - For training tiles specifically: year_t, year_t1, delta_bathy and bathy_t1
     - Verify years match one of our 13 pairs
     """
-    desc = "Checks that all training and prediction parquet files contain the required data columns and that their embedded year pairs match the configuration."
+    desc = "Checks that all long-format training and prediction parquet files contain the required data columns and that their embedded year pairs match the configuration."
     
     train_files = s3_fs.glob(f"{training_tiles_dir}/**/*_long.parquet")
     pred_files = s3_fs.glob(f"{prediction_tiles_dir}/**/*_prediction_clipped_data.parquet")
@@ -546,46 +729,204 @@ def test_parquet_schema_and_contents(s3_fs, year_pairs, training_tiles_dir, pred
         
     fail_with_errors(errors, "Parquet Schema and Contents", desc)
 
-def test_long_format_padded_schema(s3_fs, training_tiles_dir):
-    """Test that long-format parquet files contain the padded bathy columns."""
-    desc = "Checks that long-format parquet files contain bathy_t, bathy_t1, and delta_bathy columns, verifying that missing years were padded with NaNs instead of dropped."
+
+def test_long_format_training_parquet_schema(s3_fs, year_pairs, training_tiles_dir):
+    """
+    Test that long-format training parquet files contain the exact 29 required columns,
+    including the 27 static variables and the 2 dynamic variables (hurr_strength_mean and tsm_mean)
+    specific to the file's year pair.
+    """
+    desc = "Checks that long-format training parquet files strictly contain all 27 expected static variables and exactly 2 dynamic year-pair variables."
     
     training_path = UPath(training_tiles_dir)
-    
-    # Find all long format training files
     long_format_files = list(training_path.rglob("*_long.parquet"))
     
-    errors = []
     if not long_format_files:
-        skip_test(f"No long-format parquet files found in {training_tiles_dir}", "Long Format Padded Schema", desc)
+        skip_test(f"No long-format parquet files found in {training_tiles_dir}", "Long Format Training Parquet Schema", desc)
 
-    # Check a sample of files to be efficient
     total_files = len(long_format_files)
     sample_files = long_format_files[::10]
-    print(f"\nFound {total_files} long-format parquets. Checking {len(sample_files)} (every 10th file) for padded schemas.")
+    print(f"\nFound {total_files} long-format parquets. Checking {len(sample_files)} (every 10th file) for full long schema.")
     
-    required_cols = {'bathy_t', 'bathy_t1', 'delta_bathy'}
+    expected_static_cols = {
+        'X', 'Y', 'FID', 'tile_id', 'year_t', 'year_t1', 'bathy_t1', 'bathy_t', 
+        'bpi_broad_t', 'bpi_fine_t', 'curv_plan_t', 'curv_profile_t', 'curv_total_t', 
+        'flowacc_t', 'flowdir_cos_t', 'flowdir_sin_t', 'gradmag_t', 'rugosity_t', 
+        'shearproxy_t', 'slope_t', 'slope_deg_t', 'tci_t', 'terrain_classification_t', 
+        'delta_bathy', 'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
+    }
+    
+    errors = []
+    sample_actual_cols = None
     
     for i, file_path in enumerate(sample_files):
         actual_index = (i * 10) + 1
-        print(f"\rChecking padded schema {actual_index}/{total_files}: {file_path.name[:30]}...   ", end="", flush=True)
+        print(f"\rChecking long schema {actual_index}/{total_files}: {file_path.name[:30]}...   ", end="", flush=True)
         
+        s3_path = f"s3://{file_path}"
         try:
-            # Open the file via the S3 filesystem
-            with s3_fs.open(str(file_path), 'rb') as f:
-                # Read just a subset or schema to be fast
-                df_sample = pd.read_parquet(f, engine='pyarrow')
-                actual_cols = set(df_sample.columns)
+            # Use pyarrow to read schema quickly
+            try:
+                import pyarrow.parquet as pq
+                with s3_fs.open(s3_path, 'rb') as f:
+                    schema = pq.read_schema(f)
+                    actual_cols = set(schema.names)
+            except Exception:
+                # Fallback to pandas
+                df = pd.read_parquet(s3_path, storage_options={"anon": False})
+                actual_cols = set(df.columns)
                 
-                missing_cols = required_cols - actual_cols
-                if missing_cols:
-                    log_error(errors, f"File {file_path.name} is missing padded columns: {missing_cols}")
-                    
-        except Exception as e:
-            log_error(errors, f"Failed to read schema for {file_path.name}: {e}")
+            missing_static = expected_static_cols - actual_cols
+            if missing_static:
+                log_error(errors, f"File {file_path.name} is missing static columns: {sorted(list(missing_static))}")
             
-    print("\nFinished checking long format padded schema.")
-    fail_with_errors(errors, "Long Format Padded Schema", desc)
+            # Check dynamic columns
+            dynamic_hurr = [c for c in actual_cols if c.startswith('hurr_strength_mean_')]
+            dynamic_tsm = [c for c in actual_cols if c.startswith('tsm_mean_')]
+            
+            if len(dynamic_hurr) != 1:
+                log_error(errors, f"File {file_path.name} expects exactly 1 hurr_strength_mean column, found {len(dynamic_hurr)}: {dynamic_hurr}")
+            if len(dynamic_tsm) != 1:
+                log_error(errors, f"File {file_path.name} expects exactly 1 tsm_mean column, found {len(dynamic_tsm)}: {dynamic_tsm}")
+                
+            # Verify they belong to configured year pairs
+            if len(dynamic_hurr) == 1 and len(dynamic_tsm) == 1:
+                try:
+                    hurr_pair = dynamic_hurr[0].replace('hurr_strength_mean_', '').split('_')
+                    h_pair_tuple = (int(hurr_pair[0]), int(hurr_pair[1]))
+                    if h_pair_tuple not in year_pairs:
+                        log_error(errors, f"File {file_path.name} has hurr_strength_mean for unconfigured pair {h_pair_tuple}")
+                except Exception:
+                    log_error(errors, f"Could not parse year pair from column {dynamic_hurr[0]}")
+                        
+                try:
+                    tsm_pair = dynamic_tsm[0].replace('tsm_mean_', '').split('_')
+                    t_pair_tuple = (int(tsm_pair[0]), int(tsm_pair[1]))
+                    if t_pair_tuple not in year_pairs:
+                        log_error(errors, f"File {file_path.name} has tsm_mean for unconfigured pair {t_pair_tuple}")
+                except Exception:
+                    log_error(errors, f"Could not parse year pair from column {dynamic_tsm[0]}")
+                    
+            # Check for unexpected extra columns
+            extra_cols = actual_cols - expected_static_cols - set(dynamic_hurr) - set(dynamic_tsm)
+            if extra_cols:
+                log_error(errors, f"File {file_path.name} has unexpected extra columns: {sorted(list(extra_cols))}")
+
+            if sample_actual_cols is None:
+                sample_actual_cols = sorted(list(actual_cols))
+                
+        except Exception as e:
+            log_error(errors, f"Failed to read schema for {file_path.name}: {str(e)}")
+                
+    print("\nFinished checking long format training schemas.")
+    
+    desc += f"\n\n--- Validation Details ---\nExpected {len(expected_static_cols)} static columns: {sorted(list(expected_static_cols))}"
+    desc += "\nExpected exactly 2 dynamic columns matching: ['hurr_strength_mean_Y0_Y1', 'tsm_mean_Y0_Y1']"
+    desc += f"\nTotal Expected Columns per file: {len(expected_static_cols) + 2}"
+    if sample_actual_cols:
+        desc += f"\nExample Found Schema (Total {len(sample_actual_cols)} cols): {sample_actual_cols}"
+        
+    fail_with_errors(errors, "Long Format Training Parquet Schema", desc)
+
+
+def test_long_format_prediction_parquet_schema(s3_fs, year_pairs, prediction_tiles_dir):
+    """
+    Test that long-format prediction parquet files contain the exact 26 required columns,
+    including the 24 static variables and the 2 dynamic variables (hurr_strength_mean and tsm_mean)
+    specific to the file's year pair.
+    """
+    desc = "Checks that long-format prediction parquet files strictly contain all 24 expected static variables and exactly 2 dynamic year-pair variables."
+    
+    prediction_path = UPath(prediction_tiles_dir)
+    long_format_files = list(prediction_path.rglob("*_long.parquet"))
+    
+    if not long_format_files:
+        skip_test(f"No long-format prediction parquet files found in {prediction_tiles_dir}", "Long Format Prediction Parquet Schema", desc)
+
+    total_files = len(long_format_files)
+    sample_files = long_format_files[::10]
+    print(f"\nFound {total_files} prediction long-format parquets. Checking {len(sample_files)} (every 10th file) for full long schema.")
+    
+    expected_static_cols = {
+        'X', 'Y', 'FID', 'tile_id', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
+        'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 'gradmag_t', 
+        'rugosity_t', 'shearproxy_t', 'slope_t', 'slope_deg_t', 'tci_t', 
+        'terrain_classification_t', 'unc_t', 'flowdir_sin_t', 'flowdir_cos_t',
+        'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
+    }
+    
+    errors = []
+    sample_actual_cols = None
+    
+    for i, file_path in enumerate(sample_files):
+        actual_index = (i * 10) + 1
+        print(f"\rChecking long prediction schema {actual_index}/{total_files}: {file_path.name[:30]}...   ", end="", flush=True)
+        
+        s3_path = f"s3://{file_path}"
+        try:
+            # Use pyarrow to read schema quickly
+            try:
+                import pyarrow.parquet as pq
+                with s3_fs.open(s3_path, 'rb') as f:
+                    schema = pq.read_schema(f)
+                    actual_cols = set(schema.names)
+            except Exception:
+                # Fallback to pandas
+                df = pd.read_parquet(s3_path, storage_options={"anon": False})
+                actual_cols = set(df.columns)
+                
+            missing_static = expected_static_cols - actual_cols
+            if missing_static:
+                log_error(errors, f"File {file_path.name} is missing static columns: {sorted(list(missing_static))}")
+            
+            # Check dynamic columns
+            dynamic_hurr = [c for c in actual_cols if c.startswith('hurr_strength_mean_')]
+            dynamic_tsm = [c for c in actual_cols if c.startswith('tsm_mean_')]
+            
+            if len(dynamic_hurr) != 1:
+                log_error(errors, f"File {file_path.name} expects exactly 1 hurr_strength_mean column, found {len(dynamic_hurr)}: {dynamic_hurr}")
+            if len(dynamic_tsm) != 1:
+                log_error(errors, f"File {file_path.name} expects exactly 1 tsm_mean column, found {len(dynamic_tsm)}: {dynamic_tsm}")
+                
+            # Verify they belong to configured year pairs
+            if len(dynamic_hurr) == 1 and len(dynamic_tsm) == 1:
+                try:
+                    hurr_pair = dynamic_hurr[0].replace('hurr_strength_mean_', '').split('_')
+                    h_pair_tuple = (int(hurr_pair[0]), int(hurr_pair[1]))
+                    if h_pair_tuple not in year_pairs:
+                        log_error(errors, f"File {file_path.name} has hurr_strength_mean for unconfigured pair {h_pair_tuple}")
+                except Exception:
+                    log_error(errors, f"Could not parse year pair from column {dynamic_hurr[0]}")
+                        
+                try:
+                    tsm_pair = dynamic_tsm[0].replace('tsm_mean_', '').split('_')
+                    t_pair_tuple = (int(tsm_pair[0]), int(tsm_pair[1]))
+                    if t_pair_tuple not in year_pairs:
+                        log_error(errors, f"File {file_path.name} has tsm_mean for unconfigured pair {t_pair_tuple}")
+                except Exception:
+                    log_error(errors, f"Could not parse year pair from column {dynamic_tsm[0]}")
+                    
+            # Check for unexpected extra columns
+            extra_cols = actual_cols - expected_static_cols - set(dynamic_hurr) - set(dynamic_tsm)
+            if extra_cols:
+                log_error(errors, f"File {file_path.name} has unexpected extra columns: {sorted(list(extra_cols))}")
+
+            if sample_actual_cols is None:
+                sample_actual_cols = sorted(list(actual_cols))
+                
+        except Exception as e:
+            log_error(errors, f"Failed to read schema for {file_path.name}: {str(e)}")
+                
+    print("\nFinished checking long format prediction schemas.")
+    
+    desc += f"\n\n--- Validation Details ---\nExpected {len(expected_static_cols)} static columns: {sorted(list(expected_static_cols))}"
+    desc += "\nExpected exactly 2 dynamic columns matching: ['hurr_strength_mean_Y0_Y1', 'tsm_mean_Y0_Y1']"
+    desc += f"\nTotal Expected Columns per file: {len(expected_static_cols) + 2}"
+    if sample_actual_cols:
+        desc += f"\nExample Found Schema (Total {len(sample_actual_cols)} cols): {sample_actual_cols}"
+        
+    fail_with_errors(errors, "Long Format Prediction Parquet Schema", desc)
+
 
 def test_parquet_spatial_integrity(s3_fs, prediction_tiles_dir):
     """
@@ -985,8 +1326,11 @@ if __name__ == "__main__":
         # "test_training_tiffs_are_masked",
         "test_training_and_prediction_values_match",
         "test_derivative_counts_per_tile",
+        "test_primary_training_parquet_schema",
+        "test_primary_prediction_parquet_schema",
         "test_parquet_schema_and_contents",
-        "test_long_format_padded_schema",
+        "test_long_format_training_parquet_schema",
+        "test_long_format_prediction_parquet_schema",
         "test_parquet_spatial_integrity",
         "test_parquet_prediction_training_parity",
         "test_mask_and_subgrid_crs",

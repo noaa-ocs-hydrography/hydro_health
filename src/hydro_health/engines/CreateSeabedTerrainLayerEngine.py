@@ -594,31 +594,6 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         return np.where(nan_mask, filled, block)
 
 
-    def generate_neighborhood_statistics(self, file_path: Path) -> None:
-        """Calculates focal mean and standard deviation for a given raster file."""
-        logger.info(f"Calculating neighborhood statistics for: {file_path.name}")
-        size = 3
-        base_name = file_path.stem 
-        out_dir = file_path.parent
-        
-        out_sd = out_dir / f"{base_name}_sd{size}.tif"
-        out_mean = out_dir / f"{base_name}_mean{size}.tif"
-
-        if 'mean' in file_path.name or (not self.overwrite and self._exists(out_sd)):
-            return 
-        if 'sd3' in file_path.name or (not self.overwrite and self._exists(out_mean)):
-            return
-        
-        rds = rioxarray.open_rasterio(str(file_path), chunks=True).isel(band=0)
-        
-        window = rds.rolling(x=size, y=size, center=True)
-        r_mean = window.mean()
-        r_sd = window.std()
-        
-        self._save_raster_da(r_mean, str(out_mean), driver="GTiff", compress="LZW")
-        self._save_raster_da(r_sd, str(out_sd), driver="GTiff", compress="LZW")
-
-
     def generate_terrain_products_python(self, bathy_path, best_radii, dictionary_dir, main_output_dir, task_idx=None, total_tasks=None) -> str:
         """Main function to process one bathymetry raster."""
         base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
@@ -1157,7 +1132,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 state_files_map[var_name].append(file_info)
                 all_state_files_to_process.append(f)
                 
-        logger.info(f"Found {len(set(all_state_files_to_process))} rasters for neighborhood stats.")
+        logger.info(f"Found {len(set(all_state_files_to_process))} rasters.")
         logger.info(f"Found {len(state_files_map)} variable groups for calculation.")
         
         logger.info("\n--- Processing Complete ---")
