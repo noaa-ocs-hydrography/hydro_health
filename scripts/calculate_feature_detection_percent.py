@@ -5,7 +5,7 @@ from collections import Counter
 import s3fs
 
 # S3 Target Path
-S3_TARGET_PATH = "s3://ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/pre_processed/BlueTopo"
+S3_TARGET_PATH = "ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/pre_processed/BlueTopo"
 
 MAX_WORKERS = 16
 
@@ -81,7 +81,7 @@ def calculate_bucket_feature_scores(target_path: str):
     fs = s3fs.S3FileSystem()
 
     # base_path = clean_s3_path(target_path)
-    glob_pattern = f"{'ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/pre_processed/BlueTopo'}/**/*.aux.xml"
+    glob_pattern = f"{target_path}/**/*.aux.xml"
     
     print(f"Searching S3 using pattern: {glob_pattern} ...")
 
