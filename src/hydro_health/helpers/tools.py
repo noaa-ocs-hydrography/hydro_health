@@ -64,15 +64,18 @@ def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_
             return parent_item
 
 
-def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoDataFrame:
+def get_ecoregion_folders(param_lookup: dict[str], output_prefix: str) -> gpd.GeoDataFrame:
     """Obtain the intersected EcoRegion folders"""
 
-    output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
     # get master_grid geopackage path
     master_grid_geopackage = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
     ecoregion_layer = 'ENHANCED_ECOREGIONS'
     all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':
+        if output_prefix:
+            output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText) / output_prefix
+        else:
+            output_folder = pathlib.Path(param_lookup['output_directory'].valueAsText)
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
         selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), mask=drawn_layer_gdf)
         make_ecoregion_folders(selected_ecoregions, output_folder)
@@ -81,7 +84,6 @@ def get_ecoregion_folders(param_lookup: dict[str], low_res=False) -> gpd.GeoData
         eco_regions = param_lookup['eco_regions'].value
         eco_regions = [region.split('-')[0] for region in eco_regions]
         selected_ecoregions = all_ecoregions[all_ecoregions['EcoRegion'].isin(eco_regions)]  # select eco_region polygons
-        make_ecoregion_folders(selected_ecoregions, output_folder)
     return list(selected_ecoregions['EcoRegion'].unique())
 
 

@@ -10,7 +10,6 @@ from osgeo import gdal
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
-
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
@@ -24,7 +23,6 @@ def _grid_single_vrt_s3(params: list) -> str:
     s3_files = s3fs.S3FileSystem()
     gdal.SetConfigOption('CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE', 'YES')
     gdal.SetConfigOption('CPL_VSIL_S3_WRITE_SUPPORT', 'YES')
-    # Limit GDAL's internal cache to prevent "Unmanaged Memory" bloat
     gdal.SetCacheMax(536870912) # 512MB
     gdal.UseExceptions()
 
@@ -42,26 +40,33 @@ def _grid_single_vrt_s3(params: list) -> str:
         shp_search_path = f"{vrt_parent}/{vrt_data_suffix}/**/*.shp"
         shp_matches = s3_files.glob(shp_search_path)
         
-        # Filter out any lingering dissolved files if they exist
-        shp_matches = [f for f in shp_matches if not f.endswith('_dis.shp')]
-
-        if not shp_matches:
+        tileindex_matches = [f for f in shp_matches if 'tileindex' in pathlib.Path(f).name.lower()]
+        if tileindex_matches:
+            target_shp = tileindex_matches[0]
+        elif shp_matches:
+            target_shp = shp_matches[0]
+        else:
             return f" - Skipped: No shapefile for {vrt_stem}"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            s3_base = shp_matches[0].rsplit('.', 1)[0]
+            s3_base = target_shp.rsplit('.', 1)[0]
             local_base = os.path.join(tmpdir, "tileindex")
+            
+            # Download sidecar files (.shp, .shx, .dbf, .prj)
             for ext in ['.shp', '.shx', '.dbf', '.prj']:
                 s3_target = f"{s3_base}{ext}"
                 if s3_files.exists(s3_target):
                     s3_files.get(s3_target, f"{local_base}{ext}")
             
-            # Read the raw local tileindex shapefile
             raw_gdf = gpd.read_file(f"{local_base}.shp")
             if raw_gdf.crs != blue_topo_gdf.crs:
                 raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
             
-            dissolve_geom = raw_gdf.union_all()
+            # Dissolve geometries on the fly
+            try:
+                dissolve_geom = raw_gdf.geometry.union_all()
+            except AttributeError:
+                dissolve_geom = raw_gdf.geometry.unary_union
 
         intersecting_tiles = blue_topo_gdf[
             (blue_topo_gdf['tile'].isin(bluetopo_grids)) & 
@@ -71,9 +76,9 @@ def _grid_single_vrt_s3(params: list) -> str:
         for _, tile_row in intersecting_tiles.iterrows():
             folder_name = tile_row['tile']
             tiled_sub = get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER')
-            output_prefix = f"{ecoregion_prefix}/{tiled_sub}/{folder_name}/{vrt_stem}_{folder_name}.tiff"
+            s3_out_file = f"{ecoregion_prefix}/{tiled_sub}/{folder_name}/{vrt_stem}_{folder_name}.tiff"
 
-            if s3_files.exists(output_prefix):
+            if s3_files.exists(s3_out_file):
                 continue
 
             with tempfile.NamedTemporaryFile(suffix=".tiff", delete=False) as tmp_file:
@@ -92,7 +97,7 @@ def _grid_single_vrt_s3(params: list) -> str:
                 dstNodata=-9999, srcSRS=vrt_projection, dstSRS=vrt_projection,
                 creationOptions=[
                     "COMPRESS=DEFLATE", 
-                    "PREDICTOR=3",      # Huge for elevation data compression
+                    "PREDICTOR=3", 
                     "TILED=YES", 
                     "BLOCKXSIZE=512", 
                     "BLOCKYSIZE=512"
@@ -103,11 +108,11 @@ def _grid_single_vrt_s3(params: list) -> str:
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
             final_ds = None
 
-            s3_files.put(local_tmp_path, output_prefix)
+            s3_files.put(local_tmp_path, s3_out_file)
             if os.path.exists(local_tmp_path):
                 os.remove(local_tmp_path)
             gdal.Unlink(in_memory_geojson)
-            engine.write_message(f" - Processed S3: {output_prefix}", param_lookup['output_directory'].valueAsText)
+            engine.write_message(f" - Processed S3: {s3_out_file}", param_lookup['output_directory'].valueAsText)
 
         return f" - Processed S3: {vrt_stem}"
     except Exception as e:
@@ -129,26 +134,49 @@ def _grid_single_vrt_local(params: list) -> str:
         vrt_ds = gdal.Open(str(vrt))
         vrt_proj = vrt_ds.GetProjection()
         
-        vrt_data_folder = vrt.parent / '_'.join(vrt.stem.split('_')[3:])
-        shp_list = list(vrt_data_folder.rglob('*_dis.shp'))
+        outputs = param_lookup['output_directory'].valueAsText
+        vrt_data_folder = vrt.parent / '_'.join(vrt.stem.split('_')[2:])
+        
+        # Look for tileindex shapefiles first, fall back to any shapefile if needed
+        shp_list = list(vrt_data_folder.rglob('tileindex*.shp'))
+
+        if not shp_list:
+            shp_list = [
+                f for f in vrt_data_folder.rglob('*.shp') 
+                if not f.name.startswith('.')
+            ]
+            
         if not shp_list:
             return f" - Skipped: No local shp for {vrt.name}"
             
-        dissolve_gdf = gpd.read_file(shp_list[0])
-        if dissolve_gdf.crs != blue_topo_gdf.crs:
-            dissolve_gdf = dissolve_gdf.to_crs(blue_topo_gdf.crs)
+        # Read the shapefile and dissolve on the fly
+        raw_gdf = gpd.read_file(shp_list[0])
+        engine.write_message(f'shp:{raw_gdf}', outputs)
+        if raw_gdf.crs != blue_topo_gdf.crs:
+            raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
         
-        dissolve_geom = dissolve_gdf.union_all()
+        try:
+            dissolve_geom = raw_gdf.geometry.union_all()
+        except AttributeError:
+            dissolve_geom = raw_gdf.geometry.unary_union
+
+        engine.write_message(f'dissolved: {dissolve_geom}', outputs)
+        
         intersecting_tiles = blue_topo_gdf[
             (blue_topo_gdf['tile'].isin(bluetopo_grids)) & 
             (blue_topo_gdf.intersects(dissolve_geom))
         ]
+        
+        engine.write_message(f'shp list:{shp_list}', outputs)
 
         tiled_sub = get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER')
+
         for _, tile_row in intersecting_tiles.iterrows():
             folder_name = tile_row['tile']
             out_dir = ecoregion / tiled_sub / folder_name
+            engine.write_message(f'output_dir:{out_dir}', outputs)
             out_file = out_dir / f'{vrt.stem}_{folder_name}.tiff'
+            engine.write_message(f'out file:{out_file}', outputs)
             
             if out_file.exists():
                 continue
@@ -170,7 +198,7 @@ def _grid_single_vrt_local(params: list) -> str:
             final_ds = gdal.Open(str(out_file), gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
             final_ds = None
-            engine.write_message(f" - Processed S3: {out_file}", param_lookup['output_directory'].valueAsText)
+            engine.write_message(f" - Processed Local: {out_file}", param_lookup['output_directory'].valueAsText)
         return f" - Processed Local: {vrt.name}"
     except Exception as e:
         return f" - Local Error {vrt.name}: {str(e)}"
@@ -185,12 +213,16 @@ class GridDigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download:bool) -> None:
+    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download: bool, output_prefix: str) -> None:
         """Processor for gridding S3 VRT files with dask"""
 
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        ecoregion_paths = s3_files.glob(f"{bucket}/ER_*")
+        
+        if output_prefix:
+            ecoregion_paths = s3_files.glob(f"{bucket}/{output_prefix}/ER_*")
+        else:
+            ecoregion_paths = s3_files.glob(f"{bucket}/ER_*")
 
         for ecoregion_prefix in ecoregion_paths:
             print(f"Gridding S3 ecoregion: {ecoregion_prefix}")
@@ -203,7 +235,6 @@ class GridDigitalCoastEngine(Engine):
             digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
             if vrt_files:
-                # We pass the Future (blue_topo_gdf_future) instead of the full object
                 params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in vrt_files]
                 future_tiles = self.client.map(_grid_single_vrt_s3, params)
                 tile_results = self.client.gather(future_tiles)
@@ -211,10 +242,14 @@ class GridDigitalCoastEngine(Engine):
             else:
                 print(f" - No VRTs found for {ecoregion_prefix} in S3.")
 
-    def process_local_vrt_gridding(self, blue_topo_gdf_future, outputs: str) -> None:
+    def process_local_vrt_gridding(self, blue_topo_gdf_future, outputs: str, output_prefix: str) -> None:
         """Processor for gridding local VRT files with dask"""
 
-        ecoregions = [ecoregion for ecoregion in pathlib.Path(outputs).glob('ER_*') if ecoregion.is_dir()]
+        base_path = pathlib.Path(outputs)
+        if output_prefix:
+            ecoregions = [ecoregion for ecoregion in (base_path / output_prefix).glob('ER_*') if ecoregion.is_dir()]
+        else:
+            ecoregions = [ecoregion for ecoregion in base_path.glob('ER_*') if ecoregion.is_dir()]
 
         for ecoregion in ecoregions:
             print(f"Gridding local ecoregion: {ecoregion.stem}")
@@ -233,7 +268,9 @@ class GridDigitalCoastEngine(Engine):
             else:
                 print(f" - No VRTs found for {ecoregion.stem} locally.")
 
-    def run(self, manual_download=False) -> None:
+    def run(self, output_prefix: str, manual_download=False) -> None:
+        """Main execution method routing control using structural parameters"""
+
         outputs = self.param_lookup['output_directory'].valueAsText
 
         self.setup_dask(self.param_lookup['env'])
@@ -245,8 +282,8 @@ class GridDigitalCoastEngine(Engine):
         [blue_topo_gdf_future] = self.client.scatter([blue_topo_gdf], broadcast=True)
 
         if self.param_lookup['env'] in ['local', 'remote']:
-            self.process_local_vrt_gridding(blue_topo_gdf_future, outputs)
+            self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, output_prefix)
         else:
-            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_download)
+            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_download, output_prefix)
 
         self.close_dask()

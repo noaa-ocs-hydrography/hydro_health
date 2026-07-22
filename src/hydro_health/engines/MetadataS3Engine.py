@@ -93,7 +93,7 @@ class MetadataS3Engine:
 
         return geometry_coords
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str = False) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str, outputs: str) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
         print('Downloading Metadata Datasets')
@@ -101,7 +101,10 @@ class MetadataS3Engine:
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
             # TODO manual download would read JSON files from N:
-            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+            if output_prefix:
+                digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{output_prefix}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+            else:
+                digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
             self.read_json_files(digital_coast_path, outputs)
 
     def write_message(self, message: str, output_folder: str) -> None:

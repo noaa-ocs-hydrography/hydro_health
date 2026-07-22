@@ -66,7 +66,16 @@ class Engine:
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
 
-        provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI
+        provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI, NGS not used by BlueTopo
+        # TODO remove NGS
+        # 1. Delete VRT files
+        # 2. Delete NGS provider folders
+        # 3. Delete tiled gridded datasets folder
+        # 4. run HH DigitalCoast download with skip, 
+        # 5. run metadata
+        # 6. run VRT creation for DigitalCoast only
+        # 7. run mask engine with manual dowload included
+        # 8. run VRT gridding
         for text in provider_list_text:
             if text in feature_json['attributes']['provider_results_name']:
                 return True
@@ -86,7 +95,7 @@ class Engine:
         self.client.close()
         self.cluster.close()
     
-    def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
+    def get_available_datasets(self, geometry_coords: str, digital_coast_folder: str) -> None:
         """Query NOWCoast REST API for available datasets"""
 
         payload = {
@@ -112,7 +121,7 @@ class Engine:
             inport_suffix = inport_number if inport_number else 'No_InPort'
             cleaned_provider = self.remove_special_chars(attrs.get('provider_details', 'No_Provider'))
             folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_suffix}"
-            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / folder_name
+            output_folder_path = digital_coast_folder / folder_name
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON

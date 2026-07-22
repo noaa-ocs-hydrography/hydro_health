@@ -61,7 +61,7 @@ class MetadataEngine:
             #     writer.write(f'{start}, {end}\n')
             # self.write_message(f' - stored metadata: {provider_folder}', outputs)
 
-    def read_json_files(self, digital_coast_folder: pathlib.Path, ecoregion: str, outputs: str) -> None:
+    def read_json_files(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Read JSON files to download metadata information"""
 
         print('- Reading DigitalCoast JSON files')
@@ -101,15 +101,18 @@ class MetadataEngine:
 
         return geometry_coords
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, outputs: str) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
         print('Downloading Metadata Datasets')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
-            digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-            self.read_json_files(digital_coast_folder, ecoregion, outputs)
+            if output_prefix:
+                digital_coast_folder = pathlib.Path(outputs) / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+            else:
+                digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+            self.read_json_files(digital_coast_folder, outputs)
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""

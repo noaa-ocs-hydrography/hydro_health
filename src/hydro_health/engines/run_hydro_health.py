@@ -65,7 +65,7 @@ def run_hydro_health(config_name: str) -> None:
         print(f'Script has been run {len(config["runtimes"])} time(s)')
 
         pilot_mode = config['pilot_mode']
-        output_prefix = config.get('output_prefix', '')
+        output_prefix = config.get('output_prefix', False)
         resolution = config.get('resolution', [8])
 
         # load ecoregions from config for remote run
@@ -74,20 +74,20 @@ def run_hydro_health(config_name: str) -> None:
         tiles = get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
-                runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix=output_prefix, resolution=resolution)
+                runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix, resolution=resolution)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
-                runners.run_digital_coast_engine(tiles, param_lookup)
+                runners.run_digital_coast_engine(tiles, param_lookup, output_prefix)
             # TODO Removed laz download until HH 2.0
             # elif step["tool"] == "run_laz_conversion_engine" and step["run"]:
             #     runners.run_laz_conversion_engine(tiles, param_lookup['output_directory'].valueAsText)
             elif step["tool"] == "run_metadata_engine" and step["run"]:
-                runners.run_metadata_engine(tiles, param_lookup)
+                runners.run_metadata_engine(tiles, param_lookup, output_prefix)
             elif step["tool"] == "run_vrt_creation" and step["run"]:
-                runners.run_raster_vrt_engine(param_lookup, skip_existing=False, low_res=True if output_prefix else False)
+                runners.run_raster_vrt_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
-                runners.run_raster_mask_engine(param_lookup)
+                runners.run_raster_mask_engine(param_lookup, output_prefix)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
-                runners.run_grid_digital_coast(param_lookup)
+                runners.run_grid_digital_coast(param_lookup, output_prefix)
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
                 runners.run_tsm_layer_engine()
             elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
