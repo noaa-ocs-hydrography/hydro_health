@@ -17,7 +17,7 @@ class RasterMaskChecker:
     def __init__(self):
         self.s3 = boto3.client('s3')
         self.bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        self.prefix = 'testing/ER_3/model_variables/Prediction/raw/DigitalCoast'
+        self.prefix = 'ER_3/model_variables/Prediction/raw/DigitalCoast'
 
     def _download_shapefile_set(self, shp_key):
         temp_dir = tempfile.mkdtemp()

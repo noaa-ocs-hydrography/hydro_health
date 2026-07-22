@@ -77,7 +77,7 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
 
     _set_gdal_s3_options()
 
-    geotiff_prefix, all_crs_info, data_folder = params
+    geotiff_prefix, all_crs_info, data_type = params
     vsi_path = f'/vsis3/{geotiff_prefix}'
     
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
@@ -116,13 +116,14 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
             
         parts = geotiff_prefix.split('/')
         try:
-            dc_index = parts.index('DigitalCoast_manual_downloads') if data_folder else parts.index('DigitalCoast')
+            dc_index = parts.index(data_type)
             provider = parts[dc_index + 1]
         except (ValueError, IndexError):
             provider = parts[-4]
             
         return {
-            'bin_key': f"{bin_id}_{provider}",
+            # Use provider to keep single VRT for each provider folder
+            'bin_key': provider, 
             'vsi_path': vsi_path,
             'nodata': nodata,
             'wkt': src_srs.ExportToWkt()
@@ -146,6 +147,8 @@ def _set_gdal_s3_options() -> None:
     
 
 class RasterVRTS3Engine(Engine):
+    """Class for handling S3 network-based VRT creation and re-uploads"""
+
     def __init__(self, param_lookup) -> None:
         super().__init__()
         self.param_lookup = param_lookup
@@ -158,7 +161,7 @@ class RasterVRTS3Engine(Engine):
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
 
-    def build_output_vrts(self, output_prefix: str, file_type: str, output_geotiffs: dict, temp_output_path: pathlib.Path, data_type: str) -> None:
+    def build_output_vrts(self, s3_output_path: str, file_type: str, output_geotiffs: dict, temp_output_path: pathlib.Path, data_type: str) -> None:
         """Master VRT Builder: Custom logic per data_type"""
 
         s3_client = boto3.client('s3')
@@ -168,7 +171,7 @@ class RasterVRTS3Engine(Engine):
             tifs = info['tiles'] 
             vrt_filename = temp_output_path / f'mosaic_{file_type}_{bin_key}.vrt'
             
-            if data_type == 'DigitalCoast':
+            if data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
                 # Force the VRT to use the first tile's WKT and allow differences
                 options = gdal.BuildVRTOptions(
                     resampleAlg='near', 
@@ -188,8 +191,8 @@ class RasterVRTS3Engine(Engine):
             gdal.BuildVRT(str(vrt_filename), tifs, options=options)
 
             if vrt_filename.exists():
-                s3_key = f'{output_prefix}/{vrt_filename.name}'
-                print(f' - Uploading {data_type} Master VRT: {vrt_filename.name}')
+                s3_key = f'{s3_output_path}/{vrt_filename.name}'
+                print(f' - Uploading {data_type} Master VRT to: {s3_key}')
                 s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
 
     def get_bluetopo_tifs(self, geotiffs: list) -> dict:
@@ -208,10 +211,10 @@ class RasterVRTS3Engine(Engine):
             output_geotiffs[clean_key]['tiles'].append(s3_path)
         return output_geotiffs
 
-    def get_digitalcoast_geotiffs(self, geotiffs: list, data_folder: str) -> dict:
+    def get_digitalcoast_geotiffs(self, geotiffs: list, data_type: str) -> dict:
         """Get all DigitalCoast tifs with original CRS"""
 
-        task_params = [(gtif, self.all_crs, data_folder) for gtif in geotiffs]
+        task_params = [(gtif, self.all_crs, data_type) for gtif in geotiffs]
         results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, task_params)) if r is not None]
 
         output_geotiffs = {}
@@ -226,33 +229,38 @@ class RasterVRTS3Engine(Engine):
             output_geotiffs[key]['tiles'].append(res['vsi_path'])
         return output_geotiffs
     
-    def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, data_folder=False, skip_existing=False) -> None:
+    def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="") -> None:
+        """Main cloud execution method routing control using structural parameters"""
+            # engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix)
+
         _set_gdal_s3_options()
         self.setup_dask(self.param_lookup['env'])
         
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         sub = get_config_item(data_type.upper(), 'SUBFOLDER')
-        base_s3 = f"s3://{bucket}/{ecoregion}/{sub}/{data_folder if data_folder else data_type}"
-        output_prefix = f"{ecoregion}/{sub}/{data_folder if data_folder else data_type}"
+        
+        if output_prefix:
+            base_s3 = f"s3://{bucket}/{output_prefix}/{ecoregion}/{sub}/{data_type}"
+            s3_output_path = f"{output_prefix}/{ecoregion}/{sub}/{data_type}"
+        else:
+            base_s3 = f"s3://{bucket}/{ecoregion}/{sub}/{data_type}"
+            s3_output_path = f"{ecoregion}/{sub}/{data_type}"
 
         if data_type == 'BlueTopo':
             geotiffs = s3_files.glob(f"{base_s3}/**/{self.glob_lookup[file_type]}")
             if geotiffs:
                 output_geotiffs = self.get_bluetopo_tifs(geotiffs)
                 with tempfile.TemporaryDirectory() as td:
-                    self.build_output_vrts(output_prefix, file_type, output_geotiffs, pathlib.Path(td), data_type)
+                    self.build_output_vrts(s3_output_path, file_type, output_geotiffs, pathlib.Path(td), data_type)
         else:
             provider_folders = s3_files.glob(f"{base_s3}/*")
             for provider_path in provider_folders:
-                print(provider_path)
-                # if provider_path ==  'ocs-dev-csdl-hydrohealth/ER_3/model_variables/Prediction/raw/DigitalCoast/NOAA_NGS_2018_9060':
-                #     print(i, provider_path)
                 geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
                 if not geotiffs: 
                     continue
-                output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, data_folder)
+                output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, data_type)
                 with tempfile.TemporaryDirectory() as td:
-                    self.build_output_vrts(output_prefix, file_type, output_geotiffs, pathlib.Path(td), data_type)
+                    self.build_output_vrts(s3_output_path, file_type, output_geotiffs, pathlib.Path(td), data_type)
 
         self.close_dask()

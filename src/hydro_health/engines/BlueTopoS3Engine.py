@@ -31,7 +31,7 @@ set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 def _process_tile(param_inputs: list) -> str:
     """
     Static function that handles processing of a single tile.
-    Refactored for S3-to-S3 workflow using ephemeral storage.
+    Refactored for S3-to-S3 workflow using ephemeral storage on NVMe disk.
     """
 
     param_lookup, tile_id, ecoregion_id, output_prefix, target_res = param_inputs
@@ -39,14 +39,11 @@ def _process_tile(param_inputs: list) -> str:
     print(f"[{tile_id}] Initiating processing for ecoregion {ecoregion_id}...")
 
     engine = BlueTopoS3Engine(param_lookup)
-        
+    
     print(f"[{tile_id}] Downloading raw NBS source to generate derivatives...")
 
-    # if engine.file_in_s3(output_prefix, target_res, ecoregion_id, tile_id, overwrite=True):
-    #         print(f'BlueTopo tile {tile_id} already exists.  Skipping download.')
-    # else:
-
-    with tempfile.TemporaryDirectory() as temp_dir:
+    # Direct temporary workspace to the engine's NVMe scratch directory
+    with tempfile.TemporaryDirectory(dir=engine.scratch_dir) as temp_dir:
         temp_path = pathlib.Path(temp_dir)
 
         tiff_file_path = engine.download_nbs_tile(temp_path, tile_id, ecoregion_id, output_prefix, target_res)
@@ -115,15 +112,21 @@ class BlueTopoS3Engine(Engine):
         self.param_lookup = param_lookup
         self.target_crs = "EPSG:6350"
         self.skip_tiling = False
+        
+        # Local NVMe scratch directory isolated to BlueTopoS3Engine for current user
+        self.scratch_dir = pathlib.Path.home() / "scratch_tmp" / "BlueTopoS3Engine"
+        self.scratch_dir.mkdir(parents=True, exist_ok=True)
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster of unique values for each survey area."""
 
         print(f"[{tiff_file_path.name}] Creating Initial Survey Score (ISS) all...")
+        nodata = -9999 
         with rasterio.open(tiff_file_path) as src:
-            contributor_band_values = np.round(src.read(3))
+            band3_raw = src.read(3)
+            # Safely replace NaNs with nodata before converting to int32
+            contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            nodata = -9999 
             width, height = src.width, src.height  
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
@@ -169,11 +172,19 @@ class BlueTopoS3Engine(Engine):
         attribute_table_df = pd.DataFrame(table_data)
 
         iss_mapping = attribute_table_df[['value', 'iss']].drop_duplicates()
-        reclass_matrix = iss_mapping.to_numpy()
-        reclass_dict = {row[0]: row[1] for row in reclass_matrix}
+        reclass_dict = {int(row[0]): float(row[1]) for row in iss_mapping.to_numpy()}
 
-        reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
-        reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
+        # Fast Array Indexing Reclassification (Replaces np.vectorize to conserve RAM)
+        max_val = int(contributor_band_values.max()) if contributor_band_values.size > 0 else 0
+        lookup_array = np.full(max_val + 1, nodata, dtype=np.float32)
+
+        for val, iss in reclass_dict.items():
+            if 0 <= val <= max_val:
+                lookup_array[val] = iss
+
+        valid_mask = (contributor_band_values >= 0) & (contributor_band_values <= max_val)
+        reclassified_band = np.full_like(contributor_band_values, nodata, dtype=np.float32)
+        reclassified_band[valid_mask] = lookup_array[contributor_band_values[valid_mask]]
 
         survey_date_file_path = tiff_file_path.parents[0] / f"{tiff_file_path.stem}_ISS_all{'_110' if increased_scale else ''}.tiff"
         with rasterio.open(
@@ -202,10 +213,12 @@ class BlueTopoS3Engine(Engine):
         """Generate an Initial Survey Score (ISS) raster using the most recent survey date"""
 
         print(f"[{tiff_file_path.name}] Creating Initial Survey Score (ISS) latest...")
+        nodata = -9999 
         with rasterio.open(tiff_file_path) as src:
-            contributor_band_values = np.round(src.read(3))
+            band3_raw = src.read(3)
+            # Safely replace NaNs with nodata before converting to int32
+            contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            nodata = -9999 
             width, height = src.width, src.height 
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
@@ -247,12 +260,7 @@ class BlueTopoS3Engine(Engine):
 
         most_recent_survey['iss'] = most_recent_survey['supersession_score']
 
-        if nodata is not None and np.isnan(nodata):
-            is_nodata = np.isnan(contributor_band_values)
-        else:
-            is_nodata = (contributor_band_values == nodata)
-
-        reclassified_band = np.where(is_nodata, nodata, most_recent_survey['iss']).astype(np.float32)
+        reclassified_band = np.where(contributor_band_values == nodata, nodata, most_recent_survey['iss']).astype(np.float32)
 
         survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_ISS_latest.tiff'
         with rasterio.open(
@@ -295,10 +303,12 @@ class BlueTopoS3Engine(Engine):
         """Create survey end date tiffs from contributor band values in the XML file."""        
 
         print(f"[{tiff_file_path.name}] Creating survey end date TIFF...")
+        nodata = -9999
         with rasterio.open(tiff_file_path) as src:
-            contributor_band_values = np.round(src.read(3))
+            band3_raw = src.read(3)
+            # Safely replace NaNs with nodata before converting to int32
+            contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            nodata = -9999
             width, height = src.width, src.height  
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
@@ -328,11 +338,19 @@ class BlueTopoS3Engine(Engine):
         )
 
         date_mapping = attribute_table_df[['value', 'survey_year_end']].drop_duplicates()
-        reclass_matrix = date_mapping.to_numpy()
-        reclass_dict = {row[0]: row[1] for row in reclass_matrix}
+        reclass_dict = {int(row[0]): int(row[1]) for row in date_mapping.to_numpy()}
 
-        reclassified_band = np.vectorize(lambda x: reclass_dict.get(x, nodata))(contributor_band_values)
-        reclassified_band = np.where(reclassified_band == None, nodata, reclassified_band)
+        # Fast Array Indexing Reclassification (Replaces np.vectorize to conserve RAM)
+        max_val = int(contributor_band_values.max()) if contributor_band_values.size > 0 else 0
+        lookup_array = np.full(max_val + 1, nodata, dtype=np.float32)
+
+        for val, yr in reclass_dict.items():
+            if 0 <= val <= max_val:
+                lookup_array[val] = yr
+
+        valid_mask = (contributor_band_values >= 0) & (contributor_band_values <= max_val)
+        reclassified_band = np.full_like(contributor_band_values, nodata, dtype=np.float32)
+        reclassified_band[valid_mask] = lookup_array[contributor_band_values[valid_mask]]
 
         survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_survey_end_date.tiff'
         with rasterio.open(
@@ -400,22 +418,16 @@ class BlueTopoS3Engine(Engine):
         print(f"[{tiff_path.name}] Finalizing COG format...")
         temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
 
-        ds = gdal.Open(str(tiff_path), gdal.GA_Update)
-        if ds is not None:
-            ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
-            ds = None
-
         gdal.Translate(
             str(temp_cog),
             str(tiff_path),
+            format="COG",
             outputSRS=self.target_crs,
             creationOptions=[
                 "COMPRESS=DEFLATE",
                 "PREDICTOR=3",
-                "TILED=YES",
-                "BLOCKXSIZE=512",
-                "BLOCKYSIZE=512",
-                "COPY_SRC_OVERVIEWS=YES"
+                "BLOCKSIZE=512",
+                "OVERVIEW_RESAMPLING=BILINEAR"
             ]
         )
 
@@ -458,6 +470,7 @@ class BlueTopoS3Engine(Engine):
 
         new_name = str(tiff_file_path).replace('.tiff', '_mb.tiff')
         mb_tiff_file = tiff_file_path.replace(pathlib.Path(new_name))
+        mb_tiff_file = pathlib.Path(new_name)
         return mb_tiff_file
 
     def warp_bluetopo_tile(self, tiff_file_path: pathlib.Path, target_res: int) -> None:
@@ -465,7 +478,10 @@ class BlueTopoS3Engine(Engine):
         Safely reprojects a 3-band BlueTopo tile to EPSG:6350.
         Uses Bilinear for Elevation (B1) & Uncertainty (B2), 
         and NearestNeighbour for the Contributor metadata (B3) to prevent category corruption.
+        Intermediate files are placed in an isolated temporary directory to avoid polluting
+        the tile folder.
         """
+        
         ds = gdal.Open(str(tiff_file_path))
         if ds is None: return
         
@@ -488,55 +504,68 @@ class BlueTopoS3Engine(Engine):
         xml_path = tiff_file_path.parent / f"{tiff_file_path.name}.aux.xml"
         safe_xml = tiff_file_path.parent / "safe.xml"
         if xml_path.exists():
-            import shutil
             shutil.copy(xml_path, safe_xml)
             
-        temp_b12_src = tiff_file_path.parent / f"b12_src_{tiff_file_path.name}"
-        temp_b3_src = tiff_file_path.parent / f"b3_src_{tiff_file_path.name}"
-        temp_b12_warp = tiff_file_path.parent / f"b12_warp_{tiff_file_path.name}"
-        temp_b3_warp = tiff_file_path.parent / f"b3_warp_{tiff_file_path.name}"
-        final_warp = tiff_file_path.parent / f"warp_{tiff_file_path.name}"
-        
-        # Extract the bands using gdal.Translate
-        ds1 = gdal.Translate(str(temp_b12_src), str(tiff_file_path), bandList=[1, 2], creationOptions=["COMPRESS=DEFLATE"])
-        ds1 = None
-        ds2 = gdal.Translate(str(temp_b3_src), str(tiff_file_path), bandList=[3], creationOptions=["COMPRESS=DEFLATE"])
-        ds2 = None
-        
-        # Warp Bands 1 & 2 (Bilinear)
-        ds3 = gdal.Warp(str(temp_b12_warp), str(temp_b12_src), options=gdal.WarpOptions(
-            format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
-            resampleAlg=gdal.GRA_Bilinear, targetAlignedPixels=True,
-            creationOptions=["COMPRESS=DEFLATE"]
-        ))
-        ds3 = None
-        
-        # Warp Band 3 (Nearest Neighbor)
-        ds4 = gdal.Warp(str(temp_b3_warp), str(temp_b3_src), options=gdal.WarpOptions(
-            format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
-            resampleAlg=gdal.GRA_NearestNeighbour, targetAlignedPixels=True,
-            creationOptions=["COMPRESS=DEFLATE"]
-        ))
-        ds4 = None
-        
-        # Combine them using rasterio
-        if temp_b12_warp.exists() and temp_b3_warp.exists():
-            with rasterio.open(temp_b12_warp) as src12, rasterio.open(temp_b3_warp) as src3:
-                profile = src12.profile
-                profile.update(count=3)
+        # Place all intermediate files inside an isolated temp directory on NVMe storage
+        with tempfile.TemporaryDirectory(dir=self.scratch_dir) as warp_tmpdir:
+            tmp_path = pathlib.Path(warp_tmpdir)
+            temp_b12_src = tmp_path / f"b12_src_{tiff_file_path.name}"
+            temp_b3_src = tmp_path / f"b3_src_{tiff_file_path.name}"
+            temp_b12_warp = tmp_path / f"b12_warp_{tiff_file_path.name}"
+            temp_b3_warp = tmp_path / f"b3_warp_{tiff_file_path.name}"
+            final_warp = tmp_path / f"warp_{tiff_file_path.name}"
+            
+            # Common creation options to prevent 4GB BigTIFF limits and improve performance
+            creation_opts = [
+                "COMPRESS=DEFLATE",
+                "BIGTIFF=IF_NEEDED",
+                "TILED=YES",
+                "BLOCKXSIZE=512",
+                "BLOCKYSIZE=512"
+            ]
+
+            # Extract bands 1 & 2 vs band 3
+            ds1 = gdal.Translate(str(temp_b12_src), str(tiff_file_path), bandList=[1, 2], creationOptions=creation_opts)
+            ds1 = None
+            ds2 = gdal.Translate(str(temp_b3_src), str(tiff_file_path), bandList=[3], creationOptions=creation_opts)
+            ds2 = None
+            
+            # Warp Bands 1 & 2 (Bilinear)
+            ds3 = gdal.Warp(str(temp_b12_warp), str(temp_b12_src), options=gdal.WarpOptions(
+                format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
+                resampleAlg=gdal.GRA_Bilinear, targetAlignedPixels=True,
+                creationOptions=creation_opts
+            ))
+            ds3 = None
+            
+            # Warp Band 3 (Nearest Neighbor)
+            ds4 = gdal.Warp(str(temp_b3_warp), str(temp_b3_src), options=gdal.WarpOptions(
+                format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
+                resampleAlg=gdal.GRA_NearestNeighbour, targetAlignedPixels=True,
+                creationOptions=creation_opts
+            ))
+            ds4 = None
+            
+            # Zero-RAM Streamed Merge using GDAL VRT
+            if temp_b12_warp.exists() and temp_b3_warp.exists():
+                vrt_path = tmp_path / f"stacked_{tiff_file_path.name}.vrt"
                 
-                with rasterio.open(final_warp, 'w', **profile) as dst:
-                    dst.write(src12.read(1), 1)
-                    dst.write(src12.read(2), 2)
-                    dst.write(src3.read(1), 3)
-            
-            # Clean up all intermediates and replace original
-            tiff_file_path.unlink()
-            final_warp.rename(tiff_file_path)
-            
-            # Restore the RAT XML to the final warped file
-            if safe_xml.exists():
-                safe_xml.rename(tiff_file_path.parent / f"{tiff_file_path.name}.aux.xml")
+                gdal.BuildVRT(str(vrt_path), [str(temp_b12_warp), str(temp_b3_warp)], options=gdal.BuildVRTOptions(separate=True))
+                
+                gdal.Translate(
+                    str(final_warp), 
+                    str(vrt_path), 
+                    bandList=[1, 2, 3], 
+                    creationOptions=creation_opts
+                )
+                
+                # Replace original tile with final warped file
+                tiff_file_path.unlink()
+                shutil.move(str(final_warp), str(tiff_file_path))
+                
+                # Restore the RAT XML to the final warped file
+                if safe_xml.exists():
+                    safe_xml.rename(tiff_file_path.parent / f"{tiff_file_path.name}.aux.xml")
 
     def print_async_results(self, results: list[str], output_folder: str) -> None:
         """Consolidate result printing"""
@@ -568,7 +597,8 @@ class BlueTopoS3Engine(Engine):
             print("[BlueTopo Engine] No requested Ecoregions found in input. Exiting run.")
             return
 
-        self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
+        # Explicitly setting single worker / thread to protect 16GB RAM limit
+        self.setup_dask(self.param_lookup['env'], n_workers=1, threads_per_worker=1)
         
         # We explicitly rely on 'EcoRegion' as requested
         er_col = 'EcoRegion' 
@@ -591,9 +621,9 @@ class BlueTopoS3Engine(Engine):
                         continue
                     
                     # We can safely assume row[er_col] is an int (1-6) per system design
-                    normalized_er = f"ER_{int(row[er_col])}"
+                    ecoregion_id = row[er_col]
                     
-                    if normalized_er not in all_ecoregions:
+                    if ecoregion_id not in all_ecoregions:
                         continue
                     
                     raw_id = str(row[tile_col]).strip()
@@ -605,7 +635,7 @@ class BlueTopoS3Engine(Engine):
                         continue
                     
                     tile_id = match.group(1)
-                    param_inputs.append([self.param_lookup, tile_id, normalized_er, output_prefix, current_res])
+                    param_inputs.append([self.param_lookup, tile_id, ecoregion_id, output_prefix, current_res])
 
                 # Sort by ecoregion number to group them together logically for Dask
                 param_inputs = sorted(param_inputs, key=lambda x: _get_er_num(x[2]))
@@ -641,16 +671,16 @@ class BlueTopoS3Engine(Engine):
         hibase_logging.send_record(record, table='bluetopo_test') 
 
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
-        """Set positive elevation to no data value"""
+        """Set positive elevation to no data value using windowed block processing."""
 
         print(f"[{tiff_file_path.name}] Setting ground to nodata...")
-        raster_ds = gdal.Open(str(tiff_file_path), gdal.GA_Update)
         no_data = -9999
-        raster_array = raster_ds.ReadAsArray()
-        meters_array = np.where(raster_array < 0, raster_array, no_data)
-        raster_ds.GetRasterBand(1).WriteArray(meters_array)
-        raster_ds.GetRasterBand(1).SetNoDataValue(no_data)  
-        raster_ds = None
+        
+        with rasterio.open(tiff_file_path, "r+") as src:
+            for _, window in src.block_windows(1):
+                band1 = src.read(1, window=window)
+                band1 = np.where(band1 < 0, band1, no_data)
+                src.write(band1, 1, window=window)
 
     def upload_current_tiles_to_s3(self, tile_folder: pathlib.Path, temp_folder: pathlib.Path) -> None:
         """Upload all tiff files to s3 for current tile."""
@@ -663,4 +693,4 @@ class BlueTopoS3Engine(Engine):
             
             s3_path = tiff_file.relative_to(temp_folder)  # Strip off the temp_folder parts
             self.write_message(f'Uploading {filename} to s3://{bucket_name}/{s3_path}', self.param_lookup['output_directory'].valueAsText)
-            s3_client.upload_file(str(tiff_file), bucket_name, f'{str(s3_path)}')
+            s3_client.upload_file(str(tiff_file), bucket_name, str(s3_path))

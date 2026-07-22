@@ -28,7 +28,7 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
-def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool, resolution: list[int]) -> None:
+def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     if param_lookup['env'] in ['local', 'remote']:
@@ -37,21 +37,21 @@ def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict],
         run_bluetopo_tile_engine_s3(tiles, param_lookup, output_prefix, resolution)
 
 
-def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool, resolution: list[int]) -> None:
+def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     engine = BlueTopoEngine(param_lookup)
     engine.run(tiles, output_prefix, resolution)
 
 
-def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict], output_prefix: str|bool, resolution: list[int]) -> None:
+def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
 
     engine = BlueTopoS3Engine(param_lookup)
     engine.run(tiles, output_prefix, resolution)
 
 
-def run_raster_mask_engine(param_lookup:dict[dict]) -> None:
+def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str) -> None:
     """Create prediction and training masks for found ecoregions"""
 
     outputs = param_lookup['output_directory'].valueAsText
@@ -59,37 +59,37 @@ def run_raster_mask_engine(param_lookup:dict[dict]) -> None:
         engine = RasterMaskEngine(param_lookup)
     else:
         engine = RasterMaskS3Engine(param_lookup)
-    engine.run(outputs)
+    engine.run(outputs, output_prefix)
 
 
-def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of Digital Coast data"""
 
     if param_lookup['env'] in ['local', 'remote']:
-        run_digital_coast_engine_local(tiles, param_lookup)
+        run_digital_coast_engine_local(tiles, param_lookup, output_prefix)
     else:
-        run_digital_coast_engine_s3(tiles, param_lookup)
+        run_digital_coast_engine_s3(tiles, param_lookup, output_prefix)
 
 
-def run_digital_coast_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+def run_digital_coast_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel proccessing of Digital Coast data"""
     
     engine = DigitalCoastEngine(param_lookup)
-    engine.run(tiles)
+    engine.run(tiles, output_prefix)
 
 
-def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel proccessing of Digital Coast data on AWS VM"""
     
     engine = DigitalCoastS3Engine(param_lookup)
-    engine.run(tiles)
+    engine.run(tiles, output_prefix)
 
 
-def run_grid_digital_coast(param_lookup: dict[dict]) -> None:
+def run_grid_digital_coast(param_lookup: dict[dict], output_prefix: str) -> None:
     """Entry poiint for gridding DigitalCoast tiles to BlueTopo polygons"""
 
     engine = GridDigitalCoastEngine(param_lookup)
-    engine.run()
+    engine.run(output_prefix)
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
@@ -99,7 +99,7 @@ def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
     engine.run(tiles, outputs)
 
 
-def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> None:
+def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of provider metadata"""
 
     if param_lookup['env'] in ['local', 'remote']:
@@ -107,7 +107,7 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict]) -> No
     else:
         engine = MetadataS3Engine()
     outputs = param_lookup['output_directory'].valueAsText
-    engine.run(tiles, outputs)
+    engine.run(tiles, output_prefix, outputs)
 
 
 def run_preprocessor_modeldata(pilot_mode: bool=False) -> None:
@@ -122,20 +122,21 @@ def run_preprocessor_modeldata(pilot_mode: bool=False) -> None:
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
 
 
-def run_raster_vrt_engine(param_lookup: dict[str], skip_existing=False, low_res=False) -> None:
+def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
     
     if param_lookup['env'] in ['local', 'remote']:
         engine = RasterVRTEngine(param_lookup)
     else:
         engine = RasterVRTS3Engine(param_lookup)
-    for ecoregion in get_ecoregion_folders(param_lookup, low_res=low_res):
+    
+    for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', skip_existing=skip_existing)
+            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix = output_prefix)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', skip_existing=skip_existing)
+        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix = output_prefix)
 
 
 def run_tsm_layer_engine() -> None:

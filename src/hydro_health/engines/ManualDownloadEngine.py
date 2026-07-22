@@ -40,15 +40,15 @@ class ManualDownloadEngine:
         """Build metdata text file for manually downloaded DEMs"""
 
         engine = MetadataS3Engine()
-        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER_3/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast_manual_downloads"
+        digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER_3/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/Digital_Coast_Manual_Downloads"
         engine.read_json_files(digital_coast_path, OUTPUTS)
         
-    def process_vrt(self) -> None:
+    def process_vrt(self, output_prefix) -> None:
         """Create VRT files for each manually downloaded provider"""
         
         engine = RasterVRTS3Engine(self.param_lookup)
         engine.setup_dask('aws')
-        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', data_folder='DigitalCoast_manual_downloads', skip_existing=False)
+        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', data_folder='Digital_Coast_Manual_Downloads', skip_existing=False)
         engine.close_dask()
 
     def rebuild_training_mask(self) -> None:
@@ -61,10 +61,17 @@ class ManualDownloadEngine:
             now = time.time()
             os.rename(OUTPUTS / 'log_prints.txt', OUTPUTS / f'log_prints_{now}.txt')
         
-        self.process_vrt()
-        self.process_masks()
+        # TODO need to add output_prefix to calls
+        output_prefix = False
+
+        # TODO this process creates missing Manual Download VRTs
+        # Need to run normal VRT process before
+        self.process_vrt(output_prefix)
+        self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()
-        self.process_grid_tiles()
+        # TODO this grid tiling process only does the manual downloads
+        # Need to run both folders separately or fix code
+        self.process_grid_tiles(output_prefix)
         print('Done')
 
 if __name__ == '__main__':

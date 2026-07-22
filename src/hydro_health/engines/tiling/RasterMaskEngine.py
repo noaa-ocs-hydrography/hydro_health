@@ -136,8 +136,12 @@ class RasterMaskEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def run(self, outputs: str) -> None:
-        ecoregions = [d for d in pathlib.Path(outputs).glob('ER_*') if d.is_dir()]
+    def run(self, outputs: str, output_prefix: str) -> None:
+        if output_prefix:
+            output_folder = pathlib.Path(self.param_lookup['output_directory'].valueAsText) / output_prefix
+        else:
+            output_folder = self.param_lookup['output_directory'].valueAsText
+        ecoregions = [d for d in pathlib.Path(output_folder).glob('ER_*') if d.is_dir()]
         self.setup_dask(self.param_lookup['env'])
         
         self.client.gather(self.client.map(_create_prediction_mask, [[er, self.param_lookup] for er in ecoregions]))
