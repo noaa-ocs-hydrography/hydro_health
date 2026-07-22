@@ -840,6 +840,31 @@ class CreateLidarDataPlotsEngine(Engine):
             
         return dataset_colors
 
+    def _merge_year_datasets(self, paths, transform, shape, crs):
+        """
+        Helper method to accumulate and merge multiple datasets from the same year onto a single global grid.
+        Returns the merged data array and a boolean mask (True where there is NoData or no coverage).
+        """
+        merged_data = np.zeros(shape, dtype=np.float32)
+        merged_mask = np.ones(shape, dtype=bool)
+        
+        for path in paths:
+            data, nodata = self.reprojectToGrid(path, transform, shape, crs)
+            
+            # Mask out NoData, artifacts, and anything above water (>= 0)
+            current_mask = np.logical_or.reduce((
+                data == nodata, 
+                data < -10000, 
+                data >= 0
+            ))
+            
+            valid_pixels = ~current_mask
+            merged_data[valid_pixels] = data[valid_pixels]
+            # Accumulate the mask (pixel is only masked if it is masked in ALL datasets)
+            merged_mask = np.logical_and(merged_mask, current_mask)
+            
+        return merged_data, merged_mask
+
     def plot_rasters_by_year(self, pdf, shp_path) -> None:
         """
         Plots individual raster datasets by year using a global extent.
@@ -912,10 +937,17 @@ class CreateLidarDataPlotsEngine(Engine):
                     x, y = geom.exterior.xy
                     ax.plot(x, y, color=ds_color, linewidth=0.5, zorder=12)
                 
-                label_text = dataset['legend_label']
-                if dataset.get('date'):
-                    label_text += f" ({dataset['date']})"
+                # Format date string cleanly (no raw python lists)
+                date_val = dataset.get('date')
+                if date_val:
+                    if isinstance(date_val, list):
+                        date_str = f" ({', '.join(date_val)})"
+                    else:
+                        date_str = f" ({date_val})"
+                else:
+                    date_str = ""
                     
+                label_text = f"{dataset['legend_label']}{date_str}"
                 legend_handles.append(Line2D([0], [0], color=ds_color, lw=2, label=label_text))
                 
                 display_mask = np.logical_or.reduce((
@@ -938,13 +970,13 @@ class CreateLidarDataPlotsEngine(Engine):
                 fontsize=10
             )
             
-            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.3), 
-                    fancybox=True, shadow=False, ncol=1, fontsize=6)
+            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.15), 
+                    fancybox=True, shadow=False, ncol=1, fontsize=5)
 
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
 
-        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Rasterized Datasets by Year (Global Extent)", pdf, 1200)
+        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Rasterized Datasets by Year", pdf, 1200)
 
     def plot_rasters_by_year_individual(self, pdf, shp_path) -> None:
         """
@@ -1024,10 +1056,17 @@ class CreateLidarDataPlotsEngine(Engine):
                     x, y = geom.exterior.xy
                     ax.plot(x, y, color=ds_color, linewidth=0.5, zorder=12)
 
-                label_text = dataset['legend_label']
-                if dataset.get('date'):
-                    label_text += f" ({dataset['date']})"
+                # Format date string cleanly (no raw python lists)
+                date_val = dataset.get('date')
+                if date_val:
+                    if isinstance(date_val, list):
+                        date_str = f" ({', '.join(date_val)})"
+                    else:
+                        date_str = f" ({date_val})"
+                else:
+                    date_str = ""
                     
+                label_text = f"{dataset['legend_label']}{date_str}"
                 legend_handles.append(Line2D([0], [0], color=ds_color, lw=2, label=label_text))
                 
                 display_mask = np.logical_or.reduce((
@@ -1047,13 +1086,13 @@ class CreateLidarDataPlotsEngine(Engine):
             subplot_title = self.year_datasets[year][0]['title']
             ax.set_title(f"{subplot_title}\nTotal Area: {total_area_km2:.0f} km$^2$", fontsize=8)
             
-            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.2), 
-                    fancybox=True, shadow=False, ncol=1, fontsize=4)
+            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.15), 
+                    fancybox=True, shadow=False, ncol=1, fontsize=5)
 
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
 
-        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Rasterized Datasets by Year (Individual Extent)", pdf, 600)
+        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Rasterized Datasets by Year", pdf, 600)
     
     def reprojectToGrid(self, path, transform, shape, target_crs, resampling_method=Resampling.bilinear) -> tuple[np.zeros, int]:
         """
@@ -1167,7 +1206,7 @@ class CreateLidarDataPlotsEngine(Engine):
         year_datasets_map = {}
         for year, data in self.year_datasets.items():
             if any(ds.get('is_use_true', False) for ds in data):
-                year_datasets_map[year] = data[0]['path']
+                year_datasets_map[year] = [ds['path'] for ds in data]
             else:
                 logger.info(f"Excluding year {year} from differences because no dataset is explicitly set to 'use: true'.")
 
@@ -1181,7 +1220,7 @@ class CreateLidarDataPlotsEngine(Engine):
         
         sorted_years_unfiltered = sorted(year_datasets_map.keys())
         
-        all_paths = list(year_datasets_map.values())
+        all_paths = [p for paths in year_datasets_map.values() for p in paths]
         global_transform, global_extent, global_shape = self.calculateExtent(all_paths, target_crs)
 
         # ADDED CHECK: Prevent crash if calculateExtent fails to read any file
@@ -1192,14 +1231,8 @@ class CreateLidarDataPlotsEngine(Engine):
         reprojected_global = {}
         valid_years = []
         for year in sorted_years_unfiltered:
-            data, nodata = self.reprojectToGrid(year_datasets_map[year], global_transform, global_shape, target_crs)
-            # Add the 'data >= 0' condition to the mask
-            mask = np.logical_or.reduce((
-                data == nodata, 
-                data < -10000, # Catch interpolated nodata artifacts
-                data >= 0
-            ))
-            reprojected_data = np.ma.array(data, mask=mask)
+            merged_data, merged_mask = self._merge_year_datasets(year_datasets_map[year], global_transform, global_shape, target_crs)
+            reprojected_data = np.ma.array(merged_data, mask=merged_mask)
             
             # STRICT CHECK: Check if there is any valid data (< 0) before keeping this year
             if reprojected_data.count() > 0:
@@ -1230,7 +1263,7 @@ class CreateLidarDataPlotsEngine(Engine):
         
         diff_data = []
         for year1, year2 in year_pairs:
-            path1, path2 = year_datasets_map[year1], year_datasets_map[year2]
+            paths1, paths2 = year_datasets_map[year1], year_datasets_map[year2]
             
             data1_global, data2_global = reprojected_global[year1], reprojected_global[year2]
             combined_mask_global = np.ma.mask_or(data1_global.mask, data2_global.mask)
@@ -1241,13 +1274,13 @@ class CreateLidarDataPlotsEngine(Engine):
             pixel_area_m2 = abs(global_transform.a * global_transform.e)
             overlap_area_km2 = (overlapping_pixels * pixel_area_m2) / 1e6
             
-            if mode == 'all' and overlap_area_km2 < 10:
+            if mode == 'all' and overlap_area_km2 < 50:
                 continue
 
             overlap_text = f"Overlap: {overlap_area_km2:.0f} km$^2$ ({overlap_percentage:.1f}%)"
             title = f'Difference: {year1} to {year2}\n{overlap_text}'
             
-            diff_data.append({'title': title, 'path1': path1, 'path2': path2, 'year1': year1, 'year2': year2})
+            diff_data.append({'title': title, 'paths1': paths1, 'paths2': paths2, 'year1': year1, 'year2': year2})
             
         if not diff_data:
             logger.warning(f"No year pairs found for '{mode}' mode with sufficient overlap.")
@@ -1267,26 +1300,20 @@ class CreateLidarDataPlotsEngine(Engine):
             ax = axes[i]
             
             if use_individual_extent:
-                local_transform, local_extent, local_shape = self.calculateExtent([data_dict['path1'], data_dict['path2']], target_crs)
+                local_paths = data_dict['paths1'] + data_dict['paths2']
+                local_transform, local_extent, local_shape = self.calculateExtent(local_paths, target_crs)
                 
                 # ADDED CHECK: Prevent crash if specific year datasets cannot be resolved
                 if local_shape is None:
                     logger.warning(f"Could not calculate local extent for {data_dict['year1']} to {data_dict['year2']}. Skipping.")
                     continue
 
-                data1, nodata1 = self.reprojectToGrid(data_dict['path1'], local_transform, local_shape, target_crs)
-                data2, nodata2 = self.reprojectToGrid(data_dict['path2'], local_transform, local_shape, target_crs)
+                merged_data1, merged_mask1 = self._merge_year_datasets(data_dict['paths1'], local_transform, local_shape, target_crs)
+                merged_data2, merged_mask2 = self._merge_year_datasets(data_dict['paths2'], local_transform, local_shape, target_crs)
                 
                 # Add conditions to mask pixels where either dataset has a value >= 0 or nodata leakage
-                combined_mask = np.logical_or.reduce((
-                    data1 == nodata1, 
-                    data1 < -10000,
-                    data2 == nodata2, 
-                    data2 < -10000,
-                    data1 >= 0,
-                    data2 >= 0
-                ))
-                diff = np.ma.array(data2 - data1, mask=combined_mask)
+                combined_mask = np.logical_or(merged_mask1, merged_mask2)
+                diff = np.ma.array(merged_data2 - merged_data1, mask=combined_mask)
                 
                 im_diff = ax.imshow(diff, extent=local_extent, cmap=cmap, vmin=global_diff_min, vmax=global_diff_max)
                 self.setupSubplot(ax, shp_gdf, local_extent)
@@ -1314,21 +1341,209 @@ class CreateLidarDataPlotsEngine(Engine):
         for j in range(i + 1, len(axes)):
             axes[j].axis('off')
         
-        extent_type = "Individual" if use_individual_extent else "Global"
-        suptitle = f"{mode.capitalize().replace('_', ' ')} Year Differences ({extent_type} Extent)"
         if mode == 'all':
-            suptitle = f"All Year Differences >= 10 km2 ({extent_type} Extent)"
-        
-        dpi = 600 if use_individual_extent else 1200
+            suptitle = f"All Year Differences >= 50 km$^2$"
+        else:
+            suptitle = f"{mode.capitalize().replace('_', ' ')} Year Differences"
 
-        self.finalizeFigure(fig, axes, im_diff, 'Difference (m)', suptitle, pdf, dpi, show_overlap_legend=True)
+        self.finalizeFigure(fig, axes, im_diff, 'Difference (m)', suptitle, pdf, 1200 if not use_individual_extent else 600, show_overlap_legend=True)
+
+    def plot_selected_year_pair_coverage(self, pdf, shp_path, year_pairs) -> None:
+        """
+        Plots combined spatial coverage mapping for specifically selected year pairs.
+        param object pdf: PdfPages object to save the plots into.
+        param str shp_path: Path to the shapefile for coastline plotting.
+        param list year_pairs: List of tuple string pairs e.g. [('1998', '2001'), ...]
+        """
+        if not self.year_datasets:
+            return
+            
+        year_datasets_map = {}
+        for year, data in self.year_datasets.items():
+            if any(ds.get('is_use_true', False) for ds in data):
+                year_datasets_map[year] = [ds['path'] for ds in data]
+
+        target_crs = 'EPSG:3857'
+        shp_read_path = self._get_s3_path(shp_path)
+        shp_gdf = gpd.read_file(shp_read_path).to_crs(target_crs)
+        
+        # Calculate global extent for the specific pairs requested
+        all_paths = []
+        valid_pairs = []
+        for y1, y2 in year_pairs:
+            if y1 in year_datasets_map and y2 in year_datasets_map:
+                all_paths.extend(year_datasets_map[y1])
+                all_paths.extend(year_datasets_map[y2])
+                valid_pairs.append((y1, y2))
+                
+        if not valid_pairs:
+            logger.warning("No valid selected year pairs found in the datasets.")
+            return
+            
+        global_transform, global_extent, global_shape = self.calculateExtent(list(set(all_paths)), target_crs)
+        if global_shape is None: 
+            return
+
+        # Pre-calculate merged data to get global min/max for colormap
+        merged_cache = {}
+        unique_years = list(set([y for pair in valid_pairs for y in pair]))
+        global_min = np.inf
+        
+        for year in unique_years:
+            data, mask = self._merge_year_datasets(year_datasets_map[year], global_transform, global_shape, target_crs)
+            merged_cache[year] = {'data': data, 'mask': mask}
+            
+            valid_data = data[~mask]
+            if valid_data.size > 0:
+                global_min = min(global_min, valid_data.min())
+                
+        if global_min == np.inf: 
+            global_min = -10
+
+        num_plots = len(valid_pairs)
+        cols = math.ceil(math.sqrt(num_plots))
+        rows = math.ceil(num_plots / cols)
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(15, 15), constrained_layout=True)
+        axes = np.atleast_1d(axes).flatten()
+        cmap = plt.colormaps['ocean'].copy()
+        cmap.set_bad(color='white')
+        im = None
+        
+        color1, color2 = 'blue', 'orange'
+
+        for i, (y1, y2) in enumerate(valid_pairs):
+            ax = axes[i]
+            
+            cache1, cache2 = merged_cache[y1], merged_cache[y2]
+            data1, mask1 = cache1['data'], cache1['mask']
+            data2, mask2 = cache2['data'], cache2['mask']
+            
+            # Overlay visual data: year 2 overrides year 1 where they overlap
+            display_data = np.where(~mask2, data2, data1)
+            display_mask = mask1 & mask2
+            masked_display = np.ma.array(display_data, mask=display_mask)
+            
+            im = ax.imshow(masked_display, extent=global_extent, cmap=cmap, vmin=global_min, vmax=0)
+            
+            # Calculate Overlap
+            overlapping_pixels = np.sum((~mask1) & (~mask2))
+            smaller_year_pixels = min(np.sum(~mask1), np.sum(~mask2))
+            overlap_percentage = (overlapping_pixels / smaller_year_pixels * 100) if smaller_year_pixels > 0 else 0
+            pixel_area_m2 = abs(global_transform.a * global_transform.e)
+            overlap_area_km2 = (overlapping_pixels * pixel_area_m2) / 1e6
+            
+            # Draw distinct footprint boundaries around the merged datasets for each year
+            geom1 = [shape(geom) for geom, val in shapes((~mask1).astype(np.uint8), transform=global_transform) if val > 0]
+            for geom in geom1:
+                x, y = geom.exterior.xy
+                # Make the background year (Year 1) outline thicker
+                ax.plot(x, y, color=color1, linewidth=2.5, zorder=12)
+                
+            geom2 = [shape(geom) for geom, val in shapes((~mask2).astype(np.uint8), transform=global_transform) if val > 0]
+            for geom in geom2:
+                x, y = geom.exterior.xy
+                # Make the foreground year (Year 2) outline thinner so the background peeks through
+                ax.plot(x, y, color=color2, linewidth=1.0, zorder=13)
+
+            self.setupSubplot(ax, shp_gdf, global_extent)
+            
+            overlap_text = f"Overlap: {overlap_area_km2:.0f} km$^2$ ({overlap_percentage:.1f}%)"
+            ax.set_title(f"Coverage: {y1} & {y2}\n{overlap_text}", fontsize=8)
+            
+            legend_handles = [
+                Line2D([0], [0], color=color1, lw=2, label=f"{y1} Coverage"),
+                Line2D([0], [0], color=color2, lw=2, label=f"{y2} Coverage")
+            ]
+            ax.legend(handles=legend_handles, loc='upper center', bbox_to_anchor=(0.5, -0.15), fancybox=True, ncol=2, fontsize=8)
+
+        for j in range(i + 1, len(axes)):
+            axes[j].axis('off')
+
+        self.finalizeFigure(fig, axes, im, 'Depth (meters)', "Selected Year Pairs Coverage", pdf, 1200)
+
+    def plot_temporal_coverage_count(self, pdf, shp_path, year_pairs) -> None:
+        """
+        Creates a heatmap counting the number of selected years that possess valid data in every grid cell.
+        param object pdf: PdfPages object to save the plots into.
+        param str shp_path: Path to the shapefile for coastline plotting.
+        param list year_pairs: List of tuple string pairs used to extract the unique years to evaluate.
+        """
+        if not self.year_datasets:
+            return
+            
+        year_datasets_map = {}
+        for year, data in self.year_datasets.items():
+            if any(ds.get('is_use_true', False) for ds in data):
+                year_datasets_map[year] = [ds['path'] for ds in data]
+
+        # Flatten pairs list to get unique, specific years
+        unique_years = sorted(list(set([y for pair in year_pairs for y in pair])))
+        valid_years = [y for y in unique_years if y in year_datasets_map]
+        
+        if not valid_years:
+            logger.warning("No valid datasets found for the temporal coverage count.")
+            return
+
+        target_crs = 'EPSG:3857'
+        shp_read_path = self._get_s3_path(shp_path)
+        shp_gdf = gpd.read_file(shp_read_path).to_crs(target_crs)
+        
+        all_paths = [p for y in valid_years for p in year_datasets_map[y]]
+        global_transform, global_extent, global_shape = self.calculateExtent(all_paths, target_crs)
+        
+        if global_shape is None: 
+            return
+
+        count_grid = np.zeros(global_shape, dtype=int)
+        
+        # Sum valid pixels across all requested years
+        for year in valid_years:
+            _, mask = self._merge_year_datasets(year_datasets_map[year], global_transform, global_shape, target_crs)
+            count_grid += (~mask).astype(int)
+
+        fig, ax = plt.subplots(figsize=(10, 10), constrained_layout=True)
+        
+        # Mask out anything with 0 overlap (empty water/land)
+        masked_count_grid = np.ma.masked_equal(count_grid, 0)
+        
+        max_count = int(count_grid.max())
+        if max_count == 0:
+            logger.warning("No overlapping pixels found for count map.")
+            return
+            
+        # Create a discrete colormap with exactly enough bins for our integers
+        cmap = plt.get_cmap('turbo', max_count).copy()
+        cmap.set_bad(color='white')
+        
+        # Offset vmin/vmax by 0.5 so that the integer ticks fall perfectly in the middle of each color block
+        im = ax.imshow(masked_count_grid, extent=global_extent, cmap=cmap, vmin=0.5, vmax=max_count + 0.5)
+        
+        self.setupSubplot(ax, shp_gdf, global_extent)
+        
+        # Standardize Custom Colorbar (Discrete integer ticks)
+        cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, ticks=range(1, max_count + 1))
+        cbar.set_label('Number of Overlapping Years', rotation=270, labelpad=20)
+        
+        # Wrap the year list cleanly for the sub-title if it is extremely long
+        years_str = ', '.join(valid_years)
+        ax.set_title(f"Selected Years: {years_str}", fontsize=10)
+        
+        legend_lines = [Line2D([0], [0], color='gray', lw=1.5, label='50m Isobath')]
+        ax.legend(handles=legend_lines, loc='lower center', bbox_to_anchor=(0.5, -0.1), fancybox=True, shadow=True, ncol=1, fontsize=10)
+        
+        plt.suptitle("Temporal Coverage Count (Selected Years)", fontsize=16, fontweight='bold', y=0.92)
+        
+        pdf.savefig(fig, dpi=1200, bbox_inches='tight')
+        plt.close(fig)
+        logger.info("Appended temporal coverage count plot to PDF.")
 
     def run(self) -> None:
         """Entrypoint for processing the Lidar Data Plots"""
 
         self.setup_dask(get_environment(), memory_limit="28GB") # Adjusted to match available 30GB system memory
 
-        self.resample_vrt_files()
+        # self.resample_vrt_files()
         self.close_dask()
 
         if self.is_aws:
@@ -1357,6 +1572,13 @@ class CreateLidarDataPlotsEngine(Engine):
             os.makedirs(os.path.dirname(pdf_path_str), exist_ok=True)
             pdf_target = pdf_path_str
 
+        selected_pairs = [
+            ('1998', '2001'), ('2004', '2006'), ('2006', '2010'), 
+            ('2010', '2015'), ('2016', '2017'), ('2017', '2018'), 
+            ('2018', '2019'), ('2019', '2020'), ('2019', '2022'), 
+            ('2022', '2024')
+        ]
+
         # Generate and save all outputs onto the same PDF object
         with PdfPages(pdf_target) as pdf:
             self.generate_dataset_report(pdf, ecoregion_name)
@@ -1366,6 +1588,10 @@ class CreateLidarDataPlotsEngine(Engine):
             # self.plot_difference(pdf, shp_path, 'consecutive', use_individual_extent=True)
             self.plot_difference(pdf, shp_path, 'all', use_individual_extent=False)
             # self.plot_difference(pdf, shp_path, 'all', use_individual_extent=True)
+            
+            # --- New Evaluative Plots ---
+            self.plot_selected_year_pair_coverage(pdf, shp_path, selected_pairs)
+            self.plot_temporal_coverage_count(pdf, shp_path, selected_pairs)
 
         if self.is_aws:
             buf.seek(0)

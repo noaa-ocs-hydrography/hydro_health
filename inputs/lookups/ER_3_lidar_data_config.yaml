@@ -41,18 +41,6 @@ EcoRegion-3:
     year: 
     manual: True
     note: Valid dataset
-  USACE_FL_State_Agencies_2007_529:
-    use: true
-    date: 2007-06-18, 2007-08-30
-    year: null
-    manual: false
-    note: Valid dataset, however no 2007 datasets in the most recent download
-  5498_USACE_USACE_NCMP_2009_8776:
-    use: true
-    date: 
-    year: null
-    manual: false
-    note: Valid dataset, however no 2009 datasets in the most recent download
   NCMP_4269_2010_DEM_USACE_NCMP_66659:
     use: true
     date: 
@@ -192,11 +180,11 @@ EcoRegion-3:
     manual: 
     note: Valid dataset
   NCMP_6346_2021_DEM_NOAA_NGS_66914:
-    use: true
+    use: false
     date: 
     year: 2021
     manual: 
-    note: Valid dataset
+    note: Valid dataset, but small
   NCMP_6346_2022_DEM_USACE_71740:
     use: false
     date: 
