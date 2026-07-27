@@ -107,12 +107,15 @@ class RasterMaskS3Engine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def create_prediction_mask(self, ecoregion: str, wkt_geom: str) -> None:
+    def create_prediction_mask(self, ecoregion: str, output_prefix: str, wkt_geom: str) -> None:
         """Build the base prediction mask (Value 1) for the ecoregion polygon."""
 
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
-        s3_key = f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
+        if output_prefix:
+            s3_key = f"{output_prefix}/{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
+        else:
+            s3_key = f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
 
         target_srs = osr.SpatialReference()
         target_srs.ImportFromEPSG(32617)
@@ -148,7 +151,7 @@ class RasterMaskS3Engine(Engine):
             
             boto3.client('s3').upload_file(tmp.name, bucket, s3_key)
 
-    def create_training_mask(self, ecoregion: str, s3_vrt_paths: list[str], outputs: str) -> str:
+    def create_training_mask(self, ecoregion: str, s3_vrt_paths: list[str], output_prefix: str, outputs: str) -> str:
         """Tile-based merge using bitwise OR to combine 58 bathymetry masks."""
 
         _set_gdal_s3_options()
@@ -165,7 +168,11 @@ class RasterMaskS3Engine(Engine):
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
 
         self.write_message(f"Downloading base prediction mask for {ecoregion}...", outputs)
-        s3_client.download_file(bucket, f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif", str(local_pred_path))
+        if output_prefix:
+            predication_mask_prefix = f"{output_prefix}/{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
+        else:
+           predication_mask_prefix = f"{ecoregion}/{mask_sub}/prediction_mask_{ecoregion}.tif"
+        s3_client.download_file(bucket, predication_mask_prefix, str(local_pred_path))
 
         base_ds = gdal.Open(str(local_pred_path))
         geo_t = base_ds.GetGeoTransform()
@@ -240,7 +247,10 @@ class RasterMaskS3Engine(Engine):
         final_ds.BuildOverviews("NEAREST", [2, 4, 8, 16, 32, 64])
         final_ds = None
 
-        s3_key = f"{ecoregion}/{mask_sub}/training_mask_{ecoregion}.tif"
+        if output_prefix:
+            s3_key = f"{output_prefix}/{ecoregion}/{mask_sub}/training_mask_{ecoregion}.tif"
+        else:
+            s3_key = f"{ecoregion}/{mask_sub}/training_mask_{ecoregion}.tif"
         s3_client.upload_file(str(final_compressed_path), bucket, s3_key)
 
         # Clean up EBS
@@ -361,7 +371,7 @@ class RasterMaskS3Engine(Engine):
 
         return f"{ecoregion}: Remerge complete. S3 updated."
     
-    def run(self, outputs: str, manual_downloads=False) -> None:
+    def run(self, outputs: str, output_prefix: str, manual_downloads=False) -> None:
         s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
@@ -373,8 +383,8 @@ class RasterMaskS3Engine(Engine):
         for _, row in gdf.iterrows():
             er = row['EcoRegion']
             vrts = self.find_provider_vrts(er, manual_downloads)
-            self.create_prediction_mask(er, row['geometry'].wkt)
+            self.create_prediction_mask(er, output_prefix, row['geometry'].wkt)
             if vrts:
                 vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
-                result_string = self.create_training_mask(er, vrt_list, outputs)
+                result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                 self.write_message(result_string, outputs)

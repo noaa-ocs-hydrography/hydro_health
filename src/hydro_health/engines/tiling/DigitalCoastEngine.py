@@ -210,9 +210,8 @@ class DigitalCoastEngine(Engine):
 
         self.write_message('Download Support Files', outputs)
         ecoregion_geom_strings = self.get_ecoregion_geometry_strings(tile_gdf, ecoregion)
-
         for geometry_coords in ecoregion_geom_strings:
-            tile_index_links = self.get_available_datasets(geometry_coords, ecoregion, outputs)  # TODO return all object keys
+            tile_index_links = self.get_available_datasets(geometry_coords, digital_coast_folder)
             bulk_download_params = [[link_dict['link'], link_dict['provider_path'], self.param_lookup, outputs] for link_dict in tile_index_links if link_dict['label'] == 'Bulk Download']
             future_tiles = self.client.map(_download_tile_index, bulk_download_params)
             _ = self.client.gather(future_tiles)
@@ -238,7 +237,7 @@ class DigitalCoastEngine(Engine):
             if result:
                 self.write_message(f'Result: {result}', output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         print('Downloading Digital Coast Datasets')
@@ -247,8 +246,11 @@ class DigitalCoastEngine(Engine):
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
-                digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-                # tile_gdf.to_file(rF'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
+                if output_prefix:
+                    digital_coast_folder = pathlib.Path(outputs) / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                else:
+                    digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                # tile_gdf.to_file(rf'{OUTPUTS}\tile_gdf.shp', driver='ESRI Shapefile')
                 ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
                 self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 self.check_tile_index_areas(digital_coast_folder, outputs)
@@ -268,10 +270,10 @@ class DigitalCoastEngine(Engine):
         tile_results = self.client.gather(future_tiles)
         self.print_async_results(tile_results, outputs)
 
-    def unzip_all_files(self, output_folder: str) -> None:
+    def unzip_all_files(self, digital_coast_folder: str) -> None:
         """Unzip all zip files in a folder"""
 
-        for zipped_file in pathlib.Path(output_folder).rglob('*.zip'):
+        for zipped_file in pathlib.Path(digital_coast_folder).rglob('*.zip'):
             with zipfile.ZipFile(zipped_file, 'r') as zipped:
                 zipped.extractall(str(zipped_file.parents[0]))
             # Delete zip file after extract

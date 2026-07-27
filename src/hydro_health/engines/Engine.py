@@ -10,6 +10,7 @@ import boto3
 import geopandas as gpd
 import dask
 import math
+import string
 
 from datetime import date
 from osgeo import osr, gdal
@@ -65,7 +66,16 @@ class Engine:
     def approved_dataset(self, feature_json: dict[dict]) -> bool:
         """Only allow certain provider types"""
 
-        provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI
+        provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI, NGS not used by BlueTopo
+        # TODO remove NGS
+        # 1. Delete VRT files
+        # 2. Delete NGS provider folders
+        # 3. Delete tiled gridded datasets folder
+        # 4. run HH DigitalCoast download with skip, 
+        # 5. run metadata
+        # 6. run VRT creation for DigitalCoast only
+        # 7. run mask engine with manual dowload included
+        # 8. run VRT gridding
         for text in provider_list_text:
             if text in feature_json['attributes']['provider_results_name']:
                 return True
@@ -85,7 +95,7 @@ class Engine:
         self.client.close()
         self.cluster.close()
     
-    def get_available_datasets(self, geometry_coords: str, ecoregion_id: str, outputs: str) -> None:
+    def get_available_datasets(self, geometry_coords: str, digital_coast_folder: str) -> None:
         """Query NOWCoast REST API for available datasets"""
 
         payload = {
@@ -105,8 +115,13 @@ class Engine:
             # print(feature['attributes']['DataType'], feature['attributes']['Year'], feature['attributes']['provider_results_name'])
             if not self.approved_dataset(feature):
                 continue
-            folder_name = re.sub('\W+',' ', feature['attributes']['provider_results_name']).strip().replace(' ', '_') + '_' + str(feature['attributes']['Year'])  # remove illegal chars
-            output_folder_path = pathlib.Path(outputs) / ecoregion_id / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast' / f"{folder_name}_{feature['attributes']['ID']}"
+            attrs = feature['attributes']
+            metalink = attrs.get('Metalink') or ''
+            inport_number = metalink.rstrip('/').split('/')[-1]
+            inport_suffix = inport_number if inport_number else 'No_InPort'
+            cleaned_provider = self.remove_special_chars(attrs.get('provider_details', 'No_Provider'))
+            folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_suffix}"
+            output_folder_path = digital_coast_folder / folder_name
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON
@@ -129,7 +144,7 @@ class Engine:
         for er_id, ecoregion_group in ecoregion_groups:
             if er_id == ecoregion:
                 ecoregion_group_web_mercator = ecoregion_group.to_crs(4269)  # POST request only allows this EPSG
-                ecoregion_group_web_mercator['geom_type'] = 'Polygon'
+                ecoregion_group_web_mercator['geom_type'] = 'Polygon'   # TODO seems like "geom_type" is missing.  Maybe geojson creation method issue.
                 tile_geometries = ecoregion_group_web_mercator[['geom_type', 'geometry']]
                 tile_boundary = tile_geometries.dissolve(by='geom_type')
                 tile_wkt = tile_boundary.iloc[0].geometry
@@ -153,6 +168,15 @@ class Engine:
         for result in results:
             if result:
                 self.write_message(f'Result: {result}', output_folder)
+
+    def remove_special_chars(self, attr: str) -> str:
+        """Remove any illegal special characters"""
+
+        illegal_chars = string.punctuation
+        illegal_chars = illegal_chars.replace('_', '')
+        illegal_chars_translation = str.maketrans("", "", illegal_chars)
+        attr = attr.replace(' ', '_')
+        return attr.translate(illegal_chars_translation)
 
     def resample_and_reproject(self, tiff_path: pathlib.Path, target_res: int) -> None:
         """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""
