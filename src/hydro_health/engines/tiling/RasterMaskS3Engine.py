@@ -274,6 +274,7 @@ class RasterMaskS3Engine(Engine):
         
         found = []
         for path in search_paths: 
+            # TODO skip unapproved providers
             found.extend(s3.glob(f"{path}/**/mosaic_*.vrt"))
         return found
 

@@ -104,6 +104,7 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
             )
 
             for vrt in vrts:
+                # TODO skip unapproved providers
                 vrt_ds = gdal.Open(vrt)
                 # Warp the VRT into a small memory chunk matching our block
                 tmp_ds = gdal.GetDriverByName('MEM').Create('', num_cols, num_rows, 2, gdal.GDT_Byte)
