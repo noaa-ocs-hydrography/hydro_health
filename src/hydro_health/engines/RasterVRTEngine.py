@@ -202,7 +202,6 @@ class RasterVRTEngine(Engine):
                     output_geotiffs = self.get_local_bluetopo_tifs(geotiffs, temp_vrt_path)
                     self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
         else:
-            # TODO skip unapproved providers
             provider_folders = [f for f in outputs.glob('*') if f.is_dir() and 'unused_providers' not in f.name]
             for provider_path in provider_folders:
                 geotiffs = [g for g in provider_path.rglob(self.glob_lookup[file_type]) if not g.name.startswith('mask_')]

@@ -8,7 +8,7 @@ import geopandas as gpd
 from osgeo import gdal
 
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
@@ -261,7 +261,13 @@ class GridDigitalCoastEngine(Engine):
             vrt_files = list(dc_sub_path.glob('*.vrt'))
 
             if vrt_files:
-                params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in vrt_files]
+                approved_providers = [provider.lower() for provider in get_approved_providers(ecoregion.stem)]
+                approved_vrt_files = []
+                for vrt in vrt_files:
+                    vrt_provider = '_'.join(vrt.stem.split('_')[2:])
+                    if vrt_provider.lower() in approved_providers:
+                        approved_vrt_files.append(vrt)
+                params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in approved_vrt_files]
                 future_tiles = self.client.map(_grid_single_vrt_local, params)
                 tile_results = self.client.gather(future_tiles)
                 self.print_async_results(tile_results, outputs)
