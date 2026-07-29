@@ -117,7 +117,6 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
                     src_file = _to_win_long_path(shp_path_obj.parent / filename)
                     shutil.copy(src_file, str(tmp_folder / filename))
 
-        # 1. Read shapefile in GDAL from short path (<260 chars)
         shp_df = gpd.read_file(str(temp_shp)).to_crs(4326)
         shp_df.columns = shp_df.columns.str.lower()
         if 'tile' in shp_df.columns:
@@ -125,7 +124,6 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
             
         df_joined = shp_df.sjoin(df=tile_gdf, how='left')
 
-        # 2. Save modified shapefile to short temp path
         try:
             df_joined.to_file(str(temp_shp), driver='ESRI Shapefile', engine='pyogrio', encoding='utf-8')
         except Exception:
@@ -136,7 +134,6 @@ def _download_intersected_datasets(param_inputs: list[list]) -> None:
             dst_file = _to_win_long_path(shp_path_obj.parent / sidecar.name)
             shutil.copy(str(sidecar), dst_file)
 
-        # 4. Download datasets if required
         if df_joined['url'].any():
             df_joined = df_joined.loc[df_joined['tile'].notnull()]
             shp_folder = shp_path_obj.parents[0]

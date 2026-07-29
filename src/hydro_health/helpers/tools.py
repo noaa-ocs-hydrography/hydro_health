@@ -37,7 +37,9 @@ def get_approved_providers(ecoregion: str) -> bool:
     config_path = INPUTS / "lookups" / 'ER_3_lidar_data_config.yaml'
     with open(config_path, "r") as lookup:
         config = yaml.safe_load(lookup)
-        ecoregion_providers = config[ecoregion_lookup[ecoregion]]
+        ecoregion_providers = config.get(ecoregion_lookup[ecoregion], False)
+        if not ecoregion_providers:
+            return []
         approved_providers = []
         for provider, data in ecoregion_providers.items():
             if data['use']:

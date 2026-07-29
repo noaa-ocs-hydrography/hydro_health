@@ -255,7 +255,6 @@ class RasterVRTS3Engine(Engine):
                     self.build_output_vrts(s3_output_path, file_type, output_geotiffs, pathlib.Path(td), data_type)
         else:
             provider_folders = s3_files.glob(f"{base_s3}/*")
-            # TODO skip unapproved providers
             for provider_path in provider_folders:
                 geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
                 if not geotiffs: 

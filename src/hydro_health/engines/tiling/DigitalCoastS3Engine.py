@@ -284,26 +284,13 @@ class DigitalCoastS3Engine(Engine):
 
         self.close_dask()
 
-    def unzip_all_files(self, digital_coast_folder: str) -> None:
+    def unzip_all_files(self, digital_coast_folder: pathlib.Path) -> None:
         """Unzip all zip files in a folder"""
 
-        for zipped_file in pathlib.Path(digital_coast_folder).rglob('*.zip'):
-            zip_path_str = str(zipped_file.resolve())
-            extract_dir_str = str(zipped_file.parents[0].resolve())
-
-            if os.name == 'nt':
-                if not zip_path_str.startswith(r'\\?\\'):
-                    zip_path_str = r'\\?\\' + zip_path_str
-                if not extract_dir_str.startswith(r'\\?\\'):
-                    extract_dir_str = r'\\?\\' + extract_dir_str
-
-            with zipfile.ZipFile(zip_path_str, 'r') as zipped:
-                zipped.extractall(extract_dir_str)
-
-            try:
-                zipped_file.unlink()
-            except OSError:
-                os.remove(zip_path_str)
+        for zipped_file in digital_coast_folder.rglob('*.zip'):
+            with zipfile.ZipFile(zipped_file, 'r') as zipped:
+                zipped.extractall(str(zipped_file.parents[0]))
+            zipped_file.unlink()
 
     def upload_file_to_s3(self, temp_file_path: str, s3_prefix: str) -> None:
         """Simple S3 file upload with only region setting"""
