@@ -1,5 +1,4 @@
 """Class for data acquisition and preprocessing of model data"""
-
 import os
 import re
 import pathlib
@@ -109,9 +108,9 @@ class ModelDataPreProcessor(Engine):
 
         self.fs = s3fs.S3FileSystem(anon=False)
 
-        self.static_patterns = ['sed_size_raster', 'sed_type_raster', 'tsm_mean', 'hurr']
+        # Extended static patterns to ensure ungridded data like 'grain', 'survey', and 'sed' are captured 
+        self.static_patterns = ['sed', 'tsm', 'hurr', 'grain', 'survey']
         self.re_bt_prefix = re.compile(r"^bt\.")
-        self.re_flowdir = re.compile(r"flowdir")
 
         self.excluded_keys = self._load_exclusion_config()
         self.is_aws = (get_environment() == 'aws')
@@ -148,6 +147,15 @@ class ModelDataPreProcessor(Engine):
         self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=self.pilot_mode)}")
         self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', pilot_mode=self.pilot_mode)}")
         self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR', pilot_mode=self.pilot_mode)}")
+        
+        # Dynamically retrieve the filled terrain directory from config to ensure accurate exclusion
+        try:
+            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR', pilot_mode=self.pilot_mode)
+            self.filled_folder_name = UPath(filled_dir_path).name.lower()
+        except Exception:
+            logger.warning("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
+            self.filled_folder_name = "filled_tifs"
+
         self.subgrid_paths = {
             'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', pilot_mode=self.pilot_mode)}"),
             'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS', pilot_mode=self.pilot_mode)}")
@@ -205,9 +213,9 @@ class ModelDataPreProcessor(Engine):
         # NOTE: Phase 1 is for Raster operations which are block-based and use less working memory
         logger.info("Initializing Phase 1 Cluster: Heavy Raster Processing (8 workers, standard memory)")
         cluster = LocalCluster(
-            n_workers=8,            
+            n_workers=6,            
             threads_per_worker=1,  
-            memory_limit='3.5GB',
+            memory_limit='5.0GB',
             env=GDAL_ENV_VARS,
             local_directory=str(self.local_tmp_dir) # Route Dask spills to cleanable local tmp
         )
@@ -264,19 +272,20 @@ class ModelDataPreProcessor(Engine):
             logger.info(f"Saving Phase 2 Dask performance report to: {report_file_tiling}")
 
             with performance_report(filename=report_file_tiling):
+                
                 self.clip_rasters_by_tile(
                     raster_dir=self.prediction_out_dir, 
                     output_dir=self.prediction_tiles_dir, 
                     data_type="prediction"
                 )
 
-                self.clip_rasters_by_tile(
-                    raster_dir=self.training_out_dir, 
-                    output_dir=self.training_tiles_dir, 
-                    data_type="training"
-                )
+                # self.clip_rasters_by_tile(
+                #     raster_dir=self.training_out_dir, 
+                #     output_dir=self.training_tiles_dir, 
+                #     data_type="training"
+                # )
                 
-                self.batch_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
+                # self.batch_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
                 self.batch_format_transformation(base_dir=self.training_tiles_dir, mode="training")
 
         except Exception as e:
@@ -382,7 +391,8 @@ class ModelDataPreProcessor(Engine):
 
         logger.info(f"Found {len(potential_files)} total potential source files in input directories.")
 
-        excluded_folders = {'combined_lidar_tifs'}
+        # Updated to explicitly exclude the filled lidar directory using config
+        excluded_folders = {self.filled_folder_name, 'filled_tifs', 'filled_lidar'}
         valid_source_files = []
         removed_folders = 0
         removed_masks = 0
@@ -502,7 +512,20 @@ class ModelDataPreProcessor(Engine):
         removed_existing_train = 0
         
         for f in training_candidates:
-            if 'mosaic' in f.name.lower() and 'filled' not in f.name.lower():
+            name_lower = f.name.lower()
+            parts_lower = [p.lower() for p in f.parts]
+
+            # Ensure filled lidar directory is excluded for training 
+            if self.filled_folder_name in parts_lower or 'filled_lidar' in parts_lower or 'filled_tifs' in parts_lower:
+                continue
+            
+            # Ensure we use combined lidar rather than filled lidar for mosaics
+            if 'mosaic' in name_lower and 'combined' not in name_lower and 'combined_lidar' not in parts_lower:
+                continue
+            
+            # Exclude BlueTopo files strictly from being processed into training datasets
+            # EXCEPTION: Keep it if it is the survey_end_date layer
+            if ('bluetopo' in name_lower or name_lower.startswith('bt.')) and 'survey_end_date' not in name_lower:
                 continue
                 
             if not self.overwrite and f.name in existing_train_outputs:
@@ -749,24 +772,6 @@ class ModelDataPreProcessor(Engine):
             if ds is None:
                 raise RuntimeError(f"gdal.Warp returned None for {os.path.basename(src_str)}")
 
-            # Release dataset handle explicitly if it matches a bathymetry layer so that
-            # we can run the positive-elevation land filtering block in read+write mode safely.
-            src_basename = os.path.basename(src_str).lower()
-            apply_bathy_filter = any(k in src_basename for k in ["lidar", "bathy", "bluetopo"])
-
-            if apply_bathy_filter:
-                ds = None  # Release the dataset lock
-                logger.info(f" [BATHY FILTER] Applying elevation filter (values >= 0 -> nodata) on: {os.path.basename(src_str)}")
-                with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
-                    with rasterio.open(gdal_dst_str, 'r+') as dst:
-                        nodata_val = dst.nodata if dst.nodata is not None else -9999.0
-                        for ji, window in dst.block_windows(1):
-                            arr = dst.read(1, window=window)
-                            mask_invalid = (arr >= 0.0)
-                            if mask_invalid.any():
-                                arr[mask_invalid] = nodata_val
-                                dst.write(arr, 1, window=window)
-
             if apply_tsm_smoothing:
                 if ds is None:
                     ds = gdal.Open(gdal_dst_str)
@@ -904,10 +909,47 @@ class ModelDataPreProcessor(Engine):
         
         logger.info(f"Scanning directory for raster files... (This will only happen once)")
         raster_dir_upath = UPath(raster_dir)
-        all_raster_files = [
-            str(f) for f in raster_dir_upath.rglob("*") 
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        ]
+        
+        all_raster_files = []
+        for f in raster_dir_upath.rglob("*"):
+            if f.suffix.lower() in {'.tif', '.tiff'}:
+                name_lower = f.name.lower()
+                parts_lower = [p.lower() for p in f.parts]
+                
+                # Double-check exclusion of filled lidar directory in clipping step
+                if self.filled_folder_name in parts_lower or "filled_lidar" in parts_lower or "filled_tifs" in parts_lower:
+                    continue
+                
+                # Exclude 'unc', specific hurricane, and tsm_cumulative files globally for BOTH modes
+                if "unc" in name_lower:
+                    continue
+                    
+                if "tsm_cumulative" in name_lower or \
+                   "hurr_count_mean" in name_lower or \
+                   "hurr_count_cumulative" in name_lower or \
+                   "hurr_strength_cumulative" in name_lower or \
+                   re.search(r"hurr_count_\d{4}_\d{4}", name_lower) or \
+                   re.search(r"hurr_strength_\d{4}_\d{4}", name_lower):
+                    continue
+                    
+                if data_type == 'training':
+                    # Exclude BlueTopo files strictly from being processed into training datasets
+                    # EXCEPTION: Keep it if it is the survey_end_date layer
+                    if ("bluetopo" in name_lower or name_lower.startswith("bt.")) and "survey_end_date" not in name_lower:
+                        continue
+                elif data_type == 'prediction':
+                    # Prediction parquet uses the bluetopo files and not the filled lidar bathy
+                    if "bathy" in name_lower and "bluetopo" not in name_lower and not name_lower.startswith("bt."):
+                        continue
+                        
+                all_raster_files.append(str(f))
+        
+        logger.info(f"Filtered out TIFF files containing 'unc' and specific hurricane/tsm derivatives from the {data_type} parquet files.")
+        if data_type == 'training':
+            logger.info(" -> Specifically excluded BlueTopo files for training (except survey_end_date).")
+        elif data_type == 'prediction':
+            logger.info(" -> Specifically excluded standard Lidar (bathy) files for prediction (using BlueTopo instead).")
+
         logger.info(f"Found {len(all_raster_files)} raster files.")
 
         # ---------------------------------------------------------------------
@@ -918,9 +960,10 @@ class ModelDataPreProcessor(Engine):
         for _, sub_grid in sub_grids.iterrows():
             tile_name = sub_grid['tile_id']
             output_folder = output_dir / tile_name
-            expected_output_path = output_folder / f"{tile_name}_{data_type}_clipped_data.parquet"
+            # Look for the final formatted file to determine if we need to process this tile
+            expected_final_path = output_folder / f"{tile_name}_{data_type}_formatted.parquet"
             
-            should_write = self.overwrite or not expected_output_path.exists()
+            should_write = self.overwrite or not expected_final_path.exists()
             if should_write:
                 write_counter += 1
                 all_tasks.append({
@@ -936,7 +979,7 @@ class ModelDataPreProcessor(Engine):
                     'output_folder': output_folder,
                     'tile_name': tile_name,
                     'should_write': False,
-                    'expected_output_path': expected_output_path
+                    'expected_output_path': expected_final_path
                 })
         
         total_to_write = write_counter
@@ -962,7 +1005,7 @@ class ModelDataPreProcessor(Engine):
             tile_name = task_item['tile_name']
             if not task_item['should_write']:
                 expected_output_path = task_item['expected_output_path']
-                logger.info(f" [SKIP] Tile already clipped: {tile_name}. Queuing stats generation only.")
+                logger.info(f" [SKIP] Tile already processed: {tile_name}. Queuing stats generation only.")
                 stats_task = dask.delayed(self._generate_stats_from_existing)(str(expected_output_path), tile_name)
                 return client.compute(stats_task)
             else:
@@ -1012,15 +1055,68 @@ class ModelDataPreProcessor(Engine):
         logger.info(f"[SUCCESS] Statistics successfully saved to: {output_csv_path}")
         logger.info(f"Finished clipping {data_type} rasters by tile.")
 
-    def _clean_raster_col_name(self, col_name: str, original_tile: str) -> str:
-        """Cleans raster filenames into consistent column names, especially for BlueTopo."""
-        if "bluetopo" in col_name.lower() and not col_name.startswith("bt."):
-            clean_name = re.sub(r"(?i)^bluetopo_?", "", col_name)
-            if original_tile and original_tile in clean_name:
-                clean_name = clean_name.replace(f"{original_tile}_", "").replace(original_tile, "")
-            clean_name = re.sub(r"^\d{8}_", "", clean_name)
-            return f"bt.{clean_name}"
-        return col_name
+    def _standardize_col_name(self, col_name: str, original_tile: str = "") -> str:
+        """Cleans raster filenames into consistent column names, standardizing years and prefixes."""
+        clean_name = col_name
+        
+        # Explicit override for survey_end_date to ensure it gets exactly this column name
+        if "survey_end_date" in clean_name.lower():
+            return "survey_end_date"
+        
+        # 1. Clean bluetopo prefix and tags
+        is_bluetopo = "bluetopo" in clean_name.lower() or clean_name.startswith("bt.")
+        if is_bluetopo:
+            clean_name = re.sub(r"(?i)^bluetopo_?", "", clean_name)
+            if clean_name.startswith("bt."):
+                clean_name = clean_name[3:]
+                
+        # 2. Strip 'combined_' legacy prefixes
+        clean_name = re.sub(r"(?i)^combined\d*_", "", clean_name)
+        
+        # 3. Strip original tile
+        if original_tile and original_tile in clean_name:
+            clean_name = clean_name.replace(f"_{original_tile}", "").replace(f"{original_tile}_", "").replace(original_tile, "")
+            
+        # 4. Truncate 8-digit YYYYMMDD dates to 4-digit YYYY
+        clean_name = re.sub(r"(?<!\d)((?:19|20)\d{2})\d{4}(?!\d)", r"\1", clean_name)
+        clean_name = clean_name.strip("_")
+        
+        # 5. Extract and shift year / year-pairs dynamically
+        m_pair = re.search(r"(\d{4}_\d{4})", clean_name)
+        if m_pair:
+            year_pair = m_pair.group(1)
+            base = clean_name.replace(year_pair, "").strip("_")
+            base = re.sub(r"__+", "_", base)
+            if base:
+                final_name = f"{base}_{year_pair}"
+            else:
+                final_name = year_pair
+        else:
+            m_single = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", clean_name)
+            if m_single:
+                year = m_single.group(1)
+                base = clean_name.replace(year, "").strip("_")
+                base = re.sub(r"__+", "_", base)
+                
+                base_lower = base.lower()
+                # Enforce '_filled' for root bathy models
+                if base_lower == "bathy" or base_lower == "bathy_filled":
+                    final_name = f"bathy_{year}_filled"
+                # Strip root bathy prefixes from dependent derivatives to keep them succinct 
+                elif base_lower.startswith("bathy_"):
+                    base = base[6:].strip("_")
+                    final_name = f"{base}_{year}"
+                elif base:
+                    final_name = f"{base}_{year}"
+                else:
+                    final_name = year
+            else:
+                final_name = clean_name
+                
+        if is_bluetopo:
+            return f"bt.{final_name}"
+            
+        return final_name
 
     def subtile_process_gridded(self, sub_grid, raster_files) -> pd.DataFrame:
         """Process gridded rasters for a single tile dynamically and avoid sequential merging."""
@@ -1053,7 +1149,7 @@ class ModelDataPreProcessor(Engine):
                     data = src.read(1, window=common_window, boundless=True, fill_value=src.nodata)
                     
                     col_name = pathlib.Path(file).stem
-                    col_name = self._clean_raster_col_name(col_name, original_tile)
+                    col_name = self._standardize_col_name(col_name, original_tile)
                     data_arrays[col_name] = (data, src.nodata)
             except Exception as e:
                 logger.warning(f"Error reading gridded file {file}: {e}")
@@ -1114,14 +1210,17 @@ class ModelDataPreProcessor(Engine):
 
             for file in current_files:
                 col_name = pathlib.Path(file).stem
-                col_name = self._clean_raster_col_name(col_name, original_tile)
+                col_name = self._standardize_col_name(col_name, original_tile)
                 try:
                     with rasterio.open(file) as src:
                         window = src.window(*tile_extent)
                         
                         # Guard against non-intersecting / empty coordinate windows
                         if window.width <= 0 or window.height <= 0:
-                            combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
+                            # Only initialize to NaN if the column doesn't exist yet to prevent overwriting valid 
+                            # data when looping through static mosaicked/tiled layers (like survey_end_date tiles)
+                            if col_name not in combined_df:
+                                combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
                             continue
 
                         win_data = src.read(1, window=window)
@@ -1146,10 +1245,19 @@ class ModelDataPreProcessor(Engine):
                                     extracted_vals[extracted_vals == nodata_val] = np.nan
                             vals[win_valid] = extracted_vals
                             
-                        combined_df[col_name] = vals
+                        # Safely insert without destroying data from other tiles mapped to the same col_name
+                        if col_name in combined_df:
+                            existing = combined_df[col_name].values
+                            existing_nan = np.isnan(existing)
+                            existing[existing_nan] = vals[existing_nan]
+                            combined_df[col_name] = existing
+                        else:
+                            combined_df[col_name] = vals
+
                 except Exception as e:
                     logger.warning(f"Failed to sample ungridded raster {file}: {e}")
-                    combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
+                    if col_name not in combined_df:
+                        combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
 
         return combined_df
 
@@ -1183,6 +1291,72 @@ class ModelDataPreProcessor(Engine):
             if combined_df is None or combined_df.empty:
                 return pd.DataFrame()
 
+            # Dynamically calculate delta_bathy for the wide/tall format before saving
+            if data_type in ["training", "prediction"]:
+                bathy_years = set()
+                # Find all base bathy columns natively
+                for c in combined_df.columns:
+                    if data_type == "training":
+                        if c.startswith('bathy_'):
+                            m = re.search(r'_(\d{4})(?:_filled)?$', c, re.IGNORECASE)
+                            if m:
+                                bathy_years.add(int(m.group(1)))
+                    else:  # prediction
+                        if c.startswith('bt.'):
+                            m = re.search(r'\.(\d{4})$', c)
+                            if m:
+                                bathy_years.add(int(m.group(1)))
+                            
+                sorted_years = sorted(list(bathy_years))
+                # Create dynamic sequential pairs: e.g., (2004, 2006), (2006, 2010), etc.
+                dynamic_year_ranges = [(sorted_years[i], sorted_years[i+1]) for i in range(len(sorted_years)-1)]
+                
+                valid_pairs = []
+                for y0, y1 in dynamic_year_ranges:
+                    y0_str, y1_str = str(y0), str(y1)
+                    
+                    if data_type == "training":
+                        pattern_0 = re.compile(rf"^bathy_{y0_str}_filled$", re.IGNORECASE)
+                        pattern_1 = re.compile(rf"^bathy_{y1_str}_filled$", re.IGNORECASE)
+                    else:
+                        pattern_0 = re.compile(rf"^bt\.(?:bluetopo_)?{y0_str}$", re.IGNORECASE)
+                        pattern_1 = re.compile(rf"^bt\.(?:bluetopo_)?{y1_str}$", re.IGNORECASE)
+                    
+                    c_0 = [c for c in combined_df.columns if pattern_0.match(c)]
+                    c_1 = [c for c in combined_df.columns if pattern_1.match(c)]
+                    
+                    if data_type == "training":
+                        f_0 = [c for c in c_0 if "filled" in c.lower()]
+                        f_1 = [c for c in c_1 if "filled" in c.lower()]
+                        b_y0 = f_0[0] if f_0 else (c_0[0] if c_0 else None)
+                        b_y1 = f_1[0] if f_1 else (c_1[0] if c_1 else None)
+                    else:
+                        b_y0 = c_0[0] if c_0 else None
+                        b_y1 = c_1[0] if c_1 else None
+                    
+                    if b_y0 and b_y1:
+                        delta_name = f"delta_bathy_{y0_str}_{y1_str}"
+                        combined_df[delta_name] = combined_df[b_y1] - combined_df[b_y0]
+                        valid_pairs.append(f"{y0_str}_{y1_str}")
+                
+                # Drop year-pair variables that do not have a matching delta_bathy
+                cols_to_drop = []
+                for c in combined_df.columns:
+                    m = re.search(r"(\d{4}_\d{4})$", c)
+                    if m and not c.startswith("delta_bathy_"):
+                        if m.group(1) not in valid_pairs:
+                            cols_to_drop.append(c)
+                if cols_to_drop:
+                    combined_df.drop(columns=cols_to_drop, inplace=True)
+
+            # Ensure tile_id is included!
+            if 'tile_id' not in combined_df.columns:
+                combined_df['tile_id'] = tile_id
+
+            # Ensure FID is included!
+            if 'FID' not in combined_df.columns:
+                combined_df.insert(0, 'FID', np.arange(len(combined_df)))
+
             output_folder_path = UPath(output_folder)
             
             if not self.is_aws: 
@@ -1194,7 +1368,14 @@ class ModelDataPreProcessor(Engine):
             combined_df.to_parquet(save_path, engine="pyarrow", index=False)
             
             progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
+            
+            # Print columns directly to terminal the moment Dask finishes saving!
             logger.info(f"{progress_str} [SUCCESS] Saved combined tile data to: {save_path}")
+            
+            # Print all parquet columns generated
+            cols_str = ", ".join(combined_df.columns.tolist())
+            logger.info(f"{progress_str}   -> CREATED PARQUET COLUMNS: {cols_str}")
+            
             return self.create_nan_stats_csv(combined_df, tile_id)
         finally:
             self._trim_memory()
@@ -1204,10 +1385,13 @@ class ModelDataPreProcessor(Engine):
         if df.empty:
             return pd.DataFrame()
         new_row = {'tile_id': tile_id}
-        change_cols = [c for c in df.columns if c.startswith('b.change.')]
+        
+        # Now searches directly for the dynamically built delta columns!
+        change_cols = [c for c in df.columns if c.startswith('delta_bathy_')]
         for col in change_cols:
-            year_pair = col.replace('b.change.', '')
+            year_pair = col.replace('delta_bathy_', '')
             new_row[f"{year_pair}_nan_percent"] = round(df[col].isna().mean() * 100, 2)
+            
         return pd.DataFrame([new_row])
 
     def _generate_stats_from_existing(self, filepath: str, tile_id: str) -> pd.DataFrame:
@@ -1221,7 +1405,7 @@ class ModelDataPreProcessor(Engine):
 
     def batch_format_transformation(self, base_dir, mode: Literal["training", "prediction"]):
         """Orchestrator for finalizing formatting on wide tiles."""
-        logger.info(f"Starting Wide & Long Format Transformation (Batch: {mode})...")
+        logger.info(f"Starting Wide & Batch Format Transformation (Mode: {mode})...")
 
         year_ranges_val = getattr(self, 'year_ranges', None)
         logger.info(f"-> Validating 'year_ranges' config: {year_ranges_val}")
@@ -1267,24 +1451,26 @@ class ModelDataPreProcessor(Engine):
             except StopIteration:
                 break
 
+        success_count = 0
+        failed_msgs = []
+
         # Process stream
         for future in seq:
-            results.append(future.result())
+            res = future.result()
+            
+            # Print immediately as tasks complete instead of waiting for the end
+            if res.startswith("Success"):
+                success_count += 1
+                logger.info(res) 
+            else:
+                failed_msgs.append(res)
+
             future.release() # Release future to prevent metadata accumulation in scheduler
             try:
                 seq.add(submit_format_task(next(tasks_iterator)))
             except StopIteration:
                 pass
 
-        success_count = 0
-        failed_msgs = []
-        
-        for r in results:
-            if r.startswith("Success"):
-                success_count += 1
-            else:
-                failed_msgs.append(r)
-        
         logger.info(f"--------------------------------------------------")
         logger.info(f"[TRANSFORMATION SUMMARY] Mode: {mode.upper()}")
         logger.info(f" -> Total Attempted Tasks: {len(results)}")
@@ -1312,11 +1498,22 @@ class ModelDataPreProcessor(Engine):
                 gdf = gpd.GeoDataFrame(df, geometry=geometry_col)
 
             if mode == "training":
-                saved = self._process_and_save_training_tile(gdf, output_dir, tile_name, current_index, total_count)
+                saved, cols_str = self._process_and_save_training_tile(gdf, output_dir, tile_name, current_index, total_count)
             else:
-                saved = self._process_and_save_prediction_tile(gdf, output_dir, tile_name, current_index, total_count)
+                saved, cols_str = self._process_and_save_prediction_tile(gdf, output_dir, tile_name, current_index, total_count)
             
-            return f"Success: {tile_name} (Generated: {len(saved)} files)"
+            # --- CLEAN UP INTERMEDIATE RAW WIDE FILE ---
+            try:
+                f_path_str = str(f_path)
+                if self.is_aws and f_path_str.startswith("s3://"):
+                    self.fs.rm(f_path_str)
+                else:
+                    if os.path.exists(f_path_str):
+                        os.remove(f_path_str)
+            except Exception as e:
+                logger.warning(f"Could not delete intermediate file {f_path}: {e}")
+
+            return f"Success: {tile_name} (Generated: {len(saved)} files)\n   -> {cols_str}"
 
         except Exception as e:
             return f"Failed: {os.path.basename(f_path)} - {str(e)}"
@@ -1374,14 +1571,23 @@ class ModelDataPreProcessor(Engine):
             
         return pd.DataFrame(records)
 
-    def _process_and_save_training_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> List[str]:
-        """Processes a training tile and writes out BOTH a wide format and long format data files."""
+    def _process_and_save_training_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> Tuple[List[str], str]:
+        """Processes a training tile and writes out BOTH a wide format and batch format data files."""
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
         saved_files = []
         year_ranges = getattr(self, 'year_ranges', [])
         
         if not year_ranges:
              logger.warning(f"{progress_str} [WARNING] 'year_ranges' is empty or missing! No pairs will be processed for {tile_name}.")
+
+        rename_dict_global = {}
+        for c in gdf.columns:
+            new_c = self._standardize_col_name(c)
+            if new_c != c:
+                rename_dict_global[c] = new_c
+
+        if rename_dict_global:
+            gdf.rename(columns=rename_dict_global, inplace=True)
 
         # ==========================================
         # 1. WIDE FORMAT GENERATION
@@ -1391,15 +1597,17 @@ class ModelDataPreProcessor(Engine):
         rename_dict_wide = {}
         if 'x' in wide_gdf.columns: rename_dict_wide['x'] = 'X'
         if 'y' in wide_gdf.columns: rename_dict_wide['y'] = 'Y'
+
         wide_gdf.rename(columns=rename_dict_wide, inplace=True)
 
+        valid_pairs = []
         for y0, y1 in year_ranges: 
             y0_str, y1_str = str(y0), str(y1)
             
             def get_bathy_col(year_str):
-                cols = [c for c in wide_gdf.columns if "bathy" in c.lower() and year_str in c]
-                filled = [c for c in cols if "filled" in c.lower()]
-                return filled[0] if filled else (cols[0] if cols else None)
+                pattern = re.compile(rf"^bathy_{year_str}_filled$", re.IGNORECASE)
+                cols = [c for c in wide_gdf.columns if pattern.match(c)]
+                return cols[0] if cols else None
 
             b_y0 = get_bathy_col(y0_str)
             b_y1 = get_bathy_col(y1_str)
@@ -1407,112 +1615,156 @@ class ModelDataPreProcessor(Engine):
             if b_y0 and b_y1:
                 delta_name = f"delta_bathy_{y0_str}_{y1_str}"
                 wide_gdf[delta_name] = wide_gdf[b_y1] - wide_gdf[b_y0]
+                valid_pairs.append((y0, y1))
+                
+        # Drop year-pair columns without a matching delta
+        valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
+        cols_to_drop = []
+        for c in wide_gdf.columns:
+            m = re.search(r"(\d{4}_\d{4})$", c)
+            if m and not c.startswith("delta_bathy_"):
+                if m.group(1) not in valid_pair_strs:
+                    cols_to_drop.append(c)
+        if cols_to_drop:
+            wide_gdf.drop(columns=cols_to_drop, inplace=True)
         
+        cols_created_wide = []
         out_name_wide = f"{tile_name}_training_formatted.parquet"
         out_path_wide = str(UPath(output_dir) / out_name_wide)
         
-        try:
-            wide_gdf.to_parquet(out_path_wide, index=None, engine="pyarrow")
-            logger.info(f"{progress_str} [SUCCESS] Saved training WIDE tile to: {out_path_wide}")
+        if not self.overwrite and UPath(out_path_wide).exists():
+            logger.info(f"{progress_str} [SKIP] Saved training WIDE tile already exists: {out_path_wide}")
             saved_files.append(out_name_wide)
-        except Exception as e:
-            logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path_wide}: {str(e)}")
-            raise e
+        else:
+            try:
+                wide_gdf.to_parquet(out_path_wide, index=None, engine="pyarrow")
+                cols_created_wide = wide_gdf.columns.tolist()
+                logger.info(f"{progress_str} [SUCCESS] Saved training WIDE tile to: {out_path_wide}")
+                saved_files.append(out_name_wide)
+            except Exception as e:
+                logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path_wide}: {str(e)}")
+                raise e
             
-        del wide_gdf
-        gc.collect()
-
         # ==========================================
-        # 2. LONG FORMAT GENERATION (MATCHES IMAGE)
+        # 2. BATCH FORMAT GENERATION 
         # ==========================================
-        long_gdf_base = gdf.copy()
+        cols_created_batch = []
         
-        rename_dict_long = {}
-        if 'x' in long_gdf_base.columns: rename_dict_long['x'] = 'X'
-        if 'y' in long_gdf_base.columns: rename_dict_long['y'] = 'Y'
-        long_gdf_base.rename(columns=rename_dict_long, inplace=True)
-        
-        self._transform_flowdir_cols_inplace(long_gdf_base)
-        col_meta = self._get_column_metadata(long_gdf_base.columns.tolist())
-
-        for y0, y1 in year_ranges: 
+        for y0, y1 in valid_pairs:
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
             
-            cols_t_meta = col_meta[col_meta["year"] == y0]
-            cols_t1_meta = col_meta[col_meta["year"] == y1]
-
-            cols_t_exist = cols_t_meta["colname"].tolist()
-            bathy_cols_t1 = [c for c in cols_t1_meta["colname"] if "bathy" in c.lower()]
-
-            # Fetch standalone forcing/static cols. Year pair matching is now position-independent
-            forcing_pattern = f"{y0_str}_{y1_str}"
-            forcing_cols = [c for c in long_gdf_base.columns if re.search(forcing_pattern, c)]
-
-            static_patterns = ["grain", "sed", "survey", "tsm", "hurr"]
-            static_cols = [c for c in long_gdf_base.columns if any(p in c.lower() for p in static_patterns) and not re.search(r"\d{4}_\d{4}", c)]
+            pair_df = pd.DataFrame()
+            if 'X' in wide_gdf.columns: pair_df['X'] = wide_gdf['X']
+            if 'Y' in wide_gdf.columns: pair_df['Y'] = wide_gdf['Y']
+            if 'FID' in wide_gdf.columns: pair_df['FID'] = wide_gdf['FID']
+            if 'tile_id' in wide_gdf.columns: pair_df['tile_id'] = wide_gdf['tile_id']
             
-            id_cols = [c for c in ["X", "Y", "FID", "tile_id", "geometry"] if c in long_gdf_base.columns]
-
-            cols_to_grab = id_cols + cols_t_exist + bathy_cols_t1 + forcing_cols + static_cols
-            # Deduplicate while preserving order for identical visual layout downstream
-            cols_to_grab = list(dict.fromkeys([c for c in cols_to_grab if c in long_gdf_base.columns]))
-
-            if not cols_to_grab:
-                continue
-
-            pair_gdf = long_gdf_base[cols_to_grab].drop_duplicates().copy()
-
-            # Map the _t year columns
-            rename_map = {}
-            for col in cols_t_exist:
-                var_base = cols_t_meta.loc[cols_t_meta["colname"] == col, "var_base"].values[0]
-                clean_base = var_base.replace("_filled", "")
-                rename_map[col] = f"{clean_base}_t"
-                
-            # Map the _t1 bathy target column
-            bathy_col_t1_target = next((c for c in bathy_cols_t1 if "filled" in c.lower()), None)
-            if not bathy_col_t1_target and bathy_cols_t1:
-                bathy_col_t1_target = bathy_cols_t1[0]
-                
-            if bathy_col_t1_target:
-                rename_map[bathy_col_t1_target] = "bathy_t1"
-
-            pair_gdf.rename(columns=rename_map, inplace=True)
-
-            pair_gdf["year_t"] = y0
-            pair_gdf["year_t1"] = y1
-
-            if "bathy_t" in pair_gdf.columns and "bathy_t1" in pair_gdf.columns:
-                pair_gdf["delta_bathy"] = pair_gdf["bathy_t1"] - pair_gdf["bathy_t"]
-
-            # Final cleanup of any lingering suffixes from columns - IGNORE standalones
-            filled_cols = [c for c in pair_gdf.columns if "_filled" in c and c not in forcing_cols and c not in static_cols]
-            if filled_cols:
-                pair_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
-
-            out_name_long = f"{tile_name}_{pair_name}_long.parquet"
-            out_path_long = str(UPath(output_dir) / out_name_long)
+            pair_df['year_t'] = y1
+            pair_df['year_ti'] = y0
             
-            try:
-                pair_gdf.to_parquet(out_path_long, index=None, engine="pyarrow")
-                logger.info(f"{progress_str} [SUCCESS] Saved training LONG tile to: {out_path_long}")
-                saved_files.append(out_name_long)
-            except Exception as e:
-                logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path_long}: {str(e)}")
-                raise e
+            b_y0 = get_bathy_col(y0_str)
+            b_y1 = get_bathy_col(y1_str)
+            if b_y0: pair_df['bathy_ti'] = wide_gdf[b_y0]
+            if b_y1: pair_df['bathy_t'] = wide_gdf[b_y1]
+            
+            # Map derivatives corresponding to the t year (second year in pair) to _t
+            for c in wide_gdf.columns:
+                if c.endswith(f"_{y1_str}") and c != b_y1:
+                    base = c.replace(f"_{y1_str}", "").lower()
+                    if "bpi_broad" in base: pair_df['bpi_broad_t'] = wide_gdf[c]
+                    elif "bpi_fine" in base: pair_df['bpi_fine_t'] = wide_gdf[c]
+                    elif "curv_plan" in base: pair_df['curv_plan_t'] = wide_gdf[c]
+                    elif "curv_profile" in base: pair_df['curv_profile_t'] = wide_gdf[c]
+                    elif "curv_total" in base: pair_df['curv_total_t'] = wide_gdf[c]
+                    elif "flowacc" in base: pair_df['flowacc_t'] = wide_gdf[c]
+                    elif "flowdir" in base:
+                        rad = np.deg2rad(wide_gdf[c].astype(np.float32))
+                        pair_df['flowdir_cos_t'] = np.cos(rad)
+                        pair_df['flowdir_sin_t'] = np.sin(rad)
+                    elif "gradmag" in base: pair_df['gradmag_t'] = wide_gdf[c]
+                    elif "rugosity" in base: pair_df['rugosity_t'] = wide_gdf[c]
+                    elif "shearproxy" in base: pair_df['shearproxy_t'] = wide_gdf[c]
+                    elif "slope_deg" in base: pair_df['slope_deg_t'] = wide_gdf[c]
+                    elif "slope" in base: pair_df['slope_t'] = wide_gdf[c]
+                    elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
+                    elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
+                    
+            delta_name = f"delta_bathy_{y0_str}_{y1_str}"
+            if delta_name in wide_gdf.columns:
+                pair_df['delta_bathy'] = wide_gdf[delta_name]
                 
-            del pair_gdf
+            hurr_col = f"hurr_strength_mean_{y0_str}_{y1_str}"
+            if hurr_col in wide_gdf.columns: pair_df[hurr_col] = wide_gdf[hurr_col]
+            
+            tsm_col = f"tsm_mean_{y0_str}_{y1_str}"
+            if tsm_col in wide_gdf.columns: pair_df[tsm_col] = wide_gdf[tsm_col]
+            
+            grain_cols = [c for c in wide_gdf.columns if "grain" in c.lower() or "sed_size" in c.lower()]
+            if grain_cols: pair_df['grain_size_layer'] = wide_gdf[grain_cols[0]]
+            
+            sed_cols = [c for c in wide_gdf.columns if "prim_sed" in c.lower() or "sed_type" in c.lower()]
+            if sed_cols: pair_df['prim_sed_layer'] = wide_gdf[sed_cols[0]]
+            
+            survey_cols = [c for c in wide_gdf.columns if "survey" in c.lower()]
+            if survey_cols: pair_df['survey_end_date'] = wide_gdf[survey_cols[0]]
+
+            ordered_cols = [
+                'X', 'Y', 'FID', 'tile_id', 'year_ti', 'year_t', 
+                'bathy_ti', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
+                'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
+                'flowdir_cos_t', 'flowdir_sin_t', 'gradmag_t', 'rugosity_t', 
+                'shearproxy_t', 'slope_t', 'slope_deg_t', 'tci_t', 
+                'terrain_classification_t', 'delta_bathy', 
+                f'hurr_strength_mean_{y0_str}_{y1_str}', f'tsm_mean_{y0_str}_{y1_str}', 
+                'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
+            ]
+            
+            final_cols = [c for c in ordered_cols if c in pair_df.columns]
+            pair_df = pair_df[final_cols].drop_duplicates()
+            
+            out_name_batch = f"{tile_name}_{pair_name}_training_batch.parquet"
+            out_path_batch = str(UPath(output_dir) / out_name_batch)
+            
+            if not self.overwrite and UPath(out_path_batch).exists():
+                logger.info(f"{progress_str} [SKIP] Saved training BATCH tile already exists: {out_path_batch}")
+                saved_files.append(out_name_batch)
+            else:
+                try:
+                    pair_df.to_parquet(out_path_batch, index=None, engine="pyarrow")
+                    if not cols_created_batch:
+                        cols_created_batch = pair_df.columns.tolist()
+                    logger.info(f"{progress_str} [SUCCESS] Saved training BATCH tile to: {out_path_batch}")
+                    saved_files.append(out_name_batch)
+                except Exception as e:
+                    logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path_batch}: {str(e)}")
+                    raise e
+                
+            del pair_df
             gc.collect()
 
-        del long_gdf_base
-        return saved_files
+        del wide_gdf
+        gc.collect()
 
-    def _process_and_save_prediction_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> List[str]:
-        """Processes a prediction tile and writes out BOTH a wide format and long format data files."""
+        summary = []
+        if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
+
+        return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
+
+    def _process_and_save_prediction_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> Tuple[List[str], str]:
+        """Processes a prediction tile and writes out BOTH a wide format and batch format data files."""
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
         saved_files = []
         year_ranges = getattr(self, 'year_ranges', [])
+
+        rename_dict_global = {}
+        for c in gdf.columns:
+            new_c = self._standardize_col_name(c)
+            if new_c != c:
+                rename_dict_global[c] = new_c
+
+        if rename_dict_global:
+            gdf.rename(columns=rename_dict_global, inplace=True)
 
         # --- STRICT PREDICTION COLUMN FILTERING ---
         # Prediction datasets must ONLY use BlueTopo ('bt.') features for terrain, along with static and forcing variables.
@@ -1535,6 +1787,7 @@ class ModelDataPreProcessor(Engine):
         rename_dict_wide = {}
         if 'x' in wide_gdf.columns: rename_dict_wide['x'] = 'X'
         if 'y' in wide_gdf.columns: rename_dict_wide['y'] = 'Y'
+
         wide_gdf.rename(columns=rename_dict_wide, inplace=True)
 
         # Strip _filled from wide prediction columns if present, leaving standalone cols completely untouched
@@ -1542,74 +1795,152 @@ class ModelDataPreProcessor(Engine):
         if filled_cols:
             wide_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
 
+        valid_pairs = []
+        for y0, y1 in year_ranges: 
+            y0_str, y1_str = str(y0), str(y1)
+            
+            def get_bt_col(year_str):
+                pattern = re.compile(rf"^bt\.(?:bluetopo_)?{year_str}$", re.IGNORECASE)
+                cols = [c for c in wide_gdf.columns if pattern.match(c)]
+                return cols[0] if cols else None
+
+            b_y0 = get_bt_col(y0_str)
+            b_y1 = get_bt_col(y1_str)
+
+            if b_y0 and b_y1:
+                delta_name = f"delta_bathy_{y0_str}_{y1_str}"
+                wide_gdf[delta_name] = wide_gdf[b_y1] - wide_gdf[b_y0]
+                valid_pairs.append((y0, y1))
+                
+        # Drop year-pair columns without a matching delta
+        valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
+        cols_to_drop = []
+        for c in wide_gdf.columns:
+            m = re.search(r"(\d{4}_\d{4})$", c)
+            if m and not c.startswith("delta_bathy_"):
+                if m.group(1) not in valid_pair_strs:
+                    cols_to_drop.append(c)
+        if cols_to_drop:
+            wide_gdf.drop(columns=cols_to_drop, inplace=True)
+
+        cols_created_wide = []
         out_name_wide = f"{tile_name}_prediction_formatted.parquet"
         out_path_wide = str(UPath(output_dir) / out_name_wide)
         
-        try:
-            wide_gdf.to_parquet(out_path_wide, index=None, engine="pyarrow")
-            logger.info(f"{progress_str} [SUCCESS] Saved prediction WIDE tile to: {out_path_wide}")
+        if not self.overwrite and UPath(out_path_wide).exists():
+            logger.info(f"{progress_str} [SKIP] Saved prediction WIDE tile already exists: {out_path_wide}")
             saved_files.append(out_name_wide)
-        except Exception as e:
-            logger.error(f"{progress_str} [ERROR] Failed to save prediction parquet file {out_path_wide}: {str(e)}")
-            raise e
+        else:
+            try:
+                wide_gdf.to_parquet(out_path_wide, index=None, engine="pyarrow")
+                cols_created_wide = wide_gdf.columns.tolist()
+                logger.info(f"{progress_str} [SUCCESS] Saved prediction WIDE tile to: {out_path_wide}")
+                saved_files.append(out_name_wide)
+            except Exception as e:
+                logger.error(f"{progress_str} [ERROR] Failed to save prediction parquet file {out_path_wide}: {str(e)}")
+                raise e
             
-        del wide_gdf
-        gc.collect()
-
         # ==========================================
-        # 2. LONG FORMAT GENERATION
+        # 2. BATCH FORMAT GENERATION
         # ==========================================
-        long_gdf = gdf.copy()
+        cols_created_batch = []
         
-        rename_dict_long = {}
-        if 'x' in long_gdf.columns: rename_dict_long['x'] = 'X'
-        if 'y' in long_gdf.columns: rename_dict_long['y'] = 'Y'
-        long_gdf.rename(columns=rename_dict_long, inplace=True)
-
-        self._transform_flowdir_cols_inplace(long_gdf)
-        
-        bt_cols = [c for c in long_gdf.columns if self.re_bt_prefix.match(c)]
-        new_t_names = [self.re_bt_prefix.sub("", c) + "_t" for c in bt_cols]
-        long_gdf.rename(columns=dict(zip(bt_cols, new_t_names)), inplace=True)
-        
-        for y0, y1 in year_ranges: 
+        for y0, y1 in valid_pairs:
             y0_str, y1_str = str(y0), str(y1)
             pair_name = f"{y0_str}_{y1_str}"
             
-            out_name_long = f"{tile_name}_{pair_name}_prediction_long.parquet"
-            out_path_long = str(UPath(output_dir) / out_name_long)
+            pair_df = pd.DataFrame()
+            if 'X' in wide_gdf.columns: pair_df['X'] = wide_gdf['X']
+            if 'Y' in wide_gdf.columns: pair_df['Y'] = wide_gdf['Y']
+            if 'FID' in wide_gdf.columns: pair_df['FID'] = wide_gdf['FID']
+            if 'tile_id' in wide_gdf.columns: pair_df['tile_id'] = wide_gdf['tile_id']
+            
+            def get_bt_col(year_str):
+                pattern = re.compile(rf"^bt\.(?:bluetopo_)?{year_str}$", re.IGNORECASE)
+                cols = [c for c in wide_gdf.columns if pattern.match(c)]
+                return cols[0] if cols else None
+            
+            # Map target 't' year (y1) to the features. BlueTopo uses 'bt.' prefix.
+            b_y1 = get_bt_col(y1_str)
+            if b_y1: pair_df['bathy_t'] = wide_gdf[b_y1]
+            
+            # Extract bt.*_YYYY variables for the target year (y1)
+            for c in wide_gdf.columns:
+                if c.endswith(f"_{y1_str}") and c != b_y1 and c.startswith("bt."):
+                    base = c.replace(f"_{y1_str}", "").replace("bt.", "").lower()
+                    if "bpi_broad" in base: pair_df['bpi_broad_t'] = wide_gdf[c]
+                    elif "bpi_fine" in base: pair_df['bpi_fine_t'] = wide_gdf[c]
+                    elif "curv_plan" in base: pair_df['curv_plan_t'] = wide_gdf[c]
+                    elif "curv_profile" in base: pair_df['curv_profile_t'] = wide_gdf[c]
+                    elif "curv_total" in base: pair_df['curv_total_t'] = wide_gdf[c]
+                    elif "flowacc" in base: pair_df['flowacc_t'] = wide_gdf[c]
+                    elif "flowdir" in base:
+                        rad = np.deg2rad(wide_gdf[c].astype(np.float32))
+                        pair_df['flowdir_sin_t'] = np.sin(rad)
+                        pair_df['flowdir_cos_t'] = np.cos(rad)
+                    elif "gradmag" in base: pair_df['gradmag_t'] = wide_gdf[c]
+                    elif "rugosity" in base: pair_df['rugosity_t'] = wide_gdf[c]
+                    elif "shearproxy" in base: pair_df['shearproxy_t'] = wide_gdf[c]
+                    elif "slope_deg" in base: pair_df['slope_deg_t'] = wide_gdf[c]
+                    elif "slope" in base: pair_df['slope_t'] = wide_gdf[c]
+                    elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
+                    elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
+                    elif "unc" in base or "uncertainty" in base: pair_df['uc_t'] = wide_gdf[c]
+                    
+            hurr_col = f"hurr_strength_mean_{y0_str}_{y1_str}"
+            if hurr_col in wide_gdf.columns: pair_df[hurr_col] = wide_gdf[hurr_col]
+            
+            tsm_col = f"tsm_mean_{y0_str}_{y1_str}"
+            if tsm_col in wide_gdf.columns: pair_df[tsm_col] = wide_gdf[tsm_col]
+            
+            grain_cols = [c for c in wide_gdf.columns if "grain" in c.lower() or "sed_size" in c.lower()]
+            if grain_cols: pair_df['grain_size_layer'] = wide_gdf[grain_cols[0]]
+            
+            sed_cols = [c for c in wide_gdf.columns if "prim_sed" in c.lower() or "sed_type" in c.lower()]
+            if sed_cols: pair_df['prim_sed_layer'] = wide_gdf[sed_cols[0]]
+            
+            survey_cols = [c for c in wide_gdf.columns if "survey" in c.lower()]
+            if survey_cols: pair_df['survey_end_date'] = wide_gdf[survey_cols[0]]
+
+            ordered_cols = [
+                'X', 'Y', 'FID', 'tile_id', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
+                'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
+                'gradmag_t', 'rugosity_t', 'shearproxy_t', 'slope_t', 'slope_deg_t', 
+                'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t', 
+                f'hurr_strength_mean_{y0_str}_{y1_str}', f'tsm_mean_{y0_str}_{y1_str}', 
+                'grain_size_layer', 'prim_sed_layer', 'survey_end_date' 
+            ]
+            
+            final_cols = [c for c in ordered_cols if c in pair_df.columns]
+            pair_df = pair_df[final_cols].drop_duplicates()
+            
+            out_name_batch = f"{tile_name}_{pair_name}_prediction_batch.parquet"
+            out_path_batch = str(UPath(output_dir) / out_name_batch)
+            
+            if not self.overwrite and UPath(out_path_batch).exists():
+                logger.info(f"{progress_str} [SKIP] Saved prediction BATCH tile already exists: {out_path_batch}")
+                saved_files.append(out_name_batch)
+            else:
+                try:
+                    pair_df.to_parquet(out_path_batch, index=None, engine="pyarrow")
+                    if not cols_created_batch:
+                        cols_created_batch = pair_df.columns.tolist()
+                    logger.info(f"{progress_str} [SUCCESS] Saved prediction BATCH tile to: {out_path_batch}")
+                    saved_files.append(out_name_batch)
+                except Exception as e:
+                    logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path_batch}: {str(e)}")
+                    raise e
                 
-            forcing_pattern = f"{y0_str}_{y1_str}"
-            forcing_cols = [c for c in long_gdf.columns if re.search(forcing_pattern, c)]
-
-            static_patterns = ["grain", "sed", "survey", "tsm", "hurr"]
-            static_cols = [c for c in long_gdf.columns if any(p in c.lower() for p in static_patterns) and not re.search(r"\d{4}_\d{4}", c)]
-            
-            id_cols = [c for c in ["X", "Y", "FID", "tile_id", "geometry"] if c in long_gdf.columns]
-
-            final_cols = id_cols + new_t_names + forcing_cols + static_cols
-            # Deduplicate while preserving column order
-            final_cols = list(dict.fromkeys([c for c in final_cols if c in long_gdf.columns]))
-
-            pair_gdf = long_gdf[final_cols].drop_duplicates()
-            
-            filled_cols = [c for c in pair_gdf.columns if "_filled" in c and c not in forcing_cols and c not in static_cols]
-            if filled_cols:
-                pair_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
-            
-            try:
-                pair_gdf.to_parquet(out_path_long, index=None, engine="pyarrow")
-                logger.info(f"{progress_str} [SUCCESS] Saved prediction LONG tile to: {out_path_long}")
-                saved_files.append(out_name_long)
-            except Exception as e:
-                logger.error(f"{progress_str} [ERROR] Failed to save parquet file {out_path_long}: {str(e)}")
-                raise e
-            
-            del pair_gdf
+            del pair_df
             gc.collect()
 
-        del long_gdf
-        return saved_files
+        del wide_gdf
+        gc.collect()
+
+        summary = []
+        if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
+
+        return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
 
     def raster_to_spatial_df(self, raster_path, process_type) -> gpd.GeoDataFrame:
         """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries in memory-safe chunks."""   

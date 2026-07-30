@@ -265,9 +265,9 @@ class CreateTSMLayerEngine(Engine):
         avg_array = np.where(count_array > 0, sum_array / count_array, np.nan)
         cumulative_array = np.where(count_array > 0, sum_array, np.nan)
 
-        # Output filenames
-        out_name_mean = f'{start_year}_{end_year}_tsm_mean.tif'
-        out_name_cumulative = f'{start_year}_{end_year}_tsm_cumulative.tif'
+        # Output filenames updated to place year pairs at the end
+        out_name_mean = f'tsm_mean_{start_year}_{end_year}.tif'
+        out_name_cumulative = f'tsm_cumulative_{start_year}_{end_year}.tif'
 
         if get_environment() in ['local', 'remote']:
             self.year_pair_path.mkdir(parents=True, exist_ok=True)
@@ -297,4 +297,3 @@ class CreateTSMLayerEngine(Engine):
         self.create_mean_year_rasters()
         for start_year, end_year in self.year_ranges:
             self.year_pair_rasters(start_year, end_year)
-            

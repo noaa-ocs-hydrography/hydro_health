@@ -612,6 +612,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         out_tci       = self._join_paths(output_dir, base_name + "_tci.tif")
         out_flowacc   = self._join_paths(output_dir, base_name + "_flowacc.tif")
         out_shear     = self._join_paths(output_dir, base_name + "_shearproxy.tif")
+
+        out_rug = self._join_paths(output_dir, base_name + "_rugosity_tri.tif")
+        out_slope = self._join_paths(output_dir, base_name + "_slope.tif")
+        out_fine = self._join_paths(output_dir, base_name + "_bpi_fine.tif")
+        out_broad = self._join_paths(output_dir, base_name + "_bpi_broad.tif")
+        out_class = self._join_paths(output_dir, base_name + "_terrain_classification.tif")
         
         with tempfile.TemporaryDirectory(dir=str(self.local_tmp_dir)) as tmpdir:
             local_bathy = os.path.join(tmpdir, "bathy.tif")
@@ -638,15 +644,16 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             missing_tci = self.overwrite or not self._exists(out_tci)
             missing_shear = self.overwrite or not self._exists(out_shear)
 
-            numpy_outputs = {
-                "_rugosity_tri.tif": None,
-                "_bpi_fine_std.tif": None, 
-                "_bpi_broad_std.tif": None,
-                "_terrain_classification.tif": None
+            missing_numpy_dict = {
+                "_rugosity_tri.tif": self.overwrite or not self._exists(out_rug),
+                "_slope.tif": self.overwrite or not self._exists(out_slope),
+                "_bpi_fine.tif": self.overwrite or not self._exists(out_fine),
+                "_bpi_broad.tif": self.overwrite or not self._exists(out_broad),
+                "_terrain_classification.tif": self.overwrite or not self._exists(out_class)
             }
-            missing_numpy = any(self.overwrite or not self._exists(self._join_paths(output_dir, base_name + suffix)) for suffix in numpy_outputs.keys())
+            missing_numpy = any(missing_numpy_dict.values())
 
-            needs_processing = missing_wbt or missing_tci or missing_shear or missing_numpy
+            needs_processing = len(missing_wbt) > 0 or missing_tci or missing_shear or missing_numpy
             if not needs_processing:
                 logger.info(f"Skipped (All exist): {base_name}")
                 return f"Skipped (All exist): {base_name}"
@@ -717,7 +724,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     logger.error(f"❌ Shear Proxy Calc Error {base_name}: {e}")
 
             if missing_numpy:
-                logger.info(f"[{base_name}] {progress_str}Generating NumPy BTM classification layers...")
+                missing_log = [k for k, v in missing_numpy_dict.items() if v]
+                logger.info(f"[{base_name}] {progress_str}Generating missing NumPy layer(s): {', '.join(missing_log)}")
                 
                 if 'bluetopo' in base_name.lower():
                     year = 'BlueTopo'
@@ -728,21 +736,22 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         year = match.group(1)
                     
                 dict_path = UPath(self._join_paths(dictionary_dir, f"dictionary_{year}.csv"))
-                if not dict_path.exists():
-                    dict_files = self._safe_ls(dictionary_dir)
-                    found = False
-                    expected_suffix = f"dictionary_{year.lower()}.csv"
-                    for df in dict_files:
-                        if df.lower().endswith(expected_suffix):
-                            dict_path = UPath(df)
-                            found = True
-                            break
-                    if not found:
-                        logger.error(f"❌ Dictionary missing for {year} on {base_name}")
-                        return f"Dictionary missing for {year}"
-                
-                with dict_path.open('r') as fh:
-                    unique_dictionary = pd.read_csv(fh)
+                if missing_numpy_dict["_terrain_classification.tif"]:
+                    if not dict_path.exists():
+                        dict_files = self._safe_ls(dictionary_dir)
+                        found = False
+                        expected_suffix = f"dictionary_{year.lower()}.csv"
+                        for df in dict_files:
+                            if df.lower().endswith(expected_suffix):
+                                dict_path = UPath(df)
+                                found = True
+                                break
+                        if not found:
+                            logger.error(f"❌ Dictionary missing for {year} on {base_name}")
+                            return f"Dictionary missing for {year}"
+                    
+                    with dict_path.open('r') as fh:
+                        unique_dictionary = pd.read_csv(fh)
 
                 # ==========================================================
                 # MEMORY CONSERVATIVE PROCESSING VIA MEMMAP AND CHUNKING
@@ -759,57 +768,81 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         bathy_array[bathy_array == nodata_val] = np.nan
 
                 # Process 1: Rugosity
-                out_path_rug = self._join_paths(output_dir, base_name + "_rugosity_tri.tif")
-                if self.overwrite or not self._exists(out_path_rug):
+                if missing_numpy_dict["_rugosity_tri.tif"]:
                     rugosity = self.calculate_tri(bathy_array)
                     profile.update(dtype=rugosity.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(rugosity, out_path_rug, profile, log_prefix=progress_str)
+                    self._save_numpy_to_raster(rugosity, out_rug, profile, log_prefix=progress_str)
                     del rugosity  
                     gc.collect()
 
                 # Process 2: Slope
-                slope_raw = self.calculate_slope(bathy_array, cell_size)
-                slope = np.memmap(os.path.join(tmpdir, "slope.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                slope[:] = slope_raw[:]
-                del slope_raw
+                if missing_numpy_dict["_slope.tif"]:
+                    slope_raw = self.calculate_slope(bathy_array, cell_size)
+                    profile.update(dtype=slope_raw.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    self._save_numpy_to_raster(slope_raw, out_slope, profile, log_prefix=progress_str)
+                    
+                    if missing_numpy_dict["_terrain_classification.tif"]:
+                        slope = np.memmap(os.path.join(tmpdir, "slope.dat"), dtype='float32', mode='w+', shape=shape_2d)
+                        slope[:] = slope_raw[:]
+                    del slope_raw
+                else:
+                    if missing_numpy_dict["_terrain_classification.tif"]:
+                        with rasterio.open(out_slope) as src_s:
+                            slope = np.memmap(os.path.join(tmpdir, "slope.dat"), dtype='float32', mode='w+', shape=shape_2d)
+                            src_s.read(1, out=slope)
+                            if src_s.nodata is not None:
+                                slope[slope == src_s.nodata] = np.nan
                 gc.collect()
 
                 # Process 3: Fine BPI
-                out_path_fine = self._join_paths(output_dir, base_name + "_bpi_fine_std.tif")
-                if self.overwrite or not self._exists(out_path_fine):
+                if missing_numpy_dict["_bpi_fine.tif"]:
                     bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
-                    bpi_fine_std_raw = self.standardize_raster_array(bpi_fine)
-                    del bpi_fine
+                    profile.update(dtype=bpi_fine.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    self._save_numpy_to_raster(bpi_fine, out_fine, profile, log_prefix=progress_str)
                     
-                    bpi_fine_std = np.memmap(os.path.join(tmpdir, "fine.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                    bpi_fine_std[:] = bpi_fine_std_raw[:]
-                    del bpi_fine_std_raw
-                    
-                    profile.update(dtype=bpi_fine_std.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(bpi_fine_std, out_path_fine, profile, log_prefix=progress_str)
-                    gc.collect()
-                else:
-                    with rasterio.open(out_path_fine) as src_f:
+                    if missing_numpy_dict["_terrain_classification.tif"]:
+                        bpi_fine_std_raw = self.standardize_raster_array(bpi_fine)
                         bpi_fine_std = np.memmap(os.path.join(tmpdir, "fine.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                        src_f.read(1, out=bpi_fine_std)
+                        bpi_fine_std[:] = bpi_fine_std_raw[:]
+                        del bpi_fine_std_raw
+                    del bpi_fine
+                else:
+                    if missing_numpy_dict["_terrain_classification.tif"]:
+                        with rasterio.open(out_fine) as src_f:
+                            bpi_fine_raw = src_f.read(1)
+                            if src_f.nodata is not None:
+                                bpi_fine_raw[bpi_fine_raw == src_f.nodata] = np.nan
+                        bpi_fine_std_raw = self.standardize_raster_array(bpi_fine_raw)
+                        del bpi_fine_raw
+                        bpi_fine_std = np.memmap(os.path.join(tmpdir, "fine.dat"), dtype='float32', mode='w+', shape=shape_2d)
+                        bpi_fine_std[:] = bpi_fine_std_raw[:]
+                        del bpi_fine_std_raw
+                gc.collect()
 
                 # Process 4: Broad BPI
-                out_path_broad = self._join_paths(output_dir, base_name + "_bpi_broad_std.tif")
-                if self.overwrite or not self._exists(out_path_broad):
+                if missing_numpy_dict["_bpi_broad.tif"]:
                     bpi_broad = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
-                    bpi_broad_std_raw = self.standardize_raster_array(bpi_broad)
-                    del bpi_broad
+                    profile.update(dtype=bpi_broad.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    self._save_numpy_to_raster(bpi_broad, out_broad, profile, log_prefix=progress_str)
                     
-                    bpi_broad_std = np.memmap(os.path.join(tmpdir, "broad.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                    bpi_broad_std[:] = bpi_broad_std_raw[:]
-                    del bpi_broad_std_raw
-                    
-                    profile.update(dtype=bpi_broad_std.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(bpi_broad_std, out_path_broad, profile, log_prefix=progress_str)
-                else:
-                    with rasterio.open(out_path_broad) as src_b:
+                    if missing_numpy_dict["_terrain_classification.tif"]:
+                        bpi_broad_std_raw = self.standardize_raster_array(bpi_broad)
                         bpi_broad_std = np.memmap(os.path.join(tmpdir, "broad.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                        src_b.read(1, out=bpi_broad_std)
+                        bpi_broad_std[:] = bpi_broad_std_raw[:]
+                        del bpi_broad_std_raw
+                    del bpi_broad
+                else:
+                    if missing_numpy_dict["_terrain_classification.tif"]:
+                        with rasterio.open(out_broad) as src_b:
+                            bpi_broad_raw = src_b.read(1)
+                            if src_b.nodata is not None:
+                                bpi_broad_raw[bpi_broad_raw == src_b.nodata] = np.nan
+                        bpi_broad_std_raw = self.standardize_raster_array(bpi_broad_raw)
+                        del bpi_broad_raw
+                        bpi_broad_std = np.memmap(os.path.join(tmpdir, "broad.dat"), dtype='float32', mode='w+', shape=shape_2d)
+                        bpi_broad_std[:] = bpi_broad_std_raw[:]
+                        del bpi_broad_std_raw
+                gc.collect()
 
                 # WE ARE COMPLETELY DONE WITH BATHY ARRAY - EXPLICITLY DELETE FILE TO SAVE EBS DISK SPACE
                 del bathy_array
@@ -820,8 +853,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     pass
                 
                 # Process 5: Terrain Classification
-                out_path_class = self._join_paths(output_dir, base_name + "_terrain_classification.tif")
-                if self.overwrite or not self._exists(out_path_class):
+                if missing_numpy_dict["_terrain_classification.tif"]:
                     classified_array = np.memmap(os.path.join(tmpdir, "class.dat"), dtype='float32', mode='w+', shape=shape_2d)
                     classified_array[:] = 0.0
                     
@@ -842,11 +874,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                                 c_chunk[matches & (c_chunk == 0)] = rule['Class_ID']
                         
                     profile.update(dtype=classified_array.dtype.name, nodata=np.nan, count=1, compress='LZW')
-                    self._save_numpy_to_raster(classified_array, out_path_class, profile, log_prefix=progress_str)
+                    self._save_numpy_to_raster(classified_array, out_class, profile, log_prefix=progress_str)
                     del classified_array
 
                 # Final cleanup - EXPLICITLY DELETE FILES TO SAVE EBS DISK SPACE
-                del slope, bpi_fine_std, bpi_broad_std
+                if 'slope' in locals():
+                    del slope, bpi_fine_std, bpi_broad_std
                 gc.collect()
                 for tmp_file in ["slope.dat", "fine.dat", "broad.dat", "class.dat"]:
                     try:
@@ -1054,17 +1087,19 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             missing_tci = self.overwrite or (base_name + "_tci.tif") not in existing_files
             missing_shear = self.overwrite or (base_name + "_shearproxy.tif") not in existing_files
 
-            numpy_outputs = ["_rugosity_tri.tif", "_bpi_fine_std.tif", "_bpi_broad_std.tif", "_terrain_classification.tif"]
-            missing_numpy = any(self.overwrite or (base_name + suffix) not in existing_files for suffix in numpy_outputs)
+            numpy_outputs = ["_rugosity_tri.tif", "_slope.tif", "_bpi_fine.tif", "_bpi_broad.tif", "_terrain_classification.tif"]
+            missing_numpy = [suffix for suffix in numpy_outputs if self.overwrite or (base_name + suffix) not in existing_files]
 
             total_missing_wbt += len(missing_wbt)
             total_missing_tci += 1 if missing_tci else 0
             total_missing_shear += 1 if missing_shear else 0
-            total_missing_numpy += 1 if missing_numpy else 0
+            total_missing_numpy += len(missing_numpy)
 
-            needs_processing = len(missing_wbt) > 0 or missing_tci or missing_shear or missing_numpy
+            needs_processing = len(missing_wbt) > 0 or missing_tci or missing_shear or len(missing_numpy) > 0
 
             if needs_processing:
+                missing_all = missing_wbt + (["_tci.tif"] if missing_tci else []) + (["_shearproxy.tif"] if missing_shear else []) + missing_numpy
+                logger.info(f"Queuing {base_name} - Missing dependencies: {', '.join(missing_all)}")
                 files_to_process.append(bathy_file)
             else:
                 total_skipped += 1
