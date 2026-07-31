@@ -1,0 +1,83 @@
+# Example configuration for machine_learning_seabed_elevation_change_model.py
+# Replace all placeholder S3 paths before running. Comments give practical starting
+# guidance; final values should be validated using spatial CV and scientific review.
+
+paths:
+  grid_uri: s3://YOUR-BUCKET/model-inputs/master_grid_canonical.gpkg # Polygon grid with tile IDs and source roles.
+  template_raster_uri: s3://YOUR-BUCKET/model-inputs/prediction.mask.UTM17_8m.tif # Authoritative CRS, extent, origin, and cell-size template for output rasters.
+  master_predictor_uri: s3://YOUR-BUCKET/model-inputs/boruta_master_predictor_list1.txt # One approved predictor base name per line.
+  training_root: s3://YOUR-BUCKET/seabed-change/training_tiles # Per-tile training GeoParquet inputs and local-model outputs.
+  prediction_root: s3://YOUR-BUCKET/seabed-change/prediction_tiles # Per-tile deployment GeoParquet inputs and prediction outputs.
+  global_shard_root: s3://YOUR-BUCKET/seabed-change/global_training_shards # Standardized fitting-eligible rows written by local training.
+  global_model_root: s3://YOUR-BUCKET/seabed-change/global_models # Global model ensembles, schemas, and metadata.
+  log_root: s3://YOUR-BUCKET/seabed-change/run_logs # Dask stage summaries and workflow logs.
+
+model:
+  year_pairs: ["2004_2006", "2006_2010", "2010_2015", "2015_2022"] # Survey intervals to model; format must be YYYY_YYYY and end year must exceed start year.
+  tile_ids: all # Use all, or a list such as ["BH4S556X_3"]; start with one known tile for validation.
+  tile_field: tile_id # Grid column containing the unique tile identifier.
+  source_field: source # Grid column describing whether a tile has training, prediction, or both data roles.
+  crs: EPSG:32617 # Projected CRS used by X/Y coordinates and spatial blocks; use the project-approved metric CRS.
+  block_size_m: 200 # Spatial CV block width in metres; commonly 100-2000 m, chosen larger than short-range spatial autocorrelation.
+  n_boot: 5 # Number of bootstrap models; 2 for smoke tests, 5-20 for production depending on compute and uncertainty stability.
+  n_folds: 5 # Number of spatial CV folds; usually 4-10, with 5 a strong default when enough occupied blocks exist.
+  use_weighted_loss: true # true emphasizes larger observed changes; compare against false during sensitivity testing.
+  weight_alpha: 1.0 # Strength/curvature of magnitude weighting; usually 0.5-2.0. Higher values emphasize extremes more strongly.
+  weight_method: power # power preserves the R default; capped_linear limits influence. Allowed: power, capped_linear.
+  weight_cap_quantile: 0.95 # Used only by capped_linear; usually 0.90-0.99. Lower values cap extreme influence sooner.
+  max_weight: 2.0 # Used only by capped_linear; usually 1.5-5.0. Keep modest unless validation supports stronger weighting.
+  max_depth: 4 # Maximum tree depth controlling interaction complexity; commonly 3-8. Deeper trees can overfit and use more memory.
+  eta: 0.01 # Learning rate/shrinkage; commonly 0.005-0.1. Smaller values need more boosting rounds but often generalize better.
+  gamma: 0.5 # Minimum loss reduction required to split a tree node; start around 0-0.5 and test up to 5. Higher values make trees more conservative.
+  reg_lambda: 0.0 # L2 regularization on leaf weights; commonly 0-10. Increase when predictions appear unstable or overfit.
+  reg_alpha: 0.0 # L1 regularization on leaf weights; commonly 0-5. Increasing can simplify the model and suppress weak effects.
+  subsample: 0.7 # Fraction of fitting rows sampled per tree; usually 0.5-1.0. Values below 1 can reduce overfitting.
+  colsample_bytree: 0.8 # Fraction of predictors sampled per tree; usually 0.5-1.0. Lower values add diversity but may omit useful predictors.
+  pre_xgb_data_mode: native_missing # native_missing retains predictor NaNs (recommended); legacy_complete drops rows with any predictor NA for fitting.
+  predictor_resolution_mode: og_training_first # og_training_first locks the training schema and errors on deployment mismatch; deployment_intersection silently narrows to shared columns and should be used cautiously.
+  round_selection_mode: cv_with_floor # cv_with_floor is production default; fixed skips CV; cv_only accepts the CV estimate without the parity floor.
+  minimum_nrounds: 1000 # Minimum rounds when using cv_with_floor; established parity safeguard. Typical testing range 500-2000.
+  fixed_nrounds: 1000 # Rounds used only when round_selection_mode=fixed; choose from prior spatial-CV evidence, commonly 500-3000.
+  cv_nrounds: 2000 # Maximum rounds evaluated within each CV fold; commonly 1000-5000 and must exceed the expected optimum.
+  early_stopping_rounds: 15 # Stop CV after this many rounds without improvement; usually 10-100. Larger values are more patient but cost more.
+  cv_fallback_nrounds: 1000 # Used if spatial CV cannot return a valid value; should reflect a previously validated conservative setting.
+  standard_horizon_years: 2 # Converts annualized change to a common comparison horizon; use the scientifically agreed reporting interval.
+  minimum_training_rows: 100 # Skip tile/pair models below this number; 100 is a technical floor, but thousands are preferable for complex models.
+  global_seed: 12345 # Reproducibility seed; any non-negative integer is acceptable. Keep fixed when comparing model versions.
+  shap_sample_rows: 1000 # Rows sampled per bootstrap for SHAP summaries; commonly 500-10000 depending on compute and tile size.
+  max_rows_per_global_tile: 100000 # Per-tile cap for balanced global training; commonly 10,000-500,000. Prevents large tiles dominating.
+  max_global_rows: 2000000 # Total global fitting cap; choose to fit worker memory, commonly 0.5-10 million rows.
+  deploy_local_full_extent: true # Run nearest-trained-local deployment automatically after tile-native local training; true is the standard production behavior.
+  overwrite_existing_local: false # false preserves tile-native LOCAL predictions; true rebuilds all full-extent LOCAL tile outputs using the assigned nearest model ensemble.
+  write_full_extent_spatial_outputs: true # Write full-extent GeoParquet summaries and seam-safe COGs; keep true for normal GIS/VRT production.
+  build_vrts_after_local: true # Build LOCAL training and prediction VRTs after automatic full-extent deployment; set false only when mosaics are managed elsewhere.
+
+raster:
+  x_col: X # Easting/longitude column used to place table predictions on the raster grid.
+  y_col: Y # Northing/latitude column used to place table predictions on the raster grid.
+  nodata: -9999.0 # Output NoData sentinel; choose a value impossible for valid model products.
+  dtype: float32 # float32 is normally sufficient and halves storage relative to float64.
+  compress: DEFLATE # Lossless GeoTIFF compression; DEFLATE or ZSTD are good scientific defaults when supported.
+  predictor: 3 # TIFF compression predictor; 3 is appropriate for floating-point rasters, 2 for integers.
+  blocksize: 512 # Internal tile width/height in pixels; usually 256 or 512 for COG access.
+  overview_levels: [2, 4, 8, 16, 32] # Downsampling factors for fast display; extend for very large national mosaics.
+  overview_resampling: average # average suits continuous depth/change surfaces; use nearest for categorical rasters.
+  use_gdaladdo: true # Also call GDAL overview tooling when available; true is recommended for production environments.
+  validate_cog: true # Verify COG structure after creation; keep true unless diagnosing a limited GDAL installation.
+
+dask:
+  scheduler_address: null # null creates a local cluster; otherwise supply an existing scheduler URL such as tcp://host:8786.
+  n_workers: 8 # Number of parallel worker processes; usually physical cores minus 1, constrained by memory per tile.
+  threads_per_worker: 1 # Keep at 1 because each tile is compute/memory heavy and XGBoost is already parallelized at the workflow level.
+  memory_limit: 12GB # Memory limit per worker; size above the largest expected tile plus bootstrap arrays and overhead.
+  local_directory: /tmp/dask-worker-space # Fast local scratch space for worker spill files; avoid slow shared network storage.
+
+s3:
+  anon: false # false for authenticated buckets; true only for genuinely public anonymous reads.
+  profile: null # Optional AWS named profile; null uses environment credentials, IAM role, ECS task role, or EKS IRSA.
+  endpoint_url: null # Optional custom S3-compatible endpoint; leave null for standard AWS S3.
+  requester_pays: false # Set true only when reading a requester-pays bucket and billing is approved.
+  client_kwargs: {} # Optional boto client settings such as region_name; usually leave empty.
+  config_kwargs:
+    retries:
+      max_attempts: 10 # Maximum transient S3 retry attempts; 5-15 is typical for cloud batch workflows.
