@@ -284,10 +284,10 @@ class DigitalCoastS3Engine(Engine):
 
         self.close_dask()
 
-    def unzip_all_files(self, output_folder: pathlib.Path) -> None:
+    def unzip_all_files(self, digital_coast_folder: pathlib.Path) -> None:
         """Unzip all zip files in a folder"""
 
-        for zipped_file in output_folder.rglob('*.zip'):
+        for zipped_file in digital_coast_folder.rglob('*.zip'):
             with zipfile.ZipFile(zipped_file, 'r') as zipped:
                 zipped.extractall(str(zipped_file.parents[0]))
             zipped_file.unlink()

@@ -2,7 +2,6 @@ import pathlib
 import sys
 import json
 import os
-import re
 import time
 import datetime
 import requests
@@ -11,6 +10,7 @@ import geopandas as gpd
 import dask
 import math
 import string
+import yaml
 
 from datetime import date
 from osgeo import osr, gdal
@@ -67,15 +67,6 @@ class Engine:
         """Only allow certain provider types"""
 
         provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI, NGS not used by BlueTopo
-        # TODO remove NGS
-        # 1. Delete VRT files
-        # 2. Delete NGS provider folders
-        # 3. Delete tiled gridded datasets folder
-        # 4. run HH DigitalCoast download with skip, 
-        # 5. run metadata
-        # 6. run VRT creation for DigitalCoast only
-        # 7. run mask engine with manual dowload included
-        # 8. run VRT gridding
         for text in provider_list_text:
             if text in feature_json['attributes']['provider_results_name']:
                 return True
@@ -133,7 +124,7 @@ class Engine:
 
             for external_data in external_provider_links:
                 if external_data['label'] == 'Bulk Download':
-                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['DataType'], 'link': external_data['link'], 'provider_path': output_folder_path}) 
+                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['DataType'], 'link': external_data['link'], 'provider_path': output_folder_path})
         return tile_index_links
 
     def get_ecoregion_geometry_strings(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str) -> str:

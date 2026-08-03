@@ -8,7 +8,7 @@ import geopandas as gpd
 from osgeo import gdal
 
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
@@ -34,10 +34,10 @@ def _grid_single_vrt_s3(params: list) -> str:
         vrt_ds = gdal.Open(vsi_vrt_path)
         vrt_projection = vrt_ds.GetProjection()
         
-        vrt_data_suffix = '_'.join(vrt_stem.split('_')[3:])
-        vrt_parent = vrt_s3_path.rsplit('/', 1)[0]
+        provider_folder_name = '_'.join(vrt_stem.split('_')[2:])
+        digital_coast_folder = pathlib.Path(vrt_s3_path).parents[0]
         
-        shp_search_path = f"{vrt_parent}/{vrt_data_suffix}/**/*.shp"
+        shp_search_path = f"{digital_coast_folder}/{provider_folder_name}/**/*.shp"
         shp_matches = s3_files.glob(shp_search_path)
         
         tileindex_matches = [f for f in shp_matches if 'tileindex' in pathlib.Path(f).name.lower()]
@@ -49,12 +49,12 @@ def _grid_single_vrt_s3(params: list) -> str:
             return f" - Skipped: No shapefile for {vrt_stem}"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            s3_base = target_shp.rsplit('.', 1)[0]
+            shp_base_name = target_shp.rsplit('.', 1)[0]
             local_base = os.path.join(tmpdir, "tileindex")
             
             # Download sidecar files (.shp, .shx, .dbf, .prj)
             for ext in ['.shp', '.shx', '.dbf', '.prj']:
-                s3_target = f"{s3_base}{ext}"
+                s3_target = f"{shp_base_name}{ext}"
                 if s3_files.exists(s3_target):
                     s3_files.get(s3_target, f"{local_base}{ext}")
             
@@ -214,7 +214,7 @@ class GridDigitalCoastEngine(Engine):
         self.param_lookup = param_lookup
 
     def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download: bool, output_prefix: str) -> None:
-        """Processor for gridding S3 VRT files with dask"""
+        """Processor for gridding S3 VRT files with dask (Approved providers only)"""
 
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
@@ -225,7 +225,8 @@ class GridDigitalCoastEngine(Engine):
             ecoregion_paths = s3_files.glob(f"{bucket}/ER_*")
 
         for ecoregion_prefix in ecoregion_paths:
-            print(f"Gridding S3 ecoregion: {ecoregion_prefix}")
+            ecoregion_stem = ecoregion_prefix.rsplit('/', 1)[-1]
+            print(f"Gridding S3 ecoregion: {ecoregion_prefix} ({ecoregion_stem})")
             
             bt_sub = get_config_item('BLUETOPO', 'SUBFOLDER')
             blue_topo_search = f"{ecoregion_prefix}/{bt_sub}/BlueTopo/"
@@ -234,11 +235,26 @@ class GridDigitalCoastEngine(Engine):
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
             digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
+            
             if vrt_files:
-                params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in vrt_files]
-                future_tiles = self.client.map(_grid_single_vrt_s3, params)
-                tile_results = self.client.gather(future_tiles)
-                self.print_async_results(tile_results, outputs)
+                approved_providers = [p.lower() for p in get_approved_providers(ecoregion_stem)]
+                approved_vrt_files = []
+                
+                for vrt in vrt_files:
+                    vrt_stem = pathlib.Path(vrt).stem
+                    vrt_provider = '_'.join(vrt_stem.split('_')[2:])
+                    if vrt_provider.lower() in approved_providers:
+                        approved_vrt_files.append(vrt)
+                    else:
+                        print(f" - Skipping unapproved S3 provider: {vrt_provider}")
+
+                if approved_vrt_files:
+                    params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in approved_vrt_files]
+                    future_tiles = self.client.map(_grid_single_vrt_s3, params)
+                    tile_results = self.client.gather(future_tiles)
+                    self.print_async_results(tile_results, outputs)
+                else:
+                    print(f" - No approved VRTs found for {ecoregion_stem} in S3.")
             else:
                 print(f" - No VRTs found for {ecoregion_prefix} in S3.")
 
@@ -261,7 +277,13 @@ class GridDigitalCoastEngine(Engine):
             vrt_files = list(dc_sub_path.glob('*.vrt'))
 
             if vrt_files:
-                params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in vrt_files]
+                approved_providers = [provider.lower() for provider in get_approved_providers(ecoregion.stem)]
+                approved_vrt_files = []
+                for vrt in vrt_files:
+                    vrt_provider = '_'.join(vrt.stem.split('_')[2:])
+                    if vrt_provider.lower() in approved_providers:
+                        approved_vrt_files.append(vrt)
+                params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in approved_vrt_files]
                 future_tiles = self.client.map(_grid_single_vrt_local, params)
                 tile_results = self.client.gather(future_tiles)
                 self.print_async_results(tile_results, outputs)

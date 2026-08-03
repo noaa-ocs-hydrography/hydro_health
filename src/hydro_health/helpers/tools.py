@@ -1,7 +1,6 @@
 import yaml
 import pathlib
 import geopandas as gpd
-import re
 
 from socket import gethostname
 from osgeo import gdal, osr
@@ -21,6 +20,32 @@ class Param:
         @property
         def valueAsText(self):
             return self.value
+
+
+def get_approved_providers(ecoregion: str) -> bool:
+    """Get list of approved provider names"""
+
+    ecoregion_lookup = {
+        'ER_1': 'EcoRegion-1',
+        'ER_2': 'EcoRegion-2',
+        'ER_3': 'EcoRegion-3',
+        'ER_4': 'EcoRegion-4',
+        'ER_5': 'EcoRegion-5',
+        'ER_6': 'EcoRegion-6',
+    }
+    # TODO need to call it lidar_data_config.yaml and use shorted ecoregion IDs
+    config_path = INPUTS / "lookups" / 'ER_3_lidar_data_config.yaml'
+    with open(config_path, "r") as lookup:
+        config = yaml.safe_load(lookup)
+        ecoregion_providers = config.get(ecoregion_lookup[ecoregion], False)
+        if not ecoregion_providers:
+            return []
+        approved_providers = []
+        for provider, data in ecoregion_providers.items():
+            if data['use']:
+                provider_id = '_'.join(provider.split('_')[2:])
+                approved_providers.append(provider_id)
+    return approved_providers
 
 
 def get_environment() -> str:

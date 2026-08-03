@@ -3,7 +3,7 @@ import shutil
 import numpy as np
 from osgeo import ogr, osr, gdal
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
@@ -67,15 +67,16 @@ def _create_prediction_mask(param_inputs: list) -> None:
     target_ds = None
 
 
-def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
+def _create_training_mask(param_inputs: list) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""
-    
+
+    ecoregion_path, outputs = param_inputs
     mask_subfolder = ecoregion_path / get_config_item('MASK', 'SUBFOLDER')
     prediction_file = mask_subfolder / f'prediction_mask_{ecoregion_path.stem}.tif'
     training_file = mask_subfolder / f'training_mask_{ecoregion_path.stem}.tif'
     dc_vrt_folder = ecoregion_path / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
 
-    vrts = [str(f) for f in dc_vrt_folder.glob("mosaic_*.vrt")]
+    vrts = list(dc_vrt_folder.glob("mosaic_*.vrt"))
     if not vrts: return f"{ecoregion_path.stem}: No VRTs found."
 
     # Copy prediction to training to start
@@ -91,29 +92,52 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
     block_size = 4096
     total_burns = 0
 
+    engine = RasterMaskEngine(param_lookup={})
+    approved_providers = [provider.lower() for provider in get_approved_providers(ecoregion_path.stem)]
+
     for y in range(0, rows, block_size):
         num_rows = min(block_size, rows - y)
         for x in range(0, cols, block_size):
             num_cols = min(block_size, cols - x)
             mask_chunk = band.ReadAsArray(x, y, num_cols, num_rows)
+            
+            # Skip reading VRTs if this block has no prediction pixels (value 1)
+            if not np.any(mask_chunk == 1):
+                continue
+
             presence_chunk = np.zeros((num_rows, num_cols), dtype=np.uint8)
             
-            chunk_geo_t = (
-                geo_t[0] + x * geo_t[1], geo_t[1], 0,
-                geo_t[3] + y * geo_t[5], 0, geo_t[5]
-            )
+            # Calculate world coordinate bounding box for this chunk: [minX, minY, maxX, maxY]
+            chunk_min_x = geo_t[0] + x * geo_t[1]
+            chunk_max_y = geo_t[3] + y * geo_t[5]  # geo_t[5] is negative pixel height
+            chunk_max_x = chunk_min_x + num_cols * geo_t[1]
+            chunk_min_y = chunk_max_y + num_rows * geo_t[5]
+
+            bounds = [chunk_min_x, chunk_min_y, chunk_max_x, chunk_max_y]
 
             for vrt in vrts:
-                vrt_ds = gdal.Open(vrt)
-                # Warp the VRT into a small memory chunk matching our block
-                tmp_ds = gdal.GetDriverByName('MEM').Create('', num_cols, num_rows, 2, gdal.GDT_Byte)
-                tmp_ds.SetGeoTransform(chunk_geo_t)
-                tmp_ds.SetProjection(proj)
+                vrt_provider = '_'.join(vrt.stem.split('_')[2:])
+                if vrt_provider.lower() not in approved_providers:
+                    engine.write_message(f'- skipping unapproved provider: {vrt_provider}', outputs)
+                    continue
                 
-                # dstAlpha creates a mask band (Band 2) showing where data exists
-                gdal.Warp(tmp_ds, vrt_ds, dstAlpha=True, resampleAlg=gdal.GRA_NearestNeighbour)
-                alpha_chunk = tmp_ds.GetRasterBand(2).ReadAsArray()
-                presence_chunk |= (alpha_chunk > 0).astype(np.uint8)
+                # construct the MEM dataset with dstAlpha instead of loading
+                warp_options = gdal.WarpOptions(
+                    format='MEM',
+                    outputBounds=bounds,
+                    width=num_cols,
+                    height=num_rows,
+                    dstSRS=proj,
+                    dstAlpha=True,
+                    resampleAlg=gdal.GRA_NearestNeighbour
+                )
+
+                vrt_ds = gdal.Open(str(vrt))
+                tmp_ds = gdal.Warp('', vrt_ds, options=warp_options)
+
+                if tmp_ds is not None and tmp_ds.RasterCount >= 2:
+                    alpha_chunk = tmp_ds.GetRasterBand(2).ReadAsArray()
+                    presence_chunk |= (alpha_chunk > 0).astype(np.uint8)
                 
                 tmp_ds = None
                 vrt_ds = None
@@ -125,6 +149,7 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
                 band.WriteArray(mask_chunk, x, y)
 
     band.FlushCache()
+    ds.BuildOverviews("NONE", [])
     ds.BuildOverviews("NEAREST", [2, 4, 8, 16])
     ds = None
     
@@ -145,7 +170,10 @@ class RasterMaskEngine(Engine):
         self.setup_dask(self.param_lookup['env'])
         
         self.client.gather(self.client.map(_create_prediction_mask, [[er, self.param_lookup] for er in ecoregions]))
-        results = self.client.gather(self.client.map(_create_training_mask, ecoregions))
+        training_params = [[er, outputs] for er in ecoregions]
+        results = self.client.gather(
+            self.client.map(_create_training_mask, training_params)
+        )
         
         for r in results: 
             print(r)
