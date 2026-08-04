@@ -66,16 +66,23 @@ class CreateTSMLayerEngine(Engine):
         self.downloaded_files = []
         self.output_folder = OUTPUTS
         
+        # Flag to control whether to overwrite existing NC files or just check for new ones
+        self.force_download = False
+        
         # Setup paths
+        tsm_data_path = get_config_item("TSM", "DATA_PATH")
+        
         if get_environment() in ["local", "remote"]:
             base_raster = OUTPUTS / 'ER_3' / get_config_item("TSM", "SUBFOLDER")
             self.raster_path = base_raster / 'mean_rasters'
             self.year_pair_path = base_raster / 'TSM_year_pair_rasters'
+            self.nc_files_path = self.output_folder / str(tsm_data_path).lstrip('/')
         else:
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             subfolder = get_config_item('TSM', 'SUBFOLDER')
             self.raster_path = f"{bucket}/ER_3/{subfolder}/mean_rasters"
             self.year_pair_path = f"{bucket}/ER_3/{subfolder}/TSM_year_pair_rasters"
+            self.nc_files_path = f"{bucket}/{tsm_data_path}"
 
     def _save_raster_data(self, data: np.array, path: str|pathlib.Path, transform: rasterio.transform.Affine, crs: str, nodata_val: float) -> None:
         """Standardized Rasterio write method"""
@@ -149,16 +156,20 @@ class CreateTSMLayerEngine(Engine):
 
                     if get_environment() == 'aws':
                         s3_files = s3fs.S3FileSystem()
-                        s3_prefix = f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/ER_3/{get_config_item("TSM", "SUBFOLDER")}/nc_files/{name}'
-                        if not s3_files.exists(s3_prefix):
+                        s3_prefix = f'{self.nc_files_path}/{name}'
+                        
+                        # Respecting the force_download flag
+                        if self.force_download or not s3_files.exists(s3_prefix):
                             print(f"Downloading {name} to S3...")
                             with s3_files.open(s3_prefix, 'wb') as writer:
                                 ftp.retrbinary(f'RETR {name}', writer.write)
                             self.downloaded_files.append(name)
                     else:
-                        local_path = self.output_folder / f'ER_3/{get_config_item("TSM", "SUBFOLDER")}/nc_files/{name}'
-                        self.output_folder.mkdir(parents=True, exist_ok=True)
-                        if not local_path.exists():
+                        local_path = self.nc_files_path / name
+                        self.nc_files_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Respecting the force_download flag
+                        if self.force_download or not local_path.exists():
                             print(f"Downloading {name} locally...")
                             with open(local_path, 'wb') as f:
                                 ftp.retrbinary(f'RETR {name}', f.write)
@@ -190,10 +201,12 @@ class CreateTSMLayerEngine(Engine):
         for year in range(1998, 2025):
             print(f'Processing year: {year}')
             if get_environment() in ['local', 'remote']:
-                nc_files_folder = f'{self.output_folder}/ER_3/{get_config_item("TSM", "SUBFOLDER")}/nc_files'
-                nc_files = [f for f in os.listdir(nc_files_folder) if f"L3m_{year}" in f and f.endswith('.nc')]
+                if not self.nc_files_path.exists():
+                    print(f'  No NetCDF files found for {year}')
+                    continue
+                nc_files = [f for f in os.listdir(self.nc_files_path) if f"L3m_{year}" in f and f.endswith('.nc')]
             else:
-                s3_tsm_files = s3_files.ls(f'{get_config_item("SHARED", "OUTPUT_BUCKET")}/ER_3/{get_config_item("TSM", "SUBFOLDER")}/nc_files')
+                s3_tsm_files = s3_files.ls(self.nc_files_path)
                 nc_files = [p for p in s3_tsm_files if f"L3m_{year}" in p and p.endswith('.nc')]
 
             if not nc_files:
@@ -202,7 +215,7 @@ class CreateTSMLayerEngine(Engine):
 
             running_sum, valid_count = None, None
             for fname in nc_files:
-                path = pathlib.Path(nc_files_folder) / fname if get_environment() in ['local', 'remote'] else f's3://{fname}'
+                path = self.nc_files_path / fname if get_environment() in ['local', 'remote'] else f's3://{fname}'
                 try:
                     with xr.open_dataset(path, engine='h5netcdf') as ds:
                         arr = ds['TSM_mean'].values.squeeze().astype(np.float32)
@@ -263,18 +276,19 @@ class CreateTSMLayerEngine(Engine):
 
         # Calculate average and cumulative arrays
         avg_array = np.where(count_array > 0, sum_array / count_array, np.nan)
-        cumulative_array = np.where(count_array > 0, sum_array, np.nan)
+        # cumulative_array = np.where(count_array > 0, sum_array, np.nan)
 
         # Output filenames updated to place year pairs at the end
         out_name_mean = f'tsm_mean_{start_year}_{end_year}.tif'
-        out_name_cumulative = f'tsm_cumulative_{start_year}_{end_year}.tif'
+        # out_name_cumulative = f'tsm_cumulative_{start_year}_{end_year}.tif'
 
         if get_environment() in ['local', 'remote']:
             self.year_pair_path.mkdir(parents=True, exist_ok=True)
             # Save Mean
             self._save_raster_data(avg_array, os.path.join(self.year_pair_path, out_name_mean), meta['transform'], meta['crs'], meta['nodata'])
+            
             # Save Cumulative
-            self._save_raster_data(cumulative_array, os.path.join(self.year_pair_path, out_name_cumulative), meta['transform'], meta['crs'], meta['nodata'])
+            # self._save_raster_data(cumulative_array, os.path.join(self.year_pair_path, out_name_cumulative), meta['transform'], meta['crs'], meta['nodata'])
         else:
             # Save Mean to S3
             with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_mean:
@@ -285,15 +299,15 @@ class CreateTSMLayerEngine(Engine):
             os.remove(tmp_mean.name)
 
             # Save Cumulative to S3
-            with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_cumul:
-                self._save_raster_data(cumulative_array, tmp_cumul.name, meta['transform'], meta['crs'], meta['nodata'])
-                s3_dest_cumul = f"s3://{self.year_pair_path}/{out_name_cumulative}"
-                s3_files.put(tmp_cumul.name, s3_dest_cumul)
-                print(f"Cumulative raster saved: {s3_dest_cumul}")    
-            os.remove(tmp_cumul.name)
+            # with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_cumul:
+            #     self._save_raster_data(cumulative_array, tmp_cumul.name, meta['transform'], meta['crs'], meta['nodata'])
+            #     s3_dest_cumul = f"s3://{self.year_pair_path}/{out_name_cumulative}"
+            #     s3_files.put(tmp_cumul.name, s3_dest_cumul)
+            #     print(f"Cumulative raster saved: {s3_dest_cumul}")    
+            # os.remove(tmp_cumul.name)
 
     def run(self) -> None:
-        # self.download_tsm_data()
+        self.download_tsm_data()
         self.create_mean_year_rasters()
         for start_year, end_year in self.year_ranges:
             self.year_pair_rasters(start_year, end_year)

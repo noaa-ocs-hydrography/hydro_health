@@ -11,6 +11,11 @@ from pathlib import Path
 import re
 import numpy as np
 import warnings
+import random
+import io
+import matplotlib
+matplotlib.use('Agg') # Use headless backend for environments without displays (like EC2)
+import matplotlib.pyplot as plt
 from rasterio.session import AWSSession
 from rasterio.features import geometry_mask
 from rasterio.warp import transform_bounds
@@ -180,7 +185,7 @@ def raster_directories(s3_prefix):
             "recursive": True
         },
         {
-            "path": str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'UNCOMBINED_LIDAR_DIR', pilot_mode=False)}")),
+            "path": str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'TILED_LIDAR_DIR', pilot_mode=False)}")),
             "recursive": False
         }
     ]
@@ -210,6 +215,194 @@ def training_tiles_dir(s3_prefix):
 def tile_directories(prediction_tiles_dir, training_tiles_dir):
     """List of directories containing output tile parquet files."""
     return [prediction_tiles_dir, training_tiles_dir]
+
+
+# --- 0. VISUAL OUTPUT TESTS ---
+
+def test_visual_terrain_stages_comparison(s3_fs, s3_prefix):
+    """
+    Picks a random tile and compares its Tiled, Filled, and Combined/Training stages visually.
+    Outputs a comparison map image and uploads it to S3.
+    """
+    desc = "Visually compares the same random tile across three processing stages: Tiled, Filled, and Training/Combined to ensure terrain structures look valid and don't contain massive arbitrary holes."
+    
+    tiled_dir = str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'TILED_LIDAR_DIR', pilot_mode=False)}"))
+    train_dir = str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=False)}"))
+    
+    try:
+        filled_dir = str(UPath(f"{s3_prefix}{get_config_item('TERRAIN', 'FILLED_DIR', pilot_mode=False)}"))
+    except KeyError:
+        filled_dir = ""
+        
+    # Get random tiled file
+    tiled_files = [f for f in s3_fs.ls(tiled_dir) if f.endswith('.tif')]
+    if not tiled_files:
+        skip_test(f"No tiled files found in {tiled_dir} to visually compare.", "Visual Terrain Stages", desc)
+        
+    random_tiled = random.choice(tiled_files)
+    tile_name = Path(random_tiled).name
+    print(f"\nVisual Terrain Check - Selected Tile: {tile_name}")
+    
+    # Try to find corresponding filled and train files
+    filled_matches = [f for f in s3_fs.find(filled_dir) if tile_name in f] if filled_dir else []
+    # Search for bathy matches in training dir
+    train_matches = [f for f in s3_fs.find(train_dir) if tile_name in f and "bathy" in f.lower()]
+    
+    # if we can't find exact matches by name, we'll try to extract the ID and search
+    tile_id_match = re.search(r'(\d+)', tile_name)
+    if tile_id_match:
+        tile_id = tile_id_match.group(1)
+        if not filled_matches and filled_dir:
+            filled_matches = [f for f in s3_fs.find(filled_dir) if tile_id in f and f.endswith('.tif')]
+        if not train_matches:
+            train_matches = [f for f in s3_fs.find(train_dir) if tile_id in f and f.endswith('.tif') and "bathy" in f.lower()]
+            
+    filled_file = filled_matches[0] if filled_matches else None
+    train_file = train_matches[0] if train_matches else None
+    
+    # Plotting
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    fig.suptitle(f"Terrain Stages Comparison: {tile_name}", fontsize=16)
+    
+    errors = []
+    try:
+        with rasterio.Env(session=AWSSession()):
+            # Function to safely plot raster data, masking nodata
+            def plot_raster(ax, file_path, title):
+                if file_path:
+                    with rasterio.open(f"/vsis3/{file_path.replace('s3://', '')}") as src:
+                        arr = src.read(1)
+                        nodata = src.nodata
+                        if nodata is not None:
+                            if pd.isna(nodata):
+                                arr = np.ma.masked_where(np.isnan(arr), arr)
+                            else:
+                                arr = np.ma.masked_where(arr == nodata, arr)
+                        im = ax.imshow(arr, cmap='viridis')
+                        ax.set_title(title)
+                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                else:
+                    ax.text(0.5, 0.5, 'Not Found / Missing', ha='center', va='center')
+                    ax.set_title(f"{title} (Missing)")
+                    
+            plot_raster(axes[0], random_tiled, "1. Tiled Lidar")
+            plot_raster(axes[1], filled_file, "2. Filled Terrain")
+            plot_raster(axes[2], train_file, "3. Combined/Training Bathy")
+                
+        plt.tight_layout()
+        
+        # Save and upload directly to S3
+        img_bytes = io.BytesIO()
+        plt.savefig(img_bytes, format='png', dpi=150)
+        img_bytes.seek(0)
+        
+        safe_title = tile_name.replace('.tif', '')
+        img_path = f"{REPORT_S3_DIR}/S3_Validation_Terrain_Comparison_{safe_title}.png"
+        with s3_fs.open(img_path, 'wb') as f:
+            f.write(img_bytes.read())
+        plt.close()
+        
+        desc += f"\n\n**Output Map Uploaded To:** {img_path}"
+        
+    except Exception as e:
+        log_error(errors, f"Failed to generate visual comparison: {str(e)}")
+        plt.close()
+        
+    fail_with_errors(errors, "Visual Terrain Stages", desc)
+
+
+def test_visual_all_variables_single_tile(s3_fs, training_tiles_dir):
+    """
+    Picks a random tile from the training processed parquet folder and plots small maps
+    of its different variables to verify values make sense visually.
+    """
+    desc = "Outputs small scatter maps of various environmental variables for a single random tile from the training parquet tiles folder to ensure data variations make sense."
+    
+    tile_folders = s3_fs.ls(training_tiles_dir)
+    if not tile_folders:
+        skip_test(f"No tile folders found in {training_tiles_dir}.", "Visual Variables Single Tile", desc)
+        
+    random_folder = random.choice(tile_folders)
+    tile_name = Path(random_folder).name
+    print(f"\nVisual Variables Check - Selected Parquet Tile: {tile_name}")
+    
+    # Load primary parquet (ignore _long and csv)
+    pq_files = [f for f in s3_fs.ls(random_folder) if f.endswith('.parquet') and not f.endswith('_long.parquet')]
+    
+    if not pq_files:
+        skip_test(f"No primary parquet found for randomly selected tile {tile_name}.", "Visual Variables Single Tile", desc)
+        
+    errors = []
+    try:
+        s3_path = f"s3://{pq_files[0]}"
+        df = pd.read_parquet(s3_path, storage_options={"anon": False})
+        
+        # Subsample if too large to prevent Memory/Time blowup on scatter plotting
+        original_len = len(df)
+        if len(df) > 50000:
+            df = df.sample(50000, random_state=42)
+            print(f" (Subsampled {original_len} down to 50k for scatter plot speed)")
+            
+        # Pick a subset of numeric columns to plot (up to 12)
+        exclude_cols = ['X', 'Y', 'FID', 'tile_id', 'survey_end_date']
+        plot_cols = [c for c in df.columns if c not in exclude_cols and pd.api.types.is_numeric_dtype(df[c])]
+        
+        # Keep a manageable number of plots by prioritizing important ones
+        if len(plot_cols) > 12:
+            priority = ['bathy', 'slope', 'rugosity', 'bpi_fine', 'curv_total', 'grain_size', 'hurr_strength', 'tsm']
+            chosen = [c for c in plot_cols if any(p in c for p in priority)][:8]
+            remaining = list(set(plot_cols) - set(chosen))
+            random.shuffle(remaining)
+            plot_cols = chosen + remaining[:12 - len(chosen)]
+            
+        n_cols = 4
+        n_rows = (len(plot_cols) + n_cols - 1) // n_cols
+        
+        fig, axes = plt.subplots(n_rows, n_cols, figsize=(4.5 * n_cols, 4 * n_rows))
+        fig.suptitle(f"Variable Maps for Tile: {tile_name}", fontsize=18)
+        
+        axes = axes.flatten() if n_rows > 1 else [axes]
+        
+        for i, col in enumerate(plot_cols):
+            ax = axes[i]
+            
+            # Drop NAs specifically for this column so matplotlib scatter doesn't crash
+            col_df = df[['X', 'Y', col]].dropna()
+            
+            if not col_df.empty:
+                sc = ax.scatter(col_df['X'], col_df['Y'], c=col_df[col], cmap='turbo', s=1)
+                ax.set_title(col, fontsize=10)
+                ax.set_aspect('equal', 'datalim')
+                ax.axis('off')
+                plt.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+            else:
+                ax.text(0.5, 0.5, 'All NaN Data', ha='center', va='center')
+                ax.set_title(col, fontsize=10)
+                ax.axis('off')
+            
+        # Hide any unused subplots
+        for j in range(len(plot_cols), len(axes)):
+            axes[j].axis('off')
+            
+        plt.tight_layout()
+        
+        # Save and upload
+        img_bytes = io.BytesIO()
+        plt.savefig(img_bytes, format='png', dpi=150)
+        img_bytes.seek(0)
+        
+        img_path = f"{REPORT_S3_DIR}/S3_Validation_Tile_Variables_{tile_name}.png"
+        with s3_fs.open(img_path, 'wb') as f:
+            f.write(img_bytes.read())
+        plt.close()
+        
+        desc += f"\n\n**Output Map Uploaded To:** {img_path}"
+        
+    except Exception as e:
+        log_error(errors, f"Failed to generate variables plot: {str(e)}")
+        plt.close()
+        
+    fail_with_errors(errors, "Visual Variables Single Tile", desc)
 
 
 # --- 1. DIRECTORY AND FILE PRESENCE TESTS ---
@@ -1319,6 +1512,8 @@ if __name__ == "__main__":
 
     # Comment out any test in this list that you want to skip.
     tests_to_run = [
+        "test_visual_terrain_stages_comparison",
+        "test_visual_all_variables_single_tile",
         # "test_output_directories_exist",
         # "test_year_range_tiffs_exist",
         # "test_raster_approximate_location",
