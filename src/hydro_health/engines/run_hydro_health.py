@@ -1,5 +1,6 @@
 import os
 import pathlib
+import boto3
 import time
 import sys
 import yaml
@@ -62,7 +63,6 @@ def run_hydro_health(config_name: str) -> None:
     config_path = INPUTS / "run_configs" / config_name
     with open(config_path, "r") as lookup:
         config = yaml.safe_load(lookup)
-        print(f'Script has been run {len(config["runtimes"])} time(s)')
 
         pilot_mode = config['pilot_mode']
         output_prefix = config.get('output_prefix', False)
@@ -96,7 +96,7 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_hurricane_layer_engine()
             elif step["tool"] == "run_preprocessor_modeldata" and step["run"]:
                 runners.run_preprocessor_modeldata(pilot_mode)
-    update_config_runtime(config_path, config)
+    write_config_log(config_path, config, env)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60} minutes")
     for ecoregion in pathlib.Path(param_lookup['output_directory'].valueAsText).glob('ER_*'):
@@ -108,18 +108,24 @@ def run_hydro_health(config_name: str) -> None:
     print("done")
 
 
-def update_config_runtime(config_path: pathlib.Path, config: dict[list]) -> None:
-    """Update run config with run time"""
+def write_config_log(config_path: pathlib.Path, config: dict[list], env: str) -> None:
+    """Store run config with run time"""
 
-    config_path = INPUTS / "run_configs" / config_name
-    with open(config_path, "w") as config_file:
-        current_day = datetime.now()
-        timestamp = current_day.strftime("%m%d%Y")
-        config['runtimes'].append(str(timestamp))
-        print(f'Updating config runtimes for date: {timestamp}')
+    current_day = datetime.now()
+    timestamp = current_day.strftime("%m%d%Y")
+    session_log = config_path.parents[0] / f'hydro_health_session_{timestamp}.yaml'
+    with open(session_log, "w") as config_file:
+        print(f'Storing run config with date: {timestamp}')
         yaml.safe_dump(config, config_file, sort_keys=False)
+
+    if env == 'aws':
+        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        output_prefix = f"logs/{session_log.name}"
+        print(f"Storing run log in S3: s3://{bucket_name}/{output_prefix}")
+        s3_client = boto3.client('s3')
+        s3_client.upload_file(str(session_log), bucket_name, output_prefix)
 
 
 if __name__ == "__main__":
-    config_name = "hydro_health_session_06012026.yaml"
+    config_name = "hydro_health_config.yaml"
     run_hydro_health(config_name)
