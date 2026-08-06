@@ -1,12 +1,10 @@
 import os
-import warnings
 import numpy as np
 import geopandas as gpd
 import rasterio
 from rasterio.features import rasterize, geometry_mask
 from rasterio.transform import from_bounds
 from rasterio.windows import Window
-from rasterio.errors import NotGeoreferencedWarning
 import concurrent.futures
 
 def generate_masks():
@@ -108,51 +106,45 @@ def generate_masks():
                 windows.append(Window(col_off, row_off, w, h))
                 
         def process_window(window):
-            # GDAL requires a thread-local environment when running in parallel
-            with rasterio.Env():
-                # Suppress the harmless NotGeoreferencedWarning during in-memory rasterization
-                with warnings.catch_warnings():
-                    warnings.filterwarnings("ignore", category=NotGeoreferencedWarning)
-                    
-                    win_transform = rasterio.windows.transform(window, transform)
-                    win_bounds = rasterio.windows.bounds(window, transform)
-                    
-                    # Intersect bounds with spatial index
-                    eco_idx = list(eco_sidx.intersection(win_bounds))
-                    
-                    # If chunk is entirely outside ecoregions, return nodata immediately
-                    if not eco_idx:
-                        return window, np.full((window.height, window.width), nodata_val, dtype=np.uint8)
-                        
-                    local_eco = eco_gdf.iloc[eco_idx]
-                    
-                    tiles_idx = list(tiles_sidx.intersection(win_bounds))
-                    
-                    if not tiles_idx:
-                        # If inside ecoregion but no tiles present, default to NoData
-                        rasterized_tiles = np.full((window.height, window.width), nodata_val, dtype=np.uint8)
-                    else:
-                        local_tiles = tiles_gdf.iloc[tiles_idx]
-                        shapes = ((geom, val) for geom, val in zip(local_tiles.geometry, local_tiles.burn_val))
-                        rasterized_tiles = rasterize(
-                            shapes=shapes,
-                            out_shape=(window.height, window.width),
-                            transform=win_transform,
-                            fill=nodata_val,
-                            dtype=np.uint8
-                        )
-                    
-                    # Eco mask (invert=True means inside polygon is True)
-                    eco_mask = geometry_mask(
-                        geometries=local_eco.geometry,
-                        out_shape=(window.height, window.width),
-                        transform=win_transform,
-                        invert=True 
-                    )
-                    
-                    # Apply mask
-                    chunk_array = np.where(eco_mask, rasterized_tiles, nodata_val)
-                    return window, chunk_array
+            win_transform = rasterio.windows.transform(window, transform)
+            win_bounds = rasterio.windows.bounds(window, transform)
+            
+            # Intersect bounds with spatial index
+            eco_idx = list(eco_sidx.intersection(win_bounds))
+            
+            # If chunk is entirely outside ecoregions, return nodata immediately
+            if not eco_idx:
+                return window, np.full((window.height, window.width), nodata_val, dtype=np.uint8)
+                
+            local_eco = eco_gdf.iloc[eco_idx]
+            
+            tiles_idx = list(tiles_sidx.intersection(win_bounds))
+            
+            if not tiles_idx:
+                # If inside ecoregion but no tiles present, default to NoData
+                rasterized_tiles = np.full((window.height, window.width), nodata_val, dtype=np.uint8)
+            else:
+                local_tiles = tiles_gdf.iloc[tiles_idx]
+                shapes = ((geom, val) for geom, val in zip(local_tiles.geometry, local_tiles.burn_val))
+                rasterized_tiles = rasterize(
+                    shapes=shapes,
+                    out_shape=(window.height, window.width),
+                    transform=win_transform,
+                    fill=nodata_val,
+                    dtype=np.uint8
+                )
+            
+            # Eco mask (invert=True means inside polygon is True)
+            eco_mask = geometry_mask(
+                geometries=local_eco.geometry,
+                out_shape=(window.height, window.width),
+                transform=win_transform,
+                invert=True 
+            )
+            
+            # Apply mask
+            chunk_array = np.where(eco_mask, rasterized_tiles, nodata_val)
+            return window, chunk_array
 
         print(f"Divided into {len(windows)} chunks. Starting parallel processing...")
         

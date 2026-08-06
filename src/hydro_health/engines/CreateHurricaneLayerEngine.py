@@ -6,9 +6,12 @@ os.environ["CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE"] = "YES"
 # Bypass GDAL free disk space checks for large rasters
 os.environ["CHECK_DISK_FREE_SPACE"] = "FALSE"
 
+import logging
+import sys
 import requests
 import tempfile
 import shutil
+import pathlib
 from collections import defaultdict
 from upath import UPath
 
@@ -39,11 +42,34 @@ class CreateHurricaneLayerEngine(Engine):
         self.is_aws = (get_environment() == 'aws')
         self.overwrite = overwrite
         
+        # --- Setup Logging ---
+        self.log_file = pathlib.Path.home() / 'hurricane_engine.log'
+        self.logger = logging.getLogger('HurricaneEngine')
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Prevent duplicate loggers if instantiated multiple times
+        if not self.logger.handlers:
+            fh = logging.FileHandler(self.log_file)
+            fh.setLevel(logging.DEBUG)
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            fh.setFormatter(formatter)
+            ch.setFormatter(formatter)
+            self.logger.addHandler(fh)
+            self.logger.addHandler(ch)
+            
+        self.logger.info(f"Logging initialized. Writing logs to {self.log_file}")
+        # ---------------------
+
         self.sediment_data = None
         self.create_file_paths()
 
     def create_file_paths(self):
         """Creates Universal Paths based on the environment."""
+        inputs_root = pathlib.Path(__file__).parents[4] / 'inputs'
+        MASTER_GRIDS = inputs_root / 'Master_Grids.gpkg'
+
         if self.is_aws:
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             # Disable directory caching since GDAL writes files outside of Python's fsspec awareness
@@ -53,7 +79,7 @@ class CreateHurricaneLayerEngine(Engine):
             self.hurricane_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'GPKG_PATH')).lstrip('/')}", **kwargs)
             self.txt_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'DATA_PATH')).lstrip('/')}", **kwargs)
             self.year_pair_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH')).lstrip('/')}", **kwargs)
-            self.coast_boundary_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'COAST_BOUNDARY_PATH')).lstrip('/')}", **kwargs)
+            self.coast_boundary_path = UPath(MASTER_GRIDS) # Local EC2 repo path
             self.raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'RASTER_PATH')).lstrip('/')}", **kwargs)
             self.mask_pred_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'MASK_PRED_PATH')).lstrip('/')}", **kwargs)
             self.count_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'COUNT_RASTER_PATH')).lstrip('/')}", **kwargs)
@@ -62,18 +88,18 @@ class CreateHurricaneLayerEngine(Engine):
             self.hurricane_data_path = UPath(get_config_item('HURRICANE', 'GPKG_PATH'))
             self.txt_data_path = UPath(get_config_item('HURRICANE', 'DATA_PATH'))
             self.year_pair_raster_path = UPath(get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH'))
-            self.coast_boundary_path = UPath(get_config_item('MASK', 'COAST_BOUNDARY_PATH'))
+            self.coast_boundary_path = UPath(MASTER_GRIDS) # Local dev repo path
             self.raster_path = UPath(get_config_item('HURRICANE', 'RASTER_PATH'))
             self.mask_pred_path = UPath(get_config_item('MASK', 'MASK_PRED_PATH'))
             self.count_raster_path = UPath(get_config_item('HURRICANE', 'COUNT_RASTER_PATH'))
             self.cumulative_raster_path = UPath(get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH'))
 
-        print("--- Hurricane Engine File Paths ---")
-        print(f"GPKG Data Path: {self.hurricane_data_path}")
-        print(f"TXT Data Path: {self.txt_data_path}")
-        print(f"Raster Base Path: {self.raster_path}")
-        print(f"Overwrite Existing Files: {self.overwrite}")
-        print("-----------------------------------")
+        self.logger.info("--- Hurricane Engine File Paths ---")
+        self.logger.info(f"GPKG Data Path: {self.hurricane_data_path}")
+        self.logger.info(f"TXT Data Path: {self.txt_data_path}")
+        self.logger.info(f"Raster Base Path: {self.raster_path}")
+        self.logger.info(f"Overwrite Existing Files: {self.overwrite}")
+        self.logger.info("-----------------------------------")
 
     def _get_gdal_path(self, path_obj) -> str:
         """Convert UPath to GDAL-compatible virtual file string if on AWS."""
@@ -82,26 +108,29 @@ class CreateHurricaneLayerEngine(Engine):
             return path_str.replace("s3://", "/vsis3/")
         return path_str
 
-    def _read_gpkg_layer(self, layer_name: str) -> gpd.GeoDataFrame:
+    def _read_gpkg_layer(self, layer_name: str, path_obj=None) -> gpd.GeoDataFrame:
         """Safely read a layer from a GeoPackage, avoiding GDAL /vsis3/ cache desyncs."""
-        if self.is_aws:
+        target_path = path_obj if path_obj is not None else self.hurricane_data_path
+        
+        # Only use the tempfile download workaround if the target path is actually in S3
+        if self.is_aws and str(target_path).startswith("s3://"):
             with tempfile.TemporaryDirectory() as tmpdir:
                 local_gpkg = os.path.join(tmpdir, "temp_read.gpkg")
                 
-                with self.hurricane_data_path.open('rb') as f_in, open(local_gpkg, 'wb') as f_out:
+                with target_path.open('rb') as f_in, open(local_gpkg, 'wb') as f_out:
                     shutil.copyfileobj(f_in, f_out)
                     
                 return gpd.read_file(local_gpkg, layer=layer_name)
         else:
             # Explicitly cast to string to prevent engine errors with custom UPath types
-            return gpd.read_file(str(self.hurricane_data_path), layer=layer_name)
+            return gpd.read_file(str(target_path), layer=layer_name)
 
     def _save_gpkg_layer(self, gdf: gpd.GeoDataFrame, layer_name: str) -> None:
         """Safely save a layer to a GeoPackage, handling S3 temp files if necessary."""
-        print(f"Saving layer '{layer_name}' to {self.hurricane_data_path}...")
+        self.logger.info(f"Saving layer '{layer_name}' to {self.hurricane_data_path}...")
         
         if gdf.empty:
-            print(f"WARNING: The GeoDataFrame for layer '{layer_name}' is empty. Saving empty layer.")
+            self.logger.warning(f"The GeoDataFrame for layer '{layer_name}' is empty. Saving empty layer.")
 
         write_kwargs = {
             "layer": layer_name,
@@ -122,13 +151,13 @@ class CreateHurricaneLayerEngine(Engine):
                         write_kwargs["mode"] = "a"
                         write_kwargs["layer_options"] = {"OVERWRITE": "YES"}
                     except Exception as e:
-                        print(f"Warning: Could not read existing GPKG from S3 ({e}). Starting fresh.")
+                        self.logger.warning(f"Could not read existing GPKG from S3 ({e}). Starting fresh.")
                         file_exists = False
                 
                 try:
                     gdf.to_file(local_gpkg, **write_kwargs)
                 except Exception as e:
-                    print(f"Warning: Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
+                    self.logger.warning(f"Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
                     if os.path.exists(local_gpkg):
                         os.remove(local_gpkg)
                     # Strip out append options and force a new file creation
@@ -150,7 +179,7 @@ class CreateHurricaneLayerEngine(Engine):
                 # Explicitly cast to string to prevent C-engine errors
                 gdf.to_file(str(self.hurricane_data_path), **write_kwargs)
             except Exception as e:
-                print(f"Warning: Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
+                self.logger.warning(f"Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
                 if self.hurricane_data_path.exists():
                     self.hurricane_data_path.unlink()
                 # Strip out append options and force a new file creation
@@ -158,7 +187,7 @@ class CreateHurricaneLayerEngine(Engine):
                 write_kwargs.pop("layer_options", None)
                 gdf.to_file(str(self.hurricane_data_path), **write_kwargs)
             
-        print(f"Successfully saved layer '{layer_name}'.")
+        self.logger.info(f"Successfully saved layer '{layer_name}'.")
 
     def average_rasters(self, input_folder, start_year, end_year, output_name) -> None:
         """
@@ -185,7 +214,7 @@ class CreateHurricaneLayerEngine(Engine):
                         found_years.add(year)
                         break
         except Exception as e:
-            print(f"Error accessing {input_folder}: {e}")
+            self.logger.error(f"Error accessing {input_folder}: {e}")
             return
 
         # Check for missing years before doing any calculations
@@ -193,7 +222,7 @@ class CreateHurricaneLayerEngine(Engine):
         missing_years = expected_years - found_years
         
         if missing_years:
-            print(f"Skipping year pair {start_year}-{end_year} for '{output_name}'. Missing data for years: {sorted(list(missing_years))}")
+            self.logger.warning(f"Skipping year pair {start_year}-{end_year} for '{output_name}'. Missing data for years: {sorted(list(missing_years))}")
             return
 
         # Prepare dimensions and masks
@@ -226,16 +255,17 @@ class CreateHurricaneLayerEngine(Engine):
 
         # Save both results using the class's built-in save wrapper 
         self.save_raster(average_array, mean_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
-        self.save_raster(sum_array, cumulative_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
+        
+        # COMMENTED OUT: Generating only the mean rasters per request
+        # self.save_raster(sum_array, cumulative_output_path, raster_shape[0], raster_shape[1], meta['transform'], meta['crs'])
 
         # UPDATED: Print exact output paths
-        print(f"Saved mean raster to: {mean_output_path}")
-        print(f"Saved cumulative raster to: {cumulative_output_path}")
+        self.logger.info(f"Saved mean raster to: {mean_output_path}")
 
     def clip_polygons(self) -> None:
         """Subtract higher wind radii from lower wind radii to create distinct rings."""
 
-        print("Subtracting wind radii from hurricane polygons to create rings...")
+        self.logger.info("Subtracting wind radii from hurricane polygons to create rings...")
         gdf_to_clip = self._read_gpkg_layer('atlantic_polygon_buffer')
 
         # Buffer by 0 to clean up invalid topological intersections before iterating
@@ -273,7 +303,7 @@ class CreateHurricaneLayerEngine(Engine):
     def convert_text_to_gpkg(self) -> gpd.GeoDataFrame:
         """Convert the hurricane text data to a GeoPackage with point and line layers."""
 
-        print("Converting text data to GeoPackage points...")
+        self.logger.info("Converting text data to GeoPackage points...")
         atlantic_point_layer_name = 'atlantic_hurricane_points'
 
         column_names = ['area_date',
@@ -364,7 +394,7 @@ class CreateHurricaneLayerEngine(Engine):
     def create_line_layer(self, gdf: gpd.GeoDataFrame) -> None:
         """Create a line layer from the hurricane point data."""
 
-        print("Creating line layer from points...")
+        self.logger.info("Creating line layer from points...")
         atlantic_line_layer_name = 'atlantic_hurricane_lines'
 
         lines = (gdf.groupby('area_date').apply(
@@ -380,7 +410,7 @@ class CreateHurricaneLayerEngine(Engine):
     def create_overlapping_buffers(self, gdf: gpd.GeoDataFrame) -> None:
         """Create overlapping buffers around hurricane points and save them as polygons."""
 
-        print("Creating overlapping buffers...")
+        self.logger.info("Creating overlapping buffers...")
         # Maintain EPSG:5070 (NAD83 / Conus Albers) for SAFE geometrical buffering across the entire US
         gdf = gdf.to_crs('EPSG:5070') 
         
@@ -500,36 +530,36 @@ class CreateHurricaneLayerEngine(Engine):
     def download_hurricane_data(self) -> None:
         """Download the HURDAT2 hurricane data"""
         
-        urls = [('atlantic_hurricane_data.txt', 'https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2023-051124.txt'), 
+        urls = [('atlantic_hurricane_data.txt', 'https://www.nhc.noaa.gov/data/hurdat/hurdat2-1851-2025-02272026.txt'), 
                 ('pacific_hurricane_data.txt', 'https://www.nhc.noaa.gov/data/hurdat/hurdat2-nepac-1949-2023-042624.txt')]
         
-        print("Starting hurricane data download...")
+        self.logger.info("Starting hurricane data download...")
         for filename, url in urls:
             response = requests.get(url)
             if response.status_code == 200:
                 self.txt_data_path.mkdir(parents=True, exist_ok=True)
                 filepath = self.txt_data_path / filename
-                print(f"Downloading {filename} to {filepath}")
+                self.logger.info(f"Downloading {filename} to {filepath}")
                 with filepath.open('w', encoding='utf-8') as f:
                     f.write(response.text)
             else:
-                print(f"Error downloading HURDAT2 data for {filename}.")  
-        print("Download complete.")
+                self.logger.error(f"Error downloading HURDAT2 data for {filename}.")  
+        self.logger.info("Download complete.")
 
     def generate_cumulative_rasters(self, output_folder, value) -> None:
         """Generate cumulative rasters for all possible hurricane years."""
 
-        print(f"Generating cumulative rasters for {value}...")
+        self.logger.info(f"Generating cumulative rasters for {value}...")
         input_raster_folder = self.raster_path
         
         target_resolution = 100.0
 
-        eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
-        print(f"Reading EcoRegions from {eco_path} for valid area mask...")
-        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
+        # UPDATED: Safely read the EcoRegions GPKG via the class helper
+        self.logger.info(f"Reading EcoRegions from {self.coast_boundary_path} for valid area mask...")
+        eco_gdf = self._read_gpkg_layer(layer_name='Enhanced_EcoRegions', path_obj=self.coast_boundary_path)
         
         # Project EcoRegions to match target CRS (EPSG:32617)
-        print("Projecting EcoRegions to match target projection (EPSG:32617)...")
+        self.logger.info("Projecting EcoRegions to match target projection (EPSG:32617)...")
         eco_gdf = eco_gdf.to_crs('EPSG:32617')
         
         # FIX for topology twisting: Repair self-intersecting lines caused by out-of-bounds projection distortion
@@ -546,7 +576,7 @@ class CreateHurricaneLayerEngine(Engine):
         mask_transform = Affine(target_resolution, 0, minx,
                                 0, -target_resolution, maxy)
         
-        print("Rasterizing EcoRegions directly into EPSG:32617 array to avoid GDAL inverse projection failures...")
+        self.logger.info("Rasterizing EcoRegions directly into EPSG:32617 array to avoid GDAL inverse projection failures...")
         shapes = [(geom, 1) for geom in eco_gdf.geometry if geom is not None and geom.is_valid and not geom.is_empty]
         mask_data = rasterio.features.rasterize(
             shapes,
@@ -564,7 +594,7 @@ class CreateHurricaneLayerEngine(Engine):
                 input_raster_folder.fs.invalidate_cache()
             all_rasters = list(input_raster_folder.rglob('*.tif'))
         except Exception as e:
-            print(f"Error accessing {input_raster_folder}: {e}")
+            self.logger.error(f"Error accessing {input_raster_folder}: {e}")
             all_rasters = []
 
         # Group the existing rasters by their parent year folder
@@ -573,16 +603,16 @@ class CreateHurricaneLayerEngine(Engine):
             year_to_rasters[r_path.parent.name].append(r_path)
 
         # Query the base dataset to determine ALL possible years
-        print("Querying base dataset to find all possible years...")
+        self.logger.info("Querying base dataset to find all possible years...")
         try:
             base_gdf = self._read_gpkg_layer('atlantic_hurricane_points')
             # Extract entire historical range dynamically without clamping to start_year/end_year
             min_year = int(base_gdf['year'].min())
             max_year = int(base_gdf['year'].max())
             all_possible_years = list(range(min_year, max_year + 1))
-            print(f"Generating data for years {min_year} to {max_year}.")
+            self.logger.info(f"Generating data for years {min_year} to {max_year}.")
         except Exception as e:
-            print(f"Warning: Could not query dataset ({e}). Defaulting to existing folders.")
+            self.logger.warning(f"Could not query dataset ({e}). Defaulting to existing folders.")
             if year_to_rasters:
                 found_years = sorted([int(y) for y in year_to_rasters.keys() if y.isdigit()])
                 if not found_years:
@@ -597,7 +627,7 @@ class CreateHurricaneLayerEngine(Engine):
             raster_files = year_to_rasters.get(year_folder, [])
 
             if not raster_files:
-                print(f"No data for year {year_folder}. Skipping raster creation.")
+                self.logger.warning(f"No data for year {year_folder}. Skipping raster creation.")
                 continue
 
             if value == "cumulative_count":
@@ -609,7 +639,7 @@ class CreateHurricaneLayerEngine(Engine):
 
             # ----- NEW CHECK ADDED HERE -----
             if not self.overwrite and output_path.exists():
-                print(f"Skipping cumulative raster for year {year_folder} ({value}) - already exists at {output_path}.")
+                self.logger.info(f"Skipping cumulative raster for year {year_folder} ({value}) - already exists at {output_path}.")
                 continue
             # --------------------------------
 
@@ -646,7 +676,7 @@ class CreateHurricaneLayerEngine(Engine):
                     elif value == "cumulative_windspeed":
                         cumulative_windspeed += np.nan_to_num(raster_data, nan=0)
 
-                print(f"Processed raster: {raster_path.name} for year {year_folder}")
+                self.logger.info(f"Processed raster: {raster_path.name} for year {year_folder}")
             
             # Apply Mask bounds constraint
             cumulative_windspeed[~mask_valid] = np.nan
@@ -659,9 +689,9 @@ class CreateHurricaneLayerEngine(Engine):
             
             output_path.parent.mkdir(parents=True, exist_ok=True)
             self.save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs)
-            print(f"Cumulative raster for year {year_folder} saved to {output_path}.")
+            self.logger.info(f"Cumulative raster for year {year_folder} saved to {output_path}.")
 
-        print(f"Cumulative raster generation complete for {value}.")
+        self.logger.info(f"Cumulative raster generation complete for {value}.")
 
     def get_corner_points(self, quarter_circle, quadrant) -> list:
         """Get the corner points of a quarter circle polygon based on the quadrant."""
@@ -679,25 +709,24 @@ class CreateHurricaneLayerEngine(Engine):
     def polygons_to_raster(self, resolution=100.0) -> None:
         """Convert hurricane polygons to rasters."""
 
-        print("Converting trimmed polygons to rasters...")
+        self.logger.info("Converting trimmed polygons to rasters...")
         
         try:
             gdf = self._read_gpkg_layer("trimmed_polygons")
         except Exception as e:
-            print(f"Error opening 'trimmed_polygons' layer. It may be missing due to empty overlap. Exception: {e}")
+            self.logger.error(f"Error opening 'trimmed_polygons' layer. It may be missing due to empty overlap. Exception: {e}")
             return
 
-        print("Projecting trimmed polygons to target CRS (EPSG:32617) to prevent raster warping failure...")
+        self.logger.info("Projecting trimmed polygons to target CRS (EPSG:32617) to prevent raster warping failure...")
         gdf = gdf.to_crs('EPSG:32617')
         
         # Repair the vector topology in case the extreme UTM distortion folded any polygons over themselves
         gdf['geometry'] = gdf.geometry.buffer(0)
         gdf = gdf[gdf.geometry.is_valid & ~gdf.geometry.is_empty]
         
-        # Load EcoRegions bounds to constrain massive ocean-wide storm rasterization sizes
-        eco_path = "/home/aubrey.mccutchen.lx/Repos/hydro_health/inputs/Master_Grids.gpkg"
-        print(f"Reading EcoRegions from {eco_path} to constrain raster bounding boxes...")
-        eco_gdf = gpd.read_file(eco_path, layer='Enhanced_EcoRegions')
+        # UPDATED: Safely read the EcoRegions GPKG via the class helper
+        self.logger.info(f"Reading EcoRegions from {self.coast_boundary_path} to constrain raster bounding boxes...")
+        eco_gdf = self._read_gpkg_layer(layer_name='Enhanced_EcoRegions', path_obj=self.coast_boundary_path)
         eco_gdf = eco_gdf.to_crs('EPSG:32617')
         eco_minx, eco_miny, eco_maxx, eco_maxy = eco_gdf.total_bounds
             
@@ -714,8 +743,9 @@ class CreateHurricaneLayerEngine(Engine):
             output_folder.mkdir(parents=True, exist_ok=True)
             raster_file = output_folder / f"{safe_name}_{area_date}.tif"
             
-            if not self.overwrite and raster_file.exists():
-                print(f"Skipping individual raster {safe_name}_{area_date}.tif ({year}) - already exists.")
+            # Prevent overwriting existing individual rasters
+            if raster_file.exists():
+                self.logger.info(f"Skipping individual raster {safe_name}_{area_date}.tif ({year}) - already exists.")
                 continue  
 
             s_minx, s_miny, s_maxx, s_maxy = group.total_bounds
@@ -727,7 +757,7 @@ class CreateHurricaneLayerEngine(Engine):
             maxy = min(s_maxy, eco_maxy)
 
             if minx >= maxx or miny >= maxy:
-                print(f"Storm {name} - {year} is completely outside the target EcoRegions bounding box. Skipping rasterization.")
+                self.logger.warning(f"Storm {name} - {year} is completely outside the target EcoRegions bounding box. Skipping rasterization.")
                 continue
 
             width = int(np.ceil((maxx - minx) / resolution))
@@ -772,7 +802,7 @@ class CreateHurricaneLayerEngine(Engine):
                 else:
                     shutil.copy(local_raster, raster_file)
 
-            print(f"Raster for {name} - {year} saved to {raster_file}.")
+            self.logger.info(f"Raster for {name} - {year} saved to {raster_file}.")
 
     def read_text_data(self, txt_path) -> list:
         """Read the hurricane data from a text file."""  
@@ -794,48 +824,23 @@ class CreateHurricaneLayerEngine(Engine):
 
     def run(self):
         """Entrypoint for processing the Hurricane layer"""
-        print("Starting Hurricane Layer Engine processing...")
+        self.logger.info("Starting Hurricane Layer Engine processing...")
 
-        run_vector_processing = True
+        self.logger.info("Always overwriting GPKG: Removing existing GeoPackage to pull the latest dataset...")
+        try:
+            if self.hurricane_data_path.exists():
+                self.hurricane_data_path.unlink()
+        except Exception as e:
+            self.logger.warning(f"Could not delete existing GPKG: {e}")
 
-        if self.overwrite:
-            print("Overwrite is enabled. Removing existing GeoPackage and Rasters to start fresh...")
-            try:
-                if self.hurricane_data_path.exists():
-                    self.hurricane_data_path.unlink()
-            except Exception as e:
-                print(f"Warning: Could not delete existing GPKG: {e}")
-
-            # FIX: Explicitly scrub the base raster path of old run files so tiny old footprints 
-            # don't bleed into the new Conus-wide cumulative footprints
-            try:
-                if self.raster_path.exists():
-                    for tif in self.raster_path.rglob("*.tif"):
-                        # Only delete files inside year folders (e.g., 1851/storm.tif)
-                        if tif.parent.name.isdigit():
-                            tif.unlink()
-            except Exception as e:
-                print(f"Warning: Could not delete existing year rasters: {e}")
-        else:
-            # Short-circuit: Check if we can skip the heavy vector generation steps
-            try:
-                if self.hurricane_data_path.exists():
-                    print("Checking for existing processed vector data...")
-                    _ = self._read_gpkg_layer('trimmed_polygons')
-                    print("Processed vector data found! Skipping download and buffering steps.")
-                    run_vector_processing = False
-            except Exception:
-                print("Vector data incomplete or missing. Proceeding with full generation.")
-
-        if run_vector_processing:
-            self.download_hurricane_data()    
-            
-            # Parse points once and pass the Dataframe down the chain
-            point_gdf = self.convert_text_to_gpkg()
-            self.create_line_layer(point_gdf)
-            self.create_overlapping_buffers(point_gdf)
-            
-            self.clip_polygons()
+        self.download_hurricane_data()    
+        
+        # Parse points once and pass the Dataframe down the chain
+        point_gdf = self.convert_text_to_gpkg()
+        self.create_line_layer(point_gdf)
+        self.create_overlapping_buffers(point_gdf)
+        
+        self.clip_polygons()
             
         self.polygons_to_raster()
 
@@ -847,14 +852,16 @@ class CreateHurricaneLayerEngine(Engine):
             output_folder=self.cumulative_raster_path,
             value="cumulative_windspeed")
 
-        print("Averaging rasters for defined year ranges...")
+        self.logger.info("Averaging rasters for defined year ranges...")
         for start_year, end_year in self.year_ranges:
-            self.average_rasters(
-                input_folder=self.count_raster_path,
-                start_year=start_year,
-                end_year=end_year,
-                output_name=f"hurr_count"
-            )
+            
+            # COMMENTED OUT: We are skipping hurr_count per request
+            # self.average_rasters(
+            #     input_folder=self.count_raster_path,
+            #     start_year=start_year,
+            #     end_year=end_year,
+            #     output_name=f"hurr_count"
+            # )
 
             self.average_rasters(
                 input_folder=self.cumulative_raster_path,
@@ -863,7 +870,7 @@ class CreateHurricaneLayerEngine(Engine):
                 output_name=f"hurr_strength"
             )
         
-        print("Hurricane Layer Engine processing complete.")
+        self.logger.info("Hurricane Layer Engine processing complete.")
 
     def save_raster(self, data, path_obj, height, width, transform, crs) -> None:
         """Save the raster data to a file safely using a local temp file."""

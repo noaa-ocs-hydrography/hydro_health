@@ -19,7 +19,6 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
-  COAST_BOUNDARY_PATH: ER_3/masks/50m_isobath_polygon.gpkg
   MASKS_DIR: ER_3/masks
   MASK_PRED_PATH: ER_3/masks/prediction_mask_ER_3.tif
   MASK_TRAINING_PATH: ER_3/masks/training_mask_ER_3.tif
@@ -35,7 +34,13 @@ MODEL:
   PREDICTION_SUB_GRIDS: ER_3/model_subgrids/prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
-  UNCOMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled
+  TILED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled
+  TILED_LIDAR_PROC: ER_3/model_variables/Prediction/pre_processed/tiled_processed
+PREPROCESSED:
+  BLUETOPO: ER_3/model_variables/Prediction/pre_processed/BlueTopo
+  HURRICANE: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
+  SEDIMENT: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
+  TSM: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters/
 S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
@@ -48,8 +53,6 @@ SHARED:
   MASTER_GRIDS: Master_Grids.gpkg
   TILES: BlueTopo_Tile_Scheme_20260505_132642
   STATES: USA_Census_States_200km_Overlap
-  ECOREGIONS_50M: EcoRegions_50m
-  ECOREGIONS: EcoRegions
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles

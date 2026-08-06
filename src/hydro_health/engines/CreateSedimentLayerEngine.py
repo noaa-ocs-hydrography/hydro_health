@@ -143,7 +143,14 @@ class CreateSedimentLayerEngine(Engine):
         # Apply Enhanced_EcoRegions mask to nullify non-valid areas
         rasterized[valid_area_mask == 0] = nodata_val
 
-        filename = f"{field_name}_raster_{resolution}m.tif"
+        if field_name == 'sed_size':
+            filename = "grain_size_layer.tif"
+        elif field_name == 'sed_type':
+            filename = "prim_sed_layer.tif"
+        elif field_name == 'sand_mud_mask':
+            filename = "sand_mud_mask.tif"
+        else:
+            filename = f"{field_name}_raster_{resolution}m.tif"
 
         with tempfile.NamedTemporaryFile(suffix=".tif", delete=False) as tmp:
             tmp_path = tmp.name
