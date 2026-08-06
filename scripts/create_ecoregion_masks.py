@@ -25,10 +25,10 @@ def get_transformation():
 
 
 def build_prediction_masks():
-    # Project Enhanced_EcoRegions to UTM
+    # Project EcoRegions_50m to UTM
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(gpkg)
-    ecoregions = gpkg_ds.GetLayerByName('Enhanced_EcoRegions')
+    ecoregions_50m = gpkg_ds.GetLayerByName('EcoRegions_50m')
     in_memory_driver = ogr.GetDriverByName('Memory')
     # in_memory_driver = ogr.GetDriverByName('ESRI Shapefile')
     
@@ -37,14 +37,14 @@ def build_prediction_masks():
     output_ds = in_memory_driver.CreateDataSource(str(OUTPUTS / 'output_ecoregions.shp'))
     output_layer = output_ds.CreateLayer(f'ecoregions', geom_type=ogr.wkbPolygon, srs=output_srs)
 
-    input_layer_definition = ecoregions.GetLayerDefn()
+    input_layer_definition = ecoregions_50m.GetLayerDefn()
     for i in range(input_layer_definition.GetFieldCount()):
         fieldDefn = input_layer_definition.GetFieldDefn(i)
         output_layer.CreateField(fieldDefn)
 
     output_layer_definition = output_layer.GetLayerDefn()
-    ecoregions.ResetReading()
-    for feature in ecoregions:
+    ecoregions_50m.ResetReading()
+    for feature in ecoregions_50m:
         geom = feature.GetGeometryRef()
         geom.Transform(get_transformation())
         output_feature = ogr.Feature(output_layer_definition)

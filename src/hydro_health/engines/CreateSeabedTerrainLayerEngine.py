@@ -43,7 +43,8 @@ import dask
 import dask.array as da
 from dask.distributed import Client, get_client, as_completed, LocalCluster
 from dask import delayed, compute
-from scipy.ndimage import binary_erosion, uniform_filter, convolve
+from scipy.ndimage import binary_erosion, uniform_filter, binary_fill_holes
+from scipy.signal import fftconvolve
 
 # ==============================================================================
 #  LOGGING CONFIGURATION
@@ -144,6 +145,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         self.wbt = WhiteboxTools()
         self.wbt.verbose = False
         self.wbt.set_compress_rasters(True)
+        # [CPU FIX]: Limit WhiteboxTools child threads to prevent CPU oversubscription stalls
+        self.wbt.max_procs = 2 
 
         self.static_vars = [
             "grain_size_layer.tif", "prim_sed_layer.tif", "survey_end_date.tif",
@@ -192,6 +195,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         self.wbt = WhiteboxTools()
         self.wbt.verbose = False
         self.wbt.set_compress_rasters(True)
+        self.wbt.max_procs = 2  # [CPU FIX]
 
 
     def _safe_compute(self, tasks: list, stage_name: str):
@@ -202,8 +206,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         results = []
         try:
             client = get_client()
-            logger.info(f"Submitting {len(tasks)} tasks to distributed client for {stage_name}...")
-            futures = client.compute(tasks)
+            logger.info(f"Submitting {len(tasks)} tasks to distributed client for {stage_name} (Retries disabled)...")
+            futures = client.compute(tasks, retries=0)
             for future in as_completed(futures):
                 try:
                     res = future.result()
@@ -211,7 +215,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     if res:
                         logger.info(res)
                 except Exception as e:
-                    logger.error(f"❌ {stage_name} task failed after all worker retries (Likely OOM or Segfault): {e}")
+                    logger.error(f"❌ {stage_name} task failed (Likely OOM, Segfault, or internal error): {e}")
         except ValueError:
             # Fallback if no distributed client is active
             logger.info(f"Computing {len(tasks)} tasks using local scheduler for {stage_name}...")
@@ -328,8 +332,20 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
     def calculate_bpi(self, bathy_array, cell_size, inner_radius, outer_radius) -> np.ndarray:
         """Calculates the Bathymetric Position Index chunked purely in Dask to prevent massive mem allocation."""
+        if cell_size <= 0:
+            raise ValueError(f"Invalid cell_size ({cell_size}). Cannot calculate BPI.")
+            
         inner_cells = int(round(inner_radius / cell_size))
         outer_cells = int(round(outer_radius / cell_size))
+        
+        # [MEMORY FIX 5]: Guard against corrupted cell sizes (e.g., degrees instead of meters) 
+        # which cause outer_cells to explode and attempt multi-terabyte allocations.
+        if outer_cells > 2000:
+            raise ValueError(
+                f"Calculated outer_cells ({outer_cells}) is extraordinarily large (cell_size: {cell_size}). "
+                f"This file is likely in geographic coordinates (degrees) instead of projected (meters), "
+                f"or has corrupted metadata. Skipping to prevent memory allocation crash."
+            )
         
         y, x = np.ogrid[-outer_cells:outer_cells + 1, -outer_cells:outer_cells + 1]
         mask = x**2 + y**2 <= outer_cells**2
@@ -343,7 +359,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         d_bathy_zeroed = da.where(da.isnan(d_bathy), 0.0, d_bathy)
         
         def _conv(block):
-            return convolve(block, kernel, mode='mirror')
+            # [CPU/MEMORY FIX 6]: Use FFT-based convolution instead of scipy.ndimage.convolve. 
+            # Spatial convolution is O(N^2 * K^2) and causes hard C-level segfaults or infinite hangs 
+            # on kernels larger than ~100x100. fftconvolve is O(N log N) and perfectly stable.
+            return fftconvolve(block, kernel, mode='same').astype(np.float32)
             
         sum_array = d_bathy_zeroed.map_overlap(_conv, depth=outer_cells, boundary='reflect')
         count_array = d_valid.map_overlap(_conv, depth=outer_cells, boundary='reflect')
@@ -457,13 +476,13 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         """Sets up directory paths dynamically based on configuration and environment."""
         filled_dir = get_config_item('TERRAIN', 'FILLED_DIR')
         combined_dir = get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR')
-        uncombined_dir = get_config_item('MODEL', 'TILED_LIDAR_DIR')
+        tiled_processed_dir = get_config_item('MODEL', 'TILED_LIDAR_PROC')
         processed_dir = get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')
 
         if get_environment() == 'remote':
             self.filled_dir = str(UPath(filled_dir))
             self.combined = str(UPath(combined_dir))
-            self.uncombined_dir = str(UPath(uncombined_dir))
+            self.tiled_processed_dir = str(UPath(tiled_processed_dir))
             self.processed_dir = str(UPath(processed_dir))
 
         elif get_environment() == 'aws':
@@ -471,7 +490,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             base_path = UPath(f"s3://{bucket}")
             self.filled_dir = str(base_path / filled_dir.strip('/'))
             self.combined = str(base_path / combined_dir.strip('/'))
-            self.uncombined_dir = str(base_path / uncombined_dir.strip('/'))
+            self.tiled_processed_dir = str(base_path / tiled_processed_dir.strip('/'))
             self.processed_dir = str(base_path / processed_dir.strip('/'))
 
 
@@ -526,8 +545,20 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 logger.info(f"    Sampling from: {os.path.basename(str(f))}")    
                 try:
                     with rasterio.open(str(f)) as src:
+                        # --- PROJECTION / CRS VALIDATION ---
+                        crs = src.crs
+                        epsg_code = crs.to_epsg() if crs else None
+                        
+                        if epsg_code != 32617:
+                            logger.warning(f"    - Skipping sample {os.path.basename(str(f))}: Invalid CRS (Found EPSG:{epsg_code}, expected 32617).")
+                            continue
+                        # -----------------------------------
+
                         bathy_array = src.read(1)
-                        bathy_array[bathy_array == src.nodata] = np.nan
+                        # Check if nodata is float NaN to safely filter
+                        if src.nodata is not None and not (isinstance(src.nodata, (float, np.floating)) and np.isnan(src.nodata)):
+                            bathy_array[bathy_array == src.nodata] = np.nan
+                            
                         cell_size = src.res[0]
                         
                         valid_pixels = np.argwhere(~np.isnan(bathy_array))
@@ -579,24 +610,47 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         
         da = ds.isel(band=0).astype("float32")
         
-        # Track where original valid data was >= 0 (e.g. land/surface elevations)
-        # We exclude nodata values in case nodata is a positive number (like 9999 or 32767)
-        positive_mask = (da >= 0)
+        # --- MASK 1: LAND/SURFACE MASK ---
+        # The user requested to explicitly ensure cells > 0 revert to nodata later.
+        land_mask = (da > 0)
         if nodata is not None:
-            positive_mask = positive_mask & (da != nodata)
+            if isinstance(nodata, (float, np.floating)) and np.isnan(nodata):
+                land_mask = land_mask & da.notnull()
+            else:
+                land_mask = land_mask & (da != nodata)
             
-        # Mask out standard nodata AND positive values so they don't positively skew the gap fill averages
+        # Convert official nodata AND exact 0.0 values to NaN so they are recognized as gaps.
         if nodata is not None:
-            da = da.where((da != nodata) & (da < 0))
+            if isinstance(nodata, (float, np.floating)) and np.isnan(nodata):
+                da = da.where(da.notnull() & (da != 0.0))
+            else:
+                da = da.where((da != nodata) & (da != 0.0))
         else:
+            da = da.where(da != 0.0)
+            
+        # Check if there is any valid data left to process before continuing
+        if not da.notnull().any().compute().item():
+            logger.info(f"Skipped gap fill and export for {os.path.basename(str(input_file))}: Contains no valid data.")
+            return
+        
+        # --- MASK 2: STRICT INTERIOR BOUNDS ---
+        # Find the exact footprint of the survey by filling holes in the valid data mask.
+        # This prevents the focal filter from bleeding outwards into the exterior open ocean.
+        logger.info("Computing survey footprint to prevent outward bleeding...")
+        valid_mask_mem = da.notnull().compute(scheduler='single-threaded').values
+        allowed_footprint = binary_fill_holes(valid_mask_mem)
+        allowed_da = xr.DataArray(allowed_footprint, coords=da.coords, dims=da.dims)
+        
+        nan_mask = ~valid_mask_mem
+        # Only run the fill loop if there are interior gaps within the allowed footprint
+        interior_gaps_exist = (nan_mask & allowed_footprint).any()
+        
+        if not interior_gaps_exist:
+            logger.info(f"No interior gaps found in {os.path.basename(str(input_file))}. Skipping fill process but applying < 0 nodata mask.")
+            
+            # Post-fill (or skip-fill) step: mask out originally land/positive regions
+            da = da.where(~land_mask)
             da = da.where(da < 0)
-        
-        logger.info("Checking for interior gaps...")
-        
-        nan_mask = da.isnull().compute(scheduler='single-threaded').values
-        
-        if not binary_erosion(nan_mask, structure=np.ones((3,3))).any():
-            logger.info(f"No interior gaps found in {os.path.basename(str(input_file))}. Skipping fill process but applying >= 0 nodata mask.")
             
             if nodata is not None:
                 da = da.fillna(nodata)
@@ -611,13 +665,14 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             logger.info(f"✅ Masked and saved (no fill needed) for: {os.path.basename(str(output_file))}")
             return
 
+        logger.info("Iteratively filling interior gaps...")
         for i in range(max_iters):
             da_prev = da
             with dask.config.set(scheduler='single-threaded'):
                 da = xr.apply_ufunc(
                     self.focal_fill_block,
                     da,
-                    kwargs={"w": 3},
+                    kwargs={"w": 5},
                     input_core_dims=[["y", "x"]],
                     output_core_dims=[["y", "x"]],
                     dask="parallelized",
@@ -626,8 +681,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 )
             da = xr.where(np.isnan(da_prev), da, da_prev)
 
-        # Re-mask the originally positive regions to prevent gap-filled bathy data from bleeding into land boundaries
-        da = da.where(~positive_mask)
+        # Restrict the filled data strictly to the original interior footprint (undo outward bleeding)
+        da = da.where(allowed_da)
+
+        # Re-apply the land mask to ensure cells originally > 0, or filled > 0, go to nodata
+        da = da.where(~land_mask)
+        da = da.where(da < 0)
 
         if nodata is not None:
             da = da.fillna(nodata)
@@ -665,21 +724,29 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         out_dir_path = UPath(output_dir)
         out_dir_path.mkdir(parents=True, exist_ok=True)
 
-        out_slope_deg = self._join_paths(output_dir, base_name + "_slope_deg.tif")
-        out_gradmag   = self._join_paths(output_dir, base_name + "_gradmag.tif") 
-        out_flowdir   = self._join_paths(output_dir, base_name + "_flowdir.tif") 
-        out_prof      = self._join_paths(output_dir, base_name + "_curv_profile.tif")
-        out_plan      = self._join_paths(output_dir, base_name + "_curv_plan.tif")
-        out_total     = self._join_paths(output_dir, base_name + "_curv_total.tif")
-        out_tci       = self._join_paths(output_dir, base_name + "_tci.tif")
-        out_flowacc   = self._join_paths(output_dir, base_name + "_flowacc.tif")
-        out_shear     = self._join_paths(output_dir, base_name + "_shearproxy.tif")
+        def resolve_out_path(suffix):
+            """Checks alternative directories so we don't recreate existing products (like BlueTopo slope)."""
+            for alt_dir in [self.processed_dir, main_output_dir]:
+                alt_path = self._join_paths(alt_dir, base_name + suffix)
+                if not self.overwrite and self._exists(alt_path):
+                    return alt_path
+            return self._join_paths(output_dir, base_name + suffix)
 
-        out_rug = self._join_paths(output_dir, base_name + "_rugosity_tri.tif")
-        out_slope = self._join_paths(output_dir, base_name + "_slope.tif")
-        out_fine = self._join_paths(output_dir, base_name + "_bpi_fine.tif")
-        out_broad = self._join_paths(output_dir, base_name + "_bpi_broad.tif")
-        out_class = self._join_paths(output_dir, base_name + "_terrain_classification.tif")
+        out_slope_deg = resolve_out_path("_slope_deg.tif")
+        out_gradmag   = resolve_out_path("_gradmag.tif") 
+        out_flowdir   = resolve_out_path("_flowdir.tif") 
+        out_prof      = resolve_out_path("_curv_profile.tif")
+        out_plan      = resolve_out_path("_curv_plan.tif")
+        out_total     = resolve_out_path("_curv_total.tif")
+        out_tci       = resolve_out_path("_tci.tif")
+        out_flowacc   = resolve_out_path("_flowacc.tif")
+        out_shear     = resolve_out_path("_shearproxy.tif")
+
+        out_rug = resolve_out_path("_rugosity_tri.tif")
+        out_slope = resolve_out_path("_slope.tif")
+        out_fine = resolve_out_path("_bpi_fine.tif")
+        out_broad = resolve_out_path("_bpi_broad.tif")
+        out_class = resolve_out_path("_terrain_classification.tif")
         
         try:
             with tempfile.TemporaryDirectory(dir=str(self.local_tmp_dir)) as tmpdir:
@@ -717,15 +784,26 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                 missing_numpy = any(missing_numpy_dict.values())
 
                 needs_processing = len(missing_wbt) > 0 or missing_tci or missing_shear or missing_numpy
-                if not needs_processing:
-                    logger.info(f"Skipped (All exist): {base_name}")
-                    return f"Skipped (All exist): {base_name}"
 
                 logger.info(f"{progress_str}Processing terrain classification for: {base_name}")
 
                 with UPath(bathy_path).open('rb') as f_in:
                     with open(local_bathy, 'wb') as f_out:
                         shutil.copyfileobj(f_in, f_out)
+
+                # --- PROJECTION / CRS VALIDATION ---
+                with rasterio.open(local_bathy) as src:
+                    crs = src.crs
+                    epsg_code = crs.to_epsg() if crs else None
+                    
+                    if epsg_code != 32617:
+                        err_msg = (
+                            f"Invalid CRS. Terrain products require EPSG:32617. "
+                            f"Found EPSG:{epsg_code}"
+                        )
+                        logger.warning(f"⚠️ Skipping {base_name}: {err_msg}")
+                        return f"Skipped (Invalid CRS EPSG:{epsg_code}): {base_name}"
+                # -----------------------------------
 
                 if missing_wbt:
                     logger.info(f"[{base_name}] {progress_str}Generating {len(missing_wbt)} required WBT layer(s)...")
@@ -736,6 +814,12 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                             with open(local_out, 'rb') as f_in, UPath(out_s3).open('wb') as f_out:
                                 shutil.copyfileobj(f_in, f_out)
                             logger.info(f"{progress_str}Successfully wrote WBT layer file to: {out_s3}")
+                            
+                            # DISK CLEANUP: Immediately remove if not needed for shear calculation
+                            if local_out not in [local_slope, local_plan]:
+                                try: os.remove(local_out)
+                                except OSError: pass
+                                
                     except Exception as e:
                         logger.error(f"❌ WBT Error on {base_name} for {out_s3}: {e}")
 
@@ -755,6 +839,10 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         with open(local_tci, 'rb') as f_in, UPath(out_tci).open('wb') as f_out:
                             shutil.copyfileobj(f_in, f_out)
                         logger.info(f"{progress_str}Successfully wrote TCI layer file to: {out_tci}")
+                        
+                        # DISK CLEANUP: Immediately remove local_tci
+                        try: os.remove(local_tci)
+                        except OSError: pass
 
                 if missing_shear:
                     logger.info(f"[{base_name}] {progress_str}Generating Shear Proxy layer...")
@@ -774,17 +862,38 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
                         if slope_src and plan_src:
                             with rasterio.open(slope_src) as s, rasterio.open(plan_src) as p:
-                                slope_arr = s.read(1)
-                                plan_arr = p.read(1)
+                                slope_arr = s.read(1).astype(np.float32)
+                                plan_arr = p.read(1).astype(np.float32)
                                 meta = s.meta.copy()
                             
-                            shear = slope_arr * np.abs(plan_arr)
-                            meta.update(compress='LZW')
-                            self._save_numpy_to_raster(shear.astype("float32"), out_shear, meta, log_prefix=progress_str)
+                            # [NODATA FIX]: Extract the raw nodata values
+                            s_nodata = s.nodata if s.nodata is not None else -9999.0
+                            p_nodata = p.nodata if p.nodata is not None else -9999.0
+
+                            # Mask out nodata pixels so we don't multiply -32768 by |-32768|
+                            valid_mask = ~np.isnan(slope_arr) & ~np.isnan(plan_arr)
+                            if not (isinstance(s_nodata, (float, np.floating)) and np.isnan(s_nodata)):
+                                valid_mask = valid_mask & (slope_arr != s_nodata)
+                            if not (isinstance(p_nodata, (float, np.floating)) and np.isnan(p_nodata)):
+                                valid_mask = valid_mask & (plan_arr != p_nodata)
+                            
+                            shear = np.full_like(slope_arr, s_nodata, dtype=np.float32)
+                            
+                            # Only apply the calculation to the valid surface area
+                            shear[valid_mask] = slope_arr[valid_mask] * np.abs(plan_arr[valid_mask])
+                            
+                            meta.update(compress='LZW', nodata=s_nodata, dtype='float32')
+                            self._save_numpy_to_raster(shear, out_shear, meta, log_prefix=progress_str)
                         else:
                             logger.warning(f"⚠️ Skipping Shear Proxy for {base_name}: Inputs missing (could not resolve local copies)")
                     except Exception as e:
                         logger.error(f"❌ Shear Proxy Calc Error {base_name}: {e}")
+                    finally:
+                        # DISK CLEANUP: Delete intermediate slope and plan temp files once shear finishes
+                        for tmp_f in [local_slope, local_plan]:
+                            if tmp_f and os.path.exists(tmp_f):
+                                try: os.remove(tmp_f)
+                                except OSError: pass
 
                 if missing_numpy:
                     missing_log = [k for k, v in missing_numpy_dict.items() if v]
@@ -827,7 +936,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         
                         bathy_array = np.memmap(os.path.join(tmpdir, "bathy.dat"), dtype='float32', mode='w+', shape=shape_2d)
                         src.read(1, out=bathy_array)
-                        if nodata_val is not None:
+                        if nodata_val is not None and not (isinstance(nodata_val, (float, np.floating)) and np.isnan(nodata_val)):
                             bathy_array[bathy_array == nodata_val] = np.nan
 
                     # Process 1: Rugosity
@@ -853,7 +962,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                             with rasterio.open(out_slope) as src_s:
                                 slope = np.memmap(os.path.join(tmpdir, "slope.dat"), dtype='float32', mode='w+', shape=shape_2d)
                                 src_s.read(1, out=slope)
-                                if src_s.nodata is not None:
+                                if src_s.nodata is not None and not (isinstance(src_s.nodata, (float, np.floating)) and np.isnan(src_s.nodata)):
                                     slope[slope == src_s.nodata] = np.nan
                     gc.collect()
 
@@ -871,7 +980,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         if missing_numpy_dict["_terrain_classification.tif"]:
                             with rasterio.open(out_fine) as src_f:
                                 bpi_fine_raw = src_f.read(1)
-                                if src_f.nodata is not None:
+                                if src_f.nodata is not None and not (isinstance(src_f.nodata, (float, np.floating)) and np.isnan(src_f.nodata)):
                                     bpi_fine_raw[bpi_fine_raw == src_f.nodata] = np.nan
                             bpi_fine_mem = np.memmap(os.path.join(tmpdir, "fine.dat"), dtype='float32', mode='w+', shape=shape_2d)
                             bpi_fine_mem[:] = bpi_fine_raw[:]
@@ -892,7 +1001,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                         if missing_numpy_dict["_terrain_classification.tif"]:
                             with rasterio.open(out_broad) as src_b:
                                 bpi_broad_raw = src_b.read(1)
-                                if src_b.nodata is not None:
+                                if src_b.nodata is not None and not (isinstance(src_b.nodata, (float, np.floating)) and np.isnan(src_b.nodata)):
                                     bpi_broad_raw[bpi_broad_raw == src_b.nodata] = np.nan
                             bpi_broad_mem = np.memmap(os.path.join(tmpdir, "broad.dat"), dtype='float32', mode='w+', shape=shape_2d)
                             bpi_broad_mem[:] = bpi_broad_raw[:]
@@ -910,7 +1019,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                     # Process 5: Terrain Classification
                     if missing_numpy_dict["_terrain_classification.tif"]:
                         classified_array = np.memmap(os.path.join(tmpdir, "class.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                        classified_array[:] = 0.0
+                        # [NODATA FIX]: Initialize with np.nan to ensure 0-values dont leak into invalid mask boundaries
+                        classified_array[:] = np.nan 
                         
                         chunk_s = 2048
                         for i in range(0, shape_2d[0], chunk_s):
@@ -920,13 +1030,17 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
                                 f_chunk = bpi_fine_mem[i:i+chunk_s, j:j+chunk_s]
                                 c_chunk = classified_array[i:i+chunk_s, j:j+chunk_s]
                                 
+                                # Make sure to apply rules only to valid (non-NaN) cells
+                                valid_mask = ~np.isnan(s_chunk) & ~np.isnan(b_chunk) & ~np.isnan(f_chunk)
+                                
                                 for index, rule in unique_dictionary.iterrows():
                                     matches = (
                                         (b_chunk >= rule['BroadBPI_Lower']) & (b_chunk <= rule['BroadBPI_Upper']) &
                                         (f_chunk >= rule['FineBPI_Lower']) & (f_chunk <= rule['FineBPI_Upper']) &
                                         (s_chunk >= rule['Slope_Lower']) & (s_chunk <= rule['Slope_Upper'])
                                     )
-                                    c_chunk[matches & (c_chunk == 0)] = rule['Class_ID']
+                                    # Target matches on valid cells that have not been classified yet (are NaN)
+                                    c_chunk[valid_mask & matches & np.isnan(c_chunk)] = rule['Class_ID']
                         
                         profile.update(dtype=classified_array.dtype.name, nodata=np.nan, count=1, compress='LZW')
                         self._save_numpy_to_raster(classified_array, out_class, profile, log_prefix=progress_str)
@@ -1027,9 +1141,14 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             # Replaced masked=True with lazy manual masking, as masked=True creates numpy.ma which bloats memory.
             da = rioxarray.open_rasterio(str(p), chunks={"x": 1024, "y": 1024}, lock=False).isel(band=0)
             
-            # Apply nodata mask lazily
+            # Apply nodata mask lazily AND treat exactly 0.0 as unofficial nodata
             if da.rio.nodata is not None:
-                da = da.where(da != da.rio.nodata)
+                if isinstance(da.rio.nodata, (float, np.floating)) and np.isnan(da.rio.nodata):
+                    da = da.where(da.notnull() & (da != 0.0))
+                else:
+                    da = da.where((da != da.rio.nodata) & (da != 0.0))
+            else:
+                da = da.where(da != 0.0)
             das.append(da)
         
         if not das:
@@ -1046,13 +1165,60 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         combined = xr.concat(aligned_das, dim="merge_dim")
         
         # skipna=True automatically ignores the NaN values we set earlier
-        averaged = combined.mean(dim="merge_dim", keep_attrs=True, skipna=True)
+        # Cast back to float32 to prevent massive float64 bounds in GIS software
+        averaged = combined.mean(dim="merge_dim", keep_attrs=True, skipna=True).astype("float32")
         
         if master.rio.crs:
             averaged.rio.write_crs(master.rio.crs, inplace=True)
             
         # The file will remain lazy and will be computed safely in chunk streams when `_save_raster_da` writes it.
         return averaged
+
+
+    def cleanup_orphaned_terrain_products(self, main_output_dir: str) -> None:
+        """Temporary function to clean up terrain products that no longer have a matching combined bathy file."""
+        logger.info("\n--- Temporary Cleanup: Orphaned Terrain Products ---")
+        output_dir = self._join_paths(main_output_dir, 'BTM_outputs')
+        
+        combined_dir_path = UPath(self.combined)
+        try:
+            valid_combined_files = [f.name for f in combined_dir_path.iterdir() if f.suffix.lower() in {'.tif', '.tiff'}]
+            valid_bases = {os.path.splitext(f)[0] for f in valid_combined_files}
+        except Exception as e:
+            logger.warning(f"Could not read combined directory {self.combined} for cleanup: {e}")
+            return
+
+        btm_dir_path = UPath(output_dir)
+        try:
+            terrain_products = [f for f in btm_dir_path.iterdir() if f.is_file() and f.suffix.lower() in {'.tif', '.tiff'}]
+        except Exception:
+            logger.info("No BTM_outputs directory found yet. Skipping cleanup.")
+            return
+
+        deleted_count = 0
+        for prod in terrain_products:
+            prod_name = prod.name
+            
+            # Skip bluetopo files
+            if 'bluetopo' in prod_name.lower():
+                continue
+                
+            # Check if product belongs to an existing combined file
+            is_orphaned = True
+            for valid_base in valid_bases:
+                if prod_name.startswith(valid_base):
+                    is_orphaned = False
+                    break
+                    
+            if is_orphaned:
+                logger.info(f"Deleting orphaned terrain product: {prod_name}")
+                try:
+                    prod.unlink()
+                    deleted_count += 1
+                except Exception as e:
+                    logger.error(f"Failed to delete {prod_name}: {e}")
+                    
+        logger.info(f"Cleanup complete. Removed {deleted_count} orphaned files.\n")
 
 
     def process(self) -> None:
@@ -1076,7 +1242,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         keywords_to_exclude = ['tsm', 'hurr', 'sed', 'bluetopo']
         
         # Look recursively through all subdirectories for tiled lidar inputs
-        input_files = self._safe_rglob(self.uncombined_dir, pattern="*.tif*") 
+        input_files = self._safe_rglob(self.tiled_processed_dir, pattern="*.tif*") 
 
         valid_input_files = [
             f for f in input_files
@@ -1112,7 +1278,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
             tasks = []
             for file in lidar_data_paths:
-                task = dask.delayed(_run_gap_fill_task)(str(file), str(self.filled_dir), 3, self.overwrite, self.pilot_mode)
+                task = dask.delayed(_run_gap_fill_task)(str(file), str(self.filled_dir), 15, self.overwrite, self.pilot_mode)
                 tasks.append(task)
             
             self._safe_compute(tasks, "Gap Fill")
@@ -1126,8 +1292,8 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         logger.info("Gap fill process complete. Starting bathymetry combination...")
         
         # --- PHASE 2: COMBINATION & TERRAIN CLUSTER ---
-        # 8 workers, 3.5GB each
-        cluster_terrain = LocalCluster(n_workers=8, memory_limit='3.5GiB', threads_per_worker=1, dashboard_address=':0')
+        # 4 workers, 7.5GB each (Reduced from 8 to prevent WBT context-switching/IOPS exhaustion)
+        cluster_terrain = LocalCluster(n_workers=4, memory_limit='7.5GiB', threads_per_worker=1, dashboard_address=':0')
         client_terrain = Client(cluster_terrain)
         
         self.run_bathy_combination()
@@ -1154,6 +1320,9 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         best_radii = {'fine': (8, 32), 'broad': (80, 240)}
         self.create_regionally_consistent_dictionaries(bathy_files_to_process, best_radii, dictionary_output_dir)
 
+        # Run temporary cleanup function
+        self.cleanup_orphaned_terrain_products(main_output_dir)
+
         logger.info("\n--- PHASE 2: Pre-flight Check for Terrain Products ---")
         
         total_missing_wbt = 0
@@ -1163,7 +1332,11 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
         total_skipped = 0
 
         output_dir = self._join_paths(main_output_dir, 'BTM_outputs')
+        
+        # Compile existing files from all potential output directories so we correctly skip dependencies
         existing_files = {UPath(f).name for f in self._safe_ls(output_dir)}
+        existing_files.update({UPath(f).name for f in self._safe_ls(self.processed_dir)})
+        existing_files.update({UPath(f).name for f in self._safe_ls(main_output_dir)})
 
         files_to_process = []
 
@@ -1275,9 +1448,16 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         try:
             da_avg = self.load_and_average(paths)
+            
+            # Check if there is any valid data before proceeding with the save
+            if not da_avg.notnull().any().compute().item():
+                logger.info(f"Skipped saving {out_path.name}: Contains no valid data.")
+                return f"Skipped (No valid data): {out_path.name}"
+                
             da_avg.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
 
-            da_avg = da_avg.fillna(-9999.0)
+            # Fill nodata and enforce float32
+            da_avg = da_avg.fillna(-9999.0).astype("float32")
             da_avg.rio.write_nodata(-9999.0, inplace=True)
 
             self._save_raster_da(
@@ -1310,7 +1490,14 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             if da_t0.rio.bounds() != da_t1.rio.bounds():
                  da_t1 = da_t1.rio.reproject_match(da_t0)
 
-            delta = da_t1 - da_t0
+            # Calculate difference and enforce float32
+            delta = (da_t1 - da_t0).astype("float32")
+            
+            # Check if there is any valid data before proceeding with the save
+            if not delta.notnull().any().compute().item():
+                logger.info(f"Skipped saving {out_path.name}: Contains no valid data.")
+                return f"Skipped (No valid data): {out_path.name}"
+                
             delta.rio.write_crs(da_t0.rio.crs, inplace=True)
             delta.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
 
@@ -1368,4 +1555,4 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             input_file=input_file,
             output_file=output_file,
             max_iters=max_iters
-        ) 
+        )

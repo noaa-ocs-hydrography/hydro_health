@@ -144,7 +144,8 @@ class ModelDataPreProcessor(Engine):
         self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
         self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=self.pilot_mode)}")
         self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', pilot_mode=self.pilot_mode)}")
-        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_DIR', pilot_mode=self.pilot_mode)}")
+        
+        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_PROC', pilot_mode=self.pilot_mode)}")
         
         # Dynamically retrieve the filled terrain directory from config to ensure accurate exclusion
         try:
@@ -162,6 +163,7 @@ class ModelDataPreProcessor(Engine):
         self.preprocessed_subdirs = {
             'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', pilot_mode=self.pilot_mode)}"),
             'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', pilot_mode=self.pilot_mode)}"),
+            # Read from the original input directory
             'lidar': UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_DIR', pilot_mode=self.pilot_mode)}"),
             'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', pilot_mode=self.pilot_mode)}"),
             'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', pilot_mode=self.pilot_mode)}")
@@ -189,7 +191,7 @@ class ModelDataPreProcessor(Engine):
         # NOTE: Phase 1 is for Raster operations which are block-based and use less working memory
         logger.info("Initializing Phase 1 Cluster: Heavy Raster Processing (8 workers, standard memory)")
         cluster = LocalCluster(
-            n_workers=3,            
+            n_workers=4,            
             threads_per_worker=1,   
             memory_limit='7GB',
             env=GDAL_ENV_VARS,
@@ -2066,4 +2068,4 @@ class ModelDataPreProcessor(Engine):
             intersecting_sub_grids.to_file(str(output_upath), driver="GPKG") 
 
         logger.info(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}")
-        return 
+        return

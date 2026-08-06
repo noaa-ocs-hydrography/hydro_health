@@ -35,6 +35,7 @@ MODEL:
   TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
   TILED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled
+  TILED_LIDAR_PROC: ER_3/model_variables/Prediction/pre_processed/tiled_processed
 PREPROCESSED:
   BLUETOPO: ER_3/model_variables/Prediction/pre_processed/BlueTopo
   HURRICANE: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
