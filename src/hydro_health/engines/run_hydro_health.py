@@ -70,7 +70,7 @@ def run_hydro_health(config_name: str) -> None:
         resolution = config.get('resolution', [8])
 
         # load ecoregions from config for remote run
-        param_lookup['eco_regions'].value = config['ecoregions'] if env in ['remote', 'aws'] else ''
+        param_lookup['eco_regions'].value = config['ecoregions']
         print(f"Running Hydro Health for ecoregions: {param_lookup['eco_regions'].valueAsText}")
         tiles = get_ecoregion_tiles(param_lookup)
         for step in config["steps"]:

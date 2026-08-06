@@ -4,7 +4,7 @@ import tempfile
 import boto3
 import os
 import pathlib
-import os
+import sys
 import rasterio
 import re
 import s3fs
@@ -139,20 +139,16 @@ class BlueTopoS3Engine(Engine):
         field_names = [f.find('Name').text for f in rat_node.findall('FieldDefn')]
 
         table_data = []
-        for row in rows:  # Can sort rows and then use the last index range or no loop
+        for row in rows:
             row_data = {field_names[i]: f_val.text for i, f_val in enumerate(row.findall('F'))}
+
+            start_date_str = row_data.get('survey_date_start')
+            end_date_str = row_data.get('survey_date_end')
+
             data = {
-                "value": float(row_data.get('value')),
-                'start_date': (
-                    datetime.strptime(row_data.get('survey_date_start'), "%Y-%m-%d").date() 
-                    if row_data.get('survey_date_start') != "N/A" 
-                    else None
-                ),
-                "end_date": (
-                    datetime.strptime(row_data.get('survey_date_end'), "%Y-%m-%d").date() 
-                    if row_data.get('survey_date_end') != "N/A" 
-                    else None
-                ),
+                "value": float(row_data.get('value', 0) or 0),
+                'start_date': _parse_survey_date(start_date_str),
+                "end_date": _parse_survey_date(end_date_str),
                 'from_filename': row_data.get('source_survey_id'),
                 'feat_detect': bool(int(row_data.get('significant_features', 0))),
                 'feat_least_depth': bool(int(row_data.get('feature_least_depth', 0))),
@@ -167,14 +163,11 @@ class BlueTopoS3Engine(Engine):
             if data['start_date'] or data['end_date']:
                 table_data.append(data)
 
-        # Add CATZOC necessary columns
         for meta in table_data:
-            # self.write_message(f"dates: {meta['start_date']}, {meta['end_date']}", self.param_lookup['output_directory'].valueAsText)
             ss_score = supersession(meta)
             meta['supersession_score'] = ss_score
             meta['catzoc'] = catzoc(meta)
-            today = date.today()
-            meta['catzoc_decay'] = decay(meta, today)
+            meta['iss'] = ss_score 
 
         attribute_table_df = pd.DataFrame(table_data)
 
@@ -203,7 +196,10 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
-            crs=src.crs,
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            crs=self.target_crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
@@ -224,7 +220,6 @@ class BlueTopoS3Engine(Engine):
             contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
             width, height = src.width, src.height 
-            crs = src.crs
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
         tree = etree.parse(xml_file_path)
@@ -238,13 +233,9 @@ class BlueTopoS3Engine(Engine):
         all_surveys = []
         for row in rows:
             row_dict = {field_names[i]: f_val.text for i, f_val in enumerate(row.findall('F'))}
-            
+
             end_date_str = row_dict.get('survey_date_end')
-            end_date = (
-                datetime.strptime(end_date_str, "%Y-%m-%d").date() 
-                if end_date_str and end_date_str != "N/A" 
-                else date.min
-            )
+            end_date = _parse_survey_date(end_date_str) or date.min
 
             meta = {
                 "end_date": end_date,
@@ -260,23 +251,18 @@ class BlueTopoS3Engine(Engine):
             }
             all_surveys.append(meta)
 
-        measured_surveys = [s for s in all_surveys if not s.get('interpolated')]  # Skip interpolated layers to use actual surveys
+        measured_surveys = [s for s in all_surveys if not s.get('interpolated')]  
         surveys_to_rank = measured_surveys if measured_surveys else all_surveys
         most_recent_survey = max(surveys_to_rank, key=lambda x: x['end_date'])
 
-        today = date.today()
         most_recent_survey['supersession_score'] = supersession(most_recent_survey)
         most_recent_survey['catzoc'] = catzoc(most_recent_survey)
-        most_recent_survey['catzoc_decay'] = decay(most_recent_survey, today)
 
-        # output_folder = self.param_lookup['output_directory'].valueAsText
-        # self.write_message(f"  Raw Score: {most_recent_survey['supersession_score']:.2f}", output_folder)
-        # self.write_message(f"  Decayed Score: {catzoc_decay:.2f}", output_folder)
-        # self.write_message(f"  CATZOC Category: {most_recent_survey['catzoc']}", output_folder)
+        most_recent_survey['iss'] = most_recent_survey['supersession_score']
 
         reclassified_band = np.where(contributor_band_values == nodata, nodata, most_recent_survey['iss']).astype(np.float32)
 
-        survey_date_file_path = tiff_file_path.parents[1] / f'{tiff_file_path.stem}_catzoc_decay_latest.tiff'
+        survey_date_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}_ISS_latest.tiff'
         with rasterio.open(
             survey_date_file_path,
             "w",
@@ -286,15 +272,21 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
-            crs=crs,
+            tiled=True,
+            blockxsize=512,
+            blockysize=512,
+            crs=self.target_crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
 
+            factors = [2, 4, 8, 16]
+            dst.build_overviews(factors, rasterio.enums.Resampling.average)
+            dst.update_tags(ns='rio_overview', resampling='average')
+
     def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a rugosity/roughness raster from the DEM"""
-
         rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
         rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
         gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
@@ -302,6 +294,7 @@ class BlueTopoS3Engine(Engine):
     def create_slope(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a slope raster from the DEM"""
 
+        print("  - Creating slope...")
         slope_name = str(tiff_file_path.stem) + '_slope.tiff'
         slope_file_path = tiff_file_path.parents[0] / slope_name
         gdal.DEMProcessing(str(slope_file_path), str(tiff_file_path), 'slope')
@@ -324,25 +317,25 @@ class BlueTopoS3Engine(Engine):
 
         contributor_band_xml = root.xpath("//PAMRasterBand[Description='Contributor']")
         rows = contributor_band_xml[0].xpath(".//GDALRasterAttributeTable/Row")
+        rat_node = root.find(".//GDALRasterAttributeTable")
+        field_names = [f.find('Name').text for f in rat_node.findall('FieldDefn')]
 
         table_data = []
         for row in rows:
-            fields = row.xpath(".//F")
-            field_values = [field.text for field in fields]
+            row_dict = {field_names[i]: f_val.text for i, f_val in enumerate(row.findall('F'))}
+            end_date_str = row_dict.get('survey_date_end')
 
             data = {
-                "value": float(field_values[0]),
-                "survey_date_end": (
-                    datetime.strptime(field_values[17], "%Y-%m-%d").date() 
-                    if field_values[17] != "N/A" 
-                    else None  
-                )
+                "value": float(row_dict.get('value', 0) or 0),
+                "survey_date_end": _parse_survey_date(end_date_str)
             }
             table_data.append(data)
         attribute_table_df = pd.DataFrame(table_data)
 
-        attribute_table_df['survey_year_end'] = attribute_table_df['survey_date_end'].apply(lambda x: x.year if pd.notna(x) else 0)
-        attribute_table_df['survey_year_end'] = attribute_table_df['survey_year_end'].round(2)
+        # Force parsed years to be rounded and converted into solid clean integers (no fractional floats)
+        attribute_table_df['survey_year_end'] = attribute_table_df['survey_date_end'].apply(
+            lambda x: int(round(x.year)) if pd.notna(x) else 0
+        )
 
         date_mapping = attribute_table_df[['value', 'survey_year_end']].drop_duplicates()
         reclass_dict = {int(row[0]): int(row[1]) for row in date_mapping.to_numpy()}
@@ -369,20 +362,18 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
-            crs=src.crs,
+            crs=self.target_crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str) -> pathlib.Path:
-        """
-        Modified to accept a pathlib.Path object for output_folder 
-        and download to that specific local path.
-        """
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res:  int) -> pathlib.Path|bool:
+        """Unconditionally download the NBS source tile and stage it for full processing."""
 
         nbs_bucket = self.get_bucket()
         output_tile_path = False
+        output_folder = self.param_lookup['output_directory'].valueAsText
 
         msg = f"Tile {tile_id} targeted for full processing. Downloading fresh NBS Source and metadata..."
         self.write_message(msg, output_folder)
@@ -446,7 +437,6 @@ class BlueTopoS3Engine(Engine):
 
     def get_bucket(self) -> boto3.resource:
         """Connect to anonymous OCS S3 Bucket"""
-
         bucket = "noaa-ocs-nationalbathymetry-pds"
         creds = {
             "aws_access_key_id": "",
@@ -464,7 +454,6 @@ class BlueTopoS3Engine(Engine):
             1: '',
             2: '_unc'
         }
-        # temporarily rename file to output singleband with original name
         output_name = str(tiff_file_path.name).replace('_mb', band_name_lookup[band])
         singleband_tile_name = tiff_file_path.parents[0] / output_name
 
@@ -472,8 +461,8 @@ class BlueTopoS3Engine(Engine):
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
-            creationOptions=["COMPRESS:DEFLATE", "TILED:NO"],
-            callback=gdal.TermProgress_nocb
+            outputSRS=self.target_crs,
+            creationOptions=["COMPRESS=DEFLATE"]
         )
 
     def rename_multiband(self, tiff_file_path: pathlib.Path) -> pathlib.Path:
@@ -679,7 +668,7 @@ class BlueTopoS3Engine(Engine):
 
         tiles = list(tile_gdf[tile_col]) if tile_col and tile_col in tile_gdf.columns else []
         record = {'data_source': 'hydro_health', 'user': os.getlogin(), 'tiles_downloaded': len(tiles), 'tile_list': tiles}
-        hibase_logging.send_record(record, table='bluetopo_test')  # TODO update to prod hibase
+        hibase_logging.send_record(record, table='bluetopo_test') 
 
     def set_ground_to_nodata(self, tiff_file_path: pathlib.Path) -> None:
         """Set positive elevation to no data value using windowed block processing."""
