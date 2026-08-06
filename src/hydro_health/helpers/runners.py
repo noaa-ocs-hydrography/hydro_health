@@ -32,23 +32,23 @@ def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict],
     """Entry point for parallel processing of BlueTopo tiles"""
 
     if param_lookup['env'] in ['local', 'remote']:
-        run_bluetopo_tile_engine_local(tiles, param_lookup)
+        run_bluetopo_tile_engine_local(tiles, param_lookup, output_prefix, resolution)
     else:
-        run_bluetopo_tile_engine_s3(tiles, param_lookup)
+        run_bluetopo_tile_engine_s3(tiles, param_lookup, output_prefix, resolution)
 
 
 def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
     engine = BlueTopoEngine(param_lookup)
-    engine.run(tiles)
+    engine.run(tiles, output_prefix, resolution)
 
 
 def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
 
     engine = BlueTopoS3Engine(param_lookup)
-    engine.run(tiles)
+    engine.run(tiles, output_prefix, resolution)
 
 
 def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str) -> None:
