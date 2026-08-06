@@ -36,8 +36,8 @@ def _process_tile(param_inputs: list[list]) -> None:
     if tiff_file_path:
         engine.resample_and_reproject(tiff_file_path, target_res)
         engine.create_survey_end_date_tiff(tiff_file_path)
-        engine.create_catzoc_all(tiff_file_path)
-        engine.create_catzoc_latest(tiff_file_path)
+        engine.create_catzoc_all(tiff_file_path, increased_scale=True)
+        engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
         mb_tiff_file = engine.rename_multiband(tiff_file_path)
         engine.multiband_to_singleband(mb_tiff_file, band=1)
         engine.multiband_to_singleband(mb_tiff_file, band=2)
@@ -56,7 +56,7 @@ class BlueTopoEngine(Engine):
         self.param_lookup = param_lookup
         self.target_crs = "EPSG:6350"
 
-    def create_catzoc_all(self, tiff_file_path: pathlib.Path) -> None:
+    def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """
         Generate a CATZOC score raster of unique values for each survey area
         """
@@ -99,7 +99,8 @@ class BlueTopoEngine(Engine):
                 'horiz_uncert_vari': float(row_data.get('horizontal_uncert_var', 0)),
                 'vert_uncert_fixed': float(row_data.get('vertical_uncert_fixed', 0)),
                 'vert_uncert_vari': float(row_data.get('vertical_uncert_var', 0)),
-                'interpolated': ".interpolated" in row_data.get('source_survey_id', '').lower()
+                'interpolated': ".interpolated" in row_data.get('source_survey_id', '').lower(),
+                'increased_scale': increased_scale
             }
             if data['start_date'] or data['end_date']:
                 table_data.append(data)
@@ -138,7 +139,7 @@ class BlueTopoEngine(Engine):
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def create_catzoc_latest(self, tiff_file_path: pathlib.Path) -> None:
+    def create_catzoc_latest(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate a CATZOC score raster using the most recent survey date"""
 
         with rasterio.open(tiff_file_path) as src:
@@ -177,7 +178,8 @@ class BlueTopoEngine(Engine):
                 "horiz_uncert_vari": float(row_dict.get('horizontal_uncert_var', 0)),
                 "vert_uncert_fixed": float(row_dict.get('vertical_uncert_fixed', 0)),
                 "vert_uncert_vari": float(row_dict.get('vertical_uncert_var', 0)),
-                'interpolated': ".interpolated" in row_dict.get('source_survey_id', '').lower()
+                'interpolated': ".interpolated" in row_dict.get('source_survey_id', '').lower(),
+                'increased_scale': increased_scale
             }
             all_surveys.append(meta)
 

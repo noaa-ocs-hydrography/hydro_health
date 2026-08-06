@@ -1,12 +1,8 @@
 ecoregions:
 - ER_3
-<<<<<<<< HEAD:inputs/run_configs/hydro_health_session_08272025.yaml
-pilot_mode: true
-========
 pilot_mode: false
 # output_prefix: testing
 # resolution: [20, 100]
->>>>>>>> 2bc8014b10b1ec275d7b998ea037aa87641d0fa7:inputs/run_configs/hydro_health_config.yaml
 steps:
 - tool: run_bluetopo_tile_engine
   run: false
@@ -28,9 +24,4 @@ steps:
 - tool: run_sediment_layer_engine
   run: false
 - tool: run_preprocessor_modeldata
-<<<<<<<< HEAD:inputs/run_configs/hydro_health_session_08272025.yaml
   run: true
-runtimes: []
-========
-  run: false
->>>>>>>> 2bc8014b10b1ec275d7b998ea037aa87641d0fa7:inputs/run_configs/hydro_health_config.yaml
