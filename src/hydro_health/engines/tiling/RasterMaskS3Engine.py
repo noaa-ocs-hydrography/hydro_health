@@ -550,7 +550,7 @@ class RasterMaskS3Engine(Engine):
 
         s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        existing_ers = {f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")}
+        existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
         
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
         
