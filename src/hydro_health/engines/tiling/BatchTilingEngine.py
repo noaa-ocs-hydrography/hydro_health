@@ -1,120 +1,49 @@
-"""Class for data acquisition and preprocessing of model data"""
+"""Class engine that turns wide parquet files into batch/long format"""
+
 import os
-import re
-import pathlib
-import warnings
-import tempfile
-import shutil
-import logging 
-import psutil 
 import gc
-import platform
-import ctypes
-from logging.handlers import RotatingFileHandler
-from typing import List, Tuple, Literal
-from pathlib import Path
-
-# Rasterio imports for array masking and vectorization
-import rasterio
-from rasterio.features import shapes, rasterize 
-from rasterio.warp import transform_bounds
-from rasterio.transform import from_origin
-from rasterio.vrt import WarpedVRT
-from rasterio.enums import Resampling
-
-from shapely.geometry import shape, Point, box, Polygon, MultiPolygon, GeometryCollection
-from shapely.ops import unary_union 
-import s3fs
-from scipy.ndimage import convolve, uniform_filter 
-
-# Tell glibc to return freed memory to the OS immediately
-os.environ["MALLOC_TRIM_THRESHOLD_"] = "0"
-
+import re
+import logging
+import pathlib
+import pandas as pd
 import geopandas as gpd
 import numpy as np
-import pandas as pd
+import rasterio
 import dask
-from dask.distributed import Client, LocalCluster, performance_report, as_completed
-from osgeo import gdal
-from upath import UPath 
+import dask.distributed
+import s3fs
+
+from pathlib import Path
+from dask.distributed import as_completed, Client
+from typing import Literal, List, Tuple, Optional
+from upath import UPath
 
 from hydro_health.helpers.tools import get_config_item, get_environment
-from hydro_health.engines.CreateSeabedTerrainLayerEngine import CreateSeabedTerrainLayerEngine
-from hydro_health.engines.Engine import Engine
 
-# Maximizing worker memory usage limits
-dask.config.set({"distributed.worker.memory.terminate": 0.98})
-dask.config.set({"distributed.worker.memory.pause": 0.95})
-dask.config.set({"distributed.worker.memory.spill": 0.92})
-
-# =========================================================================
-# GDAL CONFIGURATION & S3 NETWORK OPTIMIZATIONS
-# =========================================================================
-GDAL_ENV_VARS = {
-    "GDAL_CACHEMAX": "128",                       # Lowered to 128 MB Cache
-    "GDAL_HTTP_MAX_RETRY": "10",                  # Increased to 10 retries for transient S3 errors
-    "GDAL_HTTP_RETRY_DELAY": "5",                 # Delay between retries
-    "AWS_MAX_CONNECTIONS": "16",                  # Reduced to 16 to avoid exhausting S3 connection limits per worker
-    "VSI_CACHE": "TRUE",
-    "VSI_CACHE_SIZE": "67108864",                 # 64 MB VSI Cache
-    "CHECK_DISK_FREE_SPACE": "FALSE",    
-    "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR", 
-    "CPL_VSIL_CURL_ALLOWED_EXTENSIONS": ".tif,.tiff,.vrt,.gpkg,.parquet", 
-    "GDAL_HTTP_MERGE_CONSECUTIVE_RANGES": "YES",  # Avoids tiny contiguous read requests
-    "CPL_VSIL_CURL_CHUNK_SIZE": "1048576",         # 1MB blocks to significantly cut down request round-trips
-    "GDAL_HTTP_MULTIPLEX": "YES",                  # Enables HTTP/2 multiplexing over single TCP connection
-    "GDAL_HTTP_TIMEOUT": "30",                     # Prevent silent hanging connections
-    "GDAL_HTTP_CONNECTTIMEOUT": "10",              # Fail-fast on stale connections
-    "CPL_VSIL_CURL_USE_HEAD": "NO",               # Drastically reduces rate-limiting HEAD requests to S3
-    "GDAL_INGESTED_BYTES_AT_OPEN": "32768"         # Caches metadata header bytes to minimize initial range requests
-}
-
-# Apply env configurations globally to the master process
-for key, val in GDAL_ENV_VARS.items():
-    os.environ[key] = val
-
-# ==========================================
-# LOGGING CONFIGURATION
-# ==========================================
-LOG_FILE_PATH = Path.home() / "hydro_health_preprocessing.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-8s | %(processName)-15s | %(message)s",
-    handlers=[
-        RotatingFileHandler(
-            LOG_FILE_PATH, maxBytes=10*1024*1024, backupCount=3
-        ), 
-        logging.StreamHandler()            
-    ]
-)
 logger = logging.getLogger(__name__)
 
-# Suppress noisy third-party logs
-logging.getLogger('botocore.credentials').setLevel(logging.WARNING)
-logging.getLogger('botocore').setLevel(logging.WARNING)
-logging.getLogger('boto3').setLevel(logging.WARNING)
-logging.getLogger('s3fs').setLevel(logging.WARNING)
 
+class BatchTilingEngine:
+    """Class for transforming wide parquet files in batch/long format"""
 
-class ModelDataPreProcessor(Engine):
-    """Class for parallel preprocessing all model data"""
+    # Class-level compiled regex patterns for static access across workers
+    STATIC_PATTERNS = ['sed', 'tsm', 'hurr', 'grain', 'survey']
+    RE_BT_PREFIX = re.compile(r"^bt\.")
+    RE_FLOWDIR = re.compile(r"flowdir")
 
-    def __init__(self, overwrite: bool = False, pilot_mode: bool=False):
+    def __init__(self, year_ranges: Optional[List[Tuple[int, int]]] = None, overwrite: bool = False, pilot_mode: bool = False):
+        """Initialize the BatchTilingEngine"""
+        
         super().__init__()
         self.pilot_mode = pilot_mode
         self.overwrite = overwrite
-
-        self.fs = s3fs.S3FileSystem(anon=False)
-
-        # Extended static patterns to ensure ungridded data like 'grain', 'survey', and 'sed' are captured 
-        self.static_patterns = ['sed', 'tsm', 'hurr', 'grain', 'survey']
-        self.re_bt_prefix = re.compile(r"^bt\.")
+        self.year_ranges = year_ranges or []
 
         self.is_aws = (get_environment() == 'aws')
 
-    def create_file_paths(self):
-        """Creates unified UPath objects that work both locally and on S3."""
+    def create_file_paths(self) -> None:
+        """Creates unified UPath objects that work both locally and on S3"""
+        
         prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
         logger.info(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
         logger.info(f"Mode detected: {'Pilot' if self.pilot_mode else 'Full'}")
@@ -156,14 +85,112 @@ class ModelDataPreProcessor(Engine):
         
         self.local_tmp_dir = Path.home() / "hydro_health_local_tmp"
 
-    def process(self) -> None:
-        """Main function to process model data."""   
- 
+    def run(self) -> None:
+        """Main entry point for executing the batch format transformations"""
+        
+        self.create_file_paths()
         self.batch_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
         self.batch_format_transformation(base_dir=self.training_tiles_dir, mode="training")
 
-    def _extract_raster_to_df(self, raster_path, tile_extent) -> pd.DataFrame:
-        """Helper to read a window of a raster and convert to DataFrame."""
+    def batch_format_transformation(self, base_dir: UPath, mode: Literal["training", "prediction"]) -> None:
+        """Orchestrator for finalizing formatting on wide tiles"""
+        
+        logger.info(f"Starting Wide & Batch Format Transformation (Mode: {mode})...")
+
+        logger.info(f"-> Validating 'year_ranges' config: {self.year_ranges}")
+        if not self.year_ranges:
+            logger.error("!!! CRITICAL WARNING: 'self.year_ranges' is empty or not defined. No files will be processed !!!")
+
+        file_suffix = f"_{mode}_clipped_data.parquet"
+
+        base_dir_upath = UPath(base_dir)
+        files_to_process = list(base_dir_upath.rglob(f"*{file_suffix}"))
+
+        if not files_to_process:
+            logger.warning(f"No files found for {mode} transformation in {base_dir}")
+            return
+
+        logger.info(f"Outputting transformed {mode} formatted tiles to: {base_dir}")
+        logger.info(f"Queueing {len(files_to_process)} tiles...")
+
+        # -------------------------------------------------------------
+        # DYNAMIC DASK TASK STREAM (FORMAT TRANSFORMATION)
+        # -------------------------------------------------------------
+        try:
+            client = dask.distributed.client.default_client()
+        except ValueError:
+            logger.info("No global Dask client found. Starting a LocalCluster...")
+            client = Client()
+
+        max_concurrent = 100 
+        total_files = len(files_to_process)
+        tasks_iterator = iter(enumerate(files_to_process))
+        seq = as_completed()
+        results = []
+        
+        def submit_format_task(item):
+            i, fp = item
+            return client.submit(
+                BatchTilingEngine._transform_tile_task, 
+                str(fp), 
+                mode, 
+                self.overwrite,
+                self.year_ranges,
+                current_index=i + 1, 
+                total_count=total_files
+            )
+
+        # Initial queue fill
+        for _ in range(min(max_concurrent, total_files)):
+            try:
+                seq.add(submit_format_task(next(tasks_iterator)))
+            except StopIteration:
+                break
+
+        success_count = 0
+        failed_msgs = []
+
+        # Process stream
+        for future in seq:
+            res = future.result()
+            
+            # Print immediately as tasks complete instead of waiting for the end
+            if res.startswith("Success"):
+                success_count += 1
+                logger.info(res) 
+            else:
+                failed_msgs.append(res)
+
+            future.release() # Release future to prevent metadata accumulation in scheduler
+            try:
+                seq.add(submit_format_task(next(tasks_iterator)))
+            except StopIteration:
+                pass
+
+        logger.info(f"--------------------------------------------------")
+        logger.info(f"[TRANSFORMATION SUMMARY] Mode: {mode.upper()}")
+        logger.info(f" -> Total Attempted Tasks: {total_files}")
+        logger.info(f" -> Successful Tasks: {success_count}")
+        logger.info(f" -> Failed/Error Tasks: {len(failed_msgs)}")
+        logger.info(f"--------------------------------------------------")
+            
+        if failed_msgs:
+            logger.error("Transformation Errors:\n" + "\n".join(failed_msgs))
+
+    @staticmethod
+    def _trim_memory() -> None:
+        """Helper to invoke garbage collector explicitly in workers"""
+        gc.collect()
+
+    @staticmethod
+    def _standardize_col_name(col: str) -> str:
+        """Helper to ensure column names are standardized."""
+        return str(col).strip()
+
+    @staticmethod
+    def _extract_raster_to_df(raster_path: str, tile_extent: Tuple) -> pd.DataFrame:
+        """Helper to read a window of a raster and convert to DataFrame"""
+        
         try:
             with rasterio.open(raster_path) as src:
                 window = src.window(*tile_extent)
@@ -185,9 +212,10 @@ class ModelDataPreProcessor(Engine):
             logger.exception(f"Reading raster window from {raster_path} failed.")
             return pd.DataFrame()
 
-
-    def _transform_tile_task(self, f_path: str, mode: Literal["training", "prediction"], current_index=None, total_count=None) -> str:
-        """Dask Worker: Reads file -> Calls specific processor -> Returns status."""
+    @staticmethod
+    def _transform_tile_task(f_path: str, mode: Literal["training", "prediction"], overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> str:
+        """Dask Worker: Reads file -> Calls specific processor -> Returns status"""
+        
         gdf = None
         try:
             tile_name = os.path.basename(f_path).split("_")[0]
@@ -202,18 +230,15 @@ class ModelDataPreProcessor(Engine):
                 gdf = gpd.GeoDataFrame(df, geometry=geometry_col)
 
             if mode == "training":
-                saved, cols_str = self._process_and_save_training_tile(gdf, output_dir, tile_name, current_index, total_count)
+                saved, cols_str = BatchTilingEngine._process_and_save_training_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
             else:
-                saved, cols_str = self._process_and_save_prediction_tile(gdf, output_dir, tile_name, current_index, total_count)
+                saved, cols_str = BatchTilingEngine._process_and_save_prediction_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
             
             # --- CLEAN UP INTERMEDIATE RAW WIDE FILE ---
             try:
-                f_path_str = str(f_path)
-                if self.is_aws and f_path_str.startswith("s3://"):
-                    self.fs.rm(f_path_str)
-                else:
-                    if os.path.exists(f_path_str):
-                        os.remove(f_path_str)
+                upath_obj = UPath(f_path)
+                if upath_obj.exists():
+                    upath_obj.unlink()
             except Exception as e:
                 logger.warning(f"Could not delete intermediate file {f_path}: {e}")
 
@@ -224,11 +249,13 @@ class ModelDataPreProcessor(Engine):
         finally:
             if gdf is not None:
                 del gdf
-            self._trim_memory()
+            BatchTilingEngine._trim_memory()
 
-    def _transform_flowdir_cols_inplace(self, df: pd.DataFrame) -> None:
-        """Modifies DataFrame in-place to replace flow direction angles."""
-        flow_cols = [c for c in df.columns if self.re_flowdir.search(c)]
+    @staticmethod
+    def _transform_flowdir_cols_inplace(df: pd.DataFrame) -> None:
+        """Modifies DataFrame in-place to replace flow direction angles"""
+        
+        flow_cols = [c for c in df.columns if BatchTilingEngine.RE_FLOWDIR.search(c)]
         if not flow_cols:
             return
 
@@ -253,8 +280,10 @@ class ModelDataPreProcessor(Engine):
         df.drop(columns=flow_cols, inplace=True)
         del radians
 
-    def _get_column_metadata(self, columns: List[str]) -> pd.DataFrame:
-        """Efficiently parses column names to extract variables and years, handling _filled suffixes."""
+    @staticmethod
+    def _get_column_metadata(columns: List[str]) -> pd.DataFrame:
+        """Efficiently parses column names to extract variables and years, handling _filled suffixes"""
+        
         records = []
         # Looks for _YYYY possibly followed by _filled (e.g. bathy_2004, bathy_2004_filled, flowdir_sin_2004)
         year_re = re.compile(r"_(\d{4})(?:_filled)?$")
@@ -275,18 +304,19 @@ class ModelDataPreProcessor(Engine):
             
         return pd.DataFrame(records)
 
-    def _process_and_save_training_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> Tuple[List[str], str]:
-        """Processes a training tile and writes out BOTH a wide format and batch format data files."""
+    @staticmethod
+    def _process_and_save_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> Tuple[List[str], str]:
+        """Processes a training tile and writes out BOTH a wide format and batch format data files"""
+        
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
         saved_files = []
-        year_ranges = getattr(self, 'year_ranges', [])
         
         if not year_ranges:
              logger.warning(f"{progress_str} [WARNING] 'year_ranges' is empty or missing! No pairs will be processed for {tile_name}.")
 
         rename_dict_global = {}
         for c in gdf.columns:
-            new_c = self._standardize_col_name(c)
+            new_c = BatchTilingEngine._standardize_col_name(c)
             if new_c != c:
                 rename_dict_global[c] = new_c
 
@@ -336,7 +366,7 @@ class ModelDataPreProcessor(Engine):
         out_name_wide = f"{tile_name}_training_formatted.parquet"
         out_path_wide = str(UPath(output_dir) / out_name_wide)
         
-        if not self.overwrite and UPath(out_path_wide).exists():
+        if not overwrite and UPath(out_path_wide).exists():
             logger.info(f"{progress_str} [SKIP] Saved training WIDE tile already exists: {out_path_wide}")
             saved_files.append(out_name_wide)
         else:
@@ -430,7 +460,7 @@ class ModelDataPreProcessor(Engine):
             out_name_batch = f"{tile_name}_{pair_name}_training_batch.parquet"
             out_path_batch = str(UPath(output_dir) / out_name_batch)
             
-            if not self.overwrite and UPath(out_path_batch).exists():
+            if not overwrite and UPath(out_path_batch).exists():
                 logger.info(f"{progress_str} [SKIP] Saved training BATCH tile already exists: {out_path_batch}")
                 saved_files.append(out_name_batch)
             else:
@@ -445,25 +475,24 @@ class ModelDataPreProcessor(Engine):
                     raise e
                 
             del pair_df
-            gc.collect()
 
         del wide_gdf
-        gc.collect()
 
         summary = []
         if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
 
         return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
 
-    def _process_and_save_prediction_tile(self, gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, current_index=None, total_count=None) -> Tuple[List[str], str]:
-        """Processes a prediction tile and writes out BOTH a wide format and batch format data files."""
+    @staticmethod
+    def _process_and_save_prediction_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> Tuple[List[str], str]:
+        """Processes a prediction tile and writes out BOTH a wide format and batch format data files"""
+        
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
         saved_files = []
-        year_ranges = getattr(self, 'year_ranges', [])
 
         rename_dict_global = {}
         for c in gdf.columns:
-            new_c = self._standardize_col_name(c)
+            new_c = BatchTilingEngine._standardize_col_name(c)
             if new_c != c:
                 rename_dict_global[c] = new_c
 
@@ -531,7 +560,7 @@ class ModelDataPreProcessor(Engine):
         out_name_wide = f"{tile_name}_prediction_formatted.parquet"
         out_path_wide = str(UPath(output_dir) / out_name_wide)
         
-        if not self.overwrite and UPath(out_path_wide).exists():
+        if not overwrite and UPath(out_path_wide).exists():
             logger.info(f"{progress_str} [SKIP] Saved prediction WIDE tile already exists: {out_path_wide}")
             saved_files.append(out_name_wide)
         else:
@@ -621,7 +650,7 @@ class ModelDataPreProcessor(Engine):
             out_name_batch = f"{tile_name}_{pair_name}_prediction_batch.parquet"
             out_path_batch = str(UPath(output_dir) / out_name_batch)
             
-            if not self.overwrite and UPath(out_path_batch).exists():
+            if not overwrite and UPath(out_path_batch).exists():
                 logger.info(f"{progress_str} [SKIP] Saved prediction BATCH tile already exists: {out_path_batch}")
                 saved_files.append(out_name_batch)
             else:
@@ -636,13 +665,11 @@ class ModelDataPreProcessor(Engine):
                     raise e
                 
             del pair_df
-            gc.collect()
 
         del wide_gdf
-        gc.collect()
 
         summary = []
         if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
 
         return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
-        
+    
