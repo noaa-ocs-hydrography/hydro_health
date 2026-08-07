@@ -548,17 +548,17 @@ class RasterMaskS3Engine(Engine):
     def run(self, outputs: str, output_prefix: str, manual_downloads=False) -> None:
         """Main run script for RasterMaskS3Engine"""
 
+        s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        existing_ers = {f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")}
+        
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
         
         pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
         train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
         
         base_prefix = str(output_prefix).rstrip('/')
-        s3 = s3fs.S3FileSystem()
-
-        existing_ers = {f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")}
-
+        
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
         gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions').to_crs("EPSG:32617")
         gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
@@ -571,7 +571,7 @@ class RasterMaskS3Engine(Engine):
             
             vrts = self.find_provider_vrts(er, manual_downloads)
             if vrts:
-                vrt_list = [v if v.startswith('s3://') else f"s3://{v}" for v in vrts]
+                vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
                 result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                 self.write_message(result_string, outputs)
 
