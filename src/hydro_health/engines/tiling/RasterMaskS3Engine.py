@@ -7,9 +7,19 @@ import boto3
 import s3fs
 import numpy as np
 import geopandas as gpd
+import rasterio
+import logging
+
+from shapely.geometry import shape
+from shapely.ops import unary_union
+from upath import UPath
+
+from rasterio.features import shapes
 from concurrent.futures import ProcessPoolExecutor
 from functools import partial
 from osgeo import gdal, osr, ogr
+
+logger = logging.getLogger(__name__)
 
 # Force GDAL settings for multi-processing stability
 os.environ['PROJ_LIB_CACHE'] = 'OFF'
@@ -315,6 +325,88 @@ class RasterMaskS3Engine(Engine):
                     
         return found
 
+    def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: UPath, process_type: str) -> gpd.GeoDataFrame:
+        """ Convert a raster file to a GeoDataFrame by extracting shapes and their geometries in memory-safe chunks."""
+
+        logger.info(f"Creating {process_type} mask GeoDataFrame from: {raster_path}")
+
+        open_path = str(raster_path)
+        
+        if self.is_aws and open_path.startswith("s3://"):
+            open_path = open_path.replace("s3://", "/vsis3/")
+
+        geometries = []
+        
+        with rasterio.open(open_path) as src:
+            block_size = 4096
+            
+            for y in range(0, src.height, block_size):
+                for x in range(0, src.width, block_size):
+                    window = rasterio.windows.Window(
+                        x, y, 
+                        min(block_size, src.width - x), 
+                        min(block_size, src.height - y)
+                    )
+                    
+                    mask_chunk = src.read(1, window=window, out_dtype='uint8')
+
+                    if process_type == 'prediction':
+                        valid_mask = mask_chunk == 1
+                    elif process_type == 'training':
+                        if self.pilot_mode:
+                            valid_mask = mask_chunk == 1
+                        else:
+                            valid_mask = mask_chunk == 2
+                    else:
+                        raise ValueError(f"Unknown process_type: {process_type}")
+
+                    if not valid_mask.any():
+                        continue
+
+                    win_transform = src.window_transform(window)
+                    shapes_gen = shapes(mask_chunk, mask=valid_mask, transform=win_transform)  
+
+                    chunk_geoms = []
+                    for geom, _ in shapes_gen:
+                        chunk_geoms.append(shape(geom))
+                        
+                    if chunk_geoms:
+                        merged_chunk = unary_union(chunk_geoms)
+                        geometries.append(merged_chunk)
+                        
+            crs = src.crs
+
+        logger.info(f" -> Extracted {len(geometries)} unified geometries. Building GeoDataFrame...")
+        
+        gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
+        gdf = gdf.to_crs(self.target_crs)   
+        
+        gdf['geometry'] = gdf.geometry.make_valid().buffer(0)
+
+        if process_type == 'prediction':
+            sub_path = get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)
+        else:
+            sub_path = get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)
+        
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        suffix = str(sub_path).lstrip('/')
+        
+        if output_prefix:
+            base = str(output_prefix).rstrip('/')
+            mask_path = UPath(f"{base}/{ecoregion}/{mask_sub}/{suffix}")
+        else:
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            mask_path = UPath(f"s3://{bucket}/{ecoregion}/{mask_sub}/{suffix}")
+
+        if not self.is_aws:
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Saving {process_type} mask GeoDataFrame to: {mask_path}")   
+
+        gdf.to_parquet(str(mask_path))
+
+        return gdf
+
     def remerge_training_mask(self, ecoregion: str, outputs: str) -> str:
         """Standalone 'Merge-Only' function using existing part_*.tif scratch files."""
 
@@ -418,6 +510,7 @@ class RasterMaskS3Engine(Engine):
 
         s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
         existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
 
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
@@ -428,7 +521,17 @@ class RasterMaskS3Engine(Engine):
             er = row['EcoRegion']
             vrts = self.find_provider_vrts(er, manual_downloads)
             self.create_prediction_mask(er, output_prefix, row['geometry'].wkt)
+            
+            pred_key = f"{output_prefix}/{er}/{mask_sub}/prediction_mask_{er}.tif"
+            pred_tif_path = UPath(f"s3://{bucket}/{pred_key}")
+            self.raster_mask_to_parquet(er, output_prefix, pred_tif_path, 'prediction')
+            
             if vrts:
                 vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
                 result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                 self.write_message(result_string, outputs)
+                
+                train_key = f"{output_prefix}/{er}/{mask_sub}/training_mask_{er}.tif"
+                train_tif_path = UPath(f"s3://{bucket}/{train_key}")
+                self.raster_mask_to_parquet(er, output_prefix, train_tif_path, 'training')
+                
