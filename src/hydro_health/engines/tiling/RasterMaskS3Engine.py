@@ -10,6 +10,7 @@ import geopandas as gpd
 import rasterio
 import logging
 
+from pathlib import Path
 from shapely.geometry import shape
 from shapely.ops import unary_union
 from upath import UPath
@@ -173,6 +174,45 @@ class RasterMaskS3Engine(Engine):
             out_ds = None 
             
             boto3.client('s3').upload_file(tmp.name, bucket, s3_key)
+
+    def create_subgrids(self, mask_gdf, output_path, process_type) -> None:
+        """ Create subgrids layer by intersecting grid tiles with the mask geometries"""        
+        
+        mask_gdf_path = str(mask_gdf)
+        logger.info(f"Preparing {process_type} sub-grids...")
+        logger.info(f" -> Reading mask GeoDataFrame from: {mask_gdf_path}")
+
+        mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=self.fs if self.is_aws else None)
+        
+        # We can still union the small number of subgrids here because this is tiny compared to raster data
+        combined_geometry = mask_gdf_df.union_all()
+        mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
+
+        grid_gpkg_str = str(self.grid_gpkg)
+        if self.is_aws and grid_gpkg_str.startswith("s3://"):
+            grid_gpkg_str = grid_gpkg_str.replace("s3://", "/vsis3/")
+
+        sub_grids = gpd.read_file(grid_gpkg_str, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
+
+        intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
+        intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
+        
+        if self.is_aws:
+            with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
+                local_tmp_path = str(Path(task_tmp_dir) / "subgrids_tmp.gpkg")
+                
+                logger.info(f" -> Writing GPKG locally to {local_tmp_path} before uploading...")
+                intersecting_sub_grids.to_file(local_tmp_path, driver="GPKG") 
+                
+                logger.info(f" -> Uploading subgrids to S3: {output_path}")
+                self.fs.put(local_tmp_path, str(output_path))
+        else:
+            output_upath = UPath(output_path)
+            output_upath.parent.mkdir(parents=True, exist_ok=True)
+            intersecting_sub_grids.to_file(str(output_upath), driver="GPKG") 
+
+        logger.info(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}")
+        return
 
     def create_training_mask(self, ecoregion: str, s3_vrt_paths: list[str], output_prefix: str, outputs: str) -> str:
         """Tile-based merge using bitwise OR to combine bathymetry masks."""
@@ -504,14 +544,20 @@ class RasterMaskS3Engine(Engine):
             print(f"!!! Error in remerge_training_mask for {ecoregion}: {e}")
             print(f"Keeping scratch directory for re-trying: {scratch_dir}")
             raise e
-    
+            
     def run(self, outputs: str, output_prefix: str, manual_downloads=False) -> None:
         """Main run script for RasterMaskS3Engine"""
 
-        s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
-        existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
+        
+        pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
+        train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
+        
+        base_prefix = str(output_prefix).rstrip('/')
+        s3 = s3fs.S3FileSystem()
+
+        existing_ers = {f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")}
 
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
         gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions').to_crs("EPSG:32617")
@@ -519,19 +565,26 @@ class RasterMaskS3Engine(Engine):
 
         for _, row in gdf.iterrows():
             er = row['EcoRegion']
-            vrts = self.find_provider_vrts(er, manual_downloads)
+            er_base_dir = f"{base_prefix}/{er}/{mask_sub}"
+            
             self.create_prediction_mask(er, output_prefix, row['geometry'].wkt)
             
-            pred_key = f"{output_prefix}/{er}/{mask_sub}/prediction_mask_{er}.tif"
-            pred_tif_path = UPath(f"s3://{bucket}/{pred_key}")
-            self.raster_mask_to_parquet(er, output_prefix, pred_tif_path, 'prediction')
-            
+            vrts = self.find_provider_vrts(er, manual_downloads)
             if vrts:
-                vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
+                vrt_list = [v if v.startswith('s3://') else f"s3://{v}" for v in vrts]
                 result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                 self.write_message(result_string, outputs)
+
+            tasks = [
+                ('prediction', pred_suffix),
+                ('training', train_suffix)
+            ]
+            
+            for mask_type, suffix in tasks:
+                tif_path = UPath(f"s3://{bucket}/{er_base_dir}/{mask_type}_mask_{er}.tif")
+                self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type)
                 
-                train_key = f"{output_prefix}/{er}/{mask_sub}/training_mask_{er}.tif"
-                train_tif_path = UPath(f"s3://{bucket}/{train_key}")
-                self.raster_mask_to_parquet(er, output_prefix, train_tif_path, 'training')
-                
+                mask_path = UPath(f"{er_base_dir}/{suffix}")
+                out_path = UPath(f"{er_base_dir}/{mask_type}_subgrids.gpkg")
+                self.create_subgrids(mask_path, out_path, mask_type)
+                    
