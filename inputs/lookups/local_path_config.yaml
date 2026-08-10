@@ -6,16 +6,16 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables\Prediction\pre_processed\tiled
 HURRICANE:
-  COUNT_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_count_raster
-  CUMULATIVE_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_cumulative_raster
-  DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data
-  GPKG_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_data.gpkg
-  RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\hurricane_data\hurricane_rasters
-  YEAR_PAIR_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
+  COUNT_RASTER_PATH: original_data_files\hurricane_data\hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: original_data_files\hurricane_data\hurricane_cumulative_raster
+  DATA_PATH: original_data_files\hurricane_data
+  GPKG_PATH: original_data_files\hurricane_data\hurricane_data.gpkg
+  RASTER_PATH: original_data_files\hurricane_data\hurricane_rasters
+  YEAR_PAIR_RASTER_PATH: model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
 LIDAR_PLOTS:
-  INPUT_VRTS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast
-  PLOT_OUTPUTS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast_plots
-  RESAMPLED_VRTS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\DigitalCoast_resampled
+  INPUT_VRTS: model_variables\Prediction\raw\DigitalCoast
+  PLOT_OUTPUTS: model_variables\Prediction\raw\DigitalCoast_plots
+  RESAMPLED_VRTS: model_variables\Prediction\raw\DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks
   MASK_PRED_PATH: masks\prediction_mask_ER_3.tif
@@ -35,10 +35,10 @@ MODEL:
   TRAINING_OUTPUT_DIR: model_variables\Training\processed
 SEDIMENT:
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data
-  GPKG_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\sediment_data\sediment_data.gpkg
-  MASK_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\prediction_masks\prediction.mask.UTM17_8m.tif
-  RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\sediment_rasters
+  DATA_PATH: original_data_files\sediment_data
+  GPKG_PATH: original_data_files\sediment_data\sediment_data.gpkg
+  MASK_PATH: prediction_masks\prediction.mask.UTM17_8m.tif
+  RASTER_PATH: model_variables\Prediction\pre_processed\sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
@@ -50,10 +50,10 @@ SHARED:
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads
 TERRAIN:
-  INPUT_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed
-  FILLED_DIR: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs
-  OUTPUTS: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\processed\terrain_digitalcoast_outputs  
+  INPUT_DIR: model_variables\Prediction\processed
+  FILLED_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs
+  OUTPUTS: model_variables\Prediction\processed\terrain_digitalcoast_outputs  
 TSM:
-  DATA_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\nc_files
-  MEAN_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\original_data_files\tsm_data\tsm_rasters\mean_rasters
-  YEAR_PAIR_RASTER_PATH: N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\pre_processed\TSM_year_pair_rasters
+  DATA_PATH: original_data_files\tsm_data\nc_files
+  MEAN_RASTER_PATH: original_data_files\tsm_data\tsm_rasters\mean_rasters
+  YEAR_PAIR_RASTER_PATH: model_variables\Prediction\pre_processed\TSM_year_pair_rasters
