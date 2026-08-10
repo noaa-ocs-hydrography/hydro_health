@@ -173,6 +173,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)
 
+    # Create an in-memory layer for the filtered ecoregion
     mem_driver = ogr.GetDriverByName('Memory')
     tmp_ds = mem_driver.CreateDataSource('mem_ds')
     tmp_layer = tmp_ds.CreateLayer('mask_poly', srs=output_srs, geom_type=ogr.wkbPolygon)
@@ -180,8 +181,9 @@ def _create_prediction_mask(param_inputs: list) -> None:
     ecoregions_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion_path.stem}'")
     for feat in ecoregions_layer:
         geom = feat.GetGeometryRef()
+        # Ensure transformation matches your get_transformation() logic
         target_srs = osr.SpatialReference()
-        target_srs.ImportFromEPSG(4326)
+        target_srs.ImportFromEPSG(4326) # Source is usually WGS84
         transform = osr.CoordinateTransformation(target_srs, output_srs)
         geom.Transform(transform)
 
@@ -211,6 +213,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
     target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
     target_ds.SetProjection(output_srs.ExportToWkt())
 
+    # Burn the polygon into the raster
     gdal.RasterizeLayer(target_ds, [1], tmp_layer, burn_values=[1])
     target_ds.FlushCache()
     target_ds = None
@@ -227,6 +230,7 @@ def _create_training_mask(param_inputs: list) -> str:
     vrts = list(dc_vrt_folder.glob("mosaic_*.vrt"))
     if not vrts: return f"{ecoregion_path.stem}: No VRTs found."
 
+    # Copy prediction to training to start
     shutil.copy(str(prediction_file), str(training_file))
 
     ds = gdal.Open(str(training_file), gdal.GA_Update)
@@ -235,6 +239,7 @@ def _create_training_mask(param_inputs: list) -> str:
     proj = ds.GetProjection()
     cols, rows = ds.RasterXSize, ds.RasterYSize
 
+    # Block processing to keep memory footprint low
     block_size = 4096
     total_burns = 0
 
@@ -247,24 +252,27 @@ def _create_training_mask(param_inputs: list) -> str:
             num_cols = min(block_size, cols - x)
             mask_chunk = band.ReadAsArray(x, y, num_cols, num_rows)
 
+            # Skip reading VRTs if this block has no prediction pixels (value 1)
             if not np.any(mask_chunk == 1):
                 continue
 
             presence_chunk = np.zeros((num_rows, num_cols), dtype=np.uint8)
 
+            # Calculate world coordinate bounding box for this chunk: [minX, minY, maxX, maxY]
             chunk_min_x = geo_t[0] + x * geo_t[1]
-            chunk_max_y = geo_t[3] + y * geo_t[5]
+            chunk_max_y = geo_t[3] + y * geo_t[5]  # geo_t[5] is negative pixel height
             chunk_max_x = chunk_min_x + num_cols * geo_t[1]
             chunk_min_y = chunk_max_y + num_rows * geo_t[5]
 
             bounds = [chunk_min_x, chunk_min_y, chunk_max_x, chunk_max_y]
 
             for vrt in vrts:
-                vrt_provider = ''.join(vrt.stem.split('')[2:])
+                vrt_provider = '_'.join(vrt.stem.split('_')[2:])
                 if vrt_provider.lower() not in approved_providers:
                     engine.write_message(f'- skipping unapproved provider: {vrt_provider}', outputs)
                     continue
 
+                # construct the MEM dataset with dstAlpha instead of loading
                 warp_options = gdal.WarpOptions(
                     format='MEM',
                     outputBounds=bounds,
