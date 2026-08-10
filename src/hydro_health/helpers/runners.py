@@ -110,12 +110,12 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], outpu
     engine.run(tiles, output_prefix, outputs)
 
 
-def run_preprocessor_modeldata(pilot_mode: bool=False) -> None:
+def run_prediction_rasters_engine() -> None:
     """Entry point for running the model data preprocessor"""
 
     profiler = cProfile.Profile()
     profiler.enable()
-    processor = ModelDataPreProcessor(overwrite=True, pilot_mode=pilot_mode)
+    processor = ModelDataPreProcessor()
     processor.process()
     profiler.disable()
     stats = pstats.Stats(profiler)

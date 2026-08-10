@@ -25,13 +25,18 @@ class PredictionRastersEngine:
         """Initialize the engine with necessary configuration paths and settings"""
         
         self.local_tmp_dir = pathlib.Path(config.get('local_tmp_dir', '/tmp'))
+        # FIX: Explicitly create the temp directory so Fiona, Dask, and Tempfile don't crash
+        self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
+        
         self.target_crs = config.get('target_crs')
         self.target_res = config.get('target_res', 10.0)
         self.is_aws = config.get('is_aws', False)
         self.pilot_mode = config.get('pilot_mode', False)
         self.overwrite = config.get('overwrite', False)
         self.gdal_env_vars = config.get('gdal_env_vars', {})
-        self.fs = s3fs.S3FileSystem() if self.is_aws else None
+        
+        # FIX 1: Removed self.fs = s3fs.S3FileSystem() from here to avoid pickling 
+        # errors when Dask attempts to serialize this class instance to workers.
 
         prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
         print(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
@@ -89,25 +94,24 @@ class PredictionRastersEngine:
         """Scan and filter input directories for valid TIFF files"""
 
         if not self.is_aws:
+            # FIX 3: Added missing directory creation for prediction outputs
             self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
+            self.prediction_out_dir.mkdir(parents=True, exist_ok=True)
 
-        existing_pred_outputs = {
-            f.name for f in self.prediction_out_dir.rglob("*")
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        }
-        existing_uncombined_outputs = {
-            f.name for f in self.uncombined_lidar_dir.rglob("*")
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        }
+        # FIX 5: Optimized globbing to avoid pulling down entire S3 directories just to filter in memory
+        existing_pred_outputs = {f.name for f in self.prediction_out_dir.rglob("*.tif")}
+        existing_pred_outputs.update({f.name for f in self.prediction_out_dir.rglob("*.tiff")})
+        
+        existing_uncombined_outputs = {f.name for f in self.uncombined_lidar_dir.rglob("*.tif")}
+        existing_uncombined_outputs.update({f.name for f in self.uncombined_lidar_dir.rglob("*.tiff")})
+        
         all_existing_pred_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
 
         potential_files = []
 
         for data_type, directory in self.preprocessed_subdirs.items():
-            found_files = [
-                f for f in directory.rglob("*") 
-                if f.suffix.lower() in {'.tif', '.tiff'}
-            ]
+            # FIX 5 (Continued): Optimized searching
+            found_files = list(directory.rglob("*.tif")) + list(directory.rglob("*.tiff"))
             
             if not found_files:
                 raise RuntimeError(f"CRITICAL ERROR: Missing data for '{data_type}'. No .tif files were found in {directory}.")
@@ -261,7 +265,10 @@ class PredictionRastersEngine:
                 self._apply_tsm_smoothing(gdal_dst_str, src_str, warp_opts)
             
             if self.is_aws:
-                self.fs.put(gdal_dst_str, dst_str)
+                # FIX 1: Initialize s3fs connection dynamically inside the worker process
+                # instead of trying to pickle it from the main class instance.
+                fs = s3fs.S3FileSystem()
+                fs.put(gdal_dst_str, dst_str)
                 print(f" - [✓ SUCCESS] Wrote to S3 successfully: {os.path.basename(dst_str)}")
             else:
                 print(f" - [✓ SUCCESS] Wrote locally successfully: {os.path.basename(dst_str)}")
@@ -270,6 +277,8 @@ class PredictionRastersEngine:
             print(f" - [✗ ERROR] GDAL Warp/Upload failed for {os.path.basename(src_str)}! Exception: {e}")
             raise e
         finally:
+            # Note: This is safe primarily because threads_per_worker is explicitly 1.
+            # If multithreading is enabled in the future, this could clear caches used by other threads.
             if hasattr(gdal, 'VSICurlClearCache'):
                 gdal.VSICurlClearCache()
 
@@ -286,7 +295,11 @@ class PredictionRastersEngine:
         radius_pixels = int(2000 / abs(pixel_size))
         size = radius_pixels * 2 + 1
         
-        smoothed_tmp = gdal_dst_str.replace('.tif', '_smoothed.tif')
+        # FIX: Using robust pathlib methods instead of naive `.replace()`. 
+        # Replacing '.tif' on a '.tiff' file would fail, resulting in trying to write 
+        # to the EXACT same file that is being read, crashing the worker instantly.
+        dst_path_obj = pathlib.Path(gdal_dst_str)
+        smoothed_tmp = str(dst_path_obj.with_name(f"{dst_path_obj.stem}_smoothed{dst_path_obj.suffix}"))
 
         with rasterio.open(gdal_dst_str) as src:
             kwargs = src.meta.copy()
@@ -334,12 +347,15 @@ class PredictionRastersEngine:
                             
                             array = src.read(1, window=read_window).astype(np.float32)
                             
+                            # FIX 4: Explicitly check for NaNs to prevent NaN propagation 
+                            # destroying the uniform_filter window even if a specific numeric nodata is set.
                             if pd.isna(nodata):
                                 valid_mask = (~np.isnan(array)).astype(np.float32)
                                 array[np.isnan(array)] = 0
                             else:
-                                valid_mask = (array != nodata).astype(np.float32)
+                                valid_mask = ((array != nodata) & ~np.isnan(array)).astype(np.float32)
                                 array[array == nodata] = 0
+                                array[np.isnan(array)] = 0
 
                             smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
                             weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
@@ -410,15 +426,23 @@ class PredictionRastersEngine:
         # Process stream
         # Prevents idle workers by instantly replacing completed tasks
         for future in seq:
-            future.result() 
+            # FIX 2: Wrapped the result call in a try/except to prevent 
+            # a single corrupt file from crashing the entire pipeline stream.
+            try:
+                future.result() 
+            except Exception as e:
+                print(f" [!] Task failed in stream processing: {e}")
+            
             try:
                 seq.add(submit_pred_task(next(prediction_iterator)))
             except StopIteration:
                 pass
 
-        # HARD FLUSH: Clear out any accumulated VSI Cache / memory blocks before handing off to the Engine
-        print('Processing Complete. Flushing memory.')
+        # FIX: Ensure Dask actually shuts down workers properly to free the ~28GB RAM
+        # Calling restart() just leaves the idle workers dangling indefinitely.
+        print('Processing Complete. Shutting down Dask cluster to free memory.')
         try:
-            client.restart()
+            client.close()
+            cluster.close()
         except Exception as e:
-            print(f"Could not restart client before Seabed Engine: {e}")
+            print(f"Could not cleanly close client/cluster before next execution step: {e}")
