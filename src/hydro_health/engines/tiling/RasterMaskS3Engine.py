@@ -23,6 +23,7 @@ from osgeo import gdal, osr, ogr
 os.environ['PROJ_LIB_CACHE'] = 'OFF'
 os.environ['PROJ_NETWORK'] = 'OFF'
 os.environ['PROJ_USER_WRITABLE_DIRECTORY'] = '/tmp'
+os.environ["GDAL_MEM_ENABLE_OPEN"] = "YES"
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers

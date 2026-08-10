@@ -12,6 +12,8 @@ from upath import UPath
 from rasterio.features import shapes
 from osgeo import ogr, osr, gdal
 
+os.environ["GDAL_MEM_ENABLE_OPEN"] = "YES"
+
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
@@ -147,7 +149,8 @@ class RasterMaskEngine(Engine):
             er_mask_dir = er_dir / mask_sub
 
             for mask_type, suffix in tasks:
-                tif_path = er_mask_dir / f"{mask_type}mask{er}.tif"
+                # FIX: Added underscores to match "prediction_mask_ER_xx.tif" and "training_mask_ER_xx.tif"
+                tif_path = er_mask_dir / f"{mask_type}_mask_{er}.tif"
                 
                 if tif_path.exists():
                     self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
