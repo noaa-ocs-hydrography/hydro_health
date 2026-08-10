@@ -4,7 +4,6 @@ import shutil
 import numpy as np
 import geopandas as gpd
 import rasterio
-import logging
 
 from pathlib import Path
 from shapely.geometry import shape
@@ -16,8 +15,6 @@ from osgeo import ogr, osr, gdal
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
-logger = logging.getLogger(__name__)
-
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
@@ -26,9 +23,9 @@ class RasterMaskEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: Path, process_type: str) -> gpd.GeoDataFrame:
+    def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
         """Convert a raster mask to a GeoDataFrame using memory-safe block processing."""
-        logger.info(f"Creating {process_type} mask GeoDataFrame from: {raster_path}")
+        self.write_message(f"Creating {process_type} mask GeoDataFrame from: {raster_path}", outputs)
 
         geometries = []
         pilot_mode = getattr(self, 'pilot_mode', False)
@@ -65,7 +62,7 @@ class RasterMaskEngine(Engine):
 
             crs = src.crs
 
-        logger.info(f" -> Extracted {len(geometries)} unified geometries. Building GeoDataFrame...")
+        self.write_message(f" -> Extracted {len(geometries)} unified geometries. Building GeoDataFrame...", outputs)
 
         gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
         if hasattr(self, 'target_crs') and self.target_crs:
@@ -89,14 +86,14 @@ class RasterMaskEngine(Engine):
 
         mask_path.parent.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Saving {process_type} mask GeoDataFrame to: {mask_path}")
+        self.write_message(f"Saving {process_type} mask GeoDataFrame to: {mask_path}", outputs)
         gdf.to_parquet(str(mask_path))
 
         return gdf
 
-    def create_subgrids(self, mask_gdf_path: Path, output_path: Path, process_type: str) -> None:
+    def create_subgrids(self, mask_gdf_path: Path, output_path: Path, process_type: str, outputs: str = None) -> None:
         """Create subgrids layer by intersecting Master_Grids tiles with mask geometries."""
-        logger.info(f"Preparing {process_type} sub-grids from: {mask_gdf_path}")
+        self.write_message(f"Preparing {process_type} sub-grids from: {mask_gdf_path}", outputs)
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path)
 
@@ -112,7 +109,7 @@ class RasterMaskEngine(Engine):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         intersecting_sub_grids.to_file(str(output_path), driver="GPKG")
 
-        logger.info(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}")
+        self.write_message(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}", outputs)
 
     def run(self, outputs: str, output_prefix: str) -> None:
         """Main execution flow using Dask for rasters followed by local parquet/subgrid creation."""
@@ -153,13 +150,13 @@ class RasterMaskEngine(Engine):
                 tif_path = er_mask_dir / f"{mask_type}mask{er}.tif"
                 
                 if tif_path.exists():
-                    self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type)
+                    self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                     
                     mask_pq_path = er_mask_dir / suffix
                     subgrid_out_path = er_mask_dir / f"{mask_type}_subgrids.gpkg"
                     
                     if mask_pq_path.exists():
-                        self.create_subgrids(mask_pq_path, subgrid_out_path, mask_type)
+                        self.create_subgrids(mask_pq_path, subgrid_out_path, mask_type, outputs)
 
 
 def _create_prediction_mask(param_inputs: list) -> None:
