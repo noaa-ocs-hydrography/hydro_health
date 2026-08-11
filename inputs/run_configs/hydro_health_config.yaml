@@ -6,7 +6,6 @@ pilot_mode: false
 steps:
 - tool: run_bluetopo_tile_engine
   run: false
-  run: false
 - tool: run_digital_coast_engine
   run: false
 - tool: run_laz_conversion_engine
