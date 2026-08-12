@@ -42,7 +42,7 @@ def test_get_ecoregion_tiles(victim, param_lookup):
 
 
 def test_get_config_item(victim):
-    result = victim.get_config_item('SHARED', 'ECOREGIONS')
+    result = victim.get_config_item('SHARED', 'ENHANCED_ECOREGIONS')
     assert result == 'ENHANCED_ECOREGIONS'
 
     result = victim.get_config_item('TSM', 'DATA_PATH')
