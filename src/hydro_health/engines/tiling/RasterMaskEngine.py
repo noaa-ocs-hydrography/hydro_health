@@ -102,8 +102,8 @@ class RasterMaskEngine(Engine):
         combined_geometry = mask_gdf_df.union_all()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
-        grid_gpkg = getattr(self, 'grid_gpkg', INPUTS / 'Master_Grids.gpkg')
-        sub_grids = gpd.read_file(str(grid_gpkg), layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
+        grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')
+        sub_grids = gpd.read_file(str(grid_gpkg_path), layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
 
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
         intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
@@ -130,12 +130,13 @@ class RasterMaskEngine(Engine):
 
         for r in results:
             print(r)
-            
-        self.close_dask()
+
+        self.close_dask()    
 
         # 2. Vector Post-Processing (Parquet & Subgrids)
         pilot_mode = getattr(self, 'pilot_mode', False)
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        subgrids_sub = get_config_item('MODEL', 'MODEL_SUBGRIDS')
         pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
         train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
 
@@ -147,6 +148,7 @@ class RasterMaskEngine(Engine):
         for er_dir in ecoregions:
             er = er_dir.name
             er_mask_dir = er_dir / mask_sub
+            er_subgrids_dir = er_dir / subgrids_sub
 
             for mask_type, suffix in tasks:
                 # FIX: Added underscores to match "prediction_mask_ER_xx.tif" and "training_mask_ER_xx.tif"
@@ -156,11 +158,10 @@ class RasterMaskEngine(Engine):
                     self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                     
                     mask_pq_path = er_mask_dir / suffix
-                    subgrid_out_path = er_mask_dir / f"{mask_type}_subgrids.gpkg"
+                    subgrid_out_path = er_subgrids_dir / f"{mask_type}_subgrids.gpkg"
                     
                     if mask_pq_path.exists():
                         self.create_subgrids(mask_pq_path, subgrid_out_path, mask_type, outputs)
-
 
 def _create_prediction_mask(param_inputs: list) -> None:
     """Rasterize the Ecoregion boundary into a tiled, compressed GeoTIFF"""
@@ -217,7 +218,6 @@ def _create_prediction_mask(param_inputs: list) -> None:
     gdal.RasterizeLayer(target_ds, [1], tmp_layer, burn_values=[1])
     target_ds.FlushCache()
     target_ds = None
-
 
 def _create_training_mask(param_inputs: list) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""

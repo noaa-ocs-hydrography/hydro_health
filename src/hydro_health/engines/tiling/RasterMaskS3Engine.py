@@ -174,7 +174,7 @@ class RasterMaskS3Engine(Engine):
             boto3.client('s3').upload_file(tmp.name, bucket, s3_key)
 
     def create_subgrids(self, mask_gdf, output_path, process_type, outputs: str) -> None:
-        """ Create subgrids layer by intersecting grid tiles with the mask geometries"""        
+        """Create subgrids layer by intersecting grid tiles with the mask geometries."""
         
         mask_gdf_path = str(mask_gdf)
         self.write_message(f"Preparing {process_type} sub-grids...", outputs)
@@ -182,14 +182,17 @@ class RasterMaskS3Engine(Engine):
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=self.fs if self.is_aws else None)
         
-        # We can still union the small number of subgrids here because this is tiny compared to raster data
+        # Union the subgrids geometry
         combined_geometry = mask_gdf_df.union_all()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
-        grid_gpkg_str = str(self.grid_gpkg)
-        if self.is_aws and grid_gpkg_str.startswith("s3://"):
-            grid_gpkg_str = grid_gpkg_str.replace("s3://", "/vsis3/")
+        # Fetch local GPKG path from instance attributes or default to local INPUTS directory
+        grid_gpkg_path = get_config_item('MODEL', 'SUBGRIDS')
+        grid_gpkg_str = str(grid_gpkg_path)
 
+        self.write_message(f" -> Reading local grid GeoPackage from EC2: {grid_gpkg_str}", outputs)
+        
+        # Read subgrid directly from local disk regardless of self.is_aws setting
         sub_grids = gpd.read_file(grid_gpkg_str, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
 
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
@@ -551,6 +554,7 @@ class RasterMaskS3Engine(Engine):
         existing_ers = [f.split('/')[-1] for f in s3.glob(f"s3://{bucket}/ER*")]
         
         mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
         
         pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
         train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
@@ -564,6 +568,7 @@ class RasterMaskS3Engine(Engine):
         for _, row in gdf.iterrows():
             er = row['EcoRegion']
             er_base_dir = f"{base_prefix}/{er}/{mask_sub}"
+            er_subgrid_dir = f"{base_prefix}/{er}/{subgrid_path}"
             
             self.create_prediction_mask(er, output_prefix, row['geometry'].wkt)
             
@@ -583,5 +588,5 @@ class RasterMaskS3Engine(Engine):
                 self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                 
                 mask_path = UPath(f"{er_base_dir}/{suffix}")
-                out_path = UPath(f"{er_base_dir}/{mask_type}_subgrids.gpkg")
+                out_path = UPath(f"{er_subgrid_dir}/{mask_type}_subgrids.gpkg")
                 self.create_subgrids(mask_path, out_path, mask_type, outputs)
