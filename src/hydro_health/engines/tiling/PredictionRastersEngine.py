@@ -18,43 +18,126 @@ from dask.distributed import LocalCluster, Client, as_completed
 from upath import UPath
 from hydro_health.helpers.tools import get_config_item
 
-class PredictionRastersEngine:
+from hydro_health.engines.Engine import Engine
+
+class PredictionRastersEngine(Engine):
     """Class for processing prediction rasters in parallel using Dask"""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
         """Initialize the engine with necessary configuration paths and settings"""
+        super().__init__()
+        self.param_lookup = param_lookup
         
-        self.local_tmp_dir = pathlib.Path(config.get('local_tmp_dir', '/tmp'))
-        self.target_crs = config.get('target_crs')
-        self.target_res = config.get('target_res', 10.0)
-        self.is_aws = config.get('is_aws', False)
-        self.pilot_mode = config.get('pilot_mode', False)
-        self.overwrite = config.get('overwrite', False)
-        self.gdal_env_vars = config.get('gdal_env_vars', {})
-        self.fs = s3fs.S3FileSystem() if self.is_aws else None
+        # Helper to safely extract values whether they are plain types or Param objects
+        def _get_val(key, default=None):
+            val = self.param_lookup.get(key, default)
+            if hasattr(val, 'valueAsText') and val.valueAsText is not None:
+                return val.valueAsText
+            if hasattr(val, 'value') and val.value is not None:
+                return val.value
+            return val
+            
+        self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', '/tmp'))
+        # FIX: Explicitly create the temp directory so Fiona, Dask, and Tempfile don't crash
+        self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.target_crs = _get_val('target_crs')
+        self.target_res = _get_val('target_res', 10.0)
+        
+        env = _get_val('env', 'local')
+        self.is_aws = env in ['remote', 'aws']
+        self.overwrite = _get_val('overwrite', False)
+        self.gdal_env_vars = _get_val('gdal_env_vars', {})
+        
+        print(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
-        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
-        print(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
-        print(f"Mode detected: {'Pilot' if self.pilot_mode else 'Full'}")
+        # ---------------------------------------------------------
+        # NEW FIX: Dynamically determine Repo Root and base folders
+        # __file__ = src/hydro_health/engines/tiling/PredictionRastersEngine.py
+        # parents[4] points to the hydro_health/ repository root
+        # ---------------------------------------------------------
+        self.repo_root = pathlib.Path(__file__).resolve().parents[4]
         
-        self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)}")
-        self.preprocessed_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREPROCESSED_DIR', pilot_mode=self.pilot_mode)}")
-        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_PROC', pilot_mode=self.pilot_mode)}")
+        in_dir = _get_val('input_directory')
+        out_dir = _get_val('output_directory')
+        
+        # Use param_lookup paths if provided (and not empty strings), else default to repo root
+        base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
+        base_out_dir = pathlib.Path(out_dir) if out_dir else self.repo_root / 'outputs'
+        
+        # Mimic RasterMaskEngine logic: append output_prefix to output folder if it exists
+        self.inputs_dir = base_in_dir
+        self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
+        
+        # Dynamically determine the ecoregion (e.g., 'ER_3') to append to output paths
+        eco_val = _get_val('eco_regions')
+        self.ecoregion = ''
+        
+        if isinstance(eco_val, list) and eco_val:
+            self.ecoregion = eco_val[0]
+        elif isinstance(eco_val, str) and eco_val:
+            import ast
+            try:
+                parsed = ast.literal_eval(eco_val)
+                if isinstance(parsed, list) and parsed:
+                    self.ecoregion = parsed[0]
+                else:
+                    self.ecoregion = eco_val.strip("[]'\" ")
+            except Exception:
+                self.ecoregion = eco_val.strip("[]'\" ")
+
+        # If it wasn't explicitly provided in param_lookup, scan the directory
+        if not self.ecoregion:
+            er_dirs = [d.name for d in self.outputs_dir.glob('ER_*') if d.is_dir()]
+            if er_dirs:
+                self.ecoregion = er_dirs[0]
+
+        # Finally, append the ecoregion into the path!
+        if self.ecoregion:
+            self.outputs_dir = self.outputs_dir / self.ecoregion
+
+        def _resolve_path(config_value: str, is_output: bool = False) -> UPath:
+            """Helper to safely build paths for AWS or Local execution"""
+            if self.is_aws:
+                bucket = get_config_item('S3', 'BUCKET_NAME')
+                return UPath(f"s3://{bucket}/{config_value}")
+            else:
+                p = pathlib.Path(config_value)
+                # 1. If the config provides an absolute path, just use it
+                if p.is_absolute():
+                    return UPath(p)
+                # 2. If the config value already starts with 'inputs' or 'outputs', 
+                #    strip the first folder and attach it directly to the correctly built 
+                #    inputs_dir or outputs_dir so that ecoregion prefixes are respected!
+                if p.parts:
+                    if p.parts[0] == 'inputs':
+                        return UPath(self.inputs_dir / pathlib.Path(*p.parts[1:]))
+                    elif p.parts[0] == 'outputs':
+                        return UPath(self.outputs_dir / pathlib.Path(*p.parts[1:]))
+                # 3. Otherwise, map flat filenames/paths to the correct base directory
+                base_dir = self.outputs_dir if is_output else self.inputs_dir
+                return UPath(base_dir / p)
+
+        # Apply the path resolver to all attributes
+        self.mask_prediction_pq = _resolve_path(get_config_item('MASK', 'PREDICTION_MASK_PQ'), is_output=True)
+        self.preprocessed_dir = _resolve_path(get_config_item('MODEL', 'PREPROCESSED_DIR'), is_output=True)
+        
+        self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
+        self.uncombined_lidar_dir = _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_PROC'), is_output=True)
 
         try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR', pilot_mode=self.pilot_mode)
+            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
             self.filled_folder_name = UPath(filled_dir_path).name.lower()
         except Exception:
             print("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
             self.filled_folder_name = "filled_tifs"
 
         self.preprocessed_subdirs = {
-            'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', pilot_mode=self.pilot_mode)}"),
-            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', pilot_mode=self.pilot_mode)}"),
-            'lidar': UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_DIR', pilot_mode=self.pilot_mode)}"),
-            'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', pilot_mode=self.pilot_mode)}"),
-            'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', pilot_mode=self.pilot_mode)}")
+            'bluetopo': _resolve_path(get_config_item('PREPROCESSED', 'BLUETOPO'), is_output=True),
+            'hurricane': _resolve_path(get_config_item('PREPROCESSED', 'HURRICANE'), is_output=True),
+            'lidar': _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_DIR'), is_output=True),
+            'sediment': _resolve_path(get_config_item('PREPROCESSED', 'SEDIMENT'), is_output=True),
+            'tsm': _resolve_path(get_config_item('PREPROCESSED', 'TSM'), is_output=True)
         }
 
     def prepare_spatial_masks(self) -> tuple:
@@ -89,28 +172,29 @@ class PredictionRastersEngine:
         """Scan and filter input directories for valid TIFF files"""
 
         if not self.is_aws:
+            # Added missing directory creation for prediction outputs using robust path methods
             self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
+            self.prediction_out_dir.mkdir(parents=True, exist_ok=True)
 
-        existing_pred_outputs = {
-            f.name for f in self.prediction_out_dir.rglob("*")
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        }
-        existing_uncombined_outputs = {
-            f.name for f in self.uncombined_lidar_dir.rglob("*")
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        }
+        existing_pred_outputs = set()
+        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+            existing_pred_outputs.update({f.name for f in self.prediction_out_dir.rglob(ext)})
+        
+        existing_uncombined_outputs = set()
+        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+            existing_uncombined_outputs.update({f.name for f in self.uncombined_lidar_dir.rglob(ext)})
+        
         all_existing_pred_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
 
         potential_files = []
 
         for data_type, directory in self.preprocessed_subdirs.items():
-            found_files = [
-                f for f in directory.rglob("*") 
-                if f.suffix.lower() in {'.tif', '.tiff'}
-            ]
+            found_files = []
+            for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+                found_files.extend(list(directory.rglob(ext)))
             
             if not found_files:
-                raise RuntimeError(f"CRITICAL ERROR: Missing data for '{data_type}'. No .tif files were found in {directory}.")
+                raise RuntimeError(f"CRITICAL ERROR: Missing data for '{data_type}'. No .tif or .tiff files were found in {directory} or any of its subfolders.")
                 
             potential_files.extend(found_files)
 
@@ -159,14 +243,12 @@ class PredictionRastersEngine:
             try:
                 target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
                 # Use robust bounding box construction strictly handling minimums and maximums
-                # preventing empty polygons caused by arrays with negative affine orientations.
                 if raster_crs != target_crs_obj:
                     left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
                     bounds_geom = box(min(left, right), min(bottom, top), max(left, right), max(bottom, top))
                 else:
                     bounds_geom = box(min(raster_bounds[0], raster_bounds[2]), min(raster_bounds[1], raster_bounds[3]), max(raster_bounds[0], raster_bounds[2]), max(raster_bounds[1], raster_bounds[3]))
             except Exception as e:
-                # FIX: Do NOT fallback to native bounds if transform fails; that mathematically breaks intersections!
                 print(f"Failed to transform bounds for {raster_name}: {e}. Bypassing intersection check for safety.")
                 bounds_geom = None
         else:
@@ -254,14 +336,14 @@ class PredictionRastersEngine:
             if ds is None:
                 raise RuntimeError(f"gdal.Warp returned None for {os.path.basename(src_str)}")
 
-            # FIX: Force close and flush the dataset to disk immediately to prevent locking/bloating
             ds = None
 
             if apply_tsm_smoothing:
                 self._apply_tsm_smoothing(gdal_dst_str, src_str, warp_opts)
             
             if self.is_aws:
-                self.fs.put(gdal_dst_str, dst_str)
+                fs = s3fs.S3FileSystem()
+                fs.put(gdal_dst_str, dst_str)
                 print(f" - [✓ SUCCESS] Wrote to S3 successfully: {os.path.basename(dst_str)}")
             else:
                 print(f" - [✓ SUCCESS] Wrote locally successfully: {os.path.basename(dst_str)}")
@@ -275,7 +357,6 @@ class PredictionRastersEngine:
 
     def _apply_tsm_smoothing(self, gdal_dst_str: str, src_str: str, warp_opts: dict) -> None:
         """Applies uniform filter smoothing to a raster dataset."""
-        # Temporarily open just to get the pixel size, then close
         tmp_ds = gdal.Open(gdal_dst_str)
         pixel_size = tmp_ds.GetGeoTransform()[1]
         tmp_ds = None 
@@ -286,7 +367,8 @@ class PredictionRastersEngine:
         radius_pixels = int(2000 / abs(pixel_size))
         size = radius_pixels * 2 + 1
         
-        smoothed_tmp = gdal_dst_str.replace('.tif', '_smoothed.tif')
+        dst_path_obj = pathlib.Path(gdal_dst_str)
+        smoothed_tmp = str(dst_path_obj.with_name(f"{dst_path_obj.stem}_smoothed{dst_path_obj.suffix}"))
 
         with rasterio.open(gdal_dst_str) as src:
             kwargs = src.meta.copy()
@@ -338,8 +420,9 @@ class PredictionRastersEngine:
                                 valid_mask = (~np.isnan(array)).astype(np.float32)
                                 array[np.isnan(array)] = 0
                             else:
-                                valid_mask = (array != nodata).astype(np.float32)
+                                valid_mask = ((array != nodata) & ~np.isnan(array)).astype(np.float32)
                                 array[array == nodata] = 0
+                                array[np.isnan(array)] = 0
 
                             smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
                             weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
@@ -370,14 +453,17 @@ class PredictionRastersEngine:
         """Main entry point for processing prediction rasters in parallel"""
 
         print('Initializing Cluster and Processing Masks')
-        cluster = LocalCluster(
-            n_workers=4,            
-            threads_per_worker=1,   
-            memory_limit='7GB',
-            env=self.gdal_env_vars,
-            local_directory=str(self.local_tmp_dir) 
-        )
-        client = Client(cluster)
+        
+        # Use param_lookup and the base Engine class to initialize Dask
+        env_val = self.param_lookup.get('env', 'local')
+        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
+        
+        self.setup_dask(env)
+        
+        # Pull the client configured by setup_dask, or fallback to connecting to the default cluster
+        client = getattr(self, 'client', None)
+        if not client:
+            client = Client()
 
         mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks()
         prediction_files = self.get_valid_source_files()
@@ -408,17 +494,20 @@ class PredictionRastersEngine:
                 break
 
         # Process stream
-        # Prevents idle workers by instantly replacing completed tasks
         for future in seq:
-            future.result() 
+            try:
+                future.result() 
+            except Exception as e:
+                print(f" [!] Task failed in stream processing: {e}")
+            
             try:
                 seq.add(submit_pred_task(next(prediction_iterator)))
             except StopIteration:
                 pass
 
-        # HARD FLUSH: Clear out any accumulated VSI Cache / memory blocks before handing off to the Engine
-        print('Processing Complete. Flushing memory.')
+        print('Processing Complete. Shutting down Dask cluster to free memory.')
         try:
-            client.restart()
+            client.close()
+            self.close_dask()
         except Exception as e:
-            print(f"Could not restart client before Seabed Engine: {e}")
+            print(f"Could not cleanly close client/cluster before next execution step: {e}")
