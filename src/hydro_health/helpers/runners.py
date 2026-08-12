@@ -11,7 +11,9 @@ from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
-from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
+from hydro_health.engines.tiling.PredictionRastersEngine import PredictionRastersEngine
+from hydro_health.engines.tiling.SubgridTilingEngine import SubgridTilingEngine
+from hydro_health.engines.tiling.TrainingRastersEngine import TrainingRastersEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
@@ -110,17 +112,44 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], outpu
     engine.run(tiles, output_prefix, outputs)
 
 
-def run_preprocessor_modeldata(pilot_mode: bool=False) -> None:
+def run_prediction_rasters_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
     profiler = cProfile.Profile()
     profiler.enable()
-    processor = ModelDataPreProcessor(overwrite=True, pilot_mode=pilot_mode)
-    processor.process()
+    
+    processor = PredictionRastersEngine(param_lookup, output_prefix) 
+    
+    processor.run()
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
 
+def run_training_rasters_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = TrainingRastersEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)    
+
+def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = SubgridTilingEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)        
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
