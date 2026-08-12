@@ -365,7 +365,7 @@ def test_raster_to_spatial_df(mock_shapes, mock_rio_open, mock_dependencies, tmp
     
     # We need to mock get_config_item specifically for this test's MASKS_DIR call
     def custom_config(section, key):
-        if key == 'MASKS_DIR': return str(tmp_path / 'masks')
+        if key == 'SUBFOLDER': return str(tmp_path / 'masks')
         return f"mock_{key.lower()}"
     mock_dependencies['get_config'].side_effect = custom_config
     
