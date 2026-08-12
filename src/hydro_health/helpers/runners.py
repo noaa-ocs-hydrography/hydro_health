@@ -5,6 +5,7 @@ import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
+from hydro_health.engines.tiling.BatchTilingEngine import BatchTilingEngine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
@@ -145,6 +146,19 @@ def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool)
     profiler.enable()
     
     processor = SubgridTilingEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
+def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = BatchTilingEngine(param_lookup, output_prefix) 
     
     processor.run()
     profiler.disable()

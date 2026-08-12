@@ -18,12 +18,13 @@ from dask.distributed import as_completed, Client
 from typing import Literal, List, Tuple, Optional
 from upath import UPath
 
-from hydro_health.helpers.tools import get_config_item, get_environment
+from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
 
 
-class BatchTilingEngine:
+class BatchTilingEngine(Engine):
     """Class for transforming wide parquet files in batch/long format"""
 
     # Class-level compiled regex patterns for static access across workers
@@ -31,66 +32,151 @@ class BatchTilingEngine:
     RE_BT_PREFIX = re.compile(r"^bt\.")
     RE_FLOWDIR = re.compile(r"flowdir")
 
-    def __init__(self, year_ranges: Optional[List[Tuple[int, int]]] = None, overwrite: bool = False, pilot_mode: bool = False):
+    def __init__(self, param_lookup: dict, output_prefix: str | bool = False, year_ranges: Optional[List[Tuple[int, int]]] = None) -> None:
         """Initialize the BatchTilingEngine"""
-        
         super().__init__()
-        self.pilot_mode = pilot_mode
-        self.overwrite = overwrite
-        self.year_ranges = year_ranges or []
+        self.param_lookup = param_lookup
+        
+        # Helper to safely extract values whether they are plain types or Param objects
+        def _get_val(key, default=None):
+            val = self.param_lookup.get(key, default)
+            if hasattr(val, 'valueAsText') and val.valueAsText is not None:
+                return val.valueAsText
+            if hasattr(val, 'value') and val.value is not None:
+                return val.value
+            return val
+            
+        env = _get_val('env', 'local')
+        self.is_aws = env in ['remote', 'aws']
+        self.overwrite = _get_val('overwrite', False)
+        
+        # Pull year ranges from arguments or fallback to param lookup
+        yr_val = year_ranges if year_ranges is not None else _get_val('year_ranges', [])
+        self.year_ranges = yr_val if isinstance(yr_val, list) else []
 
-        self.is_aws = (get_environment() == 'aws')
+        logger.info(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
-    def create_file_paths(self) -> None:
-        """Creates unified UPath objects that work both locally and on S3"""
+        # ---------------------------------------------------------
+        # Dynamically determine Repo Root and base folders
+        # __file__ = src/hydro_health/engines/tiling/BatchTilingEngine.py
+        # parents[4] points to the hydro_health/ repository root
+        # ---------------------------------------------------------
+        self.repo_root = pathlib.Path(__file__).resolve().parents[4]
         
-        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
-        logger.info(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
-        logger.info(f"Mode detected: {'Pilot' if self.pilot_mode else 'Full'}")
+        in_dir = _get_val('input_directory')
+        out_dir = _get_val('output_directory')
         
-        self.mask_prediction_pq = UPath(f"{prefix}{get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)}")
-        self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)}")
-        self.grid_gpkg = UPath(f"{prefix}{get_config_item('MODEL', 'SUBGRIDS', pilot_mode=self.pilot_mode)}")
-        self.pred_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_PRED_PATH', pilot_mode=self.pilot_mode)}")
-        self.train_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_TRAINING_PATH', pilot_mode=self.pilot_mode)}")
-        self.preprocessed_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREPROCESSED_DIR', pilot_mode=self.pilot_mode)}")
-        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=self.pilot_mode)}")
-        self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', pilot_mode=self.pilot_mode)}")
+        # Use param_lookup paths if provided (and not empty strings), else default to repo root
+        base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
+        base_out_dir = pathlib.Path(out_dir) if out_dir else self.repo_root / 'outputs'
         
-        self.uncombined_lidar_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_PROC', pilot_mode=self.pilot_mode)}")
+        # Mimic RasterMaskEngine logic: append output_prefix to output folder if it exists
+        self.inputs_dir = base_in_dir
+        self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
         
-        # Dynamically retrieve the filled terrain directory from config to ensure accurate exclusion
+        # Dynamically determine the ecoregion (e.g., 'ER_3') to append to output paths
+        eco_val = _get_val('eco_regions')
+        self.ecoregion = ''
+        
+        if isinstance(eco_val, list) and eco_val:
+            self.ecoregion = eco_val[0]
+        elif isinstance(eco_val, str) and eco_val:
+            import ast
+            try:
+                parsed = ast.literal_eval(eco_val)
+                if isinstance(parsed, list) and parsed:
+                    self.ecoregion = parsed[0]
+                else:
+                    self.ecoregion = eco_val.strip("[]'\" ")
+            except Exception:
+                self.ecoregion = eco_val.strip("[]'\" ")
+
+        # If it wasn't explicitly provided in param_lookup, scan the directory
+        if not self.ecoregion:
+            er_dirs = [d.name for d in self.outputs_dir.glob('ER_*') if d.is_dir()]
+            if er_dirs:
+                self.ecoregion = er_dirs[0]
+
+        # Finally, append the ecoregion into the path!
+        if self.ecoregion:
+            self.outputs_dir = self.outputs_dir / self.ecoregion
+
+        def _resolve_path(config_value: str, is_output: bool = False) -> UPath:
+            """Helper to safely build paths for AWS or Local execution"""
+            if self.is_aws:
+                bucket = get_config_item('S3', 'BUCKET_NAME')
+                return UPath(f"s3://{bucket}/{config_value}")
+            else:
+                p = pathlib.Path(config_value)
+                # 1. If the config provides an absolute path, just use it
+                if p.is_absolute():
+                    return UPath(p)
+                # 2. If the config value already starts with 'inputs' or 'outputs', 
+                #    strip the first folder and attach it directly to the correctly built 
+                #    inputs_dir or outputs_dir so that ecoregion prefixes are respected!
+                if p.parts:
+                    if p.parts[0] == 'inputs':
+                        return UPath(self.inputs_dir / pathlib.Path(*p.parts[1:]))
+                    elif p.parts[0] == 'outputs':
+                        return UPath(self.outputs_dir / pathlib.Path(*p.parts[1:]))
+                # 3. Otherwise, map flat filenames/paths to the correct base directory
+                base_dir = self.outputs_dir if is_output else self.inputs_dir
+                return UPath(base_dir / p)
+
+        # Apply the path resolver to all attributes
+        self.mask_prediction_pq = _resolve_path(get_config_item('MASK', 'PREDICTION_MASK_PQ'), is_output=True)
+        self.mask_training_pq = _resolve_path(get_config_item('MASK', 'TRAINING_MASK_PQ'), is_output=True)
+        self.grid_gpkg = _resolve_path(get_config_item('MODEL', 'SUBGRIDS'), is_output=True)
+        self.pred_mask_path = _resolve_path(get_config_item('MASK', 'MASK_PRED_PATH'), is_output=True)
+        self.train_mask_path = _resolve_path(get_config_item('MASK', 'MASK_TRAINING_PATH'), is_output=True)
+        self.preprocessed_dir = _resolve_path(get_config_item('MODEL', 'PREPROCESSED_DIR'), is_output=True)
+        self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
+        self.training_out_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'), is_output=True)
+        self.training_tiles_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_TILES_DIR'), is_output=True)
+        self.prediction_tiles_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'), is_output=True)
+        self.uncombined_lidar_dir = _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_PROC'), is_output=True)
+        
+        self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', str(Path.home() / "hydro_health_local_tmp")))
+        self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR', pilot_mode=self.pilot_mode)
+            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
             self.filled_folder_name = UPath(filled_dir_path).name.lower()
         except Exception:
             logger.warning("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
             self.filled_folder_name = "filled_tifs"
 
         self.subgrid_paths = {
-            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', pilot_mode=self.pilot_mode)}"),
-            'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS', pilot_mode=self.pilot_mode)}")
+            'training': _resolve_path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS'), is_output=True),
+            'prediction': _resolve_path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'), is_output=True)
         }
 
         self.preprocessed_subdirs = {
-            'bluetopo': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'BLUETOPO', pilot_mode=self.pilot_mode)}"),
-            'hurricane': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'HURRICANE', pilot_mode=self.pilot_mode)}"),
+            'bluetopo': _resolve_path(get_config_item('PREPROCESSED', 'BLUETOPO'), is_output=True),
+            'hurricane': _resolve_path(get_config_item('PREPROCESSED', 'HURRICANE'), is_output=True),
             # Read from the original input directory
-            'lidar': UPath(f"{prefix}{get_config_item('MODEL', 'TILED_LIDAR_DIR', pilot_mode=self.pilot_mode)}"),
-            'sediment': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'SEDIMENT', pilot_mode=self.pilot_mode)}"),
-            'tsm': UPath(f"{prefix}{get_config_item('PREPROCESSED', 'TSM', pilot_mode=self.pilot_mode)}")
+            'lidar': _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_DIR'), is_output=False),
+            'sediment': _resolve_path(get_config_item('PREPROCESSED', 'SEDIMENT'), is_output=True),
+            'tsm': _resolve_path(get_config_item('PREPROCESSED', 'TSM'), is_output=True)
         }
-        
-        self.local_tmp_dir = Path.home() / "hydro_health_local_tmp"
 
     def run(self) -> None:
         """Main entry point for executing the batch format transformations"""
         
-        self.create_file_paths()
-        self.batch_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
-        self.batch_format_transformation(base_dir=self.training_tiles_dir, mode="training")
+        # Use param_lookup and the base Engine class to initialize Dask
+        env_val = self.param_lookup.get('env', 'local')
+        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
+        
+        self.setup_dask(env)
+
+        try:
+            self.batch_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
+            self.batch_format_transformation(base_dir=self.training_tiles_dir, mode="training")
+        finally:
+            try:
+                self.close_dask()
+            except Exception as e:
+                logger.error(f"Could not cleanly close client/cluster: {e}")
 
     def batch_format_transformation(self, base_dir: UPath, mode: Literal["training", "prediction"]) -> None:
         """Orchestrator for finalizing formatting on wide tiles"""
@@ -117,7 +203,9 @@ class BatchTilingEngine:
         # DYNAMIC DASK TASK STREAM (FORMAT TRANSFORMATION)
         # -------------------------------------------------------------
         try:
-            client = dask.distributed.client.default_client()
+            client = getattr(self, 'client', None)
+            if not client:
+                client = Client()
         except ValueError:
             logger.info("No global Dask client found. Starting a LocalCluster...")
             client = Client()
@@ -620,6 +708,10 @@ class BatchTilingEngine:
                     elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
                     elif "unc" in base or "uncertainty" in base: pair_df['uc_t'] = wide_gdf[c]
                     
+            delta_name = f"delta_bathy_{y0_str}_{y1_str}"
+            if delta_name in wide_gdf.columns:
+                pair_df['delta_bathy'] = wide_gdf[delta_name]
+                
             hurr_col = f"hurr_strength_mean_{y0_str}_{y1_str}"
             if hurr_col in wide_gdf.columns: pair_df[hurr_col] = wide_gdf[hurr_col]
             
@@ -672,4 +764,3 @@ class BatchTilingEngine:
         if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
 
         return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
-    
