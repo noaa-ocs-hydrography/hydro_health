@@ -3,6 +3,7 @@
 import re
 import logging
 from pathlib import Path
+import pathlib
 
 import dask
 import numpy as np
@@ -10,50 +11,123 @@ import pandas as pd
 import geopandas as gpd
 import rasterio
 from upath import UPath
-from dask.distributed import as_completed
+from dask.distributed import as_completed, Client
 
-from hydro_health.helpers.tools import get_config_item, get_environment
+from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
 
 
-class SubgridTilingEngine:
+class SubgridTilingEngine(Engine):
     """Class for subtiling raster data into geoparquet files"""
 
-    def __init__(self, overwrite: bool = False, pilot_mode: bool = False) -> None:
+    def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
         """Initialize the SubgridTilingEngine"""
-        
         super().__init__()
-        self.pilot_mode = pilot_mode
-        self.overwrite = overwrite
+        self.param_lookup = param_lookup
+        
+        # Helper to safely extract values whether they are plain types or Param objects
+        def _get_val(key, default=None):
+            val = self.param_lookup.get(key, default)
+            if hasattr(val, 'valueAsText') and val.valueAsText is not None:
+                return val.valueAsText
+            if hasattr(val, 'value') and val.value is not None:
+                return val.value
+            return val
+            
+        env = _get_val('env', 'local')
+        self.is_aws = env in ['remote', 'aws']
+        self.overwrite = _get_val('overwrite', False)
 
         # Extended static patterns to ensure ungridded data like 'grain', 'survey', and 'sed' are captured 
         self.static_patterns = ['sed', 'tsm', 'hurr', 'grain', 'survey']
-        self.is_aws = (get_environment() == 'aws')
+        
+        logger.info(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
-    def create_file_paths(self) -> None:
-        """Creates unified UPath objects that work both locally and on S3"""
+        # ---------------------------------------------------------
+        # Dynamically determine Repo Root and base folders
+        # __file__ = src/hydro_health/engines/tiling/SubgridTilingEngine.py
+        # parents[4] points to the hydro_health/ repository root
+        # ---------------------------------------------------------
+        self.repo_root = pathlib.Path(__file__).resolve().parents[4]
         
-        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
-        logger.info(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
-        logger.info(f"Mode detected: {'Pilot' if self.pilot_mode else 'Full'}")
+        in_dir = _get_val('input_directory')
+        out_dir = _get_val('output_directory')
         
-        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=self.pilot_mode)}")
-        self.prediction_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', pilot_mode=self.pilot_mode)}")
+        # Use param_lookup paths if provided (and not empty strings), else default to repo root
+        base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
+        base_out_dir = pathlib.Path(out_dir) if out_dir else self.repo_root / 'outputs'
+        
+        # Mimic RasterMaskEngine logic: append output_prefix to output folder if it exists
+        self.inputs_dir = base_in_dir
+        self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
+        
+        # Dynamically determine the ecoregion (e.g., 'ER_3') to append to output paths
+        eco_val = _get_val('eco_regions')
+        self.ecoregion = ''
+        
+        if isinstance(eco_val, list) and eco_val:
+            self.ecoregion = eco_val[0]
+        elif isinstance(eco_val, str) and eco_val:
+            import ast
+            try:
+                parsed = ast.literal_eval(eco_val)
+                if isinstance(parsed, list) and parsed:
+                    self.ecoregion = parsed[0]
+                else:
+                    self.ecoregion = eco_val.strip("[]'\" ")
+            except Exception:
+                self.ecoregion = eco_val.strip("[]'\" ")
+
+        # If it wasn't explicitly provided in param_lookup, scan the directory
+        if not self.ecoregion:
+            er_dirs = [d.name for d in self.outputs_dir.glob('ER_*') if d.is_dir()]
+            if er_dirs:
+                self.ecoregion = er_dirs[0]
+
+        # Finally, append the ecoregion into the path!
+        if self.ecoregion:
+            self.outputs_dir = self.outputs_dir / self.ecoregion
+
+        def _resolve_path(config_value: str, is_output: bool = False) -> UPath:
+            """Helper to safely build paths for AWS or Local execution"""
+            if self.is_aws:
+                bucket = get_config_item('S3', 'BUCKET_NAME')
+                return UPath(f"s3://{bucket}/{config_value}")
+            else:
+                p = pathlib.Path(config_value)
+                # 1. If the config provides an absolute path, just use it
+                if p.is_absolute():
+                    return UPath(p)
+                # 2. If the config value already starts with 'inputs' or 'outputs', 
+                #    strip the first folder and attach it directly to the correctly built 
+                #    inputs_dir or outputs_dir so that ecoregion prefixes are respected!
+                if p.parts:
+                    if p.parts[0] == 'inputs':
+                        return UPath(self.inputs_dir / pathlib.Path(*p.parts[1:]))
+                    elif p.parts[0] == 'outputs':
+                        return UPath(self.outputs_dir / pathlib.Path(*p.parts[1:]))
+                # 3. Otherwise, map flat filenames/paths to the correct base directory
+                base_dir = self.outputs_dir if is_output else self.inputs_dir
+                return UPath(base_dir / p)
+
+        self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
+        self.training_out_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'), is_output=True)
+        self.training_tiles_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_TILES_DIR'), is_output=True)
+        self.prediction_tiles_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'), is_output=True)
         
         # Dynamically retrieve the filled terrain directory from config to ensure accurate exclusion
         try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR', pilot_mode=self.pilot_mode)
+            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
             self.filled_folder_name = UPath(filled_dir_path).name.lower()
         except Exception:
             logger.warning("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
             self.filled_folder_name = "filled_tifs"
 
         self.subgrid_paths = {
-            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', pilot_mode=self.pilot_mode)}"),
-            'prediction': UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_SUB_GRIDS', pilot_mode=self.pilot_mode)}")
+            'training': _resolve_path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS'), is_output=True),
+            'prediction': _resolve_path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'), is_output=True)
         }
 
     def clip_rasters_by_tile(self, raster_dir: UPath, output_dir: UPath, data_type: str) -> None:
@@ -175,7 +249,10 @@ class SubgridTilingEngine:
         logger.info("--------------------------------------------------")
 
         # Dynamic Dask task stream
-        client = dask.distributed.client.default_client()
+        client = getattr(self, 'client', None)
+        if not client:
+            client = Client()
+            
         max_concurrent = 25 
         logger.info(f"Building dynamic Dask task stream (max {max_concurrent} concurrent)...")
         
@@ -246,19 +323,29 @@ class SubgridTilingEngine:
     def run(self) -> None:
         """Main entry point for executing the clipping pipelines"""
         
-        self.create_file_paths()
+        # Use param_lookup and the base Engine class to initialize Dask
+        env_val = self.param_lookup.get('env', 'local')
+        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
         
-        self.clip_rasters_by_tile(
-            raster_dir=self.prediction_out_dir, 
-            output_dir=self.prediction_tiles_dir, 
-            data_type="prediction"
-        )
+        self.setup_dask(env)
 
-        self.clip_rasters_by_tile(
-            raster_dir=self.training_out_dir, 
-            output_dir=self.training_tiles_dir, 
-            data_type="training"
-        )
+        try:
+            self.clip_rasters_by_tile(
+                raster_dir=self.prediction_out_dir, 
+                output_dir=self.prediction_tiles_dir, 
+                data_type="prediction"
+            )
+
+            self.clip_rasters_by_tile(
+                raster_dir=self.training_out_dir, 
+                output_dir=self.training_tiles_dir, 
+                data_type="training"
+            )
+        finally:
+            try:
+                self.close_dask()
+            except Exception as e:
+                logger.error(f"Could not cleanly close client/cluster: {e}")
 
     @staticmethod
     def _generate_stats_from_existing(filepath: str, tile_id: str) -> pd.DataFrame:
