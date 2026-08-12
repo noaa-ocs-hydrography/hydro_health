@@ -20,52 +20,128 @@ from upath import UPath
 import s3fs
 
 from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
 
 
-class TrainingRastersEngine:
+class TrainingRastersEngine(Engine):
     """Class for parallel processing training rasters and applying mathematical masks"""
 
-    def __init__(self, pilot_mode: bool = False, is_aws: bool = False, overwrite: bool = False, target_res: float = 1.0, target_crs: str = "EPSG:4326") -> None:
+    def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
         """Initialize paths, configurations, and environment for training rasters"""
+        super().__init__()
+        self.param_lookup = param_lookup
         
-        self.pilot_mode = pilot_mode
-        self.is_aws = is_aws
-        self.overwrite = overwrite
+        # Helper to safely extract values whether they are plain types or Param objects
+        def _get_val(key, default=None):
+            val = self.param_lookup.get(key, default)
+            if hasattr(val, 'valueAsText') and val.valueAsText is not None:
+                return val.valueAsText
+            if hasattr(val, 'value') and val.value is not None:
+                return val.value
+            return val
+            
+        self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', str(Path.home() / "hydro_health_local_tmp")))
+        self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        self.gdal_env_vars = {
+        self.target_crs = _get_val('target_crs', "EPSG:4326")
+        self.target_res = float(_get_val('target_res', 1.0))
+        
+        env = _get_val('env', 'local')
+        self.is_aws = env in ['remote', 'aws']
+        self.overwrite = _get_val('overwrite', False)
+        
+        self.gdal_env_vars = _get_val('gdal_env_vars', {
             'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR',
             'AWS_NO_SIGN_REQUEST': 'YES'
-        } if self.is_aws else {}
+        } if self.is_aws else {})
         
-        self.fs = s3fs.S3FileSystem() if self.is_aws else None
-        self.target_res = target_res
-        self.target_crs = target_crs
+        logger.info(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
-        prefix = f"s3://{get_config_item('S3', 'BUCKET_NAME', pilot_mode=self.pilot_mode)}/" if self.is_aws else ""
-        logger.info(f"Environment detected: {'AWS' if self.is_aws else 'Local/Remote'}")
-        logger.info(f"Mode detected: {'Pilot' if self.pilot_mode else 'Full'}")
+        # ---------------------------------------------------------
+        # Dynamically determine Repo Root and base folders
+        # __file__ = src/hydro_health/engines/tiling/TrainingRastersEngine.py
+        # parents[4] points to the hydro_health/ repository root
+        # ---------------------------------------------------------
+        self.repo_root = pathlib.Path(__file__).resolve().parents[4]
         
-        self.mask_training_pq = UPath(f"{prefix}{get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)}")
-        self.train_mask_path = UPath(f"{prefix}{get_config_item('MASK', 'MASK_TRAINING_PATH', pilot_mode=self.pilot_mode)}")
-        self.prediction_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.training_out_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_OUTPUT_DIR', pilot_mode=self.pilot_mode)}")
-        self.training_tiles_dir = UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=self.pilot_mode)}")
+        in_dir = _get_val('input_directory')
+        out_dir = _get_val('output_directory')
+        
+        # Use param_lookup paths if provided (and not empty strings), else default to repo root
+        base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
+        base_out_dir = pathlib.Path(out_dir) if out_dir else self.repo_root / 'outputs'
+        
+        # Mimic RasterMaskEngine logic: append output_prefix to output folder if it exists
+        self.inputs_dir = base_in_dir
+        self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
+        
+        # Dynamically determine the ecoregion (e.g., 'ER_3') to append to output paths
+        eco_val = _get_val('eco_regions')
+        self.ecoregion = ''
+        
+        if isinstance(eco_val, list) and eco_val:
+            self.ecoregion = eco_val[0]
+        elif isinstance(eco_val, str) and eco_val:
+            import ast
+            try:
+                parsed = ast.literal_eval(eco_val)
+                if isinstance(parsed, list) and parsed:
+                    self.ecoregion = parsed[0]
+                else:
+                    self.ecoregion = eco_val.strip("[]'\" ")
+            except Exception:
+                self.ecoregion = eco_val.strip("[]'\" ")
+
+        # If it wasn't explicitly provided in param_lookup, scan the directory
+        if not self.ecoregion:
+            er_dirs = [d.name for d in self.outputs_dir.glob('ER_*') if d.is_dir()]
+            if er_dirs:
+                self.ecoregion = er_dirs[0]
+
+        # Finally, append the ecoregion into the path!
+        if self.ecoregion:
+            self.outputs_dir = self.outputs_dir / self.ecoregion
+
+        def _resolve_path(config_value: str, is_output: bool = False) -> UPath:
+            """Helper to safely build paths for AWS or Local execution"""
+            if self.is_aws:
+                bucket = get_config_item('S3', 'BUCKET_NAME')
+                return UPath(f"s3://{bucket}/{config_value}")
+            else:
+                p = pathlib.Path(config_value)
+                # 1. If the config provides an absolute path, just use it
+                if p.is_absolute():
+                    return UPath(p)
+                # 2. If the config value already starts with 'inputs' or 'outputs', 
+                #    strip the first folder and attach it directly to the correctly built 
+                #    inputs_dir or outputs_dir so that ecoregion prefixes are respected!
+                if p.parts:
+                    if p.parts[0] == 'inputs':
+                        return UPath(self.inputs_dir / pathlib.Path(*p.parts[1:]))
+                    elif p.parts[0] == 'outputs':
+                        return UPath(self.outputs_dir / pathlib.Path(*p.parts[1:]))
+                # 3. Otherwise, map flat filenames/paths to the correct base directory
+                base_dir = self.outputs_dir if is_output else self.inputs_dir
+                return UPath(base_dir / p)
+
+        self.mask_training_pq = _resolve_path(get_config_item('MASK', 'TRAINING_MASK_PQ'), is_output=True)
+        self.train_mask_path = _resolve_path(get_config_item('MASK', 'MASK_TRAINING_PATH'), is_output=True)
+        self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
+        self.training_out_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'), is_output=True)
+        self.training_tiles_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_TILES_DIR'), is_output=True)
         
         try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR', pilot_mode=self.pilot_mode)
+            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
             self.filled_folder_name = UPath(filled_dir_path).name.lower()
         except Exception:
             logger.warning("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
             self.filled_folder_name = "filled_tifs"
 
         self.subgrid_paths = {
-            'training': UPath(f"{prefix}{get_config_item('MODEL', 'TRAINING_SUB_GRIDS', pilot_mode=self.pilot_mode)}")
+            'training': _resolve_path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS'), is_output=True)
         }
-        
-        self.local_tmp_dir = Path.home() / "hydro_health_local_tmp"
-        self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
 
     def _create_binary_mask_raster(self, cutline_path: str, bounds: tuple, output_path: str) -> tuple:
         """Creates a global binary raster mask from a vector layer before running Dask processes"""
@@ -180,7 +256,9 @@ class TrainingRastersEngine:
                     
                     # If on AWS, push complete file from fast local disk to S3 bucket
                     if self.is_aws:
-                        self.fs.put(tmp_dst_path, str(output_path))
+                        import s3fs
+                        fs = s3fs.S3FileSystem()
+                        fs.put(tmp_dst_path, str(output_path))
 
                 logger.info(f" - [✓ SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}")
                 
@@ -190,29 +268,34 @@ class TrainingRastersEngine:
     def run(self, mask_train_bounds: tuple, train_cutline_path: str, max_concurrent: int = 10) -> None:
         """Main entry point for generating binary masks and processing training rasters in parallel"""
         
-        cluster = LocalCluster(
-            n_workers=4,            
-            threads_per_worker=1,   
-            memory_limit='7GB',
-            env=self.gdal_env_vars,
-            local_directory=str(self.local_tmp_dir) 
-        )
-        client = Client(cluster)
+        # Use param_lookup and the base Engine class to initialize Dask
+        env_val = self.param_lookup.get('env', 'local')
+        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
+        
+        self.setup_dask(env)
+        
+        # Pull the client configured by setup_dask, or fallback to connecting to the default cluster
+        client = getattr(self, 'client', None)
+        if not client:
+            client = Client()
         
         global_mask_path = str(self.local_tmp_dir / "global_train_mask.tif")
         self._create_binary_mask_raster(train_cutline_path, mask_train_bounds, global_mask_path)
 
-        potential_train_inputs = list(self.prediction_out_dir.rglob("*"))
-        training_candidates = [
-            f for f in potential_train_inputs
-            if f.suffix.lower() in {'.tif', '.tiff'}
-        ]
+        # Case-insensitive recursive glob for input files
+        potential_train_inputs = []
+        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+            potential_train_inputs.extend(list(self.prediction_out_dir.rglob(ext)))
 
         training_files = []
         removed_existing_train = 0
-        existing_train_outputs = {f.name for f in self.training_out_dir.rglob("*")}
         
-        for f in training_candidates:
+        # Case-insensitive recursive glob for existing outputs
+        existing_train_outputs = set()
+        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+            existing_train_outputs.update({f.name for f in self.training_out_dir.rglob(ext)})
+        
+        for f in potential_train_inputs:
             name_lower = f.name.lower()
             parts_lower = [p.lower() for p in f.parts]
 
@@ -244,7 +327,6 @@ class TrainingRastersEngine:
         # DYNAMIC DASK TASK STREAM (TRAINING)
         # Prevents idle workers by instantly replacing completed tasks
         # -------------------------------------------------------------
-        client = dask.distributed.client.default_client()
         total_train = len(training_files)
         training_iterator = iter(enumerate(training_files))
         seq_train = as_completed()
@@ -281,3 +363,10 @@ class TrainingRastersEngine:
             logger.info("[SUCCESS] Training raster processing complete.")
         else:
             logger.info("No new training rasters to process.")
+            
+        # Cleanly shut down
+        try:
+            client.close()
+            self.close_dask()
+        except Exception as e:
+            logger.error(f"Could not cleanly close client/cluster: {e}")

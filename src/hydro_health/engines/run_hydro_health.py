@@ -97,6 +97,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_hurricane_layer_engine()
             elif step["tool"] == "run_prediction_rasters_engine" and step["run"]:
                 runners.run_prediction_rasters_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_training_rasters_engine" and step["run"]:
+                runners.run_training_rasters_engine(param_lookup, output_prefix)
     write_config_log(config_path, config, env)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60} minutes")
