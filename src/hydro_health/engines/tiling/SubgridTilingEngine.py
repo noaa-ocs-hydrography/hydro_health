@@ -18,7 +18,6 @@ from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
 
-
 class SubgridTilingEngine(Engine):
     """Class for subtiling raster data into geoparquet files"""
 
@@ -117,6 +116,13 @@ class SubgridTilingEngine(Engine):
         self.training_tiles_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_TILES_DIR'), is_output=True)
         self.prediction_tiles_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'), is_output=True)
         
+        # Ensure the local output directories exist before workers try to write to them
+        if not self.is_aws:
+            pathlib.Path(self.prediction_out_dir).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.training_out_dir).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.training_tiles_dir).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.prediction_tiles_dir).mkdir(parents=True, exist_ok=True)
+
         # Dynamically retrieve the filled terrain directory from config to ensure accurate exclusion
         try:
             filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
@@ -129,6 +135,22 @@ class SubgridTilingEngine(Engine):
             'training': _resolve_path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS'), is_output=True),
             'prediction': _resolve_path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'), is_output=True)
         }
+
+    def __getstate__(self):
+        """
+        Exclude unpicklable attributes (like Dask Client/Cluster and raw Params)
+        when serializing this instance to send to Dask worker nodes.
+        """
+        state = self.__dict__.copy()
+        
+        # Drop the active connection handlers which crash the serializer
+        state.pop('client', None)
+        state.pop('cluster', None)
+        
+        # Drop raw parameter lookups in case they contain unpicklable COM objects
+        state.pop('param_lookup', None)
+        
+        return state
 
     def clip_rasters_by_tile(self, raster_dir: UPath, output_dir: UPath, data_type: str) -> None:
         """Clip raster files by tile and save data in memory-managed batches"""
