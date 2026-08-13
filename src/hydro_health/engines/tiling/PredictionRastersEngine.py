@@ -14,7 +14,7 @@ from osgeo import gdal
 from scipy.ndimage import uniform_filter
 from rasterio.warp import transform_bounds
 from shapely.geometry import box
-from dask.distributed import LocalCluster, Client, as_completed
+from dask.distributed import Client, as_completed
 from upath import UPath
 from hydro_health.helpers.tools import get_config_item
 
@@ -26,40 +26,34 @@ class PredictionRastersEngine(Engine):
     def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
         """Initialize the engine with necessary configuration paths and settings"""
         super().__init__()
-        self.param_lookup = param_lookup
         
-        # Helper to safely extract values whether they are plain types or Param objects
-        def _get_val(key, default=None):
-            val = self.param_lookup.get(key, default)
-            if hasattr(val, 'valueAsText') and val.valueAsText is not None:
-                return val.valueAsText
-            if hasattr(val, 'value') and val.value is not None:
-                return val.value
-            return val
-            
-        self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', '/tmp'))
-        # FIX: Explicitly create the temp directory so Fiona, Dask, and Tempfile don't crash
+        # Unwrap values from arcpy Param objects so standard dictionary .get() works cleanly everywhere
+        self.param_lookup = {}
+        for k, v in (param_lookup or {}).items():
+            if hasattr(v, 'valueAsText') and v.valueAsText is not None:
+                self.param_lookup[k] = v.valueAsText
+            elif hasattr(v, 'value') and v.value is not None:
+                self.param_lookup[k] = v.value
+            else:
+                self.param_lookup[k] = v
+                
+        self.target_crs = 'EPSG:32617'
+        self.target_res = 8.0
+        
+        self.local_tmp_dir = pathlib.Path(self.param_lookup.get('local_tmp_dir', '/tmp'))
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        self.target_crs = _get_val('target_crs')
-        self.target_res = _get_val('target_res', 10.0)
-        
-        env = _get_val('env', 'local')
+        env = self.param_lookup.get('env', 'local')
         self.is_aws = env in ['remote', 'aws']
-        self.overwrite = _get_val('overwrite', False)
-        self.gdal_env_vars = _get_val('gdal_env_vars', {})
+        self.overwrite = self.param_lookup.get('overwrite', False)
+        self.gdal_env_vars = self.param_lookup.get('gdal_env_vars', {})
         
         print(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
-        # ---------------------------------------------------------
-        # NEW FIX: Dynamically determine Repo Root and base folders
-        # __file__ = src/hydro_health/engines/tiling/PredictionRastersEngine.py
-        # parents[4] points to the hydro_health/ repository root
-        # ---------------------------------------------------------
         self.repo_root = pathlib.Path(__file__).resolve().parents[4]
         
-        in_dir = _get_val('input_directory')
-        out_dir = _get_val('output_directory')
+        in_dir = self.param_lookup.get('input_directory')
+        out_dir = self.param_lookup.get('output_directory')
         
         # Use param_lookup paths if provided (and not empty strings), else default to repo root
         base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
@@ -70,29 +64,12 @@ class PredictionRastersEngine(Engine):
         self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
         
         # Dynamically determine the ecoregion (e.g., 'ER_3') to append to output paths
-        eco_val = _get_val('eco_regions')
+        eco_val = self.param_lookup.get('eco_regions')
         self.ecoregion = ''
         
-        if isinstance(eco_val, list) and eco_val:
-            self.ecoregion = eco_val[0]
-        elif isinstance(eco_val, str) and eco_val:
-            import ast
-            try:
-                parsed = ast.literal_eval(eco_val)
-                if isinstance(parsed, list) and parsed:
-                    self.ecoregion = parsed[0]
-                else:
-                    self.ecoregion = eco_val.strip("[]'\" ")
-            except Exception:
-                self.ecoregion = eco_val.strip("[]'\" ")
+        if eco_val:
+            self.ecoregion = eco_val[0] if isinstance(eco_val, list) else str(eco_val).strip("[]'\" ")
 
-        # If it wasn't explicitly provided in param_lookup, scan the directory
-        if not self.ecoregion:
-            er_dirs = [d.name for d in self.outputs_dir.glob('ER_*') if d.is_dir()]
-            if er_dirs:
-                self.ecoregion = er_dirs[0]
-
-        # Finally, append the ecoregion into the path!
         if self.ecoregion:
             self.outputs_dir = self.outputs_dir / self.ecoregion
 
@@ -118,20 +95,17 @@ class PredictionRastersEngine(Engine):
                 base_dir = self.outputs_dir if is_output else self.inputs_dir
                 return UPath(base_dir / p)
 
-        # Apply the path resolver to all attributes
         self.mask_prediction_pq = _resolve_path(get_config_item('MASK', 'PREDICTION_MASK_PQ'), is_output=True)
         self.preprocessed_dir = _resolve_path(get_config_item('MODEL', 'PREPROCESSED_DIR'), is_output=True)
         
         self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
         self.uncombined_lidar_dir = _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_PROC'), is_output=True)
 
-        try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
-            self.filled_folder_name = UPath(filled_dir_path).name.lower()
-        except Exception:
-            print("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
-            self.filled_folder_name = "filled_tifs"
-
+        filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
+        self.filled_folder_name = UPath(filled_dir_path).name.lower()
+        print("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
+        
+        self.filled_folder_name = "filled_tifs"
         self.preprocessed_subdirs = {
             'bluetopo': _resolve_path(get_config_item('PREPROCESSED', 'BLUETOPO'), is_output=True),
             'hurricane': _resolve_path(get_config_item('PREPROCESSED', 'HURRICANE'), is_output=True),
@@ -139,6 +113,22 @@ class PredictionRastersEngine(Engine):
             'sediment': _resolve_path(get_config_item('PREPROCESSED', 'SEDIMENT'), is_output=True),
             'tsm': _resolve_path(get_config_item('PREPROCESSED', 'TSM'), is_output=True)
         }
+
+    def __getstate__(self):
+        """
+        Exclude unpicklable attributes (like Dask Client/Cluster and raw Params)
+        when serializing this instance to send to Dask worker nodes.
+        """
+        state = self.__dict__.copy()
+        
+        # Drop the active connection handlers which crash the serializer
+        state.pop('client', None)
+        state.pop('cluster', None)
+        
+        # Drop raw parameter lookups in case they contain unpicklable COM objects
+        state.pop('param_lookup', None)
+        
+        return state
 
     def prepare_spatial_masks(self) -> tuple:
         """Process and validate geometries for prediction masks"""
@@ -172,29 +162,26 @@ class PredictionRastersEngine(Engine):
         """Scan and filter input directories for valid TIFF files"""
 
         if not self.is_aws:
-            # Added missing directory creation for prediction outputs using robust path methods
             self.uncombined_lidar_dir.mkdir(parents=True, exist_ok=True)
             self.prediction_out_dir.mkdir(parents=True, exist_ok=True)
 
-        existing_pred_outputs = set()
-        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-            existing_pred_outputs.update({f.name for f in self.prediction_out_dir.rglob(ext)})
-        
-        existing_uncombined_outputs = set()
-        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-            existing_uncombined_outputs.update({f.name for f in self.uncombined_lidar_dir.rglob(ext)})
+        existing_pred_outputs = {f.name for f in self.prediction_out_dir.rglob("*") if f.suffix.lower() in ['.tif', '.tiff']}
+        existing_uncombined_outputs = {f.name for f in self.uncombined_lidar_dir.rglob("*") if f.suffix.lower() in ['.tif', '.tiff']}
         
         all_existing_pred_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
 
         potential_files = []
 
         for data_type, directory in self.preprocessed_subdirs.items():
-            found_files = []
-            for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-                found_files.extend(list(directory.rglob(ext)))
+            found_files = [f for f in directory.rglob("*") if f.suffix.lower() in ['.tif', '.tiff']]
             
             if not found_files:
-                raise RuntimeError(f"CRITICAL ERROR: Missing data for '{data_type}'. No .tif or .tiff files were found in {directory} or any of its subfolders.")
+                print(f"\n{'='*80}")
+                print(f"WARNING: Missing data for '{data_type}'.")
+                print(f"No .tif or .tiff files were found in {directory} or any of its subfolders.")
+                print(f"Continuing pipeline without '{data_type}' files...")
+                print(f"{'='*80}\n")
+                continue
                 
             potential_files.extend(found_files)
 
@@ -242,17 +229,17 @@ class PredictionRastersEngine(Engine):
         if raster_crs is not None:
             try:
                 target_crs_obj = rasterio.crs.CRS.from_string(self.target_crs)
-                # Use robust bounding box construction strictly handling minimums and maximums
                 if raster_crs != target_crs_obj:
                     left, bottom, right, top = transform_bounds(raster_crs, target_crs_obj, *raster_bounds)
-                    bounds_geom = box(min(left, right), min(bottom, top), max(left, right), max(bottom, top))
                 else:
-                    bounds_geom = box(min(raster_bounds[0], raster_bounds[2]), min(raster_bounds[1], raster_bounds[3]), max(raster_bounds[0], raster_bounds[2]), max(raster_bounds[1], raster_bounds[3]))
+                    left, bottom, right, top = raster_bounds
             except Exception as e:
                 print(f"Failed to transform bounds for {raster_name}: {e}. Bypassing intersection check for safety.")
-                bounds_geom = None
+                left, bottom, right, top = None, None, None, None
         else:
-            bounds_geom = box(min(raster_bounds[0], raster_bounds[2]), min(raster_bounds[1], raster_bounds[3]), max(raster_bounds[0], raster_bounds[2]), max(raster_bounds[1], raster_bounds[3]))
+            left, bottom, right, top = raster_bounds
+
+        bounds_geom = box(min(left, right), min(bottom, top), max(left, right), max(bottom, top)) if left is not None else None
 
         if bounds_geom is not None:
             try:
@@ -455,15 +442,9 @@ class PredictionRastersEngine(Engine):
         print('Initializing Cluster and Processing Masks')
         
         # Use param_lookup and the base Engine class to initialize Dask
-        env_val = self.param_lookup.get('env', 'local')
-        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
-        
+        env = self.param_lookup.get('env', 'local')
         self.setup_dask(env)
-        
-        # Pull the client configured by setup_dask, or fallback to connecting to the default cluster
         client = getattr(self, 'client', None)
-        if not client:
-            client = Client()
 
         mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks()
         prediction_files = self.get_valid_source_files()
