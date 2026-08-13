@@ -36,7 +36,7 @@ MODEL:
   TILED_LIDAR_DIR: model_variables\Prediction\pre_processed\tiled
   TILED_LIDAR_PROC: model_variables\Prediction\pre_processed\tiled_processed
 PREPROCESSED:
-  BLUETOPO: model_variables\pre_processed\BlueTopo
+  BLUETOPO: model_variables\Prediction\pre_processed\BlueTopo
   HURRICANE: model_variables\Prediction\pre_processed\hurricane_year_pair_rasters
   SEDIMENT: model_variables\Prediction\pre_processed\sediment_rasters
   TSM: model_variables\Prediction\pre_processed\TSM_year_pair_rasters
