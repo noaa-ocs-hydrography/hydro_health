@@ -11,6 +11,7 @@ from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
+from hydro_health.engines.tiling.LidarGapFillEngine import LidarGapFillEngine
 from hydro_health.engines.tiling.PredictionRastersEngine import PredictionRastersEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
@@ -122,6 +123,19 @@ def run_prediction_rasters_engine(param_lookup: dict[dict], output_prefix: str|b
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
+
+def run_lidar_gap_fill_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = LidarGapFillEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)    
 
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
