@@ -8,10 +8,7 @@ import pathlib
 import pandas as pd
 import geopandas as gpd
 import numpy as np
-import rasterio
-import dask
 import dask.distributed
-import s3fs
 
 from pathlib import Path
 from dask.distributed import as_completed, Client
@@ -26,11 +23,6 @@ logger = logging.getLogger(__name__)
 
 class BatchTilingEngine(Engine):
     """Class for transforming wide parquet files in batch/long format"""
-
-    # Class-level compiled regex patterns for static access across workers
-    STATIC_PATTERNS = ['sed', 'tsm', 'hurr', 'grain', 'survey']
-    RE_BT_PREFIX = re.compile(r"^bt\.")
-    RE_FLOWDIR = re.compile(r"flowdir")
 
     def __init__(self, param_lookup: dict, output_prefix: str | bool = False, year_ranges: Optional[List[Tuple[int, int]]] = None) -> None:
         """Initialize the BatchTilingEngine"""
@@ -50,9 +42,10 @@ class BatchTilingEngine(Engine):
         self.is_aws = env in ['remote', 'aws']
         self.overwrite = _get_val('overwrite', False)
         
-        # Pull year ranges from arguments or fallback to param lookup
-        yr_val = year_ranges if year_ranges is not None else _get_val('year_ranges', [])
-        self.year_ranges = yr_val if isinstance(yr_val, list) else []
+        # Pull year ranges from arguments, fallback to param lookup, or fallback to the inherited Engine value!
+        inherited_yr = getattr(self, 'year_ranges', [])
+        yr_val = year_ranges if year_ranges is not None else _get_val('year_ranges', inherited_yr)
+        self.year_ranges = yr_val if isinstance(yr_val, list) else inherited_yr
 
         logger.info(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
@@ -123,42 +116,33 @@ class BatchTilingEngine(Engine):
                 base_dir = self.outputs_dir if is_output else self.inputs_dir
                 return UPath(base_dir / p)
 
-        # Apply the path resolver to all attributes
-        self.mask_prediction_pq = _resolve_path(get_config_item('MASK', 'PREDICTION_MASK_PQ'), is_output=True)
-        self.mask_training_pq = _resolve_path(get_config_item('MASK', 'TRAINING_MASK_PQ'), is_output=True)
-        self.grid_gpkg = _resolve_path(get_config_item('MODEL', 'SUBGRIDS'), is_output=True)
-        self.pred_mask_path = _resolve_path(get_config_item('MASK', 'MASK_PRED_PATH'), is_output=True)
-        self.train_mask_path = _resolve_path(get_config_item('MASK', 'MASK_TRAINING_PATH'), is_output=True)
-        self.preprocessed_dir = _resolve_path(get_config_item('MODEL', 'PREPROCESSED_DIR'), is_output=True)
-        self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
-        self.training_out_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'), is_output=True)
+        # Apply the path resolver to the attributes actually needed by this engine
         self.training_tiles_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_TILES_DIR'), is_output=True)
         self.prediction_tiles_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_TILES_DIR'), is_output=True)
-        self.uncombined_lidar_dir = _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_PROC'), is_output=True)
         
         self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', str(Path.home() / "hydro_health_local_tmp")))
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Ensure the local output directories exist before workers try to write to them
+        if not self.is_aws:
+            pathlib.Path(self.training_tiles_dir).mkdir(parents=True, exist_ok=True)
+            pathlib.Path(self.prediction_tiles_dir).mkdir(parents=True, exist_ok=True)
 
-        try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
-            self.filled_folder_name = UPath(filled_dir_path).name.lower()
-        except Exception:
-            logger.warning("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
-            self.filled_folder_name = "filled_tifs"
-
-        self.subgrid_paths = {
-            'training': _resolve_path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS'), is_output=True),
-            'prediction': _resolve_path(get_config_item('MODEL', 'PREDICTION_SUB_GRIDS'), is_output=True)
-        }
-
-        self.preprocessed_subdirs = {
-            'bluetopo': _resolve_path(get_config_item('PREPROCESSED', 'BLUETOPO'), is_output=True),
-            'hurricane': _resolve_path(get_config_item('PREPROCESSED', 'HURRICANE'), is_output=True),
-            # Read from the original input directory
-            'lidar': _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_DIR'), is_output=False),
-            'sediment': _resolve_path(get_config_item('PREPROCESSED', 'SEDIMENT'), is_output=True),
-            'tsm': _resolve_path(get_config_item('PREPROCESSED', 'TSM'), is_output=True)
-        }
+    def __getstate__(self):
+        """
+        Exclude unpicklable attributes (like Dask Client/Cluster and raw Params)
+        when serializing this instance to send to Dask worker nodes.
+        """
+        state = self.__dict__.copy()
+        
+        # Drop the active connection handlers which crash the serializer
+        state.pop('client', None)
+        state.pop('cluster', None)
+        
+        # Drop raw parameter lookups in case they contain unpicklable COM objects
+        state.pop('param_lookup', None)
+        
+        return state
 
     def run(self) -> None:
         """Main entry point for executing the batch format transformations"""
@@ -214,7 +198,6 @@ class BatchTilingEngine(Engine):
         total_files = len(files_to_process)
         tasks_iterator = iter(enumerate(files_to_process))
         seq = as_completed()
-        results = []
         
         def submit_format_task(item):
             i, fp = item
@@ -276,31 +259,6 @@ class BatchTilingEngine(Engine):
         return str(col).strip()
 
     @staticmethod
-    def _extract_raster_to_df(raster_path: str, tile_extent: Tuple) -> pd.DataFrame:
-        """Helper to read a window of a raster and convert to DataFrame"""
-        
-        try:
-            with rasterio.open(raster_path) as src:
-                window = src.window(*tile_extent)
-                data = src.read(1, window=window)
-                transform = src.window_transform(window)
-                mask = data != src.nodata
-                
-                if not mask.any():
-                    return pd.DataFrame()
-
-                rows, cols = np.where(mask)
-                values = data[mask]
-                xs, ys = rasterio.transform.xy(transform, rows, cols, offset='center')
-                
-                return pd.DataFrame({
-                    'X': xs, 'Y': ys, 'Value': values, 'Raster': pathlib.Path(raster_path).stem
-                })
-        except Exception as e:
-            logger.exception(f"Reading raster window from {raster_path} failed.")
-            return pd.DataFrame()
-
-    @staticmethod
     def _transform_tile_task(f_path: str, mode: Literal["training", "prediction"], overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> str:
         """Dask Worker: Reads file -> Calls specific processor -> Returns status"""
         
@@ -338,59 +296,6 @@ class BatchTilingEngine(Engine):
             if gdf is not None:
                 del gdf
             BatchTilingEngine._trim_memory()
-
-    @staticmethod
-    def _transform_flowdir_cols_inplace(df: pd.DataFrame) -> None:
-        """Modifies DataFrame in-place to replace flow direction angles"""
-        
-        flow_cols = [c for c in df.columns if BatchTilingEngine.RE_FLOWDIR.search(c)]
-        if not flow_cols:
-            return
-
-        # Explicitly enforce float32 to prevent automatic float64 casting from eating extra memory
-        radians = np.deg2rad(df[flow_cols].astype(np.float32))
-        for col in flow_cols:
-            # We inject _sin and _cos before the year to match the _t parsing logic later
-            # e.g., flowdir_2004 -> flowdir_sin_2004
-            match = re.search(r"_(\d{4})", col)
-            if match:
-                base = col[:match.start()]
-                suffix = col[match.start():]
-                sin_col = f"{base}_sin{suffix}"
-                cos_col = f"{base}_cos{suffix}"
-            else:
-                sin_col = f"{col}_sin"
-                cos_col = f"{col}_cos"
-
-            df[sin_col] = np.sin(radians[col]).astype(np.float32)
-            df[cos_col] = np.cos(radians[col]).astype(np.float32)
-
-        df.drop(columns=flow_cols, inplace=True)
-        del radians
-
-    @staticmethod
-    def _get_column_metadata(columns: List[str]) -> pd.DataFrame:
-        """Efficiently parses column names to extract variables and years, handling _filled suffixes"""
-        
-        records = []
-        # Looks for _YYYY possibly followed by _filled (e.g. bathy_2004, bathy_2004_filled, flowdir_sin_2004)
-        year_re = re.compile(r"_(\d{4})(?:_filled)?$")
-        
-        for c in columns:
-            # Safely skip year pair forcing columns and standalone files (e.g. 1998_2004_tsm_mean)
-            if re.search(r"\d{4}_\d{4}", c):
-                continue
-                
-            match = year_re.search(c)
-            if match:
-                year = int(match.group(1))
-                var_base = c[:match.start()]
-                records.append({"colname": c, "year": year, "var_base": var_base})
-                
-        if not records:
-            return pd.DataFrame(columns=["colname", "year", "var_base"])
-            
-        return pd.DataFrame(records)
 
     @staticmethod
     def _process_and_save_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> Tuple[List[str], str]:
