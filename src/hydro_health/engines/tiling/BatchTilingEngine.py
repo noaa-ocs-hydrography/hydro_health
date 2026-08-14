@@ -171,10 +171,16 @@ class BatchTilingEngine(Engine):
         if not self.year_ranges:
             logger.error("!!! CRITICAL WARNING: 'self.year_ranges' is empty or not defined. No files will be processed !!!")
 
-        file_suffix = f"_{mode}_clipped_data.parquet"
-
         base_dir_upath = UPath(base_dir)
-        files_to_process = list(base_dir_upath.rglob(f"*{file_suffix}"))
+        
+        # Search all subdirectories for parquet files, ignoring the final batch files.
+        # We allow processing of _formatted files in case the pipeline was interrupted and 
+        # the raw wide files were already deleted.
+        all_parquets = base_dir_upath.rglob("*.parquet")
+        files_to_process = [
+            fp for fp in all_parquets 
+            if not fp.name.endswith("_batch.parquet")
+        ]
 
         if not files_to_process:
             logger.warning(f"No files found for {mode} transformation in {base_dir}")
@@ -281,12 +287,14 @@ class BatchTilingEngine(Engine):
                 saved, cols_str = BatchTilingEngine._process_and_save_prediction_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
             
             # --- CLEAN UP INTERMEDIATE RAW WIDE FILE ---
-            try:
-                upath_obj = UPath(f_path)
-                if upath_obj.exists():
-                    upath_obj.unlink()
-            except Exception as e:
-                logger.warning(f"Could not delete intermediate file {f_path}: {e}")
+            # We do not want to delete the file if it is already our formatted output!
+            if not f_path.endswith("_formatted.parquet"):
+                try:
+                    upath_obj = UPath(f_path)
+                    if upath_obj.exists():
+                        upath_obj.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not delete intermediate file {f_path}: {e}")
 
             return f"Success: {tile_name} (Generated: {len(saved)} files)\n   -> {cols_str}"
 
