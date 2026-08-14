@@ -322,7 +322,13 @@ class SubgridTilingEngine(Engine):
                 
         # Process stream
         for future in seq:
-            results_list.append(future.result())
+            # Unpack the tuple returned by the Dask task
+            stats_df, cols_list, t_id = future.result()
+            
+            # Print columns directly in the main thread so you actually see them!
+            print(f"\n{'='*75}\n✅ [TILE COMPLETED: {t_id}]\nPARQUET FILE CONTAINS THE FOLLOWING {len(cols_list)} COLUMNS:\n{', '.join(cols_list)}\n{'='*75}\n")
+            
+            results_list.append(stats_df)
             try:
                 seq.add(submit_next_tile(next(sub_grid_iterator)))
             except StopIteration:
@@ -370,14 +376,15 @@ class SubgridTilingEngine(Engine):
                 logger.error(f"Could not cleanly close client/cluster: {e}")
 
     @staticmethod
-    def _generate_stats_from_existing(filepath: str, tile_id: str) -> pd.DataFrame:
-        """Reads an existing parquet file to generate nan stats without reprocessing."""
+    def _generate_stats_from_existing(filepath: str, tile_id: str) -> tuple:
+        """Reads an existing parquet file to generate nan stats without reprocessing. Returns tuple for main thread unpacking."""
         try:
             df = pd.read_parquet(filepath)
-            return SubgridTilingEngine.create_nan_stats_csv(df, tile_id)
+            cols = df.columns.tolist()
+            return SubgridTilingEngine.create_nan_stats_csv(df, tile_id), cols, tile_id
         except Exception:
             logger.exception(f"Failed to read existing tile {filepath} for stats.")
-            return pd.DataFrame()
+            return pd.DataFrame(), [], tile_id
 
     @staticmethod
     def subtile_process_gridded(sub_grid, raster_files, is_aws: bool) -> pd.DataFrame:
@@ -391,6 +398,7 @@ class SubgridTilingEngine(Engine):
         ]
         
         if not filtered_files:
+            logger.warning(f"⚠️ MISSING GRIDDED DATA: No tile-specific raster files found for tile '{original_tile}'.")
             return pd.DataFrame()
 
         tile_extent = sub_grid.geometry.bounds
@@ -437,6 +445,7 @@ class SubgridTilingEngine(Engine):
                 master_mask |= mask
                 
         if master_mask is None or not master_mask.any():
+            logger.warning(f"⚠️ MISSING VALID DATA: Gridded files exist for '{original_tile}', but all pixels are NoData/NaN.")
             return pd.DataFrame()
             
         # Compute spatial coordinates only ONCE for the whole tile
@@ -463,6 +472,7 @@ class SubgridTilingEngine(Engine):
     def subtile_process_ungridded(sub_grid, raster_files, gridded_df, static_patterns: list, is_aws: bool) -> pd.DataFrame:
         """Process ungridded rasters by translating spatial locations directly to pixel indices instead of merging."""
         if gridded_df is None or gridded_df.empty:
+            logger.warning(f"⚠️ MISSING SPATIAL GRID: Cannot process ungridded data for tile '{sub_grid.get('original_tile', 'Unknown')}' because gridded dataframe is empty.")
             return pd.DataFrame()
 
         # Copy dataframe structure to insert matching ungridded bands directly
@@ -475,6 +485,9 @@ class SubgridTilingEngine(Engine):
 
         for pattern in static_patterns:
             current_files = [f for f in raster_files if pattern in Path(f).name]
+            
+            if not current_files:
+                logger.warning(f"⚠️ MISSING UNGRIDDED DATA: No global files found matching pattern '{pattern}' for tile '{original_tile}'.")
 
             for file in current_files:
                 col_name = Path(file).stem
@@ -533,10 +546,11 @@ class SubgridTilingEngine(Engine):
         return combined_df
 
     @staticmethod
-    def save_combined_data(combined_df, output_folder, data_type, tile_id, is_aws: bool, current_index=None, total_count=None) -> pd.DataFrame:
-        """Combine dataframes and save to parquet."""
+    def save_combined_data(combined_df, output_folder, data_type, tile_id, is_aws: bool, current_index=None, total_count=None) -> tuple:
+        """Combine dataframes and save to parquet. Returns tuple for main thread unpacking."""
         if combined_df is None or combined_df.empty:
-            return pd.DataFrame()
+            logger.warning(f"⚠️ CRITICAL MISSING DATA: No data assembled for tile '{tile_id}'. Creating empty parquet file to register completion.")
+            combined_df = pd.DataFrame(columns=['FID', 'tile_id', 'X', 'Y'])
 
         # Dynamically calculate delta_bathy for the wide/tall format before saving
         if data_type in ["training", "prediction"]:
@@ -585,6 +599,11 @@ class SubgridTilingEngine(Engine):
                     delta_name = f"delta_bathy_{y0_str}_{y1_str}"
                     combined_df[delta_name] = combined_df[b_y1] - combined_df[b_y0]
                     valid_pairs.append(f"{y0_str}_{y1_str}")
+                else:
+                    missing_parts = []
+                    if not b_y0: missing_parts.append(f"bathy for {y0_str}")
+                    if not b_y1: missing_parts.append(f"bathy for {y1_str}")
+                    logger.warning(f"⚠️ MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'. Missing: {', '.join(missing_parts)}")
             
             # Drop year-pair variables that do not have a matching delta_bathy
             cols_to_drop = []
@@ -614,13 +633,15 @@ class SubgridTilingEngine(Engine):
         
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
         
-        # Print columns directly to terminal the moment Dask finishes saving
+        # Standard logging for the worker file logs
         logger.info(f"{progress_str} [SUCCESS] Saved combined tile data to: {save_path}")
         
-        cols_str = ", ".join(combined_df.columns.tolist())
+        cols_list = combined_df.columns.tolist()
+        cols_str = ", ".join(cols_list)
         logger.info(f"{progress_str}    -> CREATED PARQUET COLUMNS: {cols_str}")
         
-        return SubgridTilingEngine.create_nan_stats_csv(combined_df, tile_id)
+        # Return the columns back to the main thread for printing!
+        return SubgridTilingEngine.create_nan_stats_csv(combined_df, tile_id), cols_list, tile_id
 
     @staticmethod
     def create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
