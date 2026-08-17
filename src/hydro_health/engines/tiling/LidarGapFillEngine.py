@@ -239,13 +239,82 @@ class LidarGapFillEngine(Engine):
             except Exception as e:
                 logger.exception(f"Unexpected failure during gap fill for {raster_name}: {e}")
 
+    def combine_lidar_datasets(self, input_paths: list, output_path: str, chunk_size: int = 512) -> None:
+        """
+        Combines and averages multiple overlapping Lidar datasets into a single raster.
+        Aligns to a common outer bounding box, calculating the mean of overlapping pixels.
+        """
+        logger.info(f"-> [STARTING] Combining and averaging {len(input_paths)} datasets into {pathlib.Path(output_path).name}")
+        
+        with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
+            try:
+                das = []
+                for p in input_paths:
+                    da = rioxarray.open_rasterio(str(p), chunks={"x": chunk_size, "y": chunk_size})
+                    
+                    # Convert nodata to NaN for proper nanmean calculations
+                    if da.rio.nodata is not None:
+                        da = da.where(da != da.rio.nodata)
+                    # Also treat exact 0.0 as nodata if required by context
+                    da = da.where(da != 0.0)
+                    das.append(da)
+                    
+                if not das:
+                    logger.warning("- [SKIP] No datasets provided to combine.")
+                    return
+                
+                # Align datasets to a common outer grid based on their coordinates
+                logger.info("Aligning datasets to global grid...")
+                aligned_das = xr.align(*das, join="outer")
+                
+                # Stack and compute the mean across overlapping areas
+                logger.info("Calculating mean across overlapping regions...")
+                stacked = xr.concat(aligned_das, dim="dataset")
+                combined = stacked.mean(dim="dataset", skipna=True)
+                
+                # Restore spatial attributes from the first input
+                base_da = das[0]
+                combined.rio.write_crs(base_da.rio.crs, inplace=True)
+                combined.rio.write_transform(base_da.rio.transform(), inplace=True)
+                
+                # Use standard nodata value (e.g. from the base layer)
+                nodata_val = base_da.rio.nodata if base_da.rio.nodata is not None else -9999.0
+                combined = combined.fillna(nodata_val)
+                combined.rio.write_nodata(nodata_val, inplace=True)
+                
+                # Ensure we retain the band dimension for raster export
+                if "band" not in combined.dims:
+                    combined = combined.expand_dims(dim="band")
+                
+                tmp_dst_path = str(output_path)
+                if self.is_aws or UPath(output_path).protocol == "s3":
+                    tmp_dst_path = str(Path(task_tmp_dir) / "combined_tmp.tif")
+
+                logger.info("Writing combined raster to disk...")
+                # Stream chunk-by-chunk to avoid OOM
+                with dask.config.set(scheduler='single-threaded'):
+                    combined.rio.to_raster(tmp_dst_path, lock=False, compress='LZW')
+
+                # Push to target destination
+                if self.is_aws or UPath(output_path).protocol == "s3":
+                    fs = s3fs.S3FileSystem()
+                    fs.put(tmp_dst_path, str(output_path))
+                else:
+                    if tmp_dst_path != str(output_path):
+                        shutil.copyfile(tmp_dst_path, str(output_path))
+
+                logger.info(f" - [✓ SUCCESS] Combined Lidar datasets saved to: {pathlib.Path(output_path).name}")
+
+            except Exception as e:
+                logger.exception(f"Unexpected failure during lidar combination: {e}")
+
     def run(self, max_concurrent: int = 5, max_iters: int = 5, chunk_size: int = 512) -> None:
         """Main entry point for evaluating directories and processing rasters in parallel."""
         env_val = self.param_lookup.get('env', 'local')
         env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
         
         # Initialize Dask via Base Engine
-        self.setup_dask(env)
+        self.setup_dask(env, n_workers=3, threads_per_worker=1, memory_limit="9.5GB")
         
         client = getattr(self, 'client', None)
         if not client:
