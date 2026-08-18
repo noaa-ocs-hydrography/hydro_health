@@ -99,6 +99,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_prediction_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_lidar_gap_fill_engine" and step["run"]:
                 runners.run_lidar_gap_fill_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_terrain_products_engine" and step["run"]:
+                runners.run_terrain_products_engine(param_lookup, output_prefix)
     write_config_log(config_path, config, env)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60} minutes")

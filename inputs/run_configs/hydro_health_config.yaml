@@ -26,9 +26,11 @@ steps:
   run: false
 - tool: run_lidar_gap_fill_engine
   run: true
+- tool: run_lidar_gap_fill_engine
+  run: true  
 - tool: run_training_rasters_engine
   run: false
 - tool: run_subgrid_tiling_engine
   run: false
-- tool: run_batch_tiling_engine
+- tool: run_terrain_products_engine
   run: false
