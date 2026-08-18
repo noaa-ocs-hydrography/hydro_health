@@ -17,7 +17,7 @@ steps:
 - tool: run_raster_mask_engine
   run: false
 - tool: grid_digital_coast_files
-  run: true
+  run: false
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
@@ -31,4 +31,4 @@ steps:
 - tool: run_subgrid_tiling_engine
   run: false
 - tool: run_batch_tiling_engine
-  run: true  
+  run: false

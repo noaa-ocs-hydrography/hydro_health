@@ -16,6 +16,7 @@ from scipy.ndimage import uniform_filter, binary_fill_holes
 from dask.distributed import Client, as_completed
 from upath import UPath
 import s3fs
+import re
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
@@ -198,7 +199,6 @@ class LidarGapFillEngine(Engine):
                 if not needs_fill:
                     logger.info(f"- [INFO]{progress_str} No interior gaps in {raster_name}. Skipping compute, applying simple masks.")
                     da = da.where(~land_mask)
-                    da = da.where(da < 0)
                 else:
                     # Iteratively fill gaps if they exist
                     for _ in range(max_iters):
@@ -224,16 +224,19 @@ class LidarGapFillEngine(Engine):
                     da = da.where(allowed_da)
                     # Re-apply land mask
                     da = da.where(~land_mask)
-                    da = da.where(da < 0)
 
-                if nodata is not None:
-                    da = da.fillna(nodata)
+                # CRITICAL: Enforce all >= 0 values become true NaNs
+                da = da.where(da < 0, np.nan)
+                
                 da = da.expand_dims(dim="band")
 
                 da.rio.write_crs(ds.rio.crs, inplace=True)
                 da.rio.write_transform(ds.rio.transform(), inplace=True)
-                if nodata is not None:
-                    da.rio.write_nodata(nodata, inplace=True)
+                
+                # Explicitly write NaN as the nodata value.
+                # This ensures the >= 0 values we just nullified remain as NaNs 
+                # rather than being filled by the original source nodata value.
+                da.rio.write_nodata(np.nan, inplace=True)
                 
                 # Setup local temp export path
                 tmp_dst_path = str(output_path)
@@ -253,7 +256,7 @@ class LidarGapFillEngine(Engine):
                         shutil.copyfile(tmp_dst_path, str(output_path))
 
                 if UPath(output_path).exists():
-                    logger.info(f" - [✓ SUCCESS]{progress_str} Gap fill complete for: {raster_name}. Saved to: {output_path}")
+                    logger.info(f" - [SUCCESS]{progress_str} Gap fill complete for: {raster_name}. Saved to: {output_path}")
                     return (True, str(output_path))
                 else:
                     logger.error(f" - [X ERROR]{progress_str} Output file not found after save attempt for: {raster_name} at {output_path}")
@@ -265,93 +268,171 @@ class LidarGapFillEngine(Engine):
 
     def combine_lidar_datasets(self, output_filename: str = "combined_lidar.tif", chunk_size: int = 512) -> None:
         """
-        Combines and averages multiple overlapping Lidar datasets into a single raster.
+        Combines and averages multiple overlapping Lidar datasets into a single raster, grouped by year.
         Aligns to a common outer bounding box, calculating the mean of overlapping pixels.
         Reads dynamic files from the filled out dir and outputs them to combined lidar dir.
         """
-        # Automatically gather from FILLED_DIR config
-        self.write_message(f"Gathering datasets to combine from {self.filled_out_dir}...", str(self.outputs_dir))
+        # Resolve to absolute path for debugging clarity
+        search_dir = self.filled_out_dir.resolve() if not self.is_aws else self.filled_out_dir
+        self.write_message(f"Gathering datasets to combine from EXACT PATH: {search_dir}", str(self.outputs_dir))
+        logger.info(f"Gathering datasets to combine from EXACT PATH: {search_dir}")
+        
+        if not self.is_aws and not search_dir.exists():
+            self.write_message(f" [WARNING] The directory does not exist: {search_dir}", str(self.outputs_dir))
+            logger.warning(f" [WARNING] The directory does not exist: {search_dir}")
+        
         input_paths = []
-        # Using rglob searches all subfolders recursively. Added uppercase extensions for case-sensitive environments.
+        seen_paths = set()
+        
+        # Using rglob searches all subfolders recursively. 
         for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-            input_paths.extend(list(self.filled_out_dir.rglob(ext)))
+            for p in self.filled_out_dir.rglob(ext):
+                if p not in seen_paths:
+                    seen_paths.add(p)
+                    input_paths.append(p)
 
         if not input_paths:
-            self.write_message(f"- [SKIP] No datasets found in {self.filled_out_dir} to combine.", str(self.outputs_dir))
-            logger.warning(f"- [SKIP] No datasets found in {self.filled_out_dir} to combine.")
+            self.write_message(f"- [SKIP] No datasets found in {search_dir} to combine.", str(self.outputs_dir))
+            logger.warning(f"- [SKIP] No datasets found in {search_dir} to combine.")
+            
+            # Debugging block: print what IS in the directory if it exists but no tifs were found
+            if not self.is_aws and search_dir.exists():
+                all_items = list(search_dir.iterdir())
+                self.write_message(f"   -> Debug: Found {len(all_items)} items in the root of {search_dir}", str(self.outputs_dir))
+                for item in all_items[:10]: # Print up to 10 items for debugging
+                    item_type = "Folder" if item.is_dir() else "File"
+                    self.write_message(f"      - {item_type}: {item.name}", str(self.outputs_dir))
             return
 
-        output_path = self.combined_lidar_dir / output_filename
-        
-        self.write_message(f"Found {len(input_paths)} datasets. Combining and averaging into full path: {output_path}", str(self.outputs_dir))
+        # Group files by year based on a 4-digit year in filename (e.g., 2019, 2022)
+        files_by_year = {}
         for p in input_paths:
-            self.write_message(f" - Dataset to combine: {p.name}", str(self.outputs_dir))
+            match = re.search(r'(19\d{2}|20\d{2})', p.name)
+            year = match.group(1) if match else "unknown"
+            if year not in files_by_year:
+                files_by_year[year] = []
+            files_by_year[year].append(p)
+
+        self.write_message(f"Found {len(input_paths)} datasets across {len(files_by_year)} year(s).", str(self.outputs_dir))
+
+        for year, year_files in files_by_year.items():
+            file_count = len(year_files)
+            self.write_message(f"Processing year group '{year}' with {file_count} file(s).", str(self.outputs_dir))
+
+            if file_count == 1:
+                single_file = year_files[0]
+                year_out_filename = f"combined1_{single_file.name}"
+                output_path = self.combined_lidar_dir / year_out_filename
+                
+                self.write_message(f"Found exactly 1 dataset for {year}. Bypassing combination and copying {single_file.name} to {output_path}", str(self.outputs_dir))
+                logger.info(f"-> [STARTING] Copying single dataset to {output_path}")
+                
+                try:
+                    if self.is_aws or UPath(output_path).protocol == "s3":
+                        fs = s3fs.S3FileSystem()
+                        fs.copy(str(single_file), str(output_path))
+                    else:
+                        shutil.copyfile(str(single_file), str(output_path))
+                    
+                    logger.info(f" - [SUCCESS] Single dataset saved to: {output_path}")
+                    self.write_message(f"Successfully copied single Lidar dataset to: {output_path}", str(self.outputs_dir))
+                except Exception as e:
+                    self.write_message(f"Failure copying single dataset: {e}", str(self.outputs_dir))
+                    logger.exception(f"Unexpected failure copying single dataset: {e}")
+                continue
+
+            # Format the output filename based on the number of overlapping files found
+            base_name = output_filename
+            # Prevent redundant prefixes if the default "combined_" was passed
+            if base_name.startswith("combined_"):
+                base_name = base_name.replace("combined_", "", 1)
+                
+            year_prefix = f"{year}_" if year != "unknown" else ""
+            year_out_filename = f"combined{file_count}_{year_prefix}{base_name}"
             
-        logger.info(f"-> [STARTING] Combining and averaging {len(input_paths)} datasets into {output_path}")
-        
-        with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
-            try:
-                das = []
-                for p in input_paths:
-                    da = rioxarray.open_rasterio(str(p), chunks={"x": chunk_size, "y": chunk_size})
+            output_path = self.combined_lidar_dir / year_out_filename
+            
+            self.write_message(f"Combining and averaging {file_count} datasets into full path: {output_path}", str(self.outputs_dir))
+            for p in year_files:
+                self.write_message(f" - Dataset to combine: {p.name}", str(self.outputs_dir))
+                
+            logger.info(f"-> [STARTING] Combining and averaging {file_count} datasets into {output_path}")
+            
+            with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
+                try:
+                    das = []
+                    for p in year_files:
+                        da = rioxarray.open_rasterio(str(p), chunks={"x": chunk_size, "y": chunk_size})
+                        
+                        # Convert nodata to NaN for proper nanmean calculations
+                        if da.rio.nodata is not None:
+                            da = da.where(da != da.rio.nodata)
+                        # Also treat exact 0.0 as nodata if required by context
+                        da = da.where(da != 0.0)
+                        
+                        # Snap coordinates to avoid catastrophic memory inflation during alignment
+                        da = da.assign_coords(
+                            x=np.round(da.x, decimals=4), 
+                            y=np.round(da.y, decimals=4)
+                        )
+                        
+                        das.append(da)
+                        
+                    # Align datasets to a common outer grid based on their coordinates
+                    logger.info("Aligning datasets to global grid...")
+                    aligned_das = xr.align(*das, join="outer")
                     
-                    # Convert nodata to NaN for proper nanmean calculations
-                    if da.rio.nodata is not None:
-                        da = da.where(da != da.rio.nodata)
-                    # Also treat exact 0.0 as nodata if required by context
-                    da = da.where(da != 0.0)
-                    das.append(da)
+                    # Stack and compute the mean across overlapping areas
+                    logger.info("Calculating mean across overlapping regions...")
+                    stacked = xr.concat(aligned_das, dim="dataset")
+                    combined = stacked.mean(dim="dataset", skipna=True)
                     
-                # Align datasets to a common outer grid based on their coordinates
-                logger.info("Aligning datasets to global grid...")
-                aligned_das = xr.align(*das, join="outer")
-                
-                # Stack and compute the mean across overlapping areas
-                logger.info("Calculating mean across overlapping regions...")
-                stacked = xr.concat(aligned_das, dim="dataset")
-                combined = stacked.mean(dim="dataset", skipna=True)
-                
-                # Restore spatial attributes from the first input
-                base_da = das[0]
-                combined.rio.write_crs(base_da.rio.crs, inplace=True)
-                combined.rio.write_transform(base_da.rio.transform(), inplace=True)
-                
-                # Use standard nodata value (e.g. from the base layer)
-                nodata_val = base_da.rio.nodata if base_da.rio.nodata is not None else -9999.0
-                combined = combined.fillna(nodata_val)
-                combined.rio.write_nodata(nodata_val, inplace=True)
-                
-                # Ensure we retain the band dimension for raster export
-                if "band" not in combined.dims:
-                    combined = combined.expand_dims(dim="band")
-                
-                tmp_dst_path = str(output_path)
-                if self.is_aws or UPath(output_path).protocol == "s3":
-                    tmp_dst_path = str(Path(task_tmp_dir) / "combined_tmp.tif")
+                    # CRITICAL: Enforce strictly < 0 for the combined dataset as well
+                    combined = combined.where(combined < 0, np.nan)
+                    
+                    # Restore spatial attributes from the first input
+                    base_da = das[0]
+                    combined.rio.write_crs(base_da.rio.crs, inplace=True)
+                    combined.rio.set_spatial_dims(x_dim="x", y_dim="y", inplace=True)
+                    
+                    # We intentionally DO NOT explicitly copy base_da's transform.
+                    # Because we used join="outer", the extent of combined is different.
+                    # Rioxarray will automatically infer the correct transform from the new x/y coordinates!
+                    
+                    # Explicitly use NaN as the NoData value to maintain consistency
+                    combined.rio.write_nodata(np.nan, inplace=True)
+                    
+                    # Ensure we retain the band dimension for raster export
+                    if "band" not in combined.dims:
+                        combined = combined.expand_dims(dim="band")
+                    
+                    tmp_dst_path = str(output_path)
+                    if self.is_aws or UPath(output_path).protocol == "s3":
+                        tmp_dst_path = str(Path(task_tmp_dir) / "combined_tmp.tif")
 
-                logger.info("Writing combined raster to disk...")
-                # Stream chunk-by-chunk to avoid OOM
-                with dask.config.set(scheduler='single-threaded'):
-                    combined.rio.to_raster(tmp_dst_path, lock=False, compress='LZW')
+                    logger.info("Writing combined raster to disk...")
+                    # Stream chunk-by-chunk to avoid OOM
+                    with dask.config.set(scheduler='single-threaded'):
+                        combined.rio.to_raster(tmp_dst_path, lock=False, compress='LZW')
 
-                # Push to target destination
-                if self.is_aws or UPath(output_path).protocol == "s3":
-                    fs = s3fs.S3FileSystem()
-                    fs.put(tmp_dst_path, str(output_path))
-                else:
-                    if tmp_dst_path != str(output_path):
-                        shutil.copyfile(tmp_dst_path, str(output_path))
+                    # Push to target destination
+                    if self.is_aws or UPath(output_path).protocol == "s3":
+                        fs = s3fs.S3FileSystem()
+                        fs.put(tmp_dst_path, str(output_path))
+                    else:
+                        if tmp_dst_path != str(output_path):
+                            shutil.copyfile(tmp_dst_path, str(output_path))
 
-                if UPath(output_path).exists():
-                    logger.info(f" - [✓ SUCCESS] Combined Lidar datasets verified and saved to: {output_path}")
-                    self.write_message(f"Successfully combined Lidar datasets and verified written to: {output_path}", str(self.outputs_dir))
-                else:
-                    logger.error(f" - [X ERROR] Combination finished but output file not found at: {output_path}")
-                    self.write_message(f"Error: Output file not found after combination at: {output_path}", str(self.outputs_dir))
+                    if UPath(output_path).exists():
+                        logger.info(f" - [SUCCESS] Combined Lidar datasets verified and saved to: {output_path}")
+                        self.write_message(f"Successfully combined Lidar datasets and verified written to: {output_path}", str(self.outputs_dir))
+                    else:
+                        logger.error(f" - [X ERROR] Combination finished but output file not found at: {output_path}")
+                        self.write_message(f"Error: Output file not found after combination at: {output_path}", str(self.outputs_dir))
 
-            except Exception as e:
-                self.write_message(f"Failure combining datasets: {e}", str(self.outputs_dir))
-                logger.exception(f"Unexpected failure during lidar combination: {e}")
+                except Exception as e:
+                    self.write_message(f"Failure combining datasets for year {year}: {e}", str(self.outputs_dir))
+                    logger.exception(f"Unexpected failure during lidar combination for year {year}: {e}")
 
     def run(self, max_concurrent: int = 5, max_iters: int = 5, chunk_size: int = 512) -> None:
         """Main entry point for evaluating directories and processing rasters in parallel."""
@@ -369,10 +450,15 @@ class LidarGapFillEngine(Engine):
 
         # Glob input files (using tiled_lidar_dir instead of base inputs_dir)
         self.write_message(f"Globbing inputs from directory: {self.tiled_lidar_dir}", str(self.outputs_dir))
+        
         potential_inputs = []
-        # Using rglob searches all subfolders recursively. Added uppercase extensions for case-sensitive environments.
+        seen_paths = set()
+        
         for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-            potential_inputs.extend(list(self.tiled_lidar_dir.rglob(ext)))
+            for p in self.tiled_lidar_dir.rglob(ext):
+                if p not in seen_paths:
+                    seen_paths.add(p)
+                    potential_inputs.append(p)
 
         self.write_message(f"Found {len(potential_inputs)} total potential inputs.", str(self.outputs_dir))
         for f in potential_inputs:
@@ -435,7 +521,7 @@ class LidarGapFillEngine(Engine):
             try:
                 success, result = future.result() 
                 if success:
-                    self.write_message(f" - [✓ SUCCESS] File correctly written to: {result}", str(self.outputs_dir))
+                    self.write_message(f" - [SUCCESS] File correctly written to: {result}", str(self.outputs_dir))
                 else:
                     self.write_message(f" - [X ERROR/SKIP] {result}", str(self.outputs_dir))
             except Exception as e:
@@ -452,6 +538,10 @@ class LidarGapFillEngine(Engine):
         else:
             self.write_message("No new rasters to gap fill.", str(self.outputs_dir))
             logger.info("No new rasters to gap fill.")
+
+        # --- NEW: Trigger the combine step after gap filling is complete ---
+        self.write_message("Moving to combine datasets step...", str(self.outputs_dir))
+        self.combine_lidar_datasets(chunk_size=chunk_size)
 
         # Cleanly shut down Dask
         try:
