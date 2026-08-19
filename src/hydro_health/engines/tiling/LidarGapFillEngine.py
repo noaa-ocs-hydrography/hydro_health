@@ -45,6 +45,15 @@ class LidarGapFillEngine(Engine):
             return val
             
         self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', str(Path.home() / "hydro_health_local_tmp")))
+        
+        # Pre-run cleanup: Wipe out any existing tmp folder to prevent disk space issues from previous crashes
+        if self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info(f"Cleaned up existing temp directory at startup: {self.local_tmp_dir}")
+            except Exception as e:
+                logger.warning(f"Could not perform startup cleanup of temp directory {self.local_tmp_dir}: {e}")
+                
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
         env = _get_val('env', 'local')
@@ -86,6 +95,11 @@ class LidarGapFillEngine(Engine):
         if self.ecoregion:
             self.outputs_dir = self.outputs_dir / self.ecoregion
 
+        # CRITICAL FIX: Ensure the base output directory exists for local logging, 
+        # regardless of AWS or local environment, BEFORE calling write_message.
+        if isinstance(self.outputs_dir, pathlib.Path):
+            self.outputs_dir.mkdir(parents=True, exist_ok=True)
+
         def _resolve_path(config_value: str, is_output: bool = False) -> UPath:
             """Helper to safely build paths for AWS or Local execution"""
             if self.is_aws:
@@ -109,9 +123,10 @@ class LidarGapFillEngine(Engine):
         self.filled_out_dir = _resolve_path(get_config_item('TERRAIN', 'FILLED_DIR'), is_output=True)
         self.combined_lidar_dir = _resolve_path(get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR'), is_output=True)
 
+        # Because we created self.outputs_dir above, this write_message will now succeed.
         self.write_message(f"Configured paths: Tiled Lidar Dir: {self.tiled_lidar_dir}, Filled Out Dir: {self.filled_out_dir}, Combined Lidar Dir: {self.combined_lidar_dir}", str(self.outputs_dir))
 
-        # Ensure all folders get created if running locally
+        # Ensure local data folders get created if running locally
         if not self.is_aws:
             self.write_message("Environment is local. Creating directories if they do not exist...", str(self.outputs_dir))
             self.tiled_lidar_dir.mkdir(parents=True, exist_ok=True)
@@ -149,7 +164,7 @@ class LidarGapFillEngine(Engine):
 
         return np.where(nan_mask, filled, block)
 
-    def process_gap_fill(self, input_path: str, output_path: str, max_iters: int = 5, chunk_size: int = 512, current_index: int = None, total_count: int = None) -> tuple:
+    def process_gap_fill(self, input_path: str, output_path: str, max_iters: int = 5, chunk_size: int = 1024, current_index: int = None, total_count: int = None) -> tuple:
         """Worker function: Performs iterative focal fill on a single raster using Dask and rioxarray."""
         raster_name = pathlib.Path(input_path).name
         progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
@@ -255,6 +270,13 @@ class LidarGapFillEngine(Engine):
                     if tmp_dst_path != str(output_path):
                         shutil.copyfile(tmp_dst_path, str(output_path))
 
+                # Explicitly delete the temp file immediately to free EC2 disk space
+                if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
+                    try:
+                        os.remove(tmp_dst_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}")
+
                 if UPath(output_path).exists():
                     logger.info(f" - [SUCCESS]{progress_str} Gap fill complete for: {raster_name}. Saved to: {output_path}")
                     return (True, str(output_path))
@@ -266,7 +288,7 @@ class LidarGapFillEngine(Engine):
                 logger.exception(f"Unexpected failure during gap fill for {raster_name}: {e}")
                 return (False, f"Failed gap fill for {raster_name}: {e}")
 
-    def combine_lidar_datasets(self, output_filename: str = "combined_lidar.tif", chunk_size: int = 512) -> None:
+    def combine_lidar_datasets(self, output_filename: str = "combined_lidar.tif", chunk_size: int = 1024) -> None:
         """
         Combines and averages multiple overlapping Lidar datasets into a single raster, grouped by year.
         Aligns to a common outer bounding box, calculating the mean of overlapping pixels.
@@ -423,6 +445,13 @@ class LidarGapFillEngine(Engine):
                         if tmp_dst_path != str(output_path):
                             shutil.copyfile(tmp_dst_path, str(output_path))
 
+                    # Explicitly delete the temp file immediately to free EC2 disk space
+                    if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
+                        try:
+                            os.remove(tmp_dst_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}")
+
                     if UPath(output_path).exists():
                         logger.info(f" - [SUCCESS] Combined Lidar datasets verified and saved to: {output_path}")
                         self.write_message(f"Successfully combined Lidar datasets and verified written to: {output_path}", str(self.outputs_dir))
@@ -434,7 +463,45 @@ class LidarGapFillEngine(Engine):
                     self.write_message(f"Failure combining datasets for year {year}: {e}", str(self.outputs_dir))
                     logger.exception(f"Unexpected failure during lidar combination for year {year}: {e}")
 
-    def run(self, max_concurrent: int = 5, max_iters: int = 5, chunk_size: int = 512) -> None:
+    def _log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
+        try:
+            # 1. Overall Hard Drive (EBS) Space for the partition holding the temp directory
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            
+            # 2. Temp Storage Folder Size
+            tmp_size_bytes = 0
+            if self.local_tmp_dir.exists():
+                tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file())
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            # 3. RAM (Using psutil if available, fallback to /proc/meminfo for EC2/Linux)
+            ram_info = "Unknown"
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                # Fallback to reading native Linux memory info if psutil is not installed
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    import re
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        pct = 100 - (avail_gb / tot_gb * 100)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {pct:.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
+
+    def run(self, max_concurrent: int = 5, max_iters: int = 5, chunk_size: int = 1024) -> None:
         """Main entry point for evaluating directories and processing rasters in parallel."""
         env_val = self.param_lookup.get('env', 'local')
         env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
@@ -442,7 +509,7 @@ class LidarGapFillEngine(Engine):
         self.write_message(f"Starting Lidar Gap Fill. Setting up Dask environment: {env}...", str(self.outputs_dir))
 
         # Initialize Dask via Base Engine with strict memory & worker limits
-        self.setup_dask(env, n_workers=2, threads_per_worker=1, memory_limit="14GB")
+        self.setup_dask(env, n_workers=1, threads_per_worker=1, memory_limit="20GB")
         
         client = getattr(self, 'client', None)
         if not client:
@@ -522,10 +589,19 @@ class LidarGapFillEngine(Engine):
                 success, result = future.result() 
                 if success:
                     self.write_message(f" - [SUCCESS] File correctly written to: {result}", str(self.outputs_dir))
+                    print(f"SUCCESS: Completed gap fill and saved to: {result}", flush=True)
                 else:
                     self.write_message(f" - [X ERROR/SKIP] {result}", str(self.outputs_dir))
+                    print(f"SKIPPED/ERROR: {result}", flush=True)
+                    
+                # Log and print system metrics as each task completes
+                metrics_msg = self._log_system_metrics()
+                self.write_message(metrics_msg, str(self.outputs_dir))
+                print(metrics_msg, flush=True)
+
             except Exception as e:
                 self.write_message(f" - [X FATAL ERROR] Worker task crashed: {e}", str(self.outputs_dir))
+                print(f"FATAL ERROR: Worker task crashed: {e}", flush=True)
                 
             try:
                 seq.add(submit_task(next(iterator)))
@@ -549,3 +625,13 @@ class LidarGapFillEngine(Engine):
             self.close_dask()
         except Exception as e:
             logger.error(f"Could not cleanly close client/cluster: {e}")
+
+        # Wipe the master local temp directory to ensure EC2 disk is completely cleared
+        self.write_message(f"Cleaning up master temp directory: {self.local_tmp_dir}", str(self.outputs_dir))
+        try:
+            if self.local_tmp_dir.exists():
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info(f"Successfully removed temp directory: {self.local_tmp_dir}")
+        except Exception as e:
+            logger.error(f"Could not delete temp directory {self.local_tmp_dir}: {e}")
+            self.write_message(f"Warning: Could not delete temp directory: {e}", str(self.outputs_dir))
