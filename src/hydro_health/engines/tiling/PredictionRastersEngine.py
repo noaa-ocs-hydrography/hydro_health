@@ -473,7 +473,7 @@ class PredictionRastersEngine(Engine):
         
         # Use param_lookup and the base Engine class to initialize Dask
         env = self.param_lookup.get('env', 'local')
-        self.setup_dask(env)
+        self.setup_dask(env, n_workers=1, threads_per_worker=1, memory_limit="20GB")
         client = getattr(self, 'client', None)
 
         mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks()
