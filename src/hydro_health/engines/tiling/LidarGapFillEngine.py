@@ -164,6 +164,13 @@ class LidarGapFillEngine(Engine):
 
         return np.where(nan_mask, filled, block)
 
+    @staticmethod
+    def _chunked_fill_holes(block: np.ndarray) -> np.ndarray:
+        """
+        Performs binary hole filling per-chunk to avoid OOM errors on massive rasters.
+        """
+        return binary_fill_holes(block.astype(bool))
+
     def process_gap_fill(self, input_path: str, output_path: str, max_iters: int = 5, chunk_size: int = 1024, current_index: int = None, total_count: int = None) -> tuple:
         """Worker function: Performs iterative focal fill on a single raster using Dask and rioxarray."""
         raster_name = pathlib.Path(input_path).name
@@ -202,12 +209,22 @@ class LidarGapFillEngine(Engine):
                     logger.info(f"- [SKIP]{progress_str} {raster_name} contains no valid data.")
                     return (False, f"Skipped {raster_name} - no valid data")
 
-                valid_mask_mem = da.notnull().compute(scheduler='single-threaded').values
-                allowed_footprint = binary_fill_holes(valid_mask_mem)
-                allowed_da = xr.DataArray(allowed_footprint, coords=da.coords, dims=da.dims)
+                # NEW SAFE LOGIC: Map the hole filling across Dask chunks to prevent RAM crashes
+                valid_mask_da = da.notnull()
                 
-                nan_mask = ~valid_mask_mem
-                interior_gaps_exist = (nan_mask & allowed_footprint).any()
+                with dask.config.set(scheduler='single-threaded'):
+                    allowed_footprint_da = valid_mask_da.data.map_overlap(
+                        self._chunked_fill_holes,
+                        depth={0: 10, 1: 10},  # Margin to catch boundary holes
+                        boundary="reflect",
+                        dtype=bool
+                    )
+                
+                allowed_da = xr.DataArray(allowed_footprint_da, coords=da.coords, dims=da.dims)
+                
+                nan_mask_da = ~valid_mask_da
+                # Evaluate if interior gaps exist without loading the whole image
+                interior_gaps_exist = (nan_mask_da & allowed_da).any().compute(scheduler='single-threaded').item()
                 
                 needs_fill = interior_gaps_exist
                 
@@ -400,6 +417,24 @@ class LidarGapFillEngine(Engine):
                         
                         das.append(da)
                         
+                    # CRITICAL FIX: Pre-flight bounding box check to prevent memory bomb
+                    all_xs = np.concatenate([da.x.values for da in das])
+                    all_ys = np.concatenate([da.y.values for da in das])
+                    
+                    min_x, max_x = all_xs.min(), all_xs.max()
+                    min_y, max_y = all_ys.min(), all_ys.max()
+                    
+                    res_x = abs(das[0].x.values[1] - das[0].x.values[0])
+                    res_y = abs(das[0].y.values[1] - das[0].y.values[0])
+                    
+                    req_width = int((max_x - min_x) / res_x)
+                    req_height = int((max_y - min_y) / res_y)
+                    total_pixels = req_width * req_height
+                    
+                    # If the resulting grid requires more than ~10GB of RAM for a float32 array we must abort.
+                    if total_pixels > 2_500_000_000:
+                        raise MemoryError(f"ABORTED COMBINATION: Datasets are too far apart! Resulting grid would be {req_width}x{req_height} ({total_pixels} pixels), crashing the EC2.")
+                        
                     # Align datasets to a common outer grid based on their coordinates
                     logger.info("Aligning datasets to global grid...")
                     aligned_das = xr.align(*das, join="outer")
@@ -508,8 +543,8 @@ class LidarGapFillEngine(Engine):
         
         self.write_message(f"Starting Lidar Gap Fill. Setting up Dask environment: {env}...", str(self.outputs_dir))
 
-        # Initialize Dask via Base Engine with strict memory & worker limits
-        self.setup_dask(env, n_workers=1, threads_per_worker=1, memory_limit="20GB")
+        # Initialize Dask via Base Engine with safe memory limits for 30GB EC2 instance
+        self.setup_dask(env, n_workers=1, threads_per_worker=1, memory_limit="25GB")
         
         client = getattr(self, 'client', None)
         if not client:
