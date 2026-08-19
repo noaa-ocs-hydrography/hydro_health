@@ -95,6 +95,7 @@ def _grid_single_vrt_s3(params: list) -> str:
                 local_tmp_path, vrt_ds, format='GTiff',
                 cutlineDSName=in_memory_geojson, cropToCutline=True,
                 dstNodata=-9999, srcSRS=vrt_projection, dstSRS=vrt_projection,
+                cutlineSRS=blue_topo_gdf.crs.to_wkt(),
                 creationOptions=[
                     "COMPRESS=DEFLATE", 
                     "PREDICTOR=3", 
@@ -182,10 +183,19 @@ def _grid_single_vrt_local(params: list) -> str:
                 continue
             
             out_dir.mkdir(parents=True, exist_ok=True)
+            
+            in_memory_geojson = f"/vsimem/cutline_{folder_name}_{vrt.stem}.json"
+            tile_geojson = {
+                "type": "FeatureCollection",
+                "features": [{"type": "Feature", "geometry": tile_row.geometry.__geo_interface__}]
+            }
+            gdal.FileFromMemBuffer(in_memory_geojson, json.dumps(tile_geojson))
+
             gdal.Warp(
                 str(out_file), vrt_ds, format='GTiff',
-                cutlineDSName=tile_row.geometry.wkt, cropToCutline=True,
-                dstNodata=-9999, cutlineSRS=vrt_proj,
+                cutlineDSName=in_memory_geojson, cropToCutline=True,
+                dstNodata=-9999, srcSRS=vrt_proj, dstSRS=vrt_proj,
+                cutlineSRS=blue_topo_gdf.crs.to_wkt(),
                 creationOptions=[
                     "COMPRESS=DEFLATE", 
                     "PREDICTOR=3", 
@@ -198,6 +208,8 @@ def _grid_single_vrt_local(params: list) -> str:
             final_ds = gdal.Open(str(out_file), gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
             final_ds = None
+            
+            gdal.Unlink(in_memory_geojson)
             engine.write_message(f" - Processed Local: {out_file}", param_lookup['output_directory'].valueAsText)
         return f" - Processed Local: {vrt.name}"
     except Exception as e:
