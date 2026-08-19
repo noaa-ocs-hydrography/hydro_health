@@ -3,6 +3,7 @@
 import os
 import gc
 import re
+import shutil
 import logging
 import pathlib
 import pandas as pd
@@ -134,48 +135,82 @@ class BatchTilingEngine(Engine):
         when serializing this instance to send to Dask worker nodes.
         """
         state = self.__dict__.copy()
-        
-        # Drop the active connection handlers which crash the serializer
         state.pop('client', None)
         state.pop('cluster', None)
-        
-        # Drop raw parameter lookups in case they contain unpicklable COM objects
         state.pop('param_lookup', None)
-        
         return state
 
-    def run(self) -> None:
-        """Main entry point for executing the batch format transformations"""
-        
-        # Use param_lookup and the base Engine class to initialize Dask
-        env_val = self.param_lookup.get('env', 'local')
-        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
-        
-        self.setup_dask(env)
-
+    def _log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
         try:
-            self.batch_format_transformation(base_dir=self.prediction_tiles_dir, mode="prediction")
-            self.batch_format_transformation(base_dir=self.training_tiles_dir, mode="training")
-        finally:
+            # 1. Overall Hard Drive (EBS) Space for the partition holding the temp directory
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            
+            # 2. Temp Storage Folder Size
+            tmp_size_bytes = 0
+            if self.local_tmp_dir.exists():
+                tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file())
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            # 3. RAM (Using psutil if available, fallback to /proc/meminfo for EC2/Linux)
+            ram_info = "Unknown"
             try:
-                self.close_dask()
-            except Exception as e:
-                logger.error(f"Could not cleanly close client/cluster: {e}")
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                # Fallback to reading native Linux memory info if psutil is not installed
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    import re
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        pct = 100 - (avail_gb / tot_gb * 100)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {pct:.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
 
-    def batch_format_transformation(self, base_dir: UPath, mode: Literal["training", "prediction"]) -> None:
-        """Orchestrator for finalizing formatting on wide tiles"""
+    def _cleanup_resources(self) -> None:
+        """Wipes temporary storage and flushes cache resources"""
+        logger.info("Cleaning up engine resources...")
         
-        logger.info(f"Starting Wide & Batch Format Transformation (Mode: {mode})...")
+        # Wipe the master local temp directory to ensure EC2 disk is completely cleared
+        if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info(f"Successfully wiped master local temp directory: {self.local_tmp_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanly wipe temp directory {self.local_tmp_dir}: {e}")
 
+    @staticmethod
+    def _trim_memory() -> None:
+        """Helper to invoke garbage collector explicitly in workers"""
+        gc.collect()
+
+    @staticmethod
+    def _standardize_col_name(col: str) -> str:
+        """Helper to ensure column names are standardized."""
+        return str(col).strip()
+
+    def _execute_batch_transformations(self, base_dir: UPath, mode: Literal["training", "prediction"]) -> None:
+        """Handles the task queuing and stream execution for format transformations."""
+        logger.info(f"Starting Wide & Batch Format Transformation (Mode: {mode})...")
         logger.info(f"-> Validating 'year_ranges' config: {self.year_ranges}")
+        
         if not self.year_ranges:
             logger.error("!!! CRITICAL WARNING: 'self.year_ranges' is empty or not defined. No files will be processed !!!")
 
         base_dir_upath = UPath(base_dir)
         
         # Search all subdirectories for parquet files, ignoring the final batch files.
-        # We allow processing of _formatted files in case the pipeline was interrupted and 
-        # the raw wide files were already deleted.
         all_parquets = base_dir_upath.rglob("*.parquet")
         files_to_process = [
             fp for fp in all_parquets 
@@ -189,9 +224,6 @@ class BatchTilingEngine(Engine):
         logger.info(f"Outputting transformed {mode} formatted tiles to: {base_dir}")
         logger.info(f"Queueing {len(files_to_process)} tiles...")
 
-        # -------------------------------------------------------------
-        # DYNAMIC DASK TASK STREAM (FORMAT TRANSFORMATION)
-        # -------------------------------------------------------------
         try:
             client = getattr(self, 'client', None)
             if not client:
@@ -253,57 +285,6 @@ class BatchTilingEngine(Engine):
             
         if failed_msgs:
             logger.error("Transformation Errors:\n" + "\n".join(failed_msgs))
-
-    @staticmethod
-    def _trim_memory() -> None:
-        """Helper to invoke garbage collector explicitly in workers"""
-        gc.collect()
-
-    @staticmethod
-    def _standardize_col_name(col: str) -> str:
-        """Helper to ensure column names are standardized."""
-        return str(col).strip()
-
-    @staticmethod
-    def _transform_tile_task(f_path: str, mode: Literal["training", "prediction"], overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> str:
-        """Dask Worker: Reads file -> Calls specific processor -> Returns status"""
-        
-        gdf = None
-        try:
-            tile_name = os.path.basename(f_path).split("_")[0]
-            output_dir = os.path.dirname(f_path)
-
-            try:
-                # Engine 'pyarrow' explicitly set to map parquet files far more memory-efficiently
-                gdf = gpd.read_parquet(f_path, engine="pyarrow")
-            except Exception:
-                df = pd.read_parquet(f_path, engine="pyarrow")
-                geometry_col = 'geometry' if 'geometry' in df.columns else None
-                gdf = gpd.GeoDataFrame(df, geometry=geometry_col)
-
-            if mode == "training":
-                saved, cols_str = BatchTilingEngine._process_and_save_training_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
-            else:
-                saved, cols_str = BatchTilingEngine._process_and_save_prediction_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
-            
-            # --- CLEAN UP INTERMEDIATE RAW WIDE FILE ---
-            # We do not want to delete the file if it is already our formatted output!
-            if not f_path.endswith("_formatted.parquet"):
-                try:
-                    upath_obj = UPath(f_path)
-                    if upath_obj.exists():
-                        upath_obj.unlink()
-                except Exception as e:
-                    logger.warning(f"Could not delete intermediate file {f_path}: {e}")
-
-            return f"Success: {tile_name} (Generated: {len(saved)} files)\n   -> {cols_str}"
-
-        except Exception as e:
-            return f"Failed: {os.path.basename(f_path)} - {str(e)}"
-        finally:
-            if gdf is not None:
-                del gdf
-            BatchTilingEngine._trim_memory()
 
     @staticmethod
     def _process_and_save_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> Tuple[List[str], str]:
@@ -476,6 +457,7 @@ class BatchTilingEngine(Engine):
                     raise e
                 
             del pair_df
+            BatchTilingEngine._trim_memory()
 
         del wide_gdf
 
@@ -670,6 +652,7 @@ class BatchTilingEngine(Engine):
                     raise e
                 
             del pair_df
+            BatchTilingEngine._trim_memory()
 
         del wide_gdf
 
@@ -677,3 +660,81 @@ class BatchTilingEngine(Engine):
         if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
 
         return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
+
+    @staticmethod
+    def _transform_tile_task(f_path: str, mode: Literal["training", "prediction"], overwrite: bool, year_ranges: list, current_index: int = None, total_count: int = None) -> str:
+        """Dask Worker: Reads file -> Calls specific processor -> Cleans up temp -> Returns status"""
+        
+        gdf = None
+        try:
+            tile_name = os.path.basename(f_path).split("_")[0]
+            output_dir = os.path.dirname(f_path)
+
+            try:
+                # Engine 'pyarrow' explicitly set to map parquet files far more memory-efficiently
+                gdf = gpd.read_parquet(f_path, engine="pyarrow")
+            except Exception:
+                df = pd.read_parquet(f_path, engine="pyarrow")
+                geometry_col = 'geometry' if 'geometry' in df.columns else None
+                gdf = gpd.GeoDataFrame(df, geometry=geometry_col)
+
+            if mode == "training":
+                saved, cols_str = BatchTilingEngine._process_and_save_training_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
+            else:
+                saved, cols_str = BatchTilingEngine._process_and_save_prediction_tile(gdf, output_dir, tile_name, overwrite, year_ranges, current_index, total_count)
+            
+            # --- CLEAN UP INTERMEDIATE RAW WIDE FILE ---
+            # We do not want to delete the file if it is already our formatted output!
+            tmp_dst_path = str(f_path)
+            is_formatted = tmp_dst_path.endswith("_formatted.parquet")
+            is_batch = tmp_dst_path.endswith("_batch.parquet")
+            
+            if not is_formatted and not is_batch:
+                try:
+                    upath_obj = UPath(f_path)
+                    if upath_obj.exists():
+                        upath_obj.unlink()
+                except Exception as e:
+                    logger.warning(f"Could not cleanly unlink intermediate UPath {f_path}: {e}")
+                    
+                # Explicitly delete the temp file immediately to free EC2 disk space if it represents a local string
+                if Path(tmp_dst_path).exists():
+                    try:
+                        os.remove(tmp_dst_path)
+                    except Exception as e:
+                        logger.warning(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}")
+
+            return f"Success: {tile_name} (Generated: {len(saved)} files)\n   -> {cols_str}"
+
+        except Exception as e:
+            return f"Failed: {os.path.basename(f_path)} - {str(e)}"
+            
+        finally:
+            if gdf is not None:
+                del gdf
+            # Force memory release back to the OS after every single file/worker opened
+            BatchTilingEngine._trim_memory()
+
+    def run(self) -> None:
+        """Main entry point for executing the batch format transformations"""
+        
+        # Use param_lookup and the base Engine class to initialize Dask
+        env_val = self.param_lookup.get('env', 'local')
+        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
+        
+        self.setup_dask(env)
+
+        try:
+            logger.info(self._log_system_metrics())
+            
+            # Separating logic into execute batches methods keeps this 'run' function clean
+            self._execute_batch_transformations(base_dir=self.prediction_tiles_dir, mode="prediction")
+            self._execute_batch_transformations(base_dir=self.training_tiles_dir, mode="training")
+            
+            logger.info(self._log_system_metrics())
+        finally:
+            self._cleanup_resources()
+            try:
+                self.close_dask()
+            except Exception as e:
+                logger.error(f"Could not cleanly close client/cluster: {e}")
