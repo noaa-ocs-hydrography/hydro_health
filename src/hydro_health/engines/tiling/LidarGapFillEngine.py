@@ -536,21 +536,28 @@ class LidarGapFillEngine(Engine):
         except Exception as e:
             return f"   [SysMetrics] Error collecting system metrics: {e}"
 
-    def run(self, max_concurrent: int = 5, max_iters: int = 5, chunk_size: int = 1024) -> None:
-        """Main entry point for evaluating directories and processing rasters in parallel."""
+    def _get_environment(self) -> str:
+        """Helper to extract the environment variable cleanly."""
         env_val = self.param_lookup.get('env', 'local')
-        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
-        
-        self.write_message(f"Starting Lidar Gap Fill. Setting up Dask environment: {env}...", str(self.outputs_dir))
+        if hasattr(env_val, 'valueAsText') and env_val.valueAsText:
+            return env_val.valueAsText
+        if hasattr(env_val, 'value') and env_val.value:
+            return env_val.value
+        return env_val
 
+    def _initialize_dask(self, env: str) -> Client:
+        """Initializes the Dask cluster and client with strict memory limits."""
+        self.write_message(f"Starting Lidar Gap Fill. Setting up Dask environment: {env}...", str(self.outputs_dir))
         # Initialize Dask via Base Engine with safe memory limits for 30GB EC2 instance
         self.setup_dask(env, n_workers=1, threads_per_worker=1, memory_limit="25GB")
         
         client = getattr(self, 'client', None)
         if not client:
             client = Client()
+        return client
 
-        # Glob input files (using tiled_lidar_dir instead of base inputs_dir)
+    def _get_files_to_process(self) -> list:
+        """Globs inputs and filters out existing outputs if overwrite is False."""
         self.write_message(f"Globbing inputs from directory: {self.tiled_lidar_dir}", str(self.outputs_dir))
         
         potential_inputs = []
@@ -563,8 +570,6 @@ class LidarGapFillEngine(Engine):
                     potential_inputs.append(p)
 
         self.write_message(f"Found {len(potential_inputs)} total potential inputs.", str(self.outputs_dir))
-        for f in potential_inputs:
-            self.write_message(f" - Potential input found: {f.name}", str(self.outputs_dir))
 
         # Identify existing outputs to optionally skip
         existing_outputs = set()
@@ -585,13 +590,12 @@ class LidarGapFillEngine(Engine):
         
         self.write_message(f"Outputting filled rasters to: {self.filled_out_dir}", str(self.outputs_dir))
         self.write_message(f"Queuing {len(files_to_process)} gap fill files{skip_msg}...", str(self.outputs_dir))
-        for f in files_to_process:
-            self.write_message(f" - Queued for gap fill: {f.name}", str(self.outputs_dir))
-            
-        logger.info(f"Outputting filled rasters to: {self.filled_out_dir}")
         logger.info(f"Queuing {len(files_to_process)} gap fill files{skip_msg}...")
+        
+        return files_to_process
 
-        # DYNAMIC DASK TASK STREAM
+    def _execute_gap_fill_tasks(self, client: Client, files_to_process: list, max_concurrent: int, max_iters: int, chunk_size: int) -> None:
+        """Manages the asynchronous execution of gap filling tasks across the Dask cluster."""
         total_files = len(files_to_process)
         iterator = iter(enumerate(files_to_process))
         seq = as_completed()
@@ -643,20 +647,16 @@ class LidarGapFillEngine(Engine):
             except StopIteration:
                 pass
 
-        if total_files > 0:
-            self.write_message(f"[SUCCESS] Processed {total_files} files.", str(self.outputs_dir))
-            logger.info("[SUCCESS] Gap Fill processing complete.")
-        else:
-            self.write_message("No new rasters to gap fill.", str(self.outputs_dir))
-            logger.info("No new rasters to gap fill.")
+        self.write_message(f"[SUCCESS] Processed {total_files} files.", str(self.outputs_dir))
+        logger.info("[SUCCESS] Gap Fill processing complete.")
 
-        # --- NEW: Trigger the combine step after gap filling is complete ---
-        self.write_message("Moving to combine datasets step...", str(self.outputs_dir))
-        self.combine_lidar_datasets(chunk_size=chunk_size)
-
+    def _cleanup_resources(self, client: Client) -> None:
+        """Safely tears down Dask and forces deletion of the massive temp directory."""
         # Cleanly shut down Dask
+        self.write_message("Cleaning up resources and shutting down Dask...", str(self.outputs_dir))
         try:
-            client.close()
+            if client:
+                client.close()
             self.close_dask()
         except Exception as e:
             logger.error(f"Could not cleanly close client/cluster: {e}")
@@ -670,3 +670,28 @@ class LidarGapFillEngine(Engine):
         except Exception as e:
             logger.error(f"Could not delete temp directory {self.local_tmp_dir}: {e}")
             self.write_message(f"Warning: Could not delete temp directory: {e}", str(self.outputs_dir))
+
+
+    def run(self, max_concurrent: int = 5, max_iters: int = 5, chunk_size: int = 1024) -> None:
+        """Main entry point for evaluating directories and processing rasters in parallel."""
+        env = self._get_environment()
+        client = self._initialize_dask(env)
+
+        try:
+            # 1. Gather files that need processing
+            files_to_process = self._get_files_to_process()
+
+            # 2. Iterative Focal Fill
+            if files_to_process:
+                self._execute_gap_fill_tasks(client, files_to_process, max_concurrent, max_iters, chunk_size)
+            else:
+                self.write_message("No new rasters to gap fill.", str(self.outputs_dir))
+                logger.info("No new rasters to gap fill.")
+
+            # 3. Combine Lidar Datasets
+            self.write_message("Moving to combine datasets step...", str(self.outputs_dir))
+            self.combine_lidar_datasets(chunk_size=chunk_size)
+
+        finally:
+            # 4. Mandatory Cleanup (Runs even if previous steps crash)
+            self._cleanup_resources(client)
