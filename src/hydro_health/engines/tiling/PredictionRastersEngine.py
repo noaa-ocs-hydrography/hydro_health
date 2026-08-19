@@ -1,10 +1,12 @@
 """Class for reading and warping TIFF files using parallel processing"""
 
 import os
+import gc
 import shutil
 import psutil
 import pathlib
 import tempfile
+import logging
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -19,6 +21,8 @@ from upath import UPath
 from hydro_health.helpers.tools import get_config_item
 
 from hydro_health.engines.Engine import Engine
+
+logger = logging.getLogger(__name__)
 
 class PredictionRastersEngine(Engine):
     """Class for processing prediction rasters in parallel using Dask"""
@@ -131,6 +135,44 @@ class PredictionRastersEngine(Engine):
         state.pop('param_lookup', None)
         
         return state
+        
+    def _log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
+        try:
+            # 1. Overall Hard Drive (EBS) Space for the partition holding the temp directory
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            
+            # 2. Temp Storage Folder Size
+            tmp_size_bytes = 0
+            if self.local_tmp_dir.exists():
+                tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file())
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            # 3. RAM (Using psutil if available, fallback to /proc/meminfo for EC2/Linux)
+            ram_info = "Unknown"
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                # Fallback to reading native Linux memory info if psutil is not installed
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    import re
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        pct = 100 - (avail_gb / tot_gb * 100)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {pct:.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
 
     def prepare_spatial_masks(self) -> tuple:
         """Process and validate geometries for prediction masks"""
@@ -302,6 +344,10 @@ class PredictionRastersEngine(Engine):
                 )
             except Exception as e:
                 print(f"Unexpected failure during _warp_to_cutline for {raster_name}: {e}")
+            finally:
+                # Force memory release back to the OS after every single file
+                gc.collect()
+                print(self._log_system_metrics())
 
     def _warp_to_cutline(self, src_path: str, dst_path: str, cutline_path: str, task_tmp_dir: str = None, **kwargs) -> None:
         """Helper to handle GDAL Warp boilerplate."""
@@ -369,6 +415,13 @@ class PredictionRastersEngine(Engine):
             print(f" - [✗ ERROR] GDAL Warp/Upload failed for {os.path.basename(src_str)}! Exception: {e}")
             raise e
         finally:
+            # Explicitly delete the temp file immediately to free EC2 disk space
+            if gdal_dst_str != dst_str and pathlib.Path(gdal_dst_str).exists():
+                try:
+                    os.remove(gdal_dst_str)
+                except Exception as e:
+                    logger.warning(f"Failed to explicitly delete temp file {gdal_dst_str}: {e}")
+
             if hasattr(gdal, 'VSICurlClearCache'):
                 gdal.VSICurlClearCache()
 
@@ -465,20 +518,26 @@ class PredictionRastersEngine(Engine):
         if os.path.exists(gdal_dst_str):
             os.remove(gdal_dst_str)
         shutil.move(smoothed_tmp, gdal_dst_str)
-
-    def run(self) -> None:
-        """Main entry point for processing prediction rasters in parallel"""
-
-        print('Initializing Cluster and Processing Masks')
         
-        # Use param_lookup and the base Engine class to initialize Dask
+    def _cleanup_resources(self):
+        """Cleanup logic to run after processing stream is complete."""
+        # Wipe the master local temp directory to ensure EC2 disk is completely cleared
+        if self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                print(f"Successfully wiped master local temp directory: {self.local_tmp_dir}")
+            except Exception as e:
+                logger.warning(f"Failed to wipe master local temp directory: {e}")
+
+    def _initialize_cluster(self) -> Client:
+        """Initializes the Dask cluster based on environment configuration."""
+        print('Initializing Cluster')
         env = self.param_lookup.get('env', 'local')
-        self.setup_dask(env, n_workers=1, threads_per_worker=1, memory_limit="20GB")
-        client = getattr(self, 'client', None)
+        self.setup_dask(env, n_workers=2, threads_per_worker=2, memory_limit="6GB")
+        return getattr(self, 'client', None)
 
-        mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks()
-        prediction_files = self.get_valid_source_files()
-
+    def _execute_task_stream(self, client: Client, prediction_files: list, mask_pred_bounds: tuple, pred_cutline_path: str) -> None:
+        """Manages the asynchronous Dask task stream and queue for raster processing."""
         print('Starting Dask Task Stream')
         max_concurrent = 200 
         total_pred = len(prediction_files)
@@ -516,9 +575,37 @@ class PredictionRastersEngine(Engine):
             except StopIteration:
                 pass
 
+    def _shutdown_cluster(self, client: Client) -> None:
+        """Safely shuts down the Dask client and cluster."""
         print('Processing Complete. Shutting down Dask cluster to free memory.')
+        if client:
+            try:
+                client.close()
+            except Exception as e:
+                print(f"Could not cleanly close client: {e}")
+                
         try:
-            client.close()
             self.close_dask()
         except Exception as e:
-            print(f"Could not cleanly close client/cluster before next execution step: {e}")
+            print(f"Could not cleanly close cluster before next execution step: {e}")
+
+    def run(self) -> None:
+        """Main entry point for processing prediction rasters in parallel"""
+        
+        # 1. Initialize Distributed Computing
+        client = self._initialize_cluster()
+
+        # 2. Prepare Data & Masks
+        print('Processing Spatial Masks...')
+        mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks()
+        prediction_files = self.get_valid_source_files()
+
+        # 3. Execute Pipeline
+        if prediction_files and client:
+            self._execute_task_stream(client, prediction_files, mask_pred_bounds, pred_cutline_path)
+        else:
+            print("No valid source files to process or Dask client failed to initialize.")
+
+        # 4. Teardown & Cleanup
+        self._shutdown_cluster(client)
+        self._cleanup_resources()

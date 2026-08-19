@@ -34,7 +34,7 @@ def _grid_single_vrt_s3(params: list) -> str:
         vrt_ds = gdal.Open(vsi_vrt_path)
         vrt_projection = vrt_ds.GetProjection()
         
-        provider_folder_name = '_'.join(vrt_stem.split('_')[2:])
+        provider_folder_name = vrt_stem.replace('mosaic_', '')
         digital_coast_folder = pathlib.Path(vrt_s3_path).parents[0]
         
         shp_search_path = f"{digital_coast_folder}/{provider_folder_name}/**/*.shp"
@@ -46,27 +46,47 @@ def _grid_single_vrt_s3(params: list) -> str:
         elif shp_matches:
             target_shp = shp_matches[0]
         else:
-            return f" - Skipped: No shapefile for {vrt_stem}"
+            target_shp = None
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            shp_base_name = target_shp.rsplit('.', 1)[0]
-            local_base = os.path.join(tmpdir, "tileindex")
+        if target_shp:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                shp_base_name = target_shp.rsplit('.', 1)[0]
+                local_base = os.path.join(tmpdir, "tileindex")
+                
+                # Download sidecar files (.shp, .shx, .dbf, .prj)
+                for ext in ['.shp', '.shx', '.dbf', '.prj']:
+                    s3_target = f"{shp_base_name}{ext}"
+                    try:
+                        if s3_files.exists(s3_target):
+                            s3_files.get(s3_target, f"{local_base}{ext}")
+                    except Exception as sidecar_err:
+                        engine.write_message(f"Warning: Skipped sidecar {s3_target}: {sidecar_err}", param_lookup['output_directory'].valueAsText)
+                
+                raw_gdf = gpd.read_file(f"{local_base}.shp")
+                if raw_gdf.crs != blue_topo_gdf.crs:
+                    raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
+                
+                # Dissolve geometries on the fly
+                try:
+                    dissolve_geom = raw_gdf.geometry.union_all()
+                except AttributeError:
+                    dissolve_geom = raw_gdf.geometry.unary_union
+        else:
+            # Fallback to VRT bounds if no shapefile exists
+            import shapely.geometry
+            gt = vrt_ds.GetGeoTransform()
+            minx = gt[0]
+            maxy = gt[3]
+            maxx = minx + gt[1] * vrt_ds.RasterXSize
+            miny = maxy + gt[5] * vrt_ds.RasterYSize
             
-            # Download sidecar files (.shp, .shx, .dbf, .prj)
-            for ext in ['.shp', '.shx', '.dbf', '.prj']:
-                s3_target = f"{shp_base_name}{ext}"
-                if s3_files.exists(s3_target):
-                    s3_files.get(s3_target, f"{local_base}{ext}")
+            vrt_box = shapely.geometry.box(minx, miny, maxx, maxy)
+            raw_gdf = gpd.GeoDataFrame({'geometry': [vrt_box]}, crs=vrt_projection)
             
-            raw_gdf = gpd.read_file(f"{local_base}.shp")
             if raw_gdf.crs != blue_topo_gdf.crs:
                 raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
             
-            # Dissolve geometries on the fly
-            try:
-                dissolve_geom = raw_gdf.geometry.union_all()
-            except AttributeError:
-                dissolve_geom = raw_gdf.geometry.unary_union
+            dissolve_geom = raw_gdf.geometry.iloc[0]
 
         intersecting_tiles = blue_topo_gdf[
             (blue_topo_gdf['tile'].isin(bluetopo_grids)) & 
@@ -117,6 +137,12 @@ def _grid_single_vrt_s3(params: list) -> str:
 
         return f" - Processed S3: {vrt_stem}"
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            engine.write_message(f"Traceback for {vrt_stem}:\n{tb}", param_lookup['output_directory'].valueAsText)
+        except:
+            pass
         return f" - S3 Error on {vrt_stem}: {str(e)}"
     finally:
         vrt_ds = None
@@ -136,7 +162,9 @@ def _grid_single_vrt_local(params: list) -> str:
         vrt_proj = vrt_ds.GetProjection()
         
         outputs = param_lookup['output_directory'].valueAsText
-        vrt_data_folder = vrt.parent / '_'.join(vrt.stem.split('_')[2:])
+        
+        provider_folder_name = vrt.stem.replace('mosaic_', '')
+        vrt_data_folder = vrt.parent / provider_folder_name
         
         # Look for tileindex shapefiles first, fall back to any shapefile if needed
         shp_list = list(vrt_data_folder.rglob('tileindex*.shp'))
@@ -147,28 +175,42 @@ def _grid_single_vrt_local(params: list) -> str:
                 if not f.name.startswith('.')
             ]
             
-        if not shp_list:
-            return f" - Skipped: No local shp for {vrt.name}"
+        if shp_list:
+            # Read the shapefile and dissolve on the fly
+            raw_gdf = gpd.read_file(shp_list[0])
+            engine.write_message(f'shp:{raw_gdf}', outputs)
+            if raw_gdf.crs != blue_topo_gdf.crs:
+                raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
             
-        # Read the shapefile and dissolve on the fly
-        raw_gdf = gpd.read_file(shp_list[0])
-        engine.write_message(f'shp:{raw_gdf}', outputs)
-        if raw_gdf.crs != blue_topo_gdf.crs:
-            raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
-        
-        try:
-            dissolve_geom = raw_gdf.geometry.union_all()
-        except AttributeError:
-            dissolve_geom = raw_gdf.geometry.unary_union
+            try:
+                dissolve_geom = raw_gdf.geometry.union_all()
+            except AttributeError:
+                dissolve_geom = raw_gdf.geometry.unary_union
 
-        engine.write_message(f'dissolved: {dissolve_geom}', outputs)
-        
+            engine.write_message(f'dissolved: {dissolve_geom}', outputs)
+            engine.write_message(f'shp list:{shp_list}', outputs)
+        else:
+            # Fallback to VRT bounds if no shapefile exists
+            import shapely.geometry
+            gt = vrt_ds.GetGeoTransform()
+            minx = gt[0]
+            maxy = gt[3]
+            maxx = minx + gt[1] * vrt_ds.RasterXSize
+            miny = maxy + gt[5] * vrt_ds.RasterYSize
+            
+            vrt_box = shapely.geometry.box(minx, miny, maxx, maxy)
+            raw_gdf = gpd.GeoDataFrame({'geometry': [vrt_box]}, crs=vrt_proj)
+            
+            if raw_gdf.crs != blue_topo_gdf.crs:
+                raw_gdf = raw_gdf.to_crs(blue_topo_gdf.crs)
+            
+            dissolve_geom = raw_gdf.geometry.iloc[0]
+            engine.write_message('Fallback to VRT bounding box.', outputs)
+
         intersecting_tiles = blue_topo_gdf[
             (blue_topo_gdf['tile'].isin(bluetopo_grids)) & 
             (blue_topo_gdf.intersects(dissolve_geom))
         ]
-        
-        engine.write_message(f'shp list:{shp_list}', outputs)
 
         tiled_sub = get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER')
 
@@ -249,13 +291,19 @@ class GridDigitalCoastEngine(Engine):
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
             
             if vrt_files:
-                approved_providers = [p.lower() for p in get_approved_providers(ecoregion_stem)]
+                approved_providers = [p.lower().strip() for p in get_approved_providers(ecoregion_stem)]
                 approved_vrt_files = []
                 
                 for vrt in vrt_files:
                     vrt_stem = pathlib.Path(vrt).stem
-                    vrt_provider = '_'.join(vrt_stem.split('_')[2:])
-                    if vrt_provider.lower() in approved_providers:
+                    vrt_provider = vrt_stem.replace('mosaic_', '')
+                    
+                    is_approved = any(
+                        vrt_provider.lower() in ap or vrt_stem.lower() in ap or ap in vrt_provider.lower() 
+                        for ap in approved_providers
+                    )
+                    
+                    if is_approved:
                         approved_vrt_files.append(vrt)
                     else:
                         print(f" - Skipping unapproved S3 provider: {vrt_provider}")
@@ -289,12 +337,20 @@ class GridDigitalCoastEngine(Engine):
             vrt_files = list(dc_sub_path.glob('*.vrt'))
 
             if vrt_files:
-                approved_providers = [provider.lower() for provider in get_approved_providers(ecoregion.stem)]
+                approved_providers = [provider.lower().strip() for provider in get_approved_providers(ecoregion.stem)]
                 approved_vrt_files = []
+                
                 for vrt in vrt_files:
-                    vrt_provider = '_'.join(vrt.stem.split('_')[2:])
-                    if vrt_provider.lower() in approved_providers:
+                    vrt_provider = vrt.stem.replace('mosaic_', '')
+                    
+                    is_approved = any(
+                        vrt_provider.lower() in ap or vrt.stem.lower() in ap or ap in vrt_provider.lower() 
+                        for ap in approved_providers
+                    )
+                    
+                    if is_approved:
                         approved_vrt_files.append(vrt)
+                        
                 params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in approved_vrt_files]
                 future_tiles = self.client.map(_grid_single_vrt_local, params)
                 tile_results = self.client.gather(future_tiles)
