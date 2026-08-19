@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import logging
 import pathlib
+import gc
 from pathlib import Path
 from typing import Union
 
@@ -45,6 +46,15 @@ class LidarGapFillEngine(Engine):
             return val
             
         self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', str(Path.home() / "hydro_health_local_tmp")))
+        
+        # Pre-run cleanup: Wipe out any existing tmp folder to prevent disk space issues from previous crashes
+        if self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info(f"Cleaned up existing temp directory at startup: {self.local_tmp_dir}")
+            except Exception as e:
+                logger.warning(f"Could not perform startup cleanup of temp directory {self.local_tmp_dir}: {e}")
+                
         
         # Pre-run cleanup: Wipe out any existing tmp folder to prevent disk space issues from previous crashes
         if self.local_tmp_dir.exists():
@@ -182,133 +192,142 @@ class LidarGapFillEngine(Engine):
         with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
             try:
                 da_chunk = {"x": chunk_size, "y": chunk_size}
-                ds = rioxarray.open_rasterio(str(input_path), chunks=da_chunk)
-                nodata = ds.rio.nodata
                 
-                da = ds.isel(band=0).astype("float32")
-                
-                # --- MASK 1: LAND/SURFACE MASK ---
-                land_mask = (da > 0)
-                if nodata is not None:
-                    if isinstance(nodata, (float, np.floating)) and np.isnan(nodata):
-                        land_mask = land_mask & da.notnull()
-                    else:
-                        land_mask = land_mask & (da != nodata)
+                # CRITICAL FIX: Wrap in a context manager to guarantee the file handle 
+                # and GDAL memory buffers are instantly released when the block exits.
+                with rioxarray.open_rasterio(str(input_path), chunks=da_chunk) as ds:
+                    nodata = ds.rio.nodata
                     
-                # Convert official nodata AND exact 0.0 values to NaN so they are recognized as gaps.
-                if nodata is not None:
-                    if isinstance(nodata, (float, np.floating)) and np.isnan(nodata):
-                        da = da.where(da.notnull() & (da != 0.0))
-                    else:
-                        da = da.where((da != nodata) & (da != 0.0))
-                else:
-                    da = da.where(da != 0.0)
+                    da = ds.isel(band=0).astype("float32")
                     
-                # Check if there is any valid data left to process
-                if not da.notnull().any().compute().item():
-                    logger.info(f"- [SKIP]{progress_str} {raster_name} contains no valid data.")
-                    return (False, f"Skipped {raster_name} - no valid data")
+                    # --- MASK 1: LAND/SURFACE MASK ---
+                    land_mask = (da > 0)
+                    if nodata is not None:
+                        if isinstance(nodata, (float, np.floating)) and np.isnan(nodata):
+                            land_mask = land_mask & da.notnull()
+                        else:
+                            land_mask = land_mask & (da != nodata)
+                        
+                    # Convert official nodata AND exact 0.0 values to NaN so they are recognized as gaps.
+                    if nodata is not None:
+                        if isinstance(nodata, (float, np.floating)) and np.isnan(nodata):
+                            da = da.where(da.notnull() & (da != 0.0))
+                        else:
+                            da = da.where((da != nodata) & (da != 0.0))
+                    else:
+                        da = da.where(da != 0.0)
+                        
+                    # Check if there is any valid data left to process
+                    if not da.notnull().any().compute().item():
+                        detailed_msg = f"Skipped {raster_name} - no valid data remaining (entire raster consists of NoData '{nodata}' or 0.0 background values)."
+                        logger.info(f"- [SKIP]{progress_str} {detailed_msg}")
+                        return (False, detailed_msg)
 
-                # NEW SAFE LOGIC: Map the hole filling across Dask chunks to prevent RAM crashes
-                valid_mask_da = da.notnull()
-                
-                with dask.config.set(scheduler='single-threaded'):
-                    allowed_footprint_da = valid_mask_da.data.map_overlap(
-                        self._chunked_fill_holes,
-                        depth={0: 10, 1: 10},  # Margin to catch boundary holes
-                        boundary="reflect",
-                        dtype=bool
-                    )
-                
-                allowed_da = xr.DataArray(allowed_footprint_da, coords=da.coords, dims=da.dims)
-                
-                nan_mask_da = ~valid_mask_da
-                # Evaluate if interior gaps exist without loading the whole image
-                interior_gaps_exist = (nan_mask_da & allowed_da).any().compute(scheduler='single-threaded').item()
-                
-                needs_fill = interior_gaps_exist
-                
-                if not needs_fill:
-                    logger.info(f"- [INFO]{progress_str} No interior gaps in {raster_name}. Skipping compute, applying simple masks.")
-                    da = da.where(~land_mask)
-                else:
-                    # Iteratively fill gaps if they exist
-                    for _ in range(max_iters):
-                        da_prev = da
-                        
-                        # Use dask.array.map_overlap to fix chunk boundary seam lines
-                        window_size = 5
-                        margin = window_size // 2  # A window of 5 requires a 2-pixel margin/halo
-                        
-                        with dask.config.set(scheduler='single-threaded'):
-                            filled_data = da.data.map_overlap(
-                                self.focal_fill_block,
-                                depth={0: margin, 1: margin},
-                                boundary="reflect",
-                                dtype=da.dtype,
-                                w=window_size
-                            )
-                            da_filled = xr.DataArray(filled_data, coords=da.coords, dims=da.dims)
+                    # NEW SAFE LOGIC: Map the hole filling across Dask chunks to prevent RAM crashes
+                    valid_mask_da = da.notnull()
+                    
+                    with dask.config.set(scheduler='single-threaded'):
+                        allowed_footprint_da = valid_mask_da.data.map_overlap(
+                            self._chunked_fill_holes,
+                            depth={0: 10, 1: 10},  # Margin to catch boundary holes
+                            boundary="reflect",
+                            dtype=bool
+                        )
+                    
+                    allowed_da = xr.DataArray(allowed_footprint_da, coords=da.coords, dims=da.dims)
+                    
+                    nan_mask_da = ~valid_mask_da
+                    # Evaluate if interior gaps exist without loading the whole image
+                    interior_gaps_exist = (nan_mask_da & allowed_da).any().compute(scheduler='single-threaded').item()
+                    
+                    needs_fill = interior_gaps_exist
+                    
+                    if not needs_fill:
+                        logger.info(f"- [INFO]{progress_str} No interior gaps in {raster_name}. Skipping compute, applying simple masks.")
+                        da = da.where(~land_mask)
+                    else:
+                        # Iteratively fill gaps if they exist
+                        for _ in range(max_iters):
+                            da_prev = da
                             
-                        da = xr.where(np.isnan(da_prev), da_filled, da_prev)
+                            # Use dask.array.map_overlap to fix chunk boundary seam lines
+                            window_size = 5
+                            margin = window_size // 2  # A window of 5 requires a 2-pixel margin/halo
+                            
+                            with dask.config.set(scheduler='single-threaded'):
+                                filled_data = da.data.map_overlap(
+                                    self.focal_fill_block,
+                                    depth={0: margin, 1: margin},
+                                    boundary="reflect",
+                                    dtype=da.dtype,
+                                    w=window_size
+                                )
+                                da_filled = xr.DataArray(filled_data, coords=da.coords, dims=da.dims)
+                                
+                            da = xr.where(np.isnan(da_prev), da_filled, da_prev)
 
-                    # Restrict filled data strictly to interior footprint
-                    da = da.where(allowed_da)
-                    # Re-apply land mask
-                    da = da.where(~land_mask)
+                        # Restrict filled data strictly to interior footprint
+                        da = da.where(allowed_da)
+                        # Re-apply land mask
+                        da = da.where(~land_mask)
 
-                # CRITICAL: Enforce all >= 0 values become true NaNs
-                da = da.where(da < 0, np.nan)
-                
-                da = da.expand_dims(dim="band")
+                    # CRITICAL: Enforce all >= 0 values become true NaNs
+                    da = da.where(da < 0, np.nan)
+                    
+                    da = da.expand_dims(dim="band")
 
-                da.rio.write_crs(ds.rio.crs, inplace=True)
-                da.rio.write_transform(ds.rio.transform(), inplace=True)
-                
-                # Explicitly write NaN as the nodata value.
-                # This ensures the >= 0 values we just nullified remain as NaNs 
-                # rather than being filled by the original source nodata value.
-                da.rio.write_nodata(np.nan, inplace=True)
-                
-                # Setup local temp export path
-                tmp_dst_path = str(output_path)
-                if self.is_aws or UPath(output_path).protocol == "s3":
-                    tmp_dst_path = str(Path(task_tmp_dir) / "filled_tmp.tif")
+                    da.rio.write_crs(ds.rio.crs, inplace=True)
+                    da.rio.write_transform(ds.rio.transform(), inplace=True)
+                    
+                    # Explicitly write NaN as the nodata value.
+                    # This ensures the >= 0 values we just nullified remain as NaNs 
+                    # rather than being filled by the original source nodata value.
+                    da.rio.write_nodata(np.nan, inplace=True)
+                    
+                    # Setup local temp export path
+                    tmp_dst_path = str(output_path)
+                    if self.is_aws or UPath(output_path).protocol == "s3":
+                        tmp_dst_path = str(Path(task_tmp_dir) / "filled_tmp.tif")
 
-                # Stream to local disk chunk-by-chunk using single-threaded dask scheduler
-                with dask.config.set(scheduler='single-threaded'):
-                    da.rio.to_raster(tmp_dst_path, lock=False, compress='LZW')
+                    # Stream to local disk chunk-by-chunk using single-threaded dask scheduler
+                    with dask.config.set(scheduler='single-threaded'):
+                        da.rio.to_raster(tmp_dst_path, lock=False, compress='LZW')
 
-                # Push to target destination
-                if self.is_aws or UPath(output_path).protocol == "s3":
-                    fs = s3fs.S3FileSystem()
-                    fs.put(tmp_dst_path, str(output_path))
-                else:
-                    if tmp_dst_path != str(output_path):
-                        shutil.copyfile(tmp_dst_path, str(output_path))
+                    # Push to target destination
+                    if self.is_aws or UPath(output_path).protocol == "s3":
+                        fs = s3fs.S3FileSystem()
+                        fs.put(tmp_dst_path, str(output_path))
+                    else:
+                        if tmp_dst_path != str(output_path):
+                            shutil.copyfile(tmp_dst_path, str(output_path))
 
-                # Explicitly delete the temp file immediately to free EC2 disk space
-                if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
-                    try:
-                        os.remove(tmp_dst_path)
-                    except Exception as e:
-                        logger.warning(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}")
+                    # Explicitly delete the temp file immediately to free EC2 disk space
+                    if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
+                        try:
+                            os.remove(tmp_dst_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}")
 
-                if UPath(output_path).exists():
-                    logger.info(f" - [SUCCESS]{progress_str} Gap fill complete for: {raster_name}. Saved to: {output_path}")
-                    return (True, str(output_path))
-                else:
-                    logger.error(f" - [X ERROR]{progress_str} Output file not found after save attempt for: {raster_name} at {output_path}")
-                    return (False, f"Output file missing after save attempt: {output_path}")
+                    if UPath(output_path).exists():
+                        logger.info(f" - [SUCCESS]{progress_str} Gap fill complete for: {raster_name}. Saved to: {output_path}")
+                        return (True, str(output_path))
+                    else:
+                        logger.error(f" - [X ERROR]{progress_str} Output file not found after save attempt for: {raster_name} at {output_path}")
+                        return (False, f"Output file missing after save attempt: {output_path}")
 
             except Exception as e:
                 logger.exception(f"Unexpected failure during gap fill for {raster_name}: {e}")
                 return (False, f"Failed gap fill for {raster_name}: {e}")
+            finally:
+                # Worker-side aggressive cleanup. This guarantees that variables held
+                # inside this specific worker process are purged and returned to the OS.
+                import gc
+                gc.collect()
 
     def combine_lidar_datasets(self, output_filename: str = "combined_lidar.tif", chunk_size: int = 1024) -> None:
         """
-        Combines and averages multiple overlapping Lidar datasets into a single raster, grouped by year.
-        Aligns to a common outer bounding box, calculating the mean of overlapping pixels.
+        Combines and averages multiple overlapping Lidar datasets into a single raster.
+        Groups files strictly by matching Year AND matching Tile Name (e.g., BH4RF58C).
         Reads dynamic files from the filled out dir and outputs them to combined lidar dir.
         """
         # Resolve to absolute path for debugging clarity
@@ -343,27 +362,36 @@ class LidarGapFillEngine(Engine):
                     self.write_message(f"      - {item_type}: {item.name}", str(self.outputs_dir))
             return
 
-        # Group files by year based on a 4-digit year in filename (e.g., 2019, 2022)
-        files_by_year = {}
+        # Group files by Year AND Tile Name
+        files_by_group = {}
         for p in input_paths:
-            match = re.search(r'(19\d{2}|20\d{2})', p.name)
-            year = match.group(1) if match else "unknown"
-            if year not in files_by_year:
-                files_by_year[year] = []
-            files_by_year[year].append(p)
+            # 1. Extract Year
+            year_match = re.search(r'(19\d{2}|20\d{2})', p.name)
+            year = year_match.group(1) if year_match else "unknown_year"
+            
+            # 2. Extract Tile Name
+            # Looks for a discrete token starting with 'B' followed by alphanumeric chars (e.g., BH4RF58C)
+            # delimited by underscores, hyphens, or string boundaries.
+            tile_match = re.search(r'(?<![a-zA-Z0-9])(B[A-Z0-9]{4,15})(?![a-zA-Z0-9])', p.name.upper())
+            tile = tile_match.group(1) if tile_match else "unknown_tile"
+            
+            group_key = (year, tile)
+            if group_key not in files_by_group:
+                files_by_group[group_key] = []
+            files_by_group[group_key].append(p)
 
-        self.write_message(f"Found {len(input_paths)} datasets across {len(files_by_year)} year(s).", str(self.outputs_dir))
+        self.write_message(f"Found {len(input_paths)} datasets across {len(files_by_group)} unique Year+Tile combinations.", str(self.outputs_dir))
 
-        for year, year_files in files_by_year.items():
-            file_count = len(year_files)
-            self.write_message(f"Processing year group '{year}' with {file_count} file(s).", str(self.outputs_dir))
-
+        for (year, tile), group_files in files_by_group.items():
+            file_count = len(group_files)
+            self.write_message(f"Processing group [Year: {year} | Tile: {tile}] with {file_count} file(s).", str(self.outputs_dir))
+            
             if file_count == 1:
-                single_file = year_files[0]
+                single_file = group_files[0]
                 year_out_filename = f"combined1_{single_file.name}"
                 output_path = self.combined_lidar_dir / year_out_filename
                 
-                self.write_message(f"Found exactly 1 dataset for {year}. Bypassing combination and copying {single_file.name} to {output_path}", str(self.outputs_dir))
+                self.write_message(f"Found exactly 1 dataset for this group. Bypassing combination and copying {single_file.name} to {output_path}", str(self.outputs_dir))
                 logger.info(f"-> [STARTING] Copying single dataset to {output_path}")
                 
                 try:
@@ -386,13 +414,11 @@ class LidarGapFillEngine(Engine):
             if base_name.startswith("combined_"):
                 base_name = base_name.replace("combined_", "", 1)
                 
-            year_prefix = f"{year}_" if year != "unknown" else ""
-            year_out_filename = f"combined{file_count}_{year_prefix}{base_name}"
-            
+            year_out_filename = f"combined{file_count}_{year}_{tile}_{base_name}"
             output_path = self.combined_lidar_dir / year_out_filename
             
             self.write_message(f"Combining and averaging {file_count} datasets into full path: {output_path}", str(self.outputs_dir))
-            for p in year_files:
+            for p in group_files:
                 self.write_message(f" - Dataset to combine: {p.name}", str(self.outputs_dir))
                 
             logger.info(f"-> [STARTING] Combining and averaging {file_count} datasets into {output_path}")
@@ -400,7 +426,7 @@ class LidarGapFillEngine(Engine):
             with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
                 try:
                     das = []
-                    for p in year_files:
+                    for p in group_files:
                         da = rioxarray.open_rasterio(str(p), chunks={"x": chunk_size, "y": chunk_size})
                         
                         # Convert nodata to NaN for proper nanmean calculations
@@ -433,7 +459,7 @@ class LidarGapFillEngine(Engine):
                     
                     # If the resulting grid requires more than ~10GB of RAM for a float32 array we must abort.
                     if total_pixels > 2_500_000_000:
-                        raise MemoryError(f"ABORTED COMBINATION: Datasets are too far apart! Resulting grid would be {req_width}x{req_height} ({total_pixels} pixels), crashing the EC2.")
+                        raise MemoryError(f"ABORTED COMBINATION: Even with matching tile {tile}, grid is too large: {req_width}x{req_height} ({total_pixels} pixels).")
                         
                     # Align datasets to a common outer grid based on their coordinates
                     logger.info("Aligning datasets to global grid...")
@@ -495,8 +521,8 @@ class LidarGapFillEngine(Engine):
                         self.write_message(f"Error: Output file not found after combination at: {output_path}", str(self.outputs_dir))
 
                 except Exception as e:
-                    self.write_message(f"Failure combining datasets for year {year}: {e}", str(self.outputs_dir))
-                    logger.exception(f"Unexpected failure during lidar combination for year {year}: {e}")
+                    self.write_message(f"Failure combining datasets for group [Year: {year} | Tile: {tile}]: {e}", str(self.outputs_dir))
+                    logger.exception(f"Unexpected failure during lidar combination for group [Year: {year} | Tile: {tile}]: {e}")
 
     def _log_system_metrics(self) -> str:
         """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
@@ -646,6 +672,9 @@ class LidarGapFillEngine(Engine):
                 seq.add(submit_task(next(iterator)))
             except StopIteration:
                 pass
+            
+            # Force memory release back to the OS after every single file
+            gc.collect()
 
         self.write_message(f"[SUCCESS] Processed {total_files} files.", str(self.outputs_dir))
         logger.info("[SUCCESS] Gap Fill processing complete.")
