@@ -11,7 +11,7 @@ import warnings
 import traceback
 import pathlib
 from pathlib import Path
-from typing import List, Dict, Tuple, Set, Optional
+from typing import List, Dict, Tuple, Set, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -22,6 +22,7 @@ import dask
 import dask.array as da
 from dask.distributed import Client, as_completed
 from upath import UPath
+import s3fs
 
 try:
     from whitebox import WhiteboxTools
@@ -37,14 +38,15 @@ from hydro_health.engines.Engine import Engine
 logger = logging.getLogger(__name__)
 
 class TerrainProductsEngine(Engine):
-    """Class for parallel generation of seabed terrain layers, completely decoupled from spatial gap-filling."""
+    """Class for parallel generation of seabed terrain layers, highly optimized for memory management."""
 
-    def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
+    def __init__(self, param_lookup: dict, output_prefix: Union[str, bool] = False) -> None:
         """Initialize paths, configurations, and environment for terrain products"""
         super().__init__()
+        self.param_lookup = param_lookup
         
         def _get_val(key, default=None):
-            val = param_lookup.get(key, default)
+            val = self.param_lookup.get(key, default)
             if hasattr(val, 'valueAsText') and val.valueAsText is not None:
                 return val.valueAsText
             if hasattr(val, 'value') and val.value is not None:
@@ -52,6 +54,15 @@ class TerrainProductsEngine(Engine):
             return val
             
         self.local_tmp_dir = pathlib.Path(_get_val('local_tmp_dir', str(Path.home() / "hydro_health_local_tmp")))
+        
+        # Pre-run cleanup: Wipe out any existing tmp folder to prevent disk space issues
+        if self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info(f"Cleaned up existing temp directory at startup: {self.local_tmp_dir}")
+            except Exception as e:
+                logger.warning(f"Could not perform startup cleanup of temp directory {self.local_tmp_dir}: {e}")
+                
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
         env = _get_val('env', 'local')
@@ -73,8 +84,15 @@ class TerrainProductsEngine(Engine):
         base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
         base_out_dir = pathlib.Path(out_dir) if out_dir else self.repo_root / 'outputs'
         
+        if hasattr(output_prefix, 'valueAsText') and output_prefix.valueAsText is not None:
+            output_prefix_str = output_prefix.valueAsText
+        elif hasattr(output_prefix, 'value') and output_prefix.value is not None:
+            output_prefix_str = output_prefix.value
+        else:
+            output_prefix_str = output_prefix
+
         self.inputs_dir = base_in_dir
-        self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
+        self.outputs_dir = base_out_dir / output_prefix_str if output_prefix_str and isinstance(output_prefix_str, str) else base_out_dir
         
         eco_val = _get_val('eco_regions')
         self.ecoregion = ''
@@ -100,6 +118,10 @@ class TerrainProductsEngine(Engine):
         if self.ecoregion:
             self.outputs_dir = self.outputs_dir / self.ecoregion
 
+        # Ensure base output directory exists for logging
+        if isinstance(self.outputs_dir, pathlib.Path):
+            self.outputs_dir.mkdir(parents=True, exist_ok=True)
+
         def _resolve_path(config_value: str, is_output: bool = False) -> UPath:
             if self.is_aws:
                 bucket = get_config_item('S3', 'BUCKET_NAME')
@@ -120,27 +142,26 @@ class TerrainProductsEngine(Engine):
         self.terrain_outputs_dir = _resolve_path(get_config_item('TERRAIN', 'OUTPUTS'), is_output=True)
         self.dictionary_dir = _resolve_path(get_config_item('TERRAIN', 'DICTIONARIES_DIR', default="dictionaries"), is_output=True)
         
-        # WE MUST NOT SAVE param_lookup to self! It contains ArcPy objects which Dask cannot Pickle.
-        # Everything needed has been extracted as basic types above.
-        
         self._init_wbt()
 
     def _init_wbt(self):
-        """Initializes WhiteboxTools securely, separated for pickleability."""
+        """Initializes WhiteboxTools securely."""
         self.wbt = WhiteboxTools()
         self.wbt.verbose = False
         self.wbt.set_compress_rasters(True)
         self.wbt.max_procs = 2 
 
     def __getstate__(self):
-        """Called automatically by Dask/cloudpickle before distributing tasks to workers."""
+        """Exclude unpicklable attributes when serializing to Dask workers."""
         state = self.__dict__.copy()
-        if 'wbt' in state:
-            del state['wbt']
+        state.pop('wbt', None)
+        state.pop('client', None)
+        state.pop('cluster', None)
+        state.pop('param_lookup', None)  # CRITICAL: Removes unpicklable ArcPy objects
         return state
 
     def __setstate__(self, state):
-        """Called automatically by Dask/cloudpickle on the worker nodes."""
+        """Reconstruct state on the worker nodes."""
         self.__dict__.update(state)
         if hasattr(self, 'local_tmp_dir'):
             self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
@@ -153,15 +174,13 @@ class TerrainProductsEngine(Engine):
         return UPath(path).stat().st_size
 
     def _join_paths(self, *args) -> str:
-        if not args:
-            return ""
+        if not args: return ""
         return str(UPath(args[0]).joinpath(*args[1:]))
 
     def _safe_ls(self, path) -> List[str]:
         try:
             p = UPath(path)
-            if not p.exists():
-                return []
+            if not p.exists(): return []
             return [str(child) for child in p.iterdir()]
         except FileNotFoundError:
             return []
@@ -195,10 +214,7 @@ class TerrainProductsEngine(Engine):
         outer_cells = int(round(outer_radius / cell_size))
         
         if outer_cells > 2000:
-            raise ValueError(
-                f"Calculated outer_cells ({outer_cells}) is extraordinarily large (cell_size: {cell_size}). "
-                f"Likely geographic coordinates (degrees) instead of projected. Skipping."
-            )
+            raise ValueError(f"outer_cells ({outer_cells}) is too large (cell_size: {cell_size}). Skipping.")
         
         y, x = np.ogrid[-outer_cells:outer_cells + 1, -outer_cells:outer_cells + 1]
         mask = x**2 + y**2 <= outer_cells**2
@@ -242,7 +258,6 @@ class TerrainProductsEngine(Engine):
             np.square(gx, out=gx)
             np.square(gy, out=gy)
             gx += gy 
-            
             del gy 
             
             np.sqrt(gx, out=gx)
@@ -258,18 +273,11 @@ class TerrainProductsEngine(Engine):
         
         for dy in [-1, 0, 1]:
             for dx in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                    
-                y1 = max(0, dy)
-                y2 = bathy_array.shape[0] + min(0, dy)
-                x1 = max(0, dx)
-                x2 = bathy_array.shape[1] + min(0, dx)
-                
-                sy1 = max(0, -dy)
-                sy2 = bathy_array.shape[0] + min(0, -dy)
-                sx1 = max(0, -dx)
-                sx2 = bathy_array.shape[1] + min(0, -dx)
+                if dx == 0 and dy == 0: continue
+                y1, y2 = max(0, dy), bathy_array.shape[0] + min(0, dy)
+                x1, x2 = max(0, dx), bathy_array.shape[1] + min(0, dx)
+                sy1, sy2 = max(0, -dy), bathy_array.shape[0] + min(0, -dy)
+                sx1, sx2 = max(0, -dx), bathy_array.shape[1] + min(0, -dx)
                 
                 neighbor = bathy_array[y1:y2, x1:x2]
                 center = bathy_array[sy1:sy2, sx1:sx2]
@@ -285,9 +293,7 @@ class TerrainProductsEngine(Engine):
                 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=RuntimeWarning)
-            tri = np.where(valid_count > 0, tri_sum / valid_count, np.nan)
-            
-        return tri
+            return np.where(valid_count > 0, tri_sum / valid_count, np.nan)
 
     def create_classification_dictionary(self, bpi_broad_sample: np.ndarray, bpi_fine_sample: np.ndarray, slope_sample: np.ndarray) -> pd.DataFrame:
         """Creates a data-driven classification dictionary from sample arrays."""
@@ -357,8 +363,7 @@ class TerrainProductsEngine(Engine):
                     with rasterio.open(str(f)) as src:
                         crs = src.crs
                         epsg_code = crs.to_epsg() if crs else None
-                        if epsg_code != 32617:
-                            continue
+                        if epsg_code != 32617: continue
 
                         bathy_array = src.read(1)
                         if src.nodata is not None and not (isinstance(src.nodata, (float, np.floating)) and np.isnan(src.nodata)):
@@ -366,6 +371,8 @@ class TerrainProductsEngine(Engine):
                             
                         cell_size = src.res[0]
                         valid_pixels = np.argwhere(~np.isnan(bathy_array))
+                        if len(valid_pixels) == 0: continue
+                        
                         sample_indices = valid_pixels[np.random.choice(len(valid_pixels), min(len(valid_pixels), 20000), replace=False)]
                         
                         slope_sample = self.calculate_slope(bathy_array, cell_size)
@@ -380,6 +387,11 @@ class TerrainProductsEngine(Engine):
                         gc.collect()
                 except Exception:
                     continue
+                finally:
+                    # [MEMORY FIX] Aggressively collect garbage after every file is opened and sampled
+                    gc.collect()
+                    try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+                    except Exception: pass
             
             if all_samples['slope']:
                 slope_agg = np.concatenate(all_samples['slope'])
@@ -390,9 +402,14 @@ class TerrainProductsEngine(Engine):
                 with dict_path.open('w') as fh:
                     year_dictionary.to_csv(fh, index=False)
                 logger.info(f"  - Saved dictionary for {year}.")
+                
+            # [MEMORY FIX] Force memory release after processing all samples for a given year
+            gc.collect()
+            try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception: pass
 
-    def process_terrain_raster(self, bathy_path: str, best_radii: Dict[str, Tuple[int, int]], current_index: int = None, total_count: int = None) -> str:
-        """Processes one bathymetry raster, generating all associated mathematical terrain products."""
+    def process_terrain_raster(self, bathy_path: str, best_radii: Dict[str, Tuple[int, int]], current_index: int = None, total_count: int = None) -> tuple:
+        """Processes one bathymetry raster returning a Success/Failure boolean tuple."""
         base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
         progress_str = f"[{current_index}/{total_count}] " if current_index and total_count else ""
         
@@ -454,19 +471,22 @@ class TerrainProductsEngine(Engine):
                 missing_numpy = any(missing_numpy_dict.values())
 
                 if not (len(missing_wbt) > 0 or missing_tci or missing_shear or missing_numpy):
-                     return f"Skipped: {base_name} (All exist)"
+                     return (True, f"Skipped: {base_name} (All exist)")
 
                 logger.info(f"-> [STARTING] {progress_str}Generating products for: {base_name}")
 
                 with UPath(bathy_path).open('rb') as f_in:
                     with open(local_bathy, 'wb') as f_out:
                         shutil.copyfileobj(f_in, f_out)
+                        
+                # [MEMORY FIX] Clear memory buffers after large file copy
+                gc.collect()
 
                 with rasterio.open(local_bathy) as src:
                     crs = src.crs
                     epsg_code = crs.to_epsg() if crs else None
                     if epsg_code != 32617:
-                        return f"Skipped (Invalid CRS): {base_name}"
+                        return (False, f"Skipped (Invalid CRS): {base_name}")
 
                 for out_s3, wbt_func, local_out in missing_wbt:
                     try:
@@ -477,6 +497,9 @@ class TerrainProductsEngine(Engine):
                             if local_out not in [local_slope, local_plan]:
                                 try: os.remove(local_out)
                                 except OSError: pass
+                                
+                        # [MEMORY FIX] Collect garbage after each WBT product is finished and file is closed
+                        gc.collect()
                     except Exception as e:
                         logger.error(f"WBT Error on {base_name}: {e}")
 
@@ -488,6 +511,9 @@ class TerrainProductsEngine(Engine):
                                 shutil.copyfileobj(f_in, f_out)
                             try: os.remove(local_tci)
                             except OSError: pass
+                            
+                        # [MEMORY FIX] Clear WBT TCI file handles
+                        gc.collect()
                     except Exception as e: 
                         logger.error(f"WBT TCI Error on {base_name}: {e}")
 
@@ -504,7 +530,6 @@ class TerrainProductsEngine(Engine):
                                 
                                 meta.update(compress='LZW', nodata=s_nodata, dtype='float32')
                                 
-                                # Chunk the calculation to prevent blowing out the worker's RAM
                                 out_u = UPath(out_shear)
                                 with tempfile.NamedTemporaryFile(suffix='.tif', delete=False, dir=str(self.local_tmp_dir)) as tmp_file:
                                     local_shear_path = tmp_file.name
@@ -521,12 +546,15 @@ class TerrainProductsEngine(Engine):
                                         
                                         dst.write(shear_chunk, 1, window=window)
                                         
+                                        # [MEMORY FIX] Clear arrays inside the block window loop
+                                        del slope_chunk, plan_chunk, valid_mask, shear_chunk
+                                        gc.collect()
+                                        
                                 if out_u.protocol == "s3":
                                     out_u.fs.put_file(local_shear_path, str(out_u))
                                 else:
                                     shutil.copyfile(local_shear_path, str(out_shear))
                                     
-                                logger.info(f"{progress_str}Successfully wrote Shear Proxy to: {out_shear}")
                                 os.remove(local_shear_path)
                     except Exception as e:
                         logger.error(f"Shear Proxy Error {base_name}: {e}")
@@ -543,7 +571,7 @@ class TerrainProductsEngine(Engine):
                         
                     dict_path = UPath(self._join_paths(str(self.dictionary_dir), f"dictionary_{year}.csv"))
                     if missing_numpy_dict["_terrain_classification.tif"] and not dict_path.exists():
-                        return f"Dictionary missing for {year}"
+                        return (False, f"Dictionary missing for {year}")
                     elif missing_numpy_dict["_terrain_classification.tif"]:
                         with dict_path.open('r') as fh:
                             unique_dictionary = pd.read_csv(fh)
@@ -553,13 +581,16 @@ class TerrainProductsEngine(Engine):
                         cell_size = src.res[0]
                         shape_2d = (src.height, src.width)
                         
-                        # Use block_windows to stream data into the memmap, preventing massive RAM spikes
                         bathy_array = np.memmap(os.path.join(tmpdir, "bathy.dat"), dtype='float32', mode='w+', shape=shape_2d)
                         for ji, window in src.block_windows(1):
                             chunk = src.read(1, window=window)
                             if src.nodata is not None and not (isinstance(src.nodata, (float, np.floating)) and np.isnan(src.nodata)):
                                 chunk[chunk == src.nodata] = np.nan
                             bathy_array[window.toslices()] = chunk
+                            
+                            # [MEMORY FIX] Clear chunk memory inside block window loop
+                            del chunk
+                            gc.collect()
 
                     if missing_numpy_dict["_rugosity_tri.tif"]:
                         rugosity = self.calculate_tri(bathy_array)
@@ -578,7 +609,8 @@ class TerrainProductsEngine(Engine):
                     elif missing_numpy_dict["_terrain_classification.tif"]:
                         with rasterio.open(out_slope) as src_s:
                             slope = np.memmap(os.path.join(tmpdir, "s.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                            src_s.read(1, out=slope)
+                            for ji, window in src_s.block_windows(1):
+                                slope[window.toslices()] = src_s.read(1, window=window)
 
                     if missing_numpy_dict["_bpi_fine.tif"]:
                         bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
@@ -591,7 +623,8 @@ class TerrainProductsEngine(Engine):
                     elif missing_numpy_dict["_terrain_classification.tif"]:
                         with rasterio.open(out_fine) as src_f:
                             bpi_fine_mem = np.memmap(os.path.join(tmpdir, "f.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                            src_f.read(1, out=bpi_fine_mem)
+                            for ji, window in src_f.block_windows(1):
+                                bpi_fine_mem[window.toslices()] = src_f.read(1, window=window)
 
                     if missing_numpy_dict["_bpi_broad.tif"]:
                         bpi_broad = self.calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
@@ -604,7 +637,8 @@ class TerrainProductsEngine(Engine):
                     elif missing_numpy_dict["_terrain_classification.tif"]:
                         with rasterio.open(out_broad) as src_b:
                             bpi_broad_mem = np.memmap(os.path.join(tmpdir, "b.dat"), dtype='float32', mode='w+', shape=shape_2d)
-                            src_b.read(1, out=bpi_broad_mem)
+                            for ji, window in src_b.block_windows(1):
+                                bpi_broad_mem[window.toslices()] = src_b.read(1, window=window)
 
                     del bathy_array; gc.collect()
                     try: os.remove(os.path.join(tmpdir, "bathy.dat"))
@@ -645,80 +679,141 @@ class TerrainProductsEngine(Engine):
                 try: ctypes.CDLL("libc.so.6").malloc_trim(0)
                 except Exception: pass
                     
-                return f"Success: {base_name}"
+                return (True, f"Success: {base_name}")
             
         except Exception as e:
             err_msg = traceback.format_exc()
             logger.error(f"❌ [{base_name}] Error during terrain product generation:\n{err_msg}")
-            return f"Failed: {base_name} - {str(e)}"
+            return (False, f"Failed: {base_name} - {str(e)}")
+
+    def _log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
+        try:
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            
+            tmp_size_bytes = 0
+            if self.local_tmp_dir.exists():
+                tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file())
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            ram_info = "Unknown"
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    import re
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        pct = 100 - (avail_gb / tot_gb * 100)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {pct:.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
+
+    def _cleanup_resources(self, client: Client) -> None:
+        """Safely tears down Dask and forces deletion of the massive temp directory."""
+        logger.info("Cleaning up resources and shutting down Dask...")
+        try:
+            if client:
+                client.close()
+            self.close_dask()
+        except Exception as e:
+            logger.error(f"Could not cleanly close client/cluster: {e}")
+
+        logger.info(f"Cleaning up master temp directory: {self.local_tmp_dir}")
+        try:
+            if self.local_tmp_dir.exists():
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info(f"Successfully removed temp directory: {self.local_tmp_dir}")
+        except Exception as e:
+            logger.error(f"Could not delete temp directory {self.local_tmp_dir}: {e}")
 
     def run(self, max_concurrent: int = 4) -> None:
-        """Main entry point for generating terrain products in parallel"""
+        """Main entry point for generating terrain products with aggressive memory management."""
         
-        # We no longer have self.param_lookup, so we check environment differently
-        # if it wasn't saved. We saved self.is_aws in __init__
-        env = 'aws' if getattr(self, 'is_aws', False) else 'local'
+        env_val = self.param_lookup.get('env', 'local')
+        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
         
         self.setup_dask(env)
         client = getattr(self, 'client', None)
         if not client:
             client = Client()
 
-        logger.info(f"Scanning combined lidar directory: {self.combined_bathy_dir}")
-        potential_inputs = []
-        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-            potential_inputs.extend(list(UPath(self.combined_bathy_dir).rglob(ext)))
-
-        valid_files = [f for f in potential_inputs if 'iss' not in UPath(f).name.lower()]
-        
-        logger.info(f"Found {len(valid_files)} combined bathymetry files.")
-        if not valid_files:
-            logger.info("No bathymetry files found to process.")
-            return
-
-        # Pre-flight phase: classification dictionaries
-        best_radii = {'fine': (8, 32), 'broad': (80, 240)}
-        self.create_regionally_consistent_dictionaries(valid_files, best_radii)
-
-        logger.info(f"\n--- PHASE 2: Parallel Terrain Product Generation ---")
-        
-        total_tasks = len(valid_files)
-        task_iterator = iter(enumerate(valid_files))
-        task_stream = as_completed()
-        
-        def submit_terrain_task(item):
-            i, file_path = item
-            return client.submit(
-                self.process_terrain_raster,
-                str(file_path),
-                best_radii,
-                current_index=i + 1,
-                total_count=total_tasks
-            )
-
-        # Initial queue fill
-        for _ in range(min(max_concurrent, total_tasks)):
-            try:
-                task_stream.add(submit_terrain_task(next(task_iterator)))
-            except StopIteration:
-                break
-
-        # Process stream
-        for future in task_stream:
-            try:
-                future.result() 
-            except Exception as e:
-                logger.error(f"Task failed: {e}")
-                
-            try:
-                task_stream.add(submit_terrain_task(next(task_iterator)))
-            except StopIteration:
-                pass
-
-        logger.info("\n[SUCCESS] Terrain raster processing complete.")
-            
         try:
-            client.close()
-            self.close_dask()
-        except Exception as e:
-            logger.error(f"Could not cleanly close client/cluster: {e}")
+            logger.info(f"Scanning combined lidar directory: {self.combined_bathy_dir}")
+            potential_inputs = []
+            for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+                potential_inputs.extend(list(UPath(self.combined_bathy_dir).rglob(ext)))
+
+            valid_files = [f for f in potential_inputs if 'iss' not in UPath(f).name.lower()]
+            
+            logger.info(f"Found {len(valid_files)} combined bathymetry files.")
+            if not valid_files:
+                logger.info("No bathymetry files found to process.")
+                return
+
+            best_radii = {'fine': (8, 32), 'broad': (80, 240)}
+            self.create_regionally_consistent_dictionaries(valid_files, best_radii)
+
+            logger.info(f"\n--- PHASE 2: Parallel Terrain Product Generation ---")
+            
+            total_tasks = len(valid_files)
+            task_iterator = iter(enumerate(valid_files))
+            task_stream = as_completed()
+            
+            def submit_terrain_task(item):
+                i, file_path = item
+                return client.submit(
+                    self.process_terrain_raster,
+                    str(file_path),
+                    best_radii,
+                    current_index=i + 1,
+                    total_count=total_tasks
+                )
+
+            # Initial queue fill
+            for _ in range(min(max_concurrent, total_tasks)):
+                try:
+                    task_stream.add(submit_terrain_task(next(task_iterator)))
+                except StopIteration:
+                    break
+
+            # Dynamic Dask execution loop with strict garbage collection
+            for future in task_stream:
+                try:
+                    success, result_msg = future.result() 
+                    if success:
+                        logger.info(f" - [SUCCESS] {result_msg}")
+                    else:
+                        logger.error(f" - [ERROR/SKIP] {result_msg}")
+                        
+                    metrics_msg = self._log_system_metrics()
+                    logger.info(metrics_msg)
+                    
+                except Exception as e:
+                    logger.error(f" - [FATAL ERROR] Worker task crashed: {e}")
+                    
+                try:
+                    task_stream.add(submit_terrain_task(next(task_iterator)))
+                except StopIteration:
+                    pass
+                
+                # [MEMORY FIX] Aggressively force memory release back to the OS after every single file finishes
+                gc.collect()
+                try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+                except Exception: pass
+
+            logger.info("\n[SUCCESS] Terrain raster processing complete.")
+            
+        finally:
+            self._cleanup_resources(client)
