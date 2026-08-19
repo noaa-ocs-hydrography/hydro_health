@@ -738,82 +738,105 @@ class TerrainProductsEngine(Engine):
         except Exception as e:
             logger.error(f"Could not delete temp directory {self.local_tmp_dir}: {e}")
 
-    def run(self, max_concurrent: int = 4) -> None:
-        """Main entry point for generating terrain products with aggressive memory management."""
-        
+    def _get_environment(self) -> str:
+        """Helper to extract the environment variable cleanly."""
         env_val = self.param_lookup.get('env', 'local')
-        env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
-        
+        if hasattr(env_val, 'valueAsText') and env_val.valueAsText:
+            return env_val.valueAsText
+        if hasattr(env_val, 'value') and env_val.value:
+            return env_val.value
+        return env_val
+
+    def _initialize_dask(self, env: str) -> Client:
+        """Initializes the Dask cluster and client."""
         self.setup_dask(env)
         client = getattr(self, 'client', None)
         if not client:
             client = Client()
+        return client
+
+    def _get_files_to_process(self) -> List[str]:
+        """Scans the directory and filters out invalid or 'iss' specific files."""
+        logger.info(f"Scanning combined lidar directory: {self.combined_bathy_dir}")
+        potential_inputs = []
+        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+            potential_inputs.extend(list(UPath(self.combined_bathy_dir).rglob(ext)))
+
+        valid_files = [f for f in potential_inputs if 'iss' not in UPath(f).name.lower()]
+        
+        logger.info(f"Found {len(valid_files)} combined bathymetry files.")
+        return valid_files
+
+    def _execute_terrain_tasks(self, client: Client, valid_files: List[str], best_radii: Dict[str, Tuple[int, int]], max_concurrent: int) -> None:
+        """Manages the asynchronous execution of terrain tasks across the Dask cluster."""
+        logger.info(f"\n--- PHASE 2: Parallel Terrain Product Generation ---")
+        
+        total_tasks = len(valid_files)
+        task_iterator = iter(enumerate(valid_files))
+        task_stream = as_completed()
+        
+        def submit_terrain_task(item):
+            i, file_path = item
+            return client.submit(
+                self.process_terrain_raster,
+                str(file_path),
+                best_radii,
+                current_index=i + 1,
+                total_count=total_tasks
+            )
+
+        # Initial queue fill
+        for _ in range(min(max_concurrent, total_tasks)):
+            try:
+                task_stream.add(submit_terrain_task(next(task_iterator)))
+            except StopIteration:
+                break
+
+        # Dynamic Dask execution loop with strict garbage collection
+        for future in task_stream:
+            try:
+                success, result_msg = future.result() 
+                if success:
+                    logger.info(f" - [SUCCESS] {result_msg}")
+                else:
+                    logger.error(f" - [ERROR/SKIP] {result_msg}")
+                    
+                metrics_msg = self._log_system_metrics()
+                logger.info(metrics_msg)
+                
+            except Exception as e:
+                logger.error(f" - [FATAL ERROR] Worker task crashed: {e}")
+                
+            try:
+                task_stream.add(submit_terrain_task(next(task_iterator)))
+            except StopIteration:
+                pass
+            
+            # [MEMORY FIX] Aggressively force memory release back to the OS after every single file finishes
+            gc.collect()
+            try: ctypes.CDLL("libc.so.6").malloc_trim(0)
+            except Exception: pass
+
+        logger.info("\n[SUCCESS] Terrain raster processing complete.")
+
+    def run(self, max_concurrent: int = 4) -> None:
+        """Main entry point for generating terrain products with aggressive memory management."""
+        env = self._get_environment()
+        client = self._initialize_dask(env)
 
         try:
-            logger.info(f"Scanning combined lidar directory: {self.combined_bathy_dir}")
-            potential_inputs = []
-            for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-                potential_inputs.extend(list(UPath(self.combined_bathy_dir).rglob(ext)))
-
-            valid_files = [f for f in potential_inputs if 'iss' not in UPath(f).name.lower()]
-            
-            logger.info(f"Found {len(valid_files)} combined bathymetry files.")
+            valid_files = self._get_files_to_process()
             if not valid_files:
                 logger.info("No bathymetry files found to process.")
                 return
 
             best_radii = {'fine': (8, 32), 'broad': (80, 240)}
+            
+            # Phase 1: Build consistent regional classes
             self.create_regionally_consistent_dictionaries(valid_files, best_radii)
-
-            logger.info(f"\n--- PHASE 2: Parallel Terrain Product Generation ---")
             
-            total_tasks = len(valid_files)
-            task_iterator = iter(enumerate(valid_files))
-            task_stream = as_completed()
-            
-            def submit_terrain_task(item):
-                i, file_path = item
-                return client.submit(
-                    self.process_terrain_raster,
-                    str(file_path),
-                    best_radii,
-                    current_index=i + 1,
-                    total_count=total_tasks
-                )
-
-            # Initial queue fill
-            for _ in range(min(max_concurrent, total_tasks)):
-                try:
-                    task_stream.add(submit_terrain_task(next(task_iterator)))
-                except StopIteration:
-                    break
-
-            # Dynamic Dask execution loop with strict garbage collection
-            for future in task_stream:
-                try:
-                    success, result_msg = future.result() 
-                    if success:
-                        logger.info(f" - [SUCCESS] {result_msg}")
-                    else:
-                        logger.error(f" - [ERROR/SKIP] {result_msg}")
-                        
-                    metrics_msg = self._log_system_metrics()
-                    logger.info(metrics_msg)
-                    
-                except Exception as e:
-                    logger.error(f" - [FATAL ERROR] Worker task crashed: {e}")
-                    
-                try:
-                    task_stream.add(submit_terrain_task(next(task_iterator)))
-                except StopIteration:
-                    pass
-                
-                # [MEMORY FIX] Aggressively force memory release back to the OS after every single file finishes
-                gc.collect()
-                try: ctypes.CDLL("libc.so.6").malloc_trim(0)
-                except Exception: pass
-
-            logger.info("\n[SUCCESS] Terrain raster processing complete.")
+            # Phase 2: Compute rasters asynchronously
+            self._execute_terrain_tasks(client, valid_files, best_radii, max_concurrent)
             
         finally:
             self._cleanup_resources(client)
