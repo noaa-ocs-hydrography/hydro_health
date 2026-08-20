@@ -31,6 +31,9 @@ class PredictionRastersEngine(Engine):
         """Initialize the engine with necessary configuration paths and settings"""
         super().__init__()
         
+        # Constrain GDAL's background Block Cache to 256MB to prevent memory bloat
+        gdal.SetCacheMax(256 * 1024 * 1024)
+        
         # Unwrap values from arcpy Param objects so standard dictionary .get() works cleanly everywhere
         self.param_lookup = {}
         for k, v in (param_lookup or {}).items():
@@ -377,7 +380,7 @@ class PredictionRastersEngine(Engine):
                 'NUM_THREADS=1'
             ],
             'multithread': False,
-            'warpMemoryLimit': 1024, # 512 MB
+            'warpMemoryLimit': 256, # Lowered from 1024 MB to conserve RAM per worker
             'outputType': gdal.GDT_Float32 
         }
         
@@ -434,7 +437,8 @@ class PredictionRastersEngine(Engine):
         mem = psutil.virtual_memory()
         print(f" [SMOOTHING INIT] {os.path.basename(src_str)} | Sys RAM: {mem.percent}% ({mem.used / 1024**3:.1f}GB / {mem.total / 1024**3:.1f}GB)")
 
-        radius_pixels = int(2000 / abs(pixel_size))
+        # Cap the radius pixels to prevent massive padding allocations on high-res files
+        radius_pixels = min(1000, int(2000 / abs(pixel_size)))
         size = radius_pixels * 2 + 1
         
         dst_path_obj = pathlib.Path(gdal_dst_str)
@@ -452,7 +456,8 @@ class PredictionRastersEngine(Engine):
             })
             nodata = src.nodata if src.nodata is not None else warp_opts.get('dstNodata', warp_opts.get('srcNodata', -9999.0))
             
-            block_size = 1024
+            # Lowered chunk size to 512 to preserve RAM
+            block_size = 512
             total_chunks_x = (src.width + block_size - 1) // block_size
             total_chunks_y = (src.height + block_size - 1) // block_size
             total_chunks = total_chunks_x * total_chunks_y
@@ -533,7 +538,8 @@ class PredictionRastersEngine(Engine):
         """Initializes the Dask cluster based on environment configuration."""
         print('Initializing Cluster')
         env = self.param_lookup.get('env', 'local')
-        self.setup_dask(env, n_workers=2, threads_per_worker=2, memory_limit="6GB")
+        # Changed to 3 workers, 1 thread each, with a hard 9GB cap
+        self.setup_dask(env, n_workers=3, threads_per_worker=1, memory_limit="9GB")
         return getattr(self, 'client', None)
 
     def _execute_task_stream(self, client: Client, prediction_files: list, mask_pred_bounds: tuple, pred_cutline_path: str) -> None:
