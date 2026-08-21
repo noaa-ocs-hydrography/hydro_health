@@ -26,7 +26,7 @@ MODEL:
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables\Prediction\pre_processed
   PREDICTION_MASK: masks\prediction_mask_ER_3.tif
-  PREDICTION_OUTPUT_DIR: ER_3\model_variables\Prediction\processed
+  PREDICTION_OUTPUT_DIR: model_variables\Prediction\processed
   PREDICTION_TILES_DIR: model_variables\Prediction\prediction_tiles
   TRAINING_TILES_DIR: model_variables\Training\training_tiles
   SUBGRIDS: model_subgrids\Prediction.subgrid.WGS84_8m.gpkg

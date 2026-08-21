@@ -1,8 +1,6 @@
 ecoregions:
 - ER_3
 pilot_mode: false
-# output_prefix: testing
-# resolution: [20, 100]
 steps:
 - tool: run_bluetopo_tile_engine
   run: false
