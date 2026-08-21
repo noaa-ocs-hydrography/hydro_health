@@ -119,10 +119,7 @@ class TrainingRastersEngine(Engine):
         
         self.local_tmp_dir = pathlib.Path(str(Path.home() / "hydro_health_local_tmp"))
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
-        
-        self.target_crs = 'EPSG:4326'
-        self.target_res = 1.0
-        
+                
         self.is_aws = param_lookup['env'] in ['remote', 'aws']  
 
         self.inputs_dir = INPUTS
