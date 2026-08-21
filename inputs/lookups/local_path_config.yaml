@@ -18,21 +18,21 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: model_variables\Prediction\raw\DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks
-  MASK_PRED_PATH: masks\prediction_mask_ER_3.tif
-  MASK_TRAINING_PATH: masks\training_mask_ER_3.tif
+  MASK_PRED_PATH: ER_3\masks\prediction_mask_ER_3.tif
+  MASK_TRAINING_PATH: ER_3\masks\training_mask_ER_3.tif
   PREDICTION_MASK_PQ: masks\prediction_mask.parquet
-  TRAINING_MASK_PQ: masks\training_mask.parquet
+  TRAINING_MASK_PQ: ER_3\masks\training_mask.parquet
 MODEL:
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables\Prediction\pre_processed
   PREDICTION_MASK: masks\prediction_mask_ER_3.tif
-  PREDICTION_OUTPUT_DIR: model_variables\Prediction\processed
+  PREDICTION_OUTPUT_DIR: ER_3\model_variables\Prediction\processed
   PREDICTION_TILES_DIR: model_variables\Prediction\prediction_tiles
   TRAINING_TILES_DIR: model_variables\Training\training_tiles
   SUBGRIDS: model_subgrids\Prediction.subgrid.WGS84_8m.gpkg
   PREDICTION_SUB_GRIDS: model_subgrids\prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: model_subgrids\training_intersecting_subgrids.gpkg
-  TRAINING_OUTPUT_DIR: model_variables\Training\processed
+  TRAINING_OUTPUT_DIR: ER_3\model_variables\Training\processed
   TILED_LIDAR_DIR: model_variables\Prediction\pre_processed\tiled
   TILED_LIDAR_PROC: model_variables\Prediction\pre_processed\tiled_processed
 PREPROCESSED:
@@ -46,6 +46,8 @@ SEDIMENT:
   GPKG_PATH: original_data_files\sediment_data\sediment_data.gpkg
   MASK_PATH: prediction_masks\prediction.mask.UTM17_8m.tif
   RASTER_PATH: model_variables\Prediction\pre_processed\sediment_rasters
+S3:
+  BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg

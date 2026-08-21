@@ -31,30 +31,30 @@ def _process_training_raster(params: list) -> None:
 
     raster_name = pathlib.Path(raster_path).name.lower()
     open_path = str(raster_path)
-    
+
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
-    
+
     if engine.is_aws and open_path.startswith('s3://'):
         open_path = open_path.replace('s3://', '/vsis3/')
 
     engine.write_message(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}", OUTPUTS)
 
     tmp_dst_path = str(output_path)
-    
+
     try:
         with tempfile.TemporaryDirectory(dir=engine.local_tmp_dir) as task_tmp_dir:
             try:
                 with rasterio.open(open_path) as src_pred:
                     src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
-                    
+
                     rb = src_pred.bounds
                     raster_bounds_geom = box(min(rb[0], rb[2]), min(rb[1], rb[3]), max(rb[0], rb[2]), max(rb[1], rb[3]))
                     mask_box = box(*mask_bounds)
-                    
+
                     if not mask_box.intersects(raster_bounds_geom):
                         engine.write_message(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.", OUTPUTS)
                         return
-                    
+
                     meta = src_pred.meta.copy()
                     meta.update({
                         'nodata': np.nan if np.isnan(src_nodata) else src_nodata,
@@ -70,13 +70,20 @@ def _process_training_raster(params: list) -> None:
                         open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
 
                     with rasterio.open(open_mask_path) as src_mask:
-                        with WarpedVRT(src_mask, crs=src_pred.crs, transform=src_pred.transform, 
-                                       height=src_pred.height, width=src_pred.width, 
-                                       resampling=Resampling.nearest) as vrt_mask:
-                            
+                        mask_nodata = src_mask.nodata if src_mask.nodata is not None else 255
+                        with WarpedVRT(
+                            src_mask,
+                            crs=src_pred.crs,
+                            transform=src_pred.transform,
+                            height=src_pred.height,
+                            width=src_pred.width,
+                            resampling=Resampling.nearest,
+                            src_nodata=mask_nodata,
+                            nodata=mask_nodata,
+                        ) as vrt_mask:
                             with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
                                 with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
-                                    
+
                                     for ji, window in src_pred.block_windows(1):
                                         pred_arr = src_pred.read(1, window=window)
                                         mask_arr = vrt_mask.read(1, window=window)
@@ -84,19 +91,19 @@ def _process_training_raster(params: list) -> None:
                                         if np.isnan(meta['nodata']) and pred_arr.dtype not in (np.float32, np.float64):
                                             pred_arr = pred_arr.astype(np.float32)
 
-                                        masked_data = np.where(mask_arr == 1, pred_arr, meta['nodata'])
+                                        masked_data = np.where(mask_arr == 2, pred_arr, meta['nodata'])
                                         dest.write(masked_data, 1, window=window)
-                    
+
                     if engine.is_aws:
                         fs = s3fs.S3FileSystem()
                         fs.put(tmp_dst_path, str(output_path))
 
                 engine.write_message(f" - [✓ SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}", OUTPUTS)
                 engine.write_message(engine.log_system_metrics(), OUTPUTS)
-                
+
             except Exception as e:
                 engine.write_message(f"Unexpected failure during array masking for {raster_name}: {e}", OUTPUTS)
-            
+
             finally:
                 if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
                     try:
@@ -132,6 +139,7 @@ class TrainingRastersEngine(Engine):
         self.prediction_out_dir = UPath(f"s3://{bucket}/{prediction_output_dir}") if self.is_aws else UPath(self.outputs_dir / prediction_output_dir)
         training_out_dir = get_config_item('MODEL', 'TRAINING_OUTPUT_DIR')
         self.training_out_dir = UPath(f"s3://{bucket}/{training_out_dir}") if self.is_aws else UPath(self.outputs_dir / training_out_dir)
+        self.training_out_dir.mkdir(parents=True, exist_ok=True)
         
         self.filled_folder_name = UPath(get_config_item('TERRAIN', 'FILLED_DIR')).name.lower()
         self.filled_folder_name = "filled_tifs"
