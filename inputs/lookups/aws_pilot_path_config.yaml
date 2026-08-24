@@ -59,6 +59,7 @@ SHARED:
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 TERRAIN:
   COMBINED_LIDAR_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
+  DICTIONARIES_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/dictionaries
   INPUT_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs
   FILLED_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
   OUTPUTS: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs

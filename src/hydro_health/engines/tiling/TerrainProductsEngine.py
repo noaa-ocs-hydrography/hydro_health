@@ -5,6 +5,8 @@ import re
 import gc
 import shutil
 import ctypes
+import platform
+import subprocess
 import logging
 import tempfile
 import warnings
@@ -22,7 +24,6 @@ import dask
 import dask.array as da
 from dask.distributed import Client, as_completed
 from upath import UPath
-import s3fs
 
 try:
     from whitebox import WhiteboxTools
@@ -58,7 +59,7 @@ class TerrainProductsEngine(Engine):
         # Pre-run cleanup: Wipe out any existing tmp folder to prevent disk space issues
         if self.local_tmp_dir.exists():
             try:
-                shutil.rmtree(self.local_tmp_dir)
+                shutil.rmtree(self.local_tmp_dir, ignore_errors=True)
                 logger.info(f"Cleaned up existing temp directory at startup: {self.local_tmp_dir}")
             except Exception as e:
                 logger.warning(f"Could not perform startup cleanup of temp directory {self.local_tmp_dir}: {e}")
@@ -140,21 +141,15 @@ class TerrainProductsEngine(Engine):
 
         self.combined_bathy_dir = _resolve_path(get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR'), is_output=True)
         self.terrain_outputs_dir = _resolve_path(get_config_item('TERRAIN', 'OUTPUTS'), is_output=True)
-        self.dictionary_dir = _resolve_path(get_config_item('TERRAIN', 'DICTIONARIES_DIR', default="dictionaries"), is_output=True)
+        self.dictionary_dir = _resolve_path(get_config_item('TERRAIN', 'DICTIONARIES_DIR'), is_output=True)
         
-        self._init_wbt()
-
-    def _init_wbt(self):
-        """Initializes WhiteboxTools securely."""
-        self.wbt = WhiteboxTools()
-        self.wbt.verbose = False
-        self.wbt.set_compress_rasters(True)
-        self.wbt.max_procs = 2 
+        # PREDICTION_OUTPUT_DIR mapped to true outputs directory
+        pred_dir = get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')
+        self.prediction_output_dir = _resolve_path(pred_dir, is_output=True) if pred_dir else None
 
     def __getstate__(self):
         """Exclude unpicklable attributes when serializing to Dask workers."""
         state = self.__dict__.copy()
-        state.pop('wbt', None)
         state.pop('client', None)
         state.pop('cluster', None)
         state.pop('param_lookup', None)  # CRITICAL: Removes unpicklable ArcPy objects
@@ -165,7 +160,6 @@ class TerrainProductsEngine(Engine):
         self.__dict__.update(state)
         if hasattr(self, 'local_tmp_dir'):
             self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
-        self._init_wbt()
 
     def _exists(self, path) -> bool:
         return UPath(path).exists()
@@ -176,14 +170,6 @@ class TerrainProductsEngine(Engine):
     def _join_paths(self, *args) -> str:
         if not args: return ""
         return str(UPath(args[0]).joinpath(*args[1:]))
-
-    def _safe_ls(self, path) -> List[str]:
-        try:
-            p = UPath(path)
-            if not p.exists(): return []
-            return [str(child) for child in p.iterdir()]
-        except FileNotFoundError:
-            return []
 
     def _save_numpy_to_raster(self, data_array: np.ndarray, out_path: str, profile: dict, log_prefix: str = ""):
         """Safely saves a numpy array to S3 or local by writing to tmp first."""
@@ -203,7 +189,8 @@ class TerrainProductsEngine(Engine):
             logger.info(f"{log_prefix}Successfully wrote NumPy layer to: {out_path}")
         finally:
             if os.path.exists(local_tmp_path):
-                os.remove(local_tmp_path)
+                try: os.remove(local_tmp_path)
+                except OSError: pass
 
     def calculate_bpi(self, bathy_array: np.ndarray, cell_size: float, inner_radius: float, outer_radius: float) -> np.ndarray:
         """Calculates BPI using chunked Dask logic to prevent massive mem allocations."""
@@ -332,16 +319,16 @@ class TerrainProductsEngine(Engine):
 
         year_groups = {}
         for f in all_files:
-            match = re.search(r'((?:19|20)\d{2})', os.path.basename(str(f)))
-            if match:
-                extracted_year = int(match.group(1))
-                if valid_years is None or extracted_year in valid_years:
-                    year = match.group(1)
-                    year_groups.setdefault(year, []).append(f)
-                    
-        generic_bathy = [f for f in all_files if 'bluetopo' in os.path.basename(str(f)).lower()]
-        if generic_bathy:
-            year_groups['BlueTopo'] = generic_bathy
+            fname = os.path.basename(str(f)).lower()
+            if 'bluetopo' in fname:
+                year_groups.setdefault('BlueTopo', []).append(f)
+            else:
+                match = re.search(r'((?:19|20)\d{2})', fname)
+                if match:
+                    extracted_year = int(match.group(1))
+                    if valid_years is None or extracted_year in valid_years:
+                        year = match.group(1)
+                        year_groups.setdefault(year, []).append(f)
             
         for year, files in year_groups.items():
             dict_path = UPath(self._join_paths(str(self.dictionary_dir), f"dictionary_{year}.csv"))
@@ -361,13 +348,16 @@ class TerrainProductsEngine(Engine):
             for f in files_to_sample:
                 try:
                     with rasterio.open(str(f)) as src:
-                        crs = src.crs
-                        epsg_code = crs.to_epsg() if crs else None
-                        if epsg_code != 32617: continue
-
-                        bathy_array = src.read(1)
-                        if src.nodata is not None and not (isinstance(src.nodata, (float, np.floating)) and np.isnan(src.nodata)):
+                        # Convert to float32 immediately to safely handle np.nan injection
+                        bathy_array = src.read(1).astype(np.float32)
+                        
+                        # Apply specified NoData value
+                        if src.nodata is not None and not np.isnan(src.nodata):
                             bathy_array[bathy_array == src.nodata] = np.nan
+                            
+                        # Sanitize unflagged NoData values and automatically mask out land/above-water (>= 0)
+                        bathy_array[bathy_array < -9998.0] = np.nan
+                        bathy_array[bathy_array >= 0.0] = np.nan
                             
                         cell_size = src.res[0]
                         valid_pixels = np.argwhere(~np.isnan(bathy_array))
@@ -410,33 +400,90 @@ class TerrainProductsEngine(Engine):
 
     def process_terrain_raster(self, bathy_path: str, best_radii: Dict[str, Tuple[int, int]], current_index: int = None, total_count: int = None) -> tuple:
         """Processes one bathymetry raster returning a Success/Failure boolean tuple."""
-        base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
-        progress_str = f"[{current_index}/{total_count}] " if current_index and total_count else ""
-        
-        out_dir_path = UPath(self.terrain_outputs_dir)
-        out_dir_path.mkdir(parents=True, exist_ok=True)
-        
-        def resolve_out_path(suffix):
-            return self._join_paths(str(self.terrain_outputs_dir), base_name + suffix)
+        # [CRITICAL FIX 1] Inject dummy stdout/stderr to prevent print(flush=True) crashes in headless Windows workers
+        import sys
+        if sys.stdout is None:
+            class DummyFile:
+                def write(self, x): pass
+                def flush(self): pass
+            sys.stdout = DummyFile()
+        if sys.stderr is None:
+            class DummyFile:
+                def write(self, x): pass
+                def flush(self): pass
+            sys.stderr = DummyFile()
 
-        out_slope_deg = resolve_out_path("_slope_deg.tif")
-        out_gradmag   = resolve_out_path("_gradmag.tif") 
-        out_flowdir   = resolve_out_path("_flowdir.tif") 
-        out_prof      = resolve_out_path("_curv_profile.tif")
-        out_plan      = resolve_out_path("_curv_plan.tif")
-        out_total     = resolve_out_path("_curv_total.tif")
-        out_tci       = resolve_out_path("_tci.tif")
-        out_flowacc   = resolve_out_path("_flowacc.tif")
-        out_shear     = resolve_out_path("_shearproxy.tif")
+        # [CRITICAL FIX 2] Force WhiteboxTools to run invisibly without opening pop-up terminal windows
+        if platform.system() == "Windows" and not hasattr(subprocess, "_wbt_patched"):
+            _orig_popen = subprocess.Popen
+            def _no_window_popen(*args, **kwargs):
+                kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
+                return _orig_popen(*args, **kwargs)
+            subprocess.Popen = _no_window_popen
+            
+            # CRITICAL: whitebox imports Popen directly, so we must overwrite its local reference!
+            try:
+                import whitebox.whitebox_tools
+                whitebox.whitebox_tools.Popen = _no_window_popen
+            except Exception:
+                pass
+                
+            subprocess._wbt_patched = True
 
-        out_rug = resolve_out_path("_rugosity_tri.tif")
-        out_slope = resolve_out_path("_slope.tif")
-        out_fine = resolve_out_path("_bpi_fine.tif")
-        out_broad = resolve_out_path("_bpi_broad.tif")
-        out_class = resolve_out_path("_terrain_classification.tif")
-        
+        # WRAP ENTIRE TASK IN A BASE EXCEPTION CATCHER TO PREVENT SILENT WORKER CRASHES
         try:
-            with tempfile.TemporaryDirectory(dir=str(self.local_tmp_dir)) as tmpdir:
+            base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
+            progress_str = f"[{current_index}/{total_count}] " if current_index and total_count else ""
+            
+            is_bluetopo = 'bluetopo' in base_name.lower()
+            
+            out_dir_path = UPath(self.terrain_outputs_dir)
+            out_dir_path.mkdir(parents=True, exist_ok=True)
+            
+            def resolve_out_path(suffix):
+                return self._join_paths(str(self.terrain_outputs_dir), base_name + suffix)
+
+            out_slope_deg = resolve_out_path("_slope_deg.tif")
+            out_gradmag   = resolve_out_path("_gradmag.tif") 
+            out_flowdir   = resolve_out_path("_flowdir.tif") 
+            out_prof      = resolve_out_path("_curv_profile.tif")
+            out_plan      = resolve_out_path("_curv_plan.tif")
+            out_total     = resolve_out_path("_curv_total.tif")
+            out_tci       = resolve_out_path("_tci.tif")
+            out_flowacc   = resolve_out_path("_flowacc.tif")
+            out_shear     = resolve_out_path("_shearproxy.tif")
+
+            out_rug = resolve_out_path("_rugosity_tri.tif")
+            out_slope = resolve_out_path("_slope.tif")
+            out_fine = resolve_out_path("_bpi_fine.tif")
+            out_broad = resolve_out_path("_bpi_broad.tif")
+            out_class = resolve_out_path("_terrain_classification.tif")
+            
+            try:
+                from whitebox import WhiteboxTools
+            except ImportError:
+                return (False, f"Failed: Whitebox library is not installed in the worker environment.")
+
+            # Verify the actual binary exists, download if missing
+            import whitebox
+            if not os.path.exists(os.path.join(os.path.dirname(whitebox.__file__), "WBT", "whitebox_tools.exe")):
+                whitebox.download_wbt()
+
+            # Isolate Whitebox instances entirely inside the worker task
+            wbt = WhiteboxTools()
+            wbt.verbose = False
+            wbt.set_default_callback(lambda x: None)
+            wbt.set_compress_rasters(True)
+            wbt.max_procs = 2 
+
+            # [MEMORY FIX] Use custom temporary directory cleanup to avoid WinError 32 file locks
+            tmpdir = tempfile.mkdtemp(dir=str(self.local_tmp_dir))
+            
+            try:
+                # Isolate WBT working directory per-worker to prevent file collisions
+                wbt.set_working_dir(tmpdir)
+                
+                local_bathy_raw = os.path.join(tmpdir, "bathy_raw.tif")
                 local_bathy = os.path.join(tmpdir, "bathy.tif")
                 local_slope = os.path.join(tmpdir, "slope_deg.tif")
                 local_flowdir = os.path.join(tmpdir, "flowdir.tif")
@@ -448,22 +495,24 @@ class TerrainProductsEngine(Engine):
                 local_gradmag = os.path.join(tmpdir, "gradmag.tif")
 
                 outputs_wbt = [
-                    (out_slope_deg, lambda i, o: self.wbt.slope(i, o, units="degrees"), local_slope),
-                    (out_gradmag, lambda i, o: self.wbt.slope(i, o, units="radians"), local_gradmag),
-                    (out_flowdir, self.wbt.aspect, local_flowdir),
-                    (out_prof, self.wbt.profile_curvature, local_prof),
-                    (out_plan, self.wbt.plan_curvature, local_plan),
-                    (out_total, self.wbt.total_curvature, local_total),
-                    (out_flowacc, lambda i, o: self.wbt.d8_flow_accumulation(i, o, out_type="cells"), local_flowacc)
+                    (out_gradmag, lambda i, o: wbt.slope(i, o, units="radians"), local_gradmag),
+                    (out_flowdir, wbt.aspect, local_flowdir),
+                    (out_prof, wbt.profile_curvature, local_prof),
+                    (out_plan, wbt.plan_curvature, local_plan),
+                    (out_total, wbt.total_curvature, local_total),
+                    (out_flowacc, lambda i, o: wbt.d8_flow_accumulation(i, o, out_type="cells"), local_flowacc)
                 ]
+                
+                if not is_bluetopo:
+                    outputs_wbt.insert(0, (out_slope_deg, lambda i, o: wbt.slope(i, o, units="degrees"), local_slope))
 
                 missing_wbt = [item for item in outputs_wbt if self.overwrite or not self._exists(item[0])]
                 missing_tci = self.overwrite or not self._exists(out_tci)
                 missing_shear = self.overwrite or not self._exists(out_shear)
 
                 missing_numpy_dict = {
-                    "_rugosity_tri.tif": self.overwrite or not self._exists(out_rug),
-                    "_slope.tif": self.overwrite or not self._exists(out_slope),
+                    "_rugosity_tri.tif": False if is_bluetopo else (self.overwrite or not self._exists(out_rug)),
+                    "_slope.tif": False if is_bluetopo else (self.overwrite or not self._exists(out_slope)),
                     "_bpi_fine.tif": self.overwrite or not self._exists(out_fine),
                     "_bpi_broad.tif": self.overwrite or not self._exists(out_broad),
                     "_terrain_classification.tif": self.overwrite or not self._exists(out_class)
@@ -475,29 +524,71 @@ class TerrainProductsEngine(Engine):
 
                 logger.info(f"-> [STARTING] {progress_str}Generating products for: {base_name}")
 
-                with UPath(bathy_path).open('rb') as f_in:
-                    with open(local_bathy, 'wb') as f_out:
-                        shutil.copyfileobj(f_in, f_out)
-                        
-                # [MEMORY FIX] Clear memory buffers after large file copy
-                gc.collect()
+                # Download raw bathy to temporary location
+                with UPath(bathy_path).open('rb') as f_in, open(local_bathy_raw, 'wb') as f_out:
+                    shutil.copyfileobj(f_in, f_out)
+                    
+                # [DATA FIX] Sanitize raster during write to strip unflagged extreme values (-9999) 
+                # This ensures WBT doesn't treat missing edges as 90-degree cliffs!
+                with rasterio.open(local_bathy_raw) as src:
+                    profile = src.profile
+                    s_nodata = src.nodata
+                    # Force output nodata to standard -9999.0
+                    profile.update(nodata=-9999.0, dtype='float32')
+                    
+                    with rasterio.open(local_bathy, 'w', **profile) as dst:
+                        for ji, window in src.block_windows(1):
+                            chunk = src.read(1, window=window).astype(np.float32)
+                            
+                            # Standardize existing nodata flags
+                            if s_nodata is not None and not np.isnan(s_nodata):
+                                chunk[chunk == s_nodata] = -9999.0
+                            
+                            # Sanitize unflagged nodata values and automatically mask out land/above-water (>= 0)
+                            chunk[chunk < -9998.0] = -9999.0
+                            chunk[chunk >= 0.0] = -9999.0
+                            
+                            # Final NaN catch
+                            chunk[np.isnan(chunk)] = -9999.0
+                            
+                            dst.write(chunk, 1, window=window)
 
-                with rasterio.open(local_bathy) as src:
-                    crs = src.crs
-                    epsg_code = crs.to_epsg() if crs else None
-                    if epsg_code != 32617:
-                        return (False, f"Skipped (Invalid CRS): {base_name}")
+                # Delete raw, keep sanitized local_bathy
+                try: os.remove(local_bathy_raw)
+                except OSError: pass
+
+                # [MEMORY FIX] Clear memory buffers after large file operations
+                gc.collect()
+                        
+                if is_bluetopo:
+                    ext = UPath(bathy_path).suffix
+                    # Extract the core name (e.g. 'BlueTopo_BH4S257N_20251209') to perfectly map pre-calculated slope
+                    match = re.search(r'(BlueTopo_[A-Za-z0-9_]+_\d{8})', base_name, re.IGNORECASE)
+                    if match:
+                        core_name = match.group(1)
+                        bluetopo_slope_path = str(UPath(self.prediction_output_dir) / f"{core_name}_slope{ext}")
+                    else:
+                        bluetopo_slope_path = str(UPath(self.prediction_output_dir) / f"{base_name}_slope{ext}")
+                        
+                    if self._exists(bluetopo_slope_path):
+                        with UPath(bluetopo_slope_path).open('rb') as f_in, open(local_slope, 'wb') as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                    else:
+                        return (False, f"Required slope file missing for BlueTopo: {bluetopo_slope_path}")
 
                 for out_s3, wbt_func, local_out in missing_wbt:
                     try:
-                        wbt_func(local_bathy, local_out)
-                        if os.path.exists(local_out):
+                        ret_code = wbt_func(local_bathy, local_out)
+                        if ret_code != 0:
+                            logger.error(f"❌ WBT Failure on {base_name}: Task returned exit code {ret_code} for {local_out}")
+                        elif not os.path.exists(local_out):
+                            logger.error(f"❌ WBT Silent Failure on {base_name}: Tool succeeded but output {local_out} is missing.")
+                        else:
                             with open(local_out, 'rb') as f_in, UPath(out_s3).open('wb') as f_out:
                                 shutil.copyfileobj(f_in, f_out)
                             if local_out not in [local_slope, local_plan]:
                                 try: os.remove(local_out)
                                 except OSError: pass
-                                
                         # [MEMORY FIX] Collect garbage after each WBT product is finished and file is closed
                         gc.collect()
                     except Exception as e:
@@ -505,13 +596,12 @@ class TerrainProductsEngine(Engine):
 
                 if missing_tci:
                     try: 
-                        self.wbt.convergence_index(local_bathy, local_tci)
-                        if os.path.exists(local_tci):
+                        ret_code = wbt.convergence_index(local_bathy, local_tci)
+                        if ret_code == 0 and os.path.exists(local_tci):
                             with open(local_tci, 'rb') as f_in, UPath(out_tci).open('wb') as f_out:
                                 shutil.copyfileobj(f_in, f_out)
                             try: os.remove(local_tci)
                             except OSError: pass
-                            
                         # [MEMORY FIX] Clear WBT TCI file handles
                         gc.collect()
                     except Exception as e: 
@@ -519,6 +609,14 @@ class TerrainProductsEngine(Engine):
 
                 if missing_shear:
                     try:
+                        if not is_bluetopo and not os.path.exists(local_slope) and self._exists(out_slope_deg):
+                            with UPath(out_slope_deg).open('rb') as f_in, open(local_slope, 'wb') as f_out:
+                                shutil.copyfileobj(f_in, f_out)
+                        
+                        if not os.path.exists(local_plan) and self._exists(out_plan):
+                            with UPath(out_plan).open('rb') as f_in, open(local_plan, 'wb') as f_out:
+                                shutil.copyfileobj(f_in, f_out)
+
                         slope_src = local_slope if os.path.exists(local_slope) else None
                         plan_src = local_plan if os.path.exists(local_plan) else None
 
@@ -539,7 +637,7 @@ class TerrainProductsEngine(Engine):
                                         slope_chunk = s.read(1, window=window).astype(np.float32)
                                         plan_chunk = p.read(1, window=window).astype(np.float32)
                                         
-                                        valid_mask = ~np.isnan(slope_chunk) & ~np.isnan(plan_chunk)
+                                        valid_mask = ~np.isnan(slope_chunk) & ~np.isnan(plan_chunk) & (slope_chunk != s_nodata) & (plan_chunk != p_nodata)
                                         
                                         shear_chunk = np.full_like(slope_chunk, s_nodata, dtype=np.float32)
                                         shear_chunk[valid_mask] = slope_chunk[valid_mask] * np.abs(plan_chunk[valid_mask])
@@ -558,16 +656,14 @@ class TerrainProductsEngine(Engine):
                                 os.remove(local_shear_path)
                     except Exception as e:
                         logger.error(f"Shear Proxy Error {base_name}: {e}")
-                    finally:
-                        for tmp_f in [local_slope, local_plan]:
-                            if tmp_f and os.path.exists(tmp_f):
-                                try: os.remove(tmp_f)
-                                except OSError: pass
 
                 if missing_numpy:
-                    year = 'BlueTopo' if 'bluetopo' in base_name.lower() else 'bt_bathy'
-                    match = re.search(r'((?:19|20)\d{2})', base_name)
-                    if match: year = match.group(1)
+                    if is_bluetopo:
+                        year = 'BlueTopo'
+                    else:
+                        year = 'bt_bathy'
+                        match = re.search(r'((?:19|20)\d{2})', base_name)
+                        if match: year = match.group(1)
                         
                     dict_path = UPath(self._join_paths(str(self.dictionary_dir), f"dictionary_{year}.csv"))
                     if missing_numpy_dict["_terrain_classification.tif"] and not dict_path.exists():
@@ -583,9 +679,12 @@ class TerrainProductsEngine(Engine):
                         
                         bathy_array = np.memmap(os.path.join(tmpdir, "bathy.dat"), dtype='float32', mode='w+', shape=shape_2d)
                         for ji, window in src.block_windows(1):
-                            chunk = src.read(1, window=window)
-                            if src.nodata is not None and not (isinstance(src.nodata, (float, np.floating)) and np.isnan(src.nodata)):
+                            chunk = src.read(1, window=window).astype(np.float32)
+                            
+                            # Numpy NaN conversion
+                            if src.nodata is not None and not np.isnan(src.nodata):
                                 chunk[chunk == src.nodata] = np.nan
+                                
                             bathy_array[window.toslices()] = chunk
                             
                             # [MEMORY FIX] Clear chunk memory inside block window loop
@@ -607,10 +706,13 @@ class TerrainProductsEngine(Engine):
                             slope[:] = slope_raw[:]
                         del slope_raw
                     elif missing_numpy_dict["_terrain_classification.tif"]:
-                        with rasterio.open(out_slope) as src_s:
+                        with rasterio.open(local_slope if is_bluetopo else out_slope) as src_s:
                             slope = np.memmap(os.path.join(tmpdir, "s.dat"), dtype='float32', mode='w+', shape=shape_2d)
                             for ji, window in src_s.block_windows(1):
-                                slope[window.toslices()] = src_s.read(1, window=window)
+                                slope_chunk = src_s.read(1, window=window).astype(np.float32)
+                                if src_s.nodata is not None and not np.isnan(src_s.nodata):
+                                    slope_chunk[slope_chunk == src_s.nodata] = np.nan
+                                slope[window.toslices()] = slope_chunk
 
                     if missing_numpy_dict["_bpi_fine.tif"]:
                         bpi_fine = self.calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
@@ -641,8 +743,6 @@ class TerrainProductsEngine(Engine):
                                 bpi_broad_mem[window.toslices()] = src_b.read(1, window=window)
 
                     del bathy_array; gc.collect()
-                    try: os.remove(os.path.join(tmpdir, "bathy.dat"))
-                    except OSError: pass
                     
                     if missing_numpy_dict["_terrain_classification.tif"]:
                         classified_array = np.memmap(os.path.join(tmpdir, "c.dat"), dtype='float32', mode='w+', shape=shape_2d)
@@ -671,9 +771,6 @@ class TerrainProductsEngine(Engine):
                     if 'slope' in locals():
                         del slope, bpi_fine_mem, bpi_broad_mem
                     gc.collect()
-                    for f in ["s.dat", "f.dat", "b.dat", "c.dat"]:
-                        try: os.remove(os.path.join(tmpdir, f))
-                        except OSError: pass
 
                 logger.info(f" - [✓ SUCCESS] {progress_str}Completed terrain processing: {base_name}")
                 try: ctypes.CDLL("libc.so.6").malloc_trim(0)
@@ -681,10 +778,31 @@ class TerrainProductsEngine(Engine):
                     
                 return (True, f"Success: {base_name}")
             
-        except Exception as e:
+            finally:
+                # Force Python to let go of any memmap file locks BEFORE deleting directory
+                def _close_mmap(arr):
+                    if arr is not None:
+                        try:
+                            if hasattr(arr, '_mmap'): arr._mmap.close()
+                            if hasattr(arr, 'base') and hasattr(arr.base, 'close'): arr.base.close()
+                        except Exception: pass
+                
+                locs = locals()
+                for key in ['bathy_array', 'slope', 'bpi_fine_mem', 'bpi_broad_mem', 'classified_array']:
+                    _close_mmap(locs.get(key))
+
+                gc.collect()
+                # Bypass WinError 32 by forcing ignore_errors on tmpdir wipe
+                shutil.rmtree(tmpdir, ignore_errors=True)
+            
+        except BaseException as e:
             err_msg = traceback.format_exc()
-            logger.error(f"❌ [{base_name}] Error during terrain product generation:\n{err_msg}")
-            return (False, f"Failed: {base_name} - {str(e)}")
+            try:
+                base_name_err = os.path.splitext(os.path.basename(str(bathy_path)))[0]
+            except Exception:
+                base_name_err = "Unknown File"
+            logger.error(f"❌ [{base_name_err}] FATAL CRASH during terrain product generation:\n{err_msg}")
+            return (False, f"Fatal Crash: {base_name_err} - {str(e)}")
 
     def _log_system_metrics(self) -> str:
         """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
@@ -733,7 +851,7 @@ class TerrainProductsEngine(Engine):
         logger.info(f"Cleaning up master temp directory: {self.local_tmp_dir}")
         try:
             if self.local_tmp_dir.exists():
-                shutil.rmtree(self.local_tmp_dir)
+                shutil.rmtree(self.local_tmp_dir, ignore_errors=True)
                 logger.info(f"Successfully removed temp directory: {self.local_tmp_dir}")
         except Exception as e:
             logger.error(f"Could not delete temp directory {self.local_tmp_dir}: {e}")
@@ -749,7 +867,7 @@ class TerrainProductsEngine(Engine):
 
     def _initialize_dask(self, env: str) -> Client:
         """Initializes the Dask cluster and client."""
-        self.setup_dask(env)
+        self.setup_dask(env, n_workers=2, threads_per_worker=1, memory_limit="14GB")
         client = getattr(self, 'client', None)
         if not client:
             client = Client()
@@ -757,14 +875,40 @@ class TerrainProductsEngine(Engine):
 
     def _get_files_to_process(self) -> List[str]:
         """Scans the directory and filters out invalid or 'iss' specific files."""
-        logger.info(f"Scanning combined lidar directory: {self.combined_bathy_dir}")
-        potential_inputs = []
-        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
-            potential_inputs.extend(list(UPath(self.combined_bathy_dir).rglob(ext)))
-
-        valid_files = [f for f in potential_inputs if 'iss' not in UPath(f).name.lower()]
+        potential_inputs = set()
         
-        logger.info(f"Found {len(valid_files)} combined bathymetry files.")
+        # 1. Grab all combined bathymetry files
+        for ext in ["*.tif", "*.tiff"]:
+            for f in UPath(self.combined_bathy_dir).rglob(ext):
+                potential_inputs.add(str(f))
+            for f in UPath(self.combined_bathy_dir).rglob(ext.upper()):
+                potential_inputs.add(str(f))
+
+        # 2. Grab top-level files from prediction output directory for BlueTopo
+        if hasattr(self, 'prediction_output_dir') and self.prediction_output_dir:
+            for ext in ["*.tif", "*.tiff"]:
+                for f in UPath(self.prediction_output_dir).glob(ext):
+                    potential_inputs.add(str(f))
+                for f in UPath(self.prediction_output_dir).glob(ext.upper()):
+                    potential_inputs.add(str(f))
+
+        valid_files = []
+        for f_str in list(potential_inputs):
+            fname = UPath(f_str).name.lower()
+            
+            # Filter 1: Ignore temporary / ISS files
+            if 'iss' in fname:
+                continue
+                
+            # Filter 2: Strict BlueTopo base file matching
+            if 'bluetopo' in fname:
+                # Must match exact base name pattern: BlueTopo_ID_YYYYMMDD.tif
+                if not re.match(r'^bluetopo_[a-z0-9_]+_\d{8}\.tiff?$', fname):
+                    continue
+
+            valid_files.append(f_str)
+            
+        logger.info(f"Final filtered list: Found {len(valid_files)} bathymetry files to process.")
         return valid_files
 
     def _execute_terrain_tasks(self, client: Client, valid_files: List[str], best_radii: Dict[str, Tuple[int, int]], max_concurrent: int) -> None:
@@ -799,7 +943,7 @@ class TerrainProductsEngine(Engine):
                 if success:
                     logger.info(f" - [SUCCESS] {result_msg}")
                 else:
-                    logger.error(f" - [ERROR/SKIP] {result_msg}")
+                    logger.error(f" - {result_msg}")
                     
                 metrics_msg = self._log_system_metrics()
                 logger.info(metrics_msg)

@@ -8,6 +8,16 @@ import yaml
 
 from datetime import datetime
 
+import logging
+
+# Add this near the top of run_hydro_health.py
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True # Overrides any other hidden logging settings
+)
+
+
 os.environ['PROJ_NETWORK'] = 'OFF'
 
 HH_MODEL = pathlib.Path(__file__).parents[2]
