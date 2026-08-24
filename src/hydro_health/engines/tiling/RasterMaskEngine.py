@@ -77,14 +77,13 @@ class RasterMaskEngine(Engine):
         else:
             sub_path = get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
 
-        mask_sub = get_config_item('MASK', 'SUBFOLDER')
         suffix = str(sub_path).lstrip('/')
 
         base_dir = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
         if output_prefix:
-            mask_path = base_dir / output_prefix / ecoregion / mask_sub / suffix
+            mask_path = base_dir / output_prefix / ecoregion / suffix
         else:
-            mask_path = base_dir / ecoregion / mask_sub / suffix
+            mask_path = base_dir / ecoregion / suffix
 
         mask_path.parent.mkdir(parents=True, exist_ok=True)
 

@@ -1,8 +1,6 @@
 ecoregions:
 - ER_3
 pilot_mode: false
-# output_prefix: testing
-# resolution: [20, 100]
 steps:
 - tool: run_bluetopo_tile_engine
   run: true
@@ -25,4 +23,4 @@ steps:
 - tool: run_prediction_rasters_engine
   run: true
 - tool: run_training_rasters_engine
-  run: false
+  run: true
