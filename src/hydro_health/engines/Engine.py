@@ -9,6 +9,8 @@ import boto3
 import geopandas as gpd
 import dask
 import math
+import shutil
+import logging
 import string
 import yaml
 
@@ -17,6 +19,8 @@ from osgeo import osr, gdal
 from dask.distributed import Client, LocalCluster
 
 from hydro_health.helpers.tools import get_config_item
+
+logger = logging.getLogger(__name__)
 
 
 gdal.UseExceptions()
@@ -78,6 +82,17 @@ class Engine:
             url = url.replace(char, '')
         return url.strip()
     
+    def cleanup_resources(self):
+        """Wipe temp disks and safely teardown parallel execution pools."""
+        self.close_dask()
+
+        if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                self.write_message("Successfully wiped master local temp directory.")
+            except Exception as e:
+                self.write_message(f"Failed to wipe master local temp directory: {e}")
+
     def close_dask(self) -> None:
         """Shut down Dask objects"""
 

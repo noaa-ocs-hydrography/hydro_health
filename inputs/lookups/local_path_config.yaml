@@ -46,10 +46,12 @@ SEDIMENT:
   GPKG_PATH: original_data_files\sediment_data\sediment_data.gpkg
   MASK_PATH: prediction_masks\prediction.mask.UTM17_8m.tif
   RASTER_PATH: model_variables\Prediction\pre_processed\sediment_rasters
+S3:
+  BUCKET_NAME: ocs-dev-csdl-hydrohealth  
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
-  TILES: BlueTopo_Tile_Scheme_20260505_132642
+  TILES: BlueTopo_Tile_Scheme_20260626_132625
   STATES: USA_Census_States_200km_Overlap
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
   ECOGRIDTILES: Eco_Region_Grid_Tiles

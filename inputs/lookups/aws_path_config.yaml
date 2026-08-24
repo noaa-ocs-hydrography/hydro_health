@@ -6,17 +6,17 @@ DIGITALCOAST:
   BUCKET: noaa-nos-coastal-lidar-pds
   TILED_SUBFOLDER: model_variables/Prediction/pre_processed/tiled
 HURRICANE:
-  SUBFOLDER: ER_3/original_data_files/tsm_data
-  COUNT_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_count_raster
-  CUMULATIVE_RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_cumulative_raster
-  DATA_PATH: ER_3/original_data_files/hurricane_data
-  GPKG_PATH: ER_3/original_data_files/hurricane_data/hurricane_data.gpkg
-  RASTER_PATH: ER_3/original_data_files/hurricane_data/hurricane_rasters
-  YEAR_PAIR_RASTER_PATH: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
+  SUBFOLDER: original_data_files/tsm_data
+  COUNT_RASTER_PATH: original_data_files/hurricane_data/hurricane_count_raster
+  CUMULATIVE_RASTER_PATH: original_data_files/hurricane_data/hurricane_cumulative_raster
+  DATA_PATH: original_data_files/hurricane_data
+  GPKG_PATH: original_data_files/hurricane_data/hurricane_data.gpkg
+  RASTER_PATH: original_data_files/hurricane_data/hurricane_rasters
+  YEAR_PAIR_RASTER_PATH: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
 LIDAR_PLOTS:
-  INPUT_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast
-  PLOT_OUTPUTS: ER_3/model_variables/Prediction/raw/DigitalCoast_plots
-  RESAMPLED_VRTS: ER_3/model_variables/Prediction/raw/DigitalCoast_resampled
+  INPUT_VRTS: model_variables/Prediction/raw/DigitalCoast
+  PLOT_OUTPUTS: model_variables/Prediction/raw/DigitalCoast_plots
+  RESAMPLED_VRTS: model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
   MASK_PRED_PATH: ER_3/masks/prediction_mask_ER_3.tif
@@ -24,22 +24,22 @@ MASK:
   PREDICTION_MASK_PQ: ER_3/masks/prediction_mask.parquet
   TRAINING_MASK_PQ: ER_3/masks/training_mask.parquet
 MODEL:
-  MODEL_SUBGRIDS: ER_3/model_subgrids
-  PREPROCESSED_DIR: ER_3/model_variables/Prediction/pre_processed
-  PREDICTION_OUTPUT_DIR: ER_3/model_variables/Prediction/processed
-  PREDICTION_TILES_DIR: ER_3/model_variables/Prediction/prediction_tiles
-  TRAINING_TILES_DIR: ER_3/model_variables/Training/training_tiles
-  SUBGRIDS: ER_3/model_subgrids/Prediction.subgrid.WGS84_8m.gpkg
-  PREDICTION_SUB_GRIDS: ER_3/model_subgrids/prediction_intersecting_subgrids.gpkg
-  TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
-  TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
-  TILED_LIDAR_DIR: ER_3/model_variables/Prediction/pre_processed/tiled
-  TILED_LIDAR_PROC: ER_3/model_variables/Prediction/pre_processed/tiled_processed
+  MODEL_SUBGRIDS: model_subgrids
+  PREPROCESSED_DIR: model_variables/Prediction/pre_processed
+  PREDICTION_OUTPUT_DIR: model_variables/Prediction/processed
+  PREDICTION_TILES_DIR: model_variables/Prediction/prediction_tiles
+  TRAINING_TILES_DIR: model_variables/Training/training_tiles
+  SUBGRIDS: model_subgrids/Prediction.subgrid.WGS84_8m.gpkg
+  PREDICTION_SUB_GRIDS: model_subgrids/prediction_intersecting_subgrids.gpkg
+  TRAINING_SUB_GRIDS: model_subgrids/training_intersecting_subgrids.gpkg
+  TRAINING_OUTPUT_DIR: model_variables/Training/processed
+  TILED_LIDAR_DIR: model_variables/Prediction/pre_processed/tiled
+  TILED_LIDAR_PROC: model_variables/Prediction/pre_processed/tiled_processed
 PREPROCESSED:
-  BLUETOPO: ER_3/model_variables/Prediction/pre_processed/BlueTopo
-  HURRICANE: ER_3/model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
-  SEDIMENT: ER_3/model_variables/Prediction/pre_processed/sediment_rasters
-  TSM: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters/
+  BLUETOPO: model_variables/Prediction/pre_processed/BlueTopo
+  HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
+  SEDIMENT: model_variables/Prediction/pre_processed/sediment_rasters
+  TSM: original_data_files/tsm_data/TSM_year_pair_rasters/
 S3:
   BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
@@ -50,7 +50,7 @@ SEDIMENT:
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
-  TILES: BlueTopo_Tile_Scheme_20260505_132642
+  TILES: BlueTopo_Tile_Scheme_20260626_132625
   STATES: USA_Census_States_200km_Overlap
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
   ECOGRIDTILES: Eco_Region_Grid_Tiles
@@ -59,12 +59,12 @@ SHARED:
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
   MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads
 TERRAIN:
-  COMBINED_LIDAR_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
-  INPUT_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs
-  FILLED_DIR: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
-  OUTPUTS: ER_3/model_variables/Prediction/processed/terrain_digitalcoast_outputs
+  COMBINED_LIDAR_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
+  INPUT_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs
+  FILLED_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
+  OUTPUTS: model_variables/Prediction/processed/terrain_digitalcoast_outputs
 TSM:
-  DATA_PATH: ER_3/original_data_files/tsm_data/nc_files
+  DATA_PATH: original_data_files/tsm_data/nc_files
   MEAN_RASTER_PATH: original_data_files/tsm_data/tsm_rasters/mean_rasters
   SUBFOLDER: original_data_files/tsm_data
-  YEAR_PAIR_RASTER_PATH: ER_3/original_data_files/tsm_data/TSM_year_pair_rasters
+  YEAR_PAIR_RASTER_PATH: original_data_files/tsm_data/TSM_year_pair_rasters
