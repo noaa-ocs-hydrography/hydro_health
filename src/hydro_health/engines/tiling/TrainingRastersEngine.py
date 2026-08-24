@@ -1,21 +1,18 @@
-"""Class for reading in tiff files and warping as needed for training"""
-
+import os
+import gc
 import logging
 import tempfile
 import pathlib
+import shutil
 from pathlib import Path
 
 import numpy as np
-import geopandas as gpd
 import rasterio
-from rasterio.features import rasterize
-from rasterio.transform import from_origin
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from shapely.geometry import box
 
-import dask
-from dask.distributed import Client, LocalCluster, as_completed
+from dask.distributed import Client, as_completed
 from upath import UPath
 import s3fs
 
@@ -23,7 +20,6 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
-
 
 class TrainingRastersEngine(Engine):
     """Class for parallel processing training rasters and applying mathematical masks"""
@@ -33,7 +29,6 @@ class TrainingRastersEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         
-        # Helper to safely extract values whether they are plain types or Param objects
         def _get_val(key, default=None):
             val = self.param_lookup.get(key, default)
             if hasattr(val, 'valueAsText') and val.valueAsText is not None:
@@ -59,11 +54,6 @@ class TrainingRastersEngine(Engine):
         
         logger.info(f"Environment detected: {'AWS/Remote' if self.is_aws else 'Local'}")
 
-        # ---------------------------------------------------------
-        # Dynamically determine Repo Root and base folders
-        # __file__ = src/hydro_health/engines/tiling/TrainingRastersEngine.py
-        # parents[4] points to the hydro_health/ repository root
-        # ---------------------------------------------------------
         self.repo_root = pathlib.Path(__file__).resolve().parents[4]
         
         in_dir = _get_val('input_directory')
@@ -73,34 +63,23 @@ class TrainingRastersEngine(Engine):
         base_in_dir = pathlib.Path(in_dir) if in_dir else self.repo_root / 'inputs'
         base_out_dir = pathlib.Path(out_dir) if out_dir else self.repo_root / 'outputs'
         
-        # Mimic RasterMaskEngine logic: append output_prefix to output folder if it exists
+        # Ensure output_prefix is correctly evaluated if it is a Param object passed in
+        if hasattr(output_prefix, 'valueAsText') and output_prefix.valueAsText is not None:
+            output_prefix_str = output_prefix.valueAsText
+        elif hasattr(output_prefix, 'value') and output_prefix.value is not None:
+            output_prefix_str = output_prefix.value
+        else:
+            output_prefix_str = output_prefix
+
         self.inputs_dir = base_in_dir
-        self.outputs_dir = base_out_dir / output_prefix if output_prefix and isinstance(output_prefix, str) else base_out_dir
+        self.outputs_dir = base_out_dir / output_prefix_str if output_prefix_str and isinstance(output_prefix_str, str) else base_out_dir
         
-        # Dynamically determine the ecoregion (e.g., 'ER_3') to append to output paths
         eco_val = _get_val('eco_regions')
         self.ecoregion = ''
         
-        if isinstance(eco_val, list) and eco_val:
-            self.ecoregion = eco_val[0]
-        elif isinstance(eco_val, str) and eco_val:
-            import ast
-            try:
-                parsed = ast.literal_eval(eco_val)
-                if isinstance(parsed, list) and parsed:
-                    self.ecoregion = parsed[0]
-                else:
-                    self.ecoregion = eco_val.strip("[]'\" ")
-            except Exception:
-                self.ecoregion = eco_val.strip("[]'\" ")
+        if eco_val:
+            self.ecoregion = eco_val[0] if isinstance(eco_val, list) else str(eco_val).strip("[]'\" ")
 
-        # If it wasn't explicitly provided in param_lookup, scan the directory
-        if not self.ecoregion:
-            er_dirs = [d.name for d in self.outputs_dir.glob('ER_*') if d.is_dir()]
-            if er_dirs:
-                self.ecoregion = er_dirs[0]
-
-        # Finally, append the ecoregion into the path!
         if self.ecoregion:
             self.outputs_dir = self.outputs_dir / self.ecoregion
 
@@ -115,8 +94,6 @@ class TrainingRastersEngine(Engine):
                 if p.is_absolute():
                     return UPath(p)
                 # 2. If the config value already starts with 'inputs' or 'outputs', 
-                #    strip the first folder and attach it directly to the correctly built 
-                #    inputs_dir or outputs_dir so that ecoregion prefixes are respected!
                 if p.parts:
                     if p.parts[0] == 'inputs':
                         return UPath(self.inputs_dir / pathlib.Path(*p.parts[1:]))
@@ -126,71 +103,70 @@ class TrainingRastersEngine(Engine):
                 base_dir = self.outputs_dir if is_output else self.inputs_dir
                 return UPath(base_dir / p)
 
-        self.mask_training_pq = _resolve_path(get_config_item('MASK', 'TRAINING_MASK_PQ'), is_output=True)
         self.train_mask_path = _resolve_path(get_config_item('MASK', 'MASK_TRAINING_PATH'), is_output=True)
         self.prediction_out_dir = _resolve_path(get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR'), is_output=True)
         self.training_out_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_OUTPUT_DIR'), is_output=True)
-        self.training_tiles_dir = _resolve_path(get_config_item('MODEL', 'TRAINING_TILES_DIR'), is_output=True)
         
-        try:
-            filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
-            self.filled_folder_name = UPath(filled_dir_path).name.lower()
-        except Exception:
-            logger.warning("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
-            self.filled_folder_name = "filled_tifs"
+        self.filled_folder_name = UPath(get_config_item('TERRAIN', 'FILLED_DIR')).name.lower()
+        self.filled_folder_name = "filled_tifs"
 
         self.subgrid_paths = {
             'training': _resolve_path(get_config_item('MODEL', 'TRAINING_SUB_GRIDS'), is_output=True)
         }
 
-    def _create_binary_mask_raster(self, cutline_path: str, bounds: tuple, output_path: str) -> tuple:
-        """Creates a global binary raster mask from a vector layer before running Dask processes"""
+    def __getstate__(self):
+        """
+        Exclude unpicklable attributes (like Dask Client/Cluster and raw Params)
+        when serializing this instance to send to Dask worker nodes.
+        """
+        state = self.__dict__.copy()
         
-        logger.info(f"Burning vector mask into binary raster: {output_path}")
-        gdf = gpd.read_file(cutline_path)
+        # Drop the active connection handlers which crash the serializer
+        state.pop('client', None)
+        state.pop('cluster', None)
         
-        minx, miny, maxx, maxy = bounds
-        res = self.target_res
+        # Drop raw parameter lookups in case they contain unpicklable COM objects
+        state.pop('param_lookup', None)
         
-        # Snap bounds to target resolution grid
-        minx = np.floor(minx / res) * res
-        maxy = np.ceil(maxy / res) * res
-        maxx = np.ceil(maxx / res) * res
-        miny = np.floor(miny / res) * res
-        
-        width = int((maxx - minx) / res)
-        height = int((maxy - miny) / res)
-        
-        # Generate the affine transform
-        transform = from_origin(minx, maxy, res, res)
-        
-        # Rasterize shapes (burn value 1)
-        shapes_gen = ((geom, 1) for geom in gdf.geometry)
-        mask_arr = rasterize(
-            shapes=shapes_gen,
-            out_shape=(height, width),
-            transform=transform,
-            fill=0,
-            dtype='uint8'
-        )
-        
-        meta = {
-            'driver': 'GTiff',
-            'height': height,
-            'width': width,
-            'count': 1,
-            'dtype': 'uint8',
-            'crs': self.target_crs,
-            'transform': transform,
-            'compress': 'lzw',
-            'tiled': True,
-            'nodata': 0
-        }
-        
-        with rasterio.open(output_path, 'w', **meta) as dst:
-            dst.write(mask_arr, 1)
+        return state
+
+    def _log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
+        try:
+            # 1. Overall Hard Drive (EBS) Space for the partition holding the temp directory
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
             
-        return (output_path,)
+            # 2. Temp Storage Folder Size
+            tmp_size_bytes = 0
+            if self.local_tmp_dir.exists():
+                tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file())
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            # 3. RAM (Using psutil if available, fallback to /proc/meminfo for EC2/Linux)
+            ram_info = "Unknown"
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                # Fallback to reading native Linux memory info if psutil is not installed
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    import re
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        pct = 100 - (avail_gb / tot_gb * 100)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {pct:.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
 
     def process_training_raster(self, raster_path: str, mask_bounds: tuple, output_path: str, global_mask_path: str, current_index: int = None, total_count: int = None) -> None:
         """Process a training raster by extracting array blocks and masking them mathematically"""
@@ -205,70 +181,86 @@ class TrainingRastersEngine(Engine):
 
         logger.info(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}")
 
-        with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
-            try:
-                with rasterio.open(open_path) as src_pred:
-                    src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
-                    
-                    # Check bounding box intersections quickly using safe bounds
-                    rb = src_pred.bounds
-                    raster_bounds_geom = box(min(rb[0], rb[2]), min(rb[1], rb[3]), max(rb[0], rb[2]), max(rb[1], rb[3]))
-                    mask_box = box(*mask_bounds)
-                    
-                    if not mask_box.intersects(raster_bounds_geom):
-                        logger.info(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.")
-                        return
-                    
-                    meta = src_pred.meta.copy()
-                    meta.update({
-                        'nodata': np.nan if np.isnan(src_nodata) else src_nodata,
-                        'compress': 'lzw',
-                        'tiled': True
-                    })
-
-                    # Setup temporary local path inside quarantined task directory
-                    tmp_dst_path = str(output_path)
-                    if self.is_aws:
-                        tmp_dst_path = str(Path(task_tmp_dir) / "train_mask_tmp.tif")
-
-                    with rasterio.open(global_mask_path) as src_mask:
-                        # Virtual re-alignment ensures the mask array is perfectly registered 
-                        # to the incoming prediction raster (even if it was cropped/offset slightly)
-                        with WarpedVRT(src_mask, crs=src_pred.crs, transform=src_pred.transform, 
-                                       height=src_pred.height, width=src_pred.width, 
-                                       resampling=Resampling.nearest) as vrt_mask:
-                            
-                            with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
-                                with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
-                                    
-                                    # Evaluate the arrays safely in memory chunks to prevent Dask limits from being exceeded
-                                    for ji, window in src_pred.block_windows(1):
-                                        pred_arr = src_pred.read(1, window=window)
-                                        mask_arr = vrt_mask.read(1, window=window)
-
-                                        # Cast integers to floats if the nodata value is NaN
-                                        if np.isnan(meta['nodata']) and pred_arr.dtype not in (np.float32, np.float64):
-                                            pred_arr = pred_arr.astype(np.float32)
-
-                                        # Apply mask logic via numpy 
-                                        masked_data = np.where(mask_arr == 1, pred_arr, meta['nodata'])
-                                        dest.write(masked_data, 1, window=window)
-                    
-                    # If on AWS, push complete file from fast local disk to S3 bucket
-                    if self.is_aws:
-                        import s3fs
-                        fs = s3fs.S3FileSystem()
-                        fs.put(tmp_dst_path, str(output_path))
-
-                logger.info(f" - [✓ SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}")
-                
-            except Exception as e:
-                logger.exception(f"Unexpected failure during array masking for {raster_name}.")
-
-    def run(self, mask_train_bounds: tuple, train_cutline_path: str, max_concurrent: int = 10) -> None:
-        """Main entry point for generating binary masks and processing training rasters in parallel"""
+        tmp_dst_path = str(output_path)
         
-        # Use param_lookup and the base Engine class to initialize Dask
+        try:
+            with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
+                try:
+                    with rasterio.open(open_path) as src_pred:
+                        src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
+                        
+                        # Check bounding box intersections quickly using safe bounds
+                        rb = src_pred.bounds
+                        raster_bounds_geom = box(min(rb[0], rb[2]), min(rb[1], rb[3]), max(rb[0], rb[2]), max(rb[1], rb[3]))
+                        mask_box = box(*mask_bounds)
+                        
+                        if not mask_box.intersects(raster_bounds_geom):
+                            logger.info(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.")
+                            return
+                        
+                        meta = src_pred.meta.copy()
+                        meta.update({
+                            'nodata': np.nan if np.isnan(src_nodata) else src_nodata,
+                            'compress': 'lzw',
+                            'tiled': True
+                        })
+
+                        # Setup temporary local path inside quarantined task directory
+                        if self.is_aws:
+                            tmp_dst_path = str(Path(task_tmp_dir) / "train_mask_tmp.tif")
+
+                        # Handle remote global mask path natively in worker 
+                        open_mask_path = str(global_mask_path)
+                        if self.is_aws and open_mask_path.startswith('s3://'):
+                            open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
+
+                        with rasterio.open(open_mask_path) as src_mask:
+                            # Virtual re-alignment ensures the mask array is perfectly registered 
+                            # to the incoming prediction raster (even if it was cropped/offset slightly)
+                            with WarpedVRT(src_mask, crs=src_pred.crs, transform=src_pred.transform, 
+                                           height=src_pred.height, width=src_pred.width, 
+                                           resampling=Resampling.nearest) as vrt_mask:
+                                
+                                with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
+                                    with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
+                                        
+                                        # Evaluate the arrays safely in memory chunks to prevent Dask limits from being exceeded
+                                        for ji, window in src_pred.block_windows(1):
+                                            pred_arr = src_pred.read(1, window=window)
+                                            mask_arr = vrt_mask.read(1, window=window)
+
+                                            # Cast integers to floats if the nodata value is NaN
+                                            if np.isnan(meta['nodata']) and pred_arr.dtype not in (np.float32, np.float64):
+                                                pred_arr = pred_arr.astype(np.float32)
+
+                                            # Apply mask logic via numpy 
+                                            masked_data = np.where(mask_arr == 1, pred_arr, meta['nodata'])
+                                            dest.write(masked_data, 1, window=window)
+                        
+                        # If on AWS, push complete file from fast local disk to S3 bucket
+                        if self.is_aws:
+                            fs = s3fs.S3FileSystem()
+                            fs.put(tmp_dst_path, str(output_path))
+
+                    logger.info(f" - [✓ SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}")
+                    logger.info(self._log_system_metrics())
+                    
+                except Exception as e:
+                    logger.exception(f"Unexpected failure during array masking for {raster_name}.")
+                
+                finally:
+                    # Explicitly delete the temp file immediately to free EC2 disk space
+                    if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
+                        try:
+                            os.remove(tmp_dst_path)
+                        except Exception as e:
+                            logger.warning(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}")
+        finally:
+            # Force memory release back to the OS after every single file/worker completion
+            gc.collect()
+
+    def _setup_dask_env(self):
+        """Initialize the parallel Dask environment and client."""
         env_val = self.param_lookup.get('env', 'local')
         env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
         
@@ -277,22 +269,33 @@ class TrainingRastersEngine(Engine):
         # Pull the client configured by setup_dask, or fallback to connecting to the default cluster
         client = getattr(self, 'client', None)
         if not client:
-            client = Client()
-        
-        global_mask_path = str(self.local_tmp_dir / "global_train_mask.tif")
-        self._create_binary_mask_raster(train_cutline_path, mask_train_bounds, global_mask_path)
+            self.client = Client()
 
-        # Case-insensitive recursive glob for input files
+    def _prepare_mask_bounds(self) -> tuple:
+        """Extract spatial bounds directly from training mask TIFF."""
+        global_mask_path = str(self.train_mask_path)
+        open_mask_path = global_mask_path
+        
+        if self.is_aws and open_mask_path.startswith('s3://'):
+            open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
+
+        logger.info(f"Extracting spatial bounds directly from training mask TIFF: {open_mask_path}")
+        with rasterio.open(open_mask_path) as src:
+            mask_train_bounds = src.bounds
+            
+        return global_mask_path, mask_train_bounds
+
+    def _collect_training_files(self) -> list:
+        """Scan directories and collect target raster paths ready for processing."""
         potential_train_inputs = []
-        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+        for ext in ["*.tif", "*.tiff"]:
             potential_train_inputs.extend(list(self.prediction_out_dir.rglob(ext)))
 
         training_files = []
         removed_existing_train = 0
         
-        # Case-insensitive recursive glob for existing outputs
         existing_train_outputs = set()
-        for ext in ["*.tif", "*.tiff", "*.TIF", "*.TIFF"]:
+        for ext in ["*.tif", "*.tiff"]:
             existing_train_outputs.update({f.name for f in self.training_out_dir.rglob(ext)})
         
         for f in potential_train_inputs:
@@ -306,11 +309,6 @@ class TrainingRastersEngine(Engine):
             # Ensure we use combined lidar rather than filled lidar for mosaics
             if 'mosaic' in name_lower and 'combined' not in name_lower and 'combined_lidar' not in parts_lower:
                 continue
-            
-            # Exclude BlueTopo files strictly from being processed into training datasets
-            # EXCEPTION: Keep it if it is the survey_end_date layer
-            if ('bluetopo' in name_lower or name_lower.startswith('bt.')) and 'survey_end_date' not in name_lower:
-                continue
                 
             if not self.overwrite and f.name in existing_train_outputs:
                 removed_existing_train += 1
@@ -319,14 +317,12 @@ class TrainingRastersEngine(Engine):
             training_files.append(f)
 
         skip_train_msg = f" (Skipping {removed_existing_train} existing)" if not self.overwrite else " (Overwrite enabled)"
-        
-        logger.info(f"Outputting training rasters to: {self.training_out_dir}")
         logger.info(f"Queuing {len(training_files)} training files{skip_train_msg}...")
+        
+        return training_files
 
-        # -------------------------------------------------------------
-        # DYNAMIC DASK TASK STREAM (TRAINING)
-        # Prevents idle workers by instantly replacing completed tasks
-        # -------------------------------------------------------------
+    def _execute_tasks(self, training_files: list, mask_train_bounds: tuple, global_mask_path: str, max_concurrent: int):
+        """Dynamically schedule and execute training tasks across Dask stream."""
         total_train = len(training_files)
         training_iterator = iter(enumerate(training_files))
         seq_train = as_completed()
@@ -334,7 +330,7 @@ class TrainingRastersEngine(Engine):
         def submit_train_task(item):
             i, file_path = item
             output_path = self.training_out_dir / file_path.name
-            return client.submit(
+            return self.client.submit(
                 self.process_training_raster,
                 str(file_path), 
                 mask_train_bounds, 
@@ -361,12 +357,37 @@ class TrainingRastersEngine(Engine):
 
         if total_train > 0:
             logger.info("[SUCCESS] Training raster processing complete.")
-        else:
-            logger.info("No new training rasters to process.")
-            
-        # Cleanly shut down
+            logger.info(self._log_system_metrics())
+
+    def _cleanup_resources(self):
+        """Wipe temp disks and safely teardown parallel execution pools."""
+        if hasattr(self, 'client') and self.client:
+            try:
+                self.client.close()
+                self.close_dask()
+            except Exception as e:
+                logger.error(f"Could not cleanly close client/cluster: {e}")
+
+        # Wipe the master local temp directory to ensure EC2 disk is completely cleared
+        if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                logger.info("Successfully wiped master local temp directory.")
+            except Exception as e:
+                logger.warning(f"Failed to wipe master local temp directory: {e}")
+
+    def run(self, max_concurrent: int = 10) -> None:
+        """Main entry point for evaluating training masks and processing rasters in parallel"""
         try:
-            client.close()
-            self.close_dask()
-        except Exception as e:
-            logger.error(f"Could not cleanly close client/cluster: {e}")
+            self._setup_dask_env()
+            global_mask_path, mask_train_bounds = self._prepare_mask_bounds()
+            training_files = self._collect_training_files()
+
+            if training_files:
+                logger.info(f"Outputting training rasters to: {self.training_out_dir}")
+                self._execute_tasks(training_files, mask_train_bounds, global_mask_path, max_concurrent)
+            else:
+                logger.info("No new training rasters to process.")
+
+        finally:
+            self._cleanup_resources()
