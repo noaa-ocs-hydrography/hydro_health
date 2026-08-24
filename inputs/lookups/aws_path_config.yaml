@@ -19,10 +19,10 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
-  MASK_PRED_PATH: ER_3/masks/prediction_mask_ER_3.tif
-  MASK_TRAINING_PATH: ER_3/masks/training_mask_ER_3.tif
-  PREDICTION_MASK_PQ: ER_3/masks/prediction_mask.parquet
-  TRAINING_MASK_PQ: ER_3/masks/training_mask.parquet
+  MASK_PRED_PATH: masks/prediction_mask_ER_3.tif
+  MASK_TRAINING_PATH: masks/training_mask_ER_3.tif
+  PREDICTION_MASK_PQ: masks/prediction_mask.parquet
+  TRAINING_MASK_PQ: masks/training_mask.parquet
 MODEL:
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables/Prediction/pre_processed
