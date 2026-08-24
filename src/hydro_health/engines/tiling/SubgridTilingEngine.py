@@ -21,8 +21,19 @@ from hydro_health.engines.Engine import Engine
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs' 
 
+def _dask_worker_logger(msg: str, dest: str = "") -> None:
+    """
+    Module-level logger for Dask workers.
+    Passed as 'log_func' to avoid pickling the Engine class instance.
+    Dask automatically captures standard print statements into cluster logs.
+    """
+    
+    print(msg)
+
+
 def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
     """Cleans raster filenames into consistent column names, standardizing years and prefixes."""
+    
     clean_name = col_name
 
     if "survey_end_date" in clean_name.lower():
@@ -71,8 +82,10 @@ def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
 
     return final_name
 
+
 def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
     """Calculates NaN stats for a tile."""
+    
     if df.empty:
         return pd.DataFrame()
     
@@ -84,15 +97,17 @@ def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
 
     return pd.DataFrame([new_row])
 
+
 def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bool, log_func) -> pd.DataFrame:
     """Process gridded rasters for a single tile dynamically and avoid sequential merging."""
+    
     original_tile = str(sub_grid['original_tile'])
     pattern = re.compile(rf"(?:^|_){original_tile}(?:_|\.)")
 
     filtered_files = [f for f in raster_files if pattern.search(Path(f).name)]
 
     if not filtered_files:
-        log_func(f"WARNING: MISSING GRIDDED DATA: No tile-specific raster files found for tile '{original_tile}'.")
+        log_func(f"WARNING: MISSING GRIDDED DATA: No tile-specific raster files found for tile '{original_tile}'.", OUTPUTS)
         return pd.DataFrame()
 
     tile_extent = sub_grid.geometry.bounds
@@ -116,7 +131,7 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
                 col_name = _standardize_col_name(col_name, original_tile)
                 data_arrays[col_name] = (data, src.nodata)
         except Exception as e:
-            log_func(f"WARNING: Error reading gridded file {file}: {e}")
+            log_func(f"WARNING: Error reading gridded file {file}: {e}", OUTPUTS)
 
     if not data_arrays:
         return pd.DataFrame()
@@ -134,7 +149,7 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
             master_mask |= mask
 
     if master_mask is None or not master_mask.any():
-        log_func(f"WARNING: MISSING VALID DATA: Gridded files exist for '{original_tile}', but all pixels are NoData/NaN.")
+        log_func(f"WARNING: MISSING VALID DATA: Gridded files exist for '{original_tile}', but all pixels are NoData/NaN.", OUTPUTS)
         return pd.DataFrame()
 
     rows, cols = np.where(master_mask)
@@ -156,8 +171,10 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
     del data_arrays, master_mask
     return combined_data
 
+
 def _subtile_process_ungridded(sub_grid: pd.Series, raster_files: list, gridded_df: pd.DataFrame, static_patterns: list, is_aws: bool, log_func) -> pd.DataFrame:
     """Process ungridded rasters by translating spatial locations directly to pixel indices instead of merging."""
+    
     if gridded_df is None or gridded_df.empty:
         return pd.DataFrame()
 
@@ -209,17 +226,19 @@ def _subtile_process_ungridded(sub_grid: pd.Series, raster_files: list, gridded_
                         combined_df[col_name] = vals
 
             except Exception as e:
-                log_func(f"WARNING: Failed to sample ungridded raster {file}: {e}")
+                log_func(f"WARNING: Failed to sample ungridded raster {file}: {e}", OUTPUTS)
                 if col_name not in combined_df:
                     combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
 
     return combined_df
 
+
 def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type: str, tile_id: str, is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, log_func) -> tuple:
     """Combine dataframes, explicitly save to temporary disk, move to output, and aggressively drop memory."""
+    
     if combined_df is None or combined_df.empty:
-        log_func(f"WARNING: CRITICAL MISSING DATA: No data assembled for tile '{tile_id}'. Creating empty parquet file.")
-        combined_df = pd.DataFrame(columns=['FID', 'tile_id', 'X', 'Y'])
+        log_func(f" [SKIP] Tile '{tile_id}': No valid data assembled. Skipping file creation.", OUTPUTS)
+        return pd.DataFrame()
 
     if data_type in ["training", "prediction"]:
         bathy_years = set()
@@ -253,7 +272,7 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
                 combined_df[f"delta_bathy_{y0_str}_{y1_str}"] = combined_df[b_y1] - combined_df[b_y0]
                 valid_pairs.append(f"{y0_str}_{y1_str}")
             else:
-                log_func(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.")
+                log_func(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.", OUTPUTS)
 
         cols_to_drop = [c for c in combined_df.columns if re.search(r"(\d{4}_\d{4})$", c) and not c.startswith("delta_bathy_") and re.search(r"(\d{4}_\d{4})$", c).group(1) not in valid_pairs]
         if cols_to_drop:
@@ -278,7 +297,7 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
     else:
         shutil.copy(tmp_dst_path, final_save_path)
 
-    log_func(f" [{current_index}/{total_count}] [SUCCESS] Saved combined tile data to: {final_save_path}")
+    log_func(f" [{current_index}/{total_count}] [SUCCESS] Saved combined tile data to: {final_save_path}", OUTPUTS)
 
     stats_df = _create_nan_stats_csv(combined_df, tile_id)
 
@@ -287,16 +306,32 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
 
     return stats_df
 
+
 def _process_tile(params: list) -> pd.DataFrame:
     """Core worker task for processing a single tile. Designed for dask pickling."""
+    
     sub_grid, gridded_files, ungridded_files, static_patterns, is_aws, output_folder, data_type, tile_name, local_tmp_dir, current_index, total_count, log_func = params
 
     expected_path = UPath(output_folder) / f"{tile_name}_{data_type}_clipped_data.parquet"
+    
+    log_func(f"Processing tile {tile_name} ({current_index}/{total_count})...", OUTPUTS)
+
+    # Prediction must have bluetopo data. Training MUST have combined lidar data.
+    has_bluetopo = any("bluetopo" in Path(f).name.lower() or Path(f).name.lower().startswith("bt.") for f in gridded_files + ungridded_files)
+    has_combined_lidar = any("combined" in Path(f).name.lower() for f in gridded_files + ungridded_files)
+
+    if data_type == "prediction" and not has_bluetopo:
+        log_func(f" [SKIP] Tile {tile_name}: Missing required BlueTopo data for prediction.", OUTPUTS)
+        return pd.DataFrame()
+
+    if data_type == "training" and not has_combined_lidar:
+        log_func(f" [SKIP] Tile {tile_name}: Missing required combined LiDAR data for training.", OUTPUTS)
+        return pd.DataFrame()
 
     try:
         # Check if the output file already exists. If so, skip raster processing and just read it to get the NaN statistics.
         if expected_path.exists():
-            log_func(f" [SKIP] Tile already processed: {tile_name}. Compiling statistics from existing data.")
+            log_func(f" [SKIP] Tile already processed: {tile_name}. Compiling statistics from existing data.", OUTPUTS)
             df = pd.read_parquet(expected_path)
             stats = _create_nan_stats_csv(df, tile_name)
             del df
@@ -312,10 +347,11 @@ def _process_tile(params: list) -> pd.DataFrame:
         return stats
     
     except Exception as e:
-        log_func(f"ERROR: Error processing tile {tile_name}: {e}")
+        log_func(f"ERROR: Error processing tile {tile_name}: {e}", OUTPUTS)
         return pd.DataFrame()
     finally:
         gc.collect()
+
 
 class SubgridTilingEngine(Engine):
     """Class for parallel subtiling of raster data into geoparquet files"""
@@ -335,10 +371,12 @@ class SubgridTilingEngine(Engine):
         self.static_patterns = ['sed', 'tsm', 'hurr', 'grain', 'survey']
 
         self.inputs_dir = INPUTS
-        region = param_lookup['eco_regions'].value[0]
+
+    def _resolve_paths(self, region: str) -> None:
+        """Resolve paths dynamically for aws or local environments and the given eco region."""
         
-        self.outputs_dir = OUTPUTS / output_prefix / region if output_prefix else OUTPUTS / region
-        print(f"SubgridTilingEngine initialized with outputs_dir: {self.outputs_dir}")
+        self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
+        self.write_message(f"SubgridTilingEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
         bucket = get_config_item('S3', 'BUCKET_NAME')
         s3_dir_base = f"s3://{bucket}/{region}"
@@ -361,9 +399,6 @@ class SubgridTilingEngine(Engine):
             self.training_tiles_dir.mkdir(parents=True, exist_ok=True)
             self.prediction_tiles_dir.mkdir(parents=True, exist_ok=True)
 
-        # Terrain defaults
-        self.filled_folder_name = UPath(str(get_config_item('TERRAIN', 'FILLED_DIR'))).name.lower()
-
         # Subgrid definitions 
         training_subgrid_path = get_config_item('MODEL', 'TRAINING_SUB_GRIDS')
         prediction_subgrid_path = get_config_item('MODEL', 'PREDICTION_SUB_GRIDS')
@@ -372,8 +407,19 @@ class SubgridTilingEngine(Engine):
             'prediction': UPath(f"{s3_dir_base}/{prediction_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / prediction_subgrid_path)
         }
 
+        # Terrain defaults
+        filled_dir = get_config_item('TERRAIN', 'FILLED_DIR')
+        self.filled_out_dir = UPath(f"{s3_dir_base}/{filled_dir}") if self.is_aws else UPath(self.outputs_dir / filled_dir)
+        self.filled_folder_name = self.filled_out_dir.name.lower()
+
+        # Config item for combined LiDAR dir for training files 
+        combined_lidar_dir = get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR')
+        self.combined_lidar_dir = UPath(f"{s3_dir_base}/{combined_lidar_dir}") if self.is_aws else UPath(self.outputs_dir / combined_lidar_dir)
+
+
     def log_system_metrics(self) -> str:
         """Helper to collect and format EC2 system metrics."""
+        
         try:
             total, used, free = shutil.disk_usage(self.local_tmp_dir)
             free_gb = free / (1024**3)
@@ -402,51 +448,63 @@ class SubgridTilingEngine(Engine):
         except Exception as e:
             return f"   [SysMetrics] Error collecting system metrics: {e}"
 
+
     def _load_subgrids(self, data_type: str) -> gpd.GeoDataFrame:
         """Loads the subgrids definition for the given data type."""
+        
         sub_grid_path = self.subgrid_paths.get(data_type)
         if not sub_grid_path:
             return None
 
-        self.write_message(f"Loading subgrids from: {sub_grid_path}")
+        self.write_message(f"Loading subgrids from: {sub_grid_path}", OUTPUTS)
         try:
             return gpd.read_file(str(sub_grid_path))
         except Exception as e:
-            self.write_message(f"EXCEPTION: Reading subgrids from {sub_grid_path} failed. {e}")
+            self.write_message(f"EXCEPTION: Reading subgrids from {sub_grid_path} failed. {e}", OUTPUTS)
             return None
 
-    def _get_filtered_raster_files(self, raster_dir: UPath, data_type: str) -> list:
+
+    def _get_filtered_raster_files(self, raster_dirs: list, data_type: str) -> list:
         """Scans and filters raster files based on type rules."""
-        self.write_message("Scanning directory for raster files...")
+        
+        self.write_message("Scanning directories for raster files...", OUTPUTS)
         all_raster_files = []
 
-        for f in raster_dir.rglob("*"):
-            if f.suffix.lower() in {'.tif', '.tiff'}:
-                name_lower = f.name.lower()
-                parts_lower = [p.lower() for p in f.parts]
-
-                if self.filled_folder_name in parts_lower or "filled_lidar" in parts_lower or "filled_tifs" in parts_lower:
-                    continue
-                if "unc" in name_lower:
-                    continue
+        for raster_dir in raster_dirs:
+            if not raster_dir.exists():
+                self.write_message(f"Directory not found, skipping: {raster_dir}", OUTPUTS)
+                continue
                 
-                exclude_patterns = ["tsm_cumulative", "hurr_count_mean", "hurr_count_cumulative", "hurr_strength_cumulative"]
-                if any(x in name_lower for x in exclude_patterns) or \
-                   re.search(r"hurr_count_\d{4}_\d{4}", name_lower) or \
-                   re.search(r"hurr_strength_\d{4}_\d{4}", name_lower):
-                    continue
+            for f in raster_dir.rglob("*"):
+                if f.suffix.lower() in {'.tif', '.tiff'}:
+                    name_lower = f.name.lower()
+                    parts_lower = [p.lower() for p in f.parts]
 
-                if data_type == 'training' and ("bluetopo" in name_lower or name_lower.startswith("bt.")) and "survey_end_date" not in name_lower:
-                    continue
-                elif data_type == 'prediction' and "bathy" in name_lower and "bluetopo" not in name_lower and not name_lower.startswith("bt."):
-                    continue
+                    # Skip filled tifs ONLY IF they aren't our required combined files for training
+                    if (self.filled_folder_name in parts_lower or "filled_lidar" in parts_lower or "filled_tifs" in parts_lower) and "combined" not in name_lower:
+                        continue
+                    if "unc" in name_lower:
+                        continue
+                    
+                    exclude_patterns = ["tsm_cumulative", "hurr_count_mean", "hurr_count_cumulative", "hurr_strength_cumulative"]
+                    if any(x in name_lower for x in exclude_patterns) or \
+                       re.search(r"hurr_count_\d{4}_\d{4}", name_lower) or \
+                       re.search(r"hurr_strength_\d{4}_\d{4}", name_lower):
+                        continue
 
-                all_raster_files.append(str(f))
+                    if data_type == 'training' and ("bluetopo" in name_lower or name_lower.startswith("bt.")) and "survey_end_date" not in name_lower:
+                        continue
+                    elif data_type == 'prediction' and "bathy" in name_lower and "bluetopo" not in name_lower and not name_lower.startswith("bt."):
+                        continue
+
+                    all_raster_files.append(str(f))
 
         return all_raster_files
 
+
     def _partition_raster_files(self, all_raster_files: list, sub_grids: gpd.GeoDataFrame) -> tuple:
         """Pre-partition files into gridded vs ungridded lists."""
+        
         valid_tids = [str(tid) for tid in sub_grids['original_tile'].unique() if pd.notna(tid) and str(tid).strip()]
         valid_tid_patterns = [re.compile(rf"(?:^|_){tid}(?:_|\.)") for tid in valid_tids]
 
@@ -455,16 +513,17 @@ class SubgridTilingEngine(Engine):
 
         return gridded_files, ungridded_files
 
-    def _process_pipeline(self, raster_dir: UPath, output_dir: UPath, data_type: str) -> None:
+    def _process_pipeline(self, raster_dirs: list, output_dir: UPath, data_type: str) -> None:
         """Orchestrates the tile processing for a specific data type via Dask mapping."""
-        self.write_message(f"--- Starting {data_type.upper()} pipeline ---")
-        self.write_message(self.log_system_metrics())
+        
+        self.write_message(f"--- Starting {data_type.upper()} pipeline ---", OUTPUTS)
+        self.write_message(self.log_system_metrics(), OUTPUTS)
 
         sub_grids = self._load_subgrids(data_type)
         if sub_grids is None or sub_grids.empty:
             return
 
-        all_raster_files = self._get_filtered_raster_files(raster_dir, data_type)
+        all_raster_files = self._get_filtered_raster_files(raster_dirs, data_type)
         gridded_files, ungridded_files = self._partition_raster_files(all_raster_files, sub_grids)
 
         # Build task payloads
@@ -485,10 +544,10 @@ class SubgridTilingEngine(Engine):
                 str(self.local_tmp_dir),
                 i + 1,
                 total_tiles,
-                self.write_message
+                _dask_worker_logger  # Uses the module-level logger to avoid pickling the Engine instance
             ])
 
-        self.write_message(f"Submitting {total_tiles} tile tasks to Dask client map...")
+        self.write_message(f"Submitting {total_tiles} tile tasks to Dask client map...", OUTPUTS)
         futures = self.client.map(_process_tile, params_list)
         results = self.client.gather(futures)
 
@@ -498,29 +557,34 @@ class SubgridTilingEngine(Engine):
             final_results_df = pd.concat(valid_results, ignore_index=True)
             output_csv_path = output_dir.parent / f"year_pair_nan_counts_{data_type}.csv"
             final_results_df.to_csv(str(output_csv_path), index=False, na_rep='NA')
-            self.write_message(f"[SUCCESS] Statistics successfully saved to: {output_csv_path}")
+            self.write_message(f"[SUCCESS] Statistics successfully saved to: {output_csv_path}", OUTPUTS)
 
-        self.write_message(self.log_system_metrics())
+        self.write_message(self.log_system_metrics(), OUTPUTS)
+
 
     def run(self) -> None:
         """Main entry point for evaluating training masks and processing rasters in parallel"""
+        
         env = self.param_lookup.get('env', 'local')
         
         try:
             self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
 
-            # Process Prediction Data
-            self._process_pipeline(
-                raster_dir=self.prediction_out_dir, 
-                output_dir=self.prediction_tiles_dir, 
-                data_type="prediction"
-            )
+            for eco_region in self.param_lookup['eco_regions'].value:
+                self._resolve_paths(eco_region)
 
-            # Process Training Data
-            self._process_pipeline(
-                raster_dir=self.training_out_dir, 
-                output_dir=self.training_tiles_dir, 
-                data_type="training"
-            )
+                # Process Prediction Data
+                self._process_pipeline(
+                    raster_dirs=[self.prediction_out_dir], 
+                    output_dir=self.prediction_tiles_dir, 
+                    data_type="prediction"
+                )
+
+                # Process Training Data
+                self._process_pipeline(
+                    raster_dirs=[self.training_out_dir, self.combined_lidar_dir], 
+                    output_dir=self.training_tiles_dir, 
+                    data_type="training"
+                )
         finally:
-            self.cleanup_resources()
+            self.cleanup_resources(OUTPUTS)

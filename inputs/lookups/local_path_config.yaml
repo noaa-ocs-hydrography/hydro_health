@@ -59,6 +59,7 @@ SHARED:
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads
 TERRAIN:
+  COMBINED_LIDAR_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\combined_lidar_tifs
   INPUT_DIR: model_variables\Prediction\processed
   FILLED_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs
   OUTPUTS: model_variables\Prediction\processed\terrain_digitalcoast_outputs  

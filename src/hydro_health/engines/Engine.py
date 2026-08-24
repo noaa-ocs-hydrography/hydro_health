@@ -82,16 +82,16 @@ class Engine:
             url = url.replace(char, '')
         return url.strip()
     
-    def cleanup_resources(self):
+    def cleanup_resources(self, output_folder: str):
         """Wipe temp disks and safely teardown parallel execution pools."""
         self.close_dask()
 
         if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
             try:
                 shutil.rmtree(self.local_tmp_dir)
-                self.write_message("Successfully wiped master local temp directory.")
+                self.write_message("Successfully wiped master local temp directory.", output_folder)
             except Exception as e:
-                self.write_message(f"Failed to wipe master local temp directory: {e}")
+                self.write_message(f"Failed to wipe master local temp directory: {e}", output_folder)
 
     def close_dask(self) -> None:
         """Shut down Dask objects"""
