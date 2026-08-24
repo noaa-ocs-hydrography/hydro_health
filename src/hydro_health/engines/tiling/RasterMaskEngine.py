@@ -99,7 +99,8 @@ class RasterMaskEngine(Engine):
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path)
 
-        combined_geometry = mask_gdf_df.union_all()
+        # one-line fix for geopandas version issues with union_all
+        combined_geometry = getattr(mask_gdf_df, "union_all", lambda: getattr(mask_gdf_df, "unary_union", getattr(mask_gdf_df.geometry, "unary_union", None)))()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
         grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')

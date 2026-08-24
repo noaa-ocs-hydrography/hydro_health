@@ -13,6 +13,29 @@ from hydro_health.helpers.tools import get_config_item, get_approved_providers
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
+def _is_raster_empty(ds, nodata_val=-9999) -> bool:
+    """Helper to check if a warped dataset is a 1x1 placeholder or pure NoData"""
+
+    if ds is None:
+        return True
+    
+    x_size, y_size = ds.RasterXSize, ds.RasterYSize
+    if x_size <= 1 or y_size <= 1 or ds.RasterCount == 0:
+        return True
+
+    band = ds.GetRasterBand(1)
+    try:
+        stats = band.ComputeRasterMinMax(False)
+        # If min and max both equal the nodata value, the tile is empty
+        if stats[0] == nodata_val and stats[1] == nodata_val:
+            return True
+    except Exception:
+        # If stats computation fails on a tiny/empty band, treat as empty
+        return True
+
+    return False
+
+
 def _grid_single_vrt_s3(params: list) -> str:
     """Grid a single S3 VRT"""
 
@@ -104,6 +127,18 @@ def _grid_single_vrt_s3(params: list) -> str:
                     "BLOCKYSIZE=512"
                 ]
             )
+
+            # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
+            check_ds = gdal.Open(local_tmp_path, gdal.GA_ReadOnly)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            check_ds = None
+
+            if empty_tile:
+                if os.path.exists(local_tmp_path):
+                    os.remove(local_tmp_path)
+                gdal.Unlink(in_memory_geojson)
+                engine.write_message(f" - Skipped empty warp: {s3_out_file}", param_lookup['output_directory'].valueAsText)
+                continue
 
             final_ds = gdal.Open(local_tmp_path, gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
@@ -204,6 +239,18 @@ def _grid_single_vrt_local(params: list) -> str:
                     "BLOCKYSIZE=512"
                 ]
             )
+
+            # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
+            check_ds = gdal.Open(str(out_file), gdal.GA_ReadOnly)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            check_ds = None
+
+            if empty_tile:
+                if out_file.exists():
+                    out_file.unlink()
+                gdal.Unlink(in_memory_geojson)
+                engine.write_message(f" - Skipped empty warp: {out_file}", param_lookup['output_directory'].valueAsText)
+                continue
 
             final_ds = gdal.Open(str(out_file), gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
