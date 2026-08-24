@@ -1,8 +1,6 @@
 ecoregions:
 - ER_3
 pilot_mode: false
-# output_prefix: testing
-# resolution: [20, 100]
 steps:
 - tool: run_bluetopo_tile_engine
   run: true
@@ -17,7 +15,7 @@ steps:
 - tool: run_raster_mask_engine
   run: true
 - tool: grid_digital_coast_files
-  run: false
+  run: true
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
@@ -25,6 +23,4 @@ steps:
 - tool: run_prediction_rasters_engine
   run: true
 - tool: run_training_rasters_engine
-  run: false
-- tool: run_subgrid_tiling_engine
-  run: true  
+  run: true

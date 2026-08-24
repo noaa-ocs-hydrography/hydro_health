@@ -12,9 +12,9 @@ import math
 import shutil
 import logging
 import string
-import yaml
+import re
 
-from datetime import date
+from datetime import datetime, date
 from osgeo import osr, gdal
 from dask.distributed import Client, LocalCluster
 
@@ -295,7 +295,7 @@ class Engine:
         
         manifest = {
             "engine": self.__class__.__name__,
-            "run_date": datetime.datetime.now().isoformat(),
+            "run_date": datetime.now().isoformat(),
             "duration_seconds": duration,
             "status": "completed"
         }
@@ -314,6 +314,29 @@ class Engine:
             manifest_prefix.parent.mkdir(parents=True, exist_ok=True)
             with open(manifest_prefix, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))
+
+    def parse_survey_date(self, date_str: str) -> date | None:
+        """Robustly parse survey dates from metadata strings handling various formats and extracting years."""
+
+        if not date_str or str(date_str).strip().upper() in ["N/A", "UNKNOWN", "NULL", "NONE", "NAN", ""]:
+            return None
+            
+        date_str = str(date_str).strip()
+        
+        # Try common exact formats
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y%m%d", "%Y"):
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+                
+        # Fallback: extract the first numeric sequence (integer or float) that looks like a year and round to nearest whole year
+        match = re.search(r'\b((?:17|18|19|20)\d{2}(?:\.\d+)?)\b', date_str)
+        if match:
+            year = int(round(float(match.group(1))))
+            return date(year, 1, 1)
+            
+        return None
 
 
 # CATZOC score.py

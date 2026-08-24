@@ -1,4 +1,3 @@
-from logging import config
 import os
 import pathlib
 import boto3
