@@ -13,6 +13,29 @@ from hydro_health.helpers.tools import get_config_item, get_approved_providers
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
+def _is_raster_empty(ds, nodata_val=-9999) -> bool:
+    """Helper to check if a warped dataset is a 1x1 placeholder or pure NoData"""
+
+    if ds is None:
+        return True
+    
+    x_size, y_size = ds.RasterXSize, ds.RasterYSize
+    if x_size <= 1 or y_size <= 1 or ds.RasterCount == 0:
+        return True
+
+    band = ds.GetRasterBand(1)
+    try:
+        stats = band.ComputeRasterMinMax(False)
+        # If min and max both equal the nodata value, the tile is empty
+        if stats[0] == nodata_val and stats[1] == nodata_val:
+            return True
+    except Exception:
+        # If stats computation fails on a tiny/empty band, treat as empty
+        return True
+
+    return False
+
+
 def _grid_single_vrt_s3(params: list) -> str:
     """Grid a single S3 VRT"""
 
@@ -95,6 +118,7 @@ def _grid_single_vrt_s3(params: list) -> str:
                 local_tmp_path, vrt_ds, format='GTiff',
                 cutlineDSName=in_memory_geojson, cropToCutline=True,
                 dstNodata=-9999, srcSRS=vrt_projection, dstSRS=vrt_projection,
+                cutlineSRS=blue_topo_gdf.crs.to_wkt(),
                 creationOptions=[
                     "COMPRESS=DEFLATE", 
                     "PREDICTOR=3", 
@@ -103,6 +127,18 @@ def _grid_single_vrt_s3(params: list) -> str:
                     "BLOCKYSIZE=512"
                 ]
             )
+
+            # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
+            check_ds = gdal.Open(local_tmp_path, gdal.GA_ReadOnly)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            check_ds = None
+
+            if empty_tile:
+                if os.path.exists(local_tmp_path):
+                    os.remove(local_tmp_path)
+                gdal.Unlink(in_memory_geojson)
+                engine.write_message(f" - Skipped empty warp: {s3_out_file}", param_lookup['output_directory'].valueAsText)
+                continue
 
             final_ds = gdal.Open(local_tmp_path, gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
@@ -182,10 +218,19 @@ def _grid_single_vrt_local(params: list) -> str:
                 continue
             
             out_dir.mkdir(parents=True, exist_ok=True)
+            
+            in_memory_geojson = f"/vsimem/cutline_{folder_name}_{vrt.stem}.json"
+            tile_geojson = {
+                "type": "FeatureCollection",
+                "features": [{"type": "Feature", "geometry": tile_row.geometry.__geo_interface__}]
+            }
+            gdal.FileFromMemBuffer(in_memory_geojson, json.dumps(tile_geojson))
+
             gdal.Warp(
                 str(out_file), vrt_ds, format='GTiff',
-                cutlineDSName=tile_row.geometry.wkt, cropToCutline=True,
-                dstNodata=-9999, cutlineSRS=vrt_proj,
+                cutlineDSName=in_memory_geojson, cropToCutline=True,
+                dstNodata=-9999, srcSRS=vrt_proj, dstSRS=vrt_proj,
+                cutlineSRS=blue_topo_gdf.crs.to_wkt(),
                 creationOptions=[
                     "COMPRESS=DEFLATE", 
                     "PREDICTOR=3", 
@@ -195,9 +240,23 @@ def _grid_single_vrt_local(params: list) -> str:
                 ]
             )
 
+            # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
+            check_ds = gdal.Open(str(out_file), gdal.GA_ReadOnly)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            check_ds = None
+
+            if empty_tile:
+                if out_file.exists():
+                    out_file.unlink()
+                gdal.Unlink(in_memory_geojson)
+                engine.write_message(f" - Skipped empty warp: {out_file}", param_lookup['output_directory'].valueAsText)
+                continue
+
             final_ds = gdal.Open(str(out_file), gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
             final_ds = None
+            
+            gdal.Unlink(in_memory_geojson)
             engine.write_message(f" - Processed Local: {out_file}", param_lookup['output_directory'].valueAsText)
         return f" - Processed Local: {vrt.name}"
     except Exception as e:

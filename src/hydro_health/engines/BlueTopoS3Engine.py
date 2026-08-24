@@ -7,7 +7,6 @@ import pathlib
 import sys
 import rasterio
 import re
-import s3fs
 import shutil
 
 import geopandas as gpd
@@ -81,29 +80,6 @@ def _process_tile(param_inputs: list) -> str:
         return msg
 
 
-def _parse_survey_date(date_str: str) -> date | None:
-    """Robustly parse survey dates from metadata strings handling various formats and extracting years."""
-    if not date_str or str(date_str).strip().upper() in ["N/A", "UNKNOWN", "NULL", "NONE", "NAN", ""]:
-        return None
-        
-    date_str = str(date_str).strip()
-    
-    # Try common exact formats
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y%m%d", "%Y"):
-        try:
-            return datetime.strptime(date_str, fmt).date()
-        except ValueError:
-            continue
-            
-    # Fallback: extract the first numeric sequence (integer or float) that looks like a year and round to nearest whole year
-    match = re.search(r'\b((?:17|18|19|20)\d{2}(?:\.\d+)?)\b', date_str)
-    if match:
-        year = int(round(float(match.group(1))))
-        return date(year, 1, 1)
-        
-    return None
-
-
 class BlueTopoS3Engine(Engine):
     """Class for parallel processing all BlueTopo tiles for a region"""
 
@@ -147,8 +123,8 @@ class BlueTopoS3Engine(Engine):
 
             data = {
                 "value": float(row_data.get('value', 0) or 0),
-                'start_date': _parse_survey_date(start_date_str),
-                "end_date": _parse_survey_date(end_date_str),
+                'start_date': self.parse_survey_date(start_date_str),
+                "end_date": self.parse_survey_date(end_date_str),
                 'from_filename': row_data.get('source_survey_id'),
                 'feat_detect': bool(int(row_data.get('significant_features', 0))),
                 'feat_least_depth': bool(int(row_data.get('feature_least_depth', 0))),
@@ -235,7 +211,7 @@ class BlueTopoS3Engine(Engine):
             row_dict = {field_names[i]: f_val.text for i, f_val in enumerate(row.findall('F'))}
 
             end_date_str = row_dict.get('survey_date_end')
-            end_date = _parse_survey_date(end_date_str) or date.min
+            end_date = self.parse_survey_date(end_date_str) or date.min
 
             meta = {
                 "end_date": end_date,

@@ -102,10 +102,12 @@ class PredictionRastersEngine(Engine):
         self.uncombined_lidar_dir = _resolve_path(get_config_item('MODEL', 'TILED_LIDAR_PROC'), is_output=True)
 
         filled_dir_path = get_config_item('TERRAIN', 'FILLED_DIR')
-        self.filled_folder_name = UPath(filled_dir_path).name.lower()
-        print("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
-        
-        self.filled_folder_name = "filled_tifs"
+        if filled_dir_path:
+            self.filled_folder_name = UPath(filled_dir_path).name.lower()
+        else:
+            print("Could not load TERRAIN/FILLED_DIR from config. Falling back to default 'filled_tifs'.")
+            self.filled_folder_name = "filled_tifs"
+            
         self.preprocessed_subdirs = {
             'bluetopo': _resolve_path(get_config_item('PREPROCESSED', 'BLUETOPO'), is_output=True),
             'hurricane': _resolve_path(get_config_item('PREPROCESSED', 'HURRICANE'), is_output=True),
@@ -171,38 +173,66 @@ class PredictionRastersEngine(Engine):
         all_existing_pred_outputs = existing_pred_outputs.union(existing_uncombined_outputs)
 
         potential_files = []
+        
+        print(f"\n{'='*80}")
+        print("SCANNING DIRECTORIES FOR SOURCE TIFF FILES")
+        print(f"{'='*80}")
 
         for data_type, directory in self.preprocessed_subdirs.items():
+            print(f"-> [{data_type.upper()}] Scanning: {directory}")
             found_files = [f for f in directory.rglob("*") if f.suffix.lower() in ['.tif', '.tiff']]
             
             if not found_files:
-                print(f"\n{'='*80}")
-                print(f"WARNING: Missing data for '{data_type}'.")
-                print(f"No .tif or .tiff files were found in {directory} or any of its subfolders.")
-                print(f"Continuing pipeline without '{data_type}' files...")
-                print(f"{'='*80}\n")
-                continue
-                
-            potential_files.extend(found_files)
+                print(f"   WARNING: No .tif or .tiff files found here.")
+            else:
+                print(f"   Found {len(found_files)} potential TIFF files.")
+                potential_files.extend(found_files)
 
         excluded_folders = {self.filled_folder_name, 'filled_tifs', 'filled_lidar'}
+        print(f"\nApplying Exclusion Rules (Folders to skip: {excluded_folders})")
+        
         valid_source_files = []
+        excluded_count = 0
+        excluded_by_folder_counts = {folder: 0 for folder in excluded_folders}
 
         for f in potential_files:
             if "sand_mud_mask" in f.name:
+                excluded_count += 1
                 continue
                 
-            if any(folder in f.parts for folder in excluded_folders):
+            # Check if any parent folder is in the exclusion list
+            skip_file = False
+            for folder in excluded_folders:
+                if folder in f.parts:
+                    excluded_by_folder_counts[folder] += 1
+                    excluded_count += 1
+                    skip_file = True
+                    break
+                    
+            if skip_file:
                 continue
                 
             valid_source_files.append(f)
 
+        print(f"Excluded {excluded_count} total files.")
+        for folder, count in excluded_by_folder_counts.items():
+            if count > 0:
+                print(f"   - {count} files dropped because they were inside a '{folder}' folder.")
+        
+        print(f"Remaining valid source files: {len(valid_source_files)}")
+
         prediction_files = []
+        already_processed_count = 0
         
         for f in valid_source_files:
             if not self.overwrite and f.name in all_existing_pred_outputs:
+                already_processed_count += 1
                 continue
             prediction_files.append(f)
+
+        print(f"Skipped {already_processed_count} files that already exist in outputs (overwrite=False).")
+        print(f"Final queue size to process: {len(prediction_files)}")
+        print(f"{'='*80}\n")
 
         return prediction_files
 
