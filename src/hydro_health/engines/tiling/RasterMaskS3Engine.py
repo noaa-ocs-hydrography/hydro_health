@@ -562,7 +562,7 @@ class RasterMaskS3Engine(Engine):
         base_prefix = str(output_prefix).rstrip('/')
         
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
-        gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions').to_crs("EPSG:32617")
+        gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions_50m').to_crs("EPSG:32617")
         gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
 
         for _, row in gdf.iterrows():
@@ -588,5 +588,5 @@ class RasterMaskS3Engine(Engine):
                 self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                 
                 mask_path = UPath(f"{er_base_dir}/{suffix}")
-                out_path = UPath(f"{er_subgrid_dir}/{mask_type}_subgrids.gpkg")
+                out_path = UPath(f"{er_subgrid_dir}/{mask_type}_intersecting_subgrids.gpkg")
                 self.create_subgrids(mask_path, out_path, mask_type, outputs)
