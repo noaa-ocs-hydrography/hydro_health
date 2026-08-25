@@ -169,7 +169,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
 
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(str(gpkg))
-    ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions')
+    ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions_50m')
 
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)
@@ -221,6 +221,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
 
 def _create_training_mask(param_inputs: list) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""
+    
     ecoregion_path, outputs = param_inputs
     mask_subfolder = ecoregion_path / get_config_item('MASK', 'SUBFOLDER')
     prediction_file = mask_subfolder / f'prediction_mask_{ecoregion_path.stem}.tif'
