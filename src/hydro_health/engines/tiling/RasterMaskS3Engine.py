@@ -562,7 +562,7 @@ class RasterMaskS3Engine(Engine):
         base_prefix = str(output_prefix).rstrip('/')
         
         gpkg = str(INPUTS / 'Master_Grids.gpkg')
-        gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions').to_crs("EPSG:32617")
+        gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions_50m').to_crs("EPSG:32617")
         gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
 
         for _, row in gdf.iterrows():
