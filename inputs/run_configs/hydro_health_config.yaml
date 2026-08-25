@@ -18,7 +18,6 @@ steps:
   run: false
 - tool: grid_digital_coast_files
   run: false
-  run: false
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
@@ -28,4 +27,4 @@ steps:
 - tool: run_lidar_gap_fill_engine
   run: true
 - tool: run_training_rasters_engine
-  run: true
+  run: false

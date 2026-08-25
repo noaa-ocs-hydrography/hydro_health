@@ -23,15 +23,6 @@ from hydro_health.engines.Engine import Engine
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
-def _dask_worker_logger(msg: str, dest: str = "") -> None:
-    """
-    Module-level logger for Dask workers.
-    Passed as 'log_func' to avoid pickling the Engine class instance.
-    Dask automatically captures standard print statements into cluster logs.
-    """
-    print(msg)
-
-
 def focal_fill_block(block: np.ndarray, w=3) -> np.ndarray:
     """
     Performs a single, efficient, nan-aware focal mean on a NumPy array block.
@@ -60,16 +51,16 @@ def _chunked_fill_holes(block: np.ndarray) -> np.ndarray:
 
 def _process_gap_fill(params: list) -> tuple:
     """Worker function: Performs iterative focal fill on a single raster using Dask and rioxarray."""
-    input_path, output_path, max_iters, chunk_size, local_tmp_dir, is_aws, log_func = params
+    input_path, output_path, max_iters, chunk_size, local_tmp_dir, is_aws = params
     raster_name = Path(input_path).name
     expected_path = UPath(output_path)
     
     # Implicit skip pattern - verify if output already exists before doing any work
     if expected_path.exists():
-        log_func(f"[SKIP] Gap fill already processed for {raster_name}. Output exists.", OUTPUTS)
+        Engine.write_message_dask(f"[SKIP] Gap fill already processed for {raster_name}. Output exists.", OUTPUTS)
         return True, str(output_path)
         
-    log_func(f"Worker attempting gap fill for: {raster_name}", OUTPUTS)
+    Engine.write_message_dask(f"Worker attempting gap fill for: {raster_name}", OUTPUTS)
 
     with tempfile.TemporaryDirectory(dir=local_tmp_dir) as task_tmp_dir:
         try:
@@ -94,7 +85,7 @@ def _process_gap_fill(params: list) -> tuple:
                 # Skip if empty
                 if not da.notnull().any().compute().item():
                     detailed_msg = f"Skipped {raster_name} - no valid data remaining."
-                    log_func(f"[SKIP] {detailed_msg}", OUTPUTS)
+                    Engine.write_message_dask(f"[SKIP] {detailed_msg}", OUTPUTS)
                     return False, detailed_msg
 
                 # Map hole filling across Dask chunks
@@ -112,7 +103,7 @@ def _process_gap_fill(params: list) -> tuple:
                 interior_gaps_exist = (nan_mask_da & allowed_da).any().compute(scheduler='single-threaded').item()
                 
                 if not interior_gaps_exist:
-                    log_func(f"[INFO] No interior gaps in {raster_name}. Applying simple masks.", OUTPUTS)
+                    Engine.write_message_dask(f"[INFO] No interior gaps in {raster_name}. Applying simple masks.", OUTPUTS)
                     da = da.where(~land_mask)
                 else:
                     for _ in range(max_iters):
@@ -162,7 +153,7 @@ def _process_gap_fill(params: list) -> tuple:
                     try:
                         os.remove(tmp_dst_path)
                     except Exception as e:
-                        log_func(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", OUTPUTS)
+                        Engine.write_message_dask(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", OUTPUTS)
 
                 return True, f"Gap fill complete for: {raster_name}"
 
@@ -173,16 +164,16 @@ def _process_gap_fill(params: list) -> tuple:
 
 def _process_combine_group(params: list) -> tuple:
     """Worker function: Combines and averages multiple overlapping Lidar datasets."""
-    group_files, output_path, chunk_size, local_tmp_dir, is_aws, log_func = params
+    group_files, output_path, chunk_size, local_tmp_dir, is_aws = params
     expected_path = UPath(output_path)
     
     # Implicit skip pattern
     if expected_path.exists():
-        log_func(f"[SKIP] Combined Lidar already processed. Output exists: {output_path}", OUTPUTS)
+        Engine.write_message_dask(f"[SKIP] Combined Lidar already processed. Output exists: {output_path}", OUTPUTS)
         return True, f"Already exists: {output_path}"
         
     file_count = len(group_files)
-    log_func(f"Starting combine task for {file_count} files -> {output_path}", OUTPUTS)
+    Engine.write_message_dask(f"Starting combine task for {file_count} files -> {output_path}", OUTPUTS)
     
     try:
         if file_count == 1:
@@ -355,8 +346,7 @@ class LidarGapFillEngine(Engine):
                 max_iters,
                 chunk_size,
                 str(self.local_tmp_dir),
-                self.is_aws,
-                _dask_worker_logger
+                self.is_aws
             ])
 
         # Execute map cleanly outside the object logic
@@ -414,8 +404,7 @@ class LidarGapFillEngine(Engine):
                 str(output_path),
                 chunk_size,
                 str(self.local_tmp_dir),
-                self.is_aws,
-                _dask_worker_logger
+                self.is_aws
             ])
 
         # Execute map cleanly outside the object logic
