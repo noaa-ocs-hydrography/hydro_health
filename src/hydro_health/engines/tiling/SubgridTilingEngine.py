@@ -21,15 +21,6 @@ from hydro_health.engines.Engine import Engine
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs' 
 
-def _dask_worker_logger(msg: str, dest: str = "") -> None:
-    """
-    Module-level logger for Dask workers.
-    Passed as 'log_func' to avoid pickling the Engine class instance.
-    Dask automatically captures standard print statements into cluster logs.
-    """
-    
-    print(msg)
-
 
 def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
     """Cleans raster filenames into consistent column names, standardizing years and prefixes."""
@@ -98,7 +89,7 @@ def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
     return pd.DataFrame([new_row])
 
 
-def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bool, log_func) -> pd.DataFrame:
+def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bool) -> pd.DataFrame:
     """Process gridded rasters for a single tile dynamically and avoid sequential merging."""
     
     original_tile = str(sub_grid['original_tile'])
@@ -107,7 +98,6 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
     filtered_files = [f for f in raster_files if pattern.search(Path(f).name)]
 
     if not filtered_files:
-        log_func(f"WARNING: MISSING GRIDDED DATA: No tile-specific raster files found for tile '{original_tile}'.", OUTPUTS)
         return pd.DataFrame()
 
     tile_extent = sub_grid.geometry.bounds
@@ -131,7 +121,8 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
                 col_name = _standardize_col_name(col_name, original_tile)
                 data_arrays[col_name] = (data, src.nodata)
         except Exception as e:
-            log_func(f"WARNING: Error reading gridded file {file}: {e}", OUTPUTS)
+            # Warnings remain active so true pipeline failures are identifiable
+            Engine.write_message_dask(f"WARNING: Error reading gridded file {file}: {e}", OUTPUTS)
 
     if not data_arrays:
         return pd.DataFrame()
@@ -149,7 +140,6 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
             master_mask |= mask
 
     if master_mask is None or not master_mask.any():
-        log_func(f"WARNING: MISSING VALID DATA: Gridded files exist for '{original_tile}', but all pixels are NoData/NaN.", OUTPUTS)
         return pd.DataFrame()
 
     rows, cols = np.where(master_mask)
@@ -172,7 +162,7 @@ def _subtile_process_gridded(sub_grid: pd.Series, raster_files: list, is_aws: bo
     return combined_data
 
 
-def _subtile_process_ungridded(sub_grid: pd.Series, raster_files: list, gridded_df: pd.DataFrame, static_patterns: list, is_aws: bool, log_func) -> pd.DataFrame:
+def _subtile_process_ungridded(sub_grid: pd.Series, raster_files: list, gridded_df: pd.DataFrame, static_patterns: list, is_aws: bool) -> pd.DataFrame:
     """Process ungridded rasters by translating spatial locations directly to pixel indices instead of merging."""
     
     if gridded_df is None or gridded_df.empty:
@@ -226,18 +216,19 @@ def _subtile_process_ungridded(sub_grid: pd.Series, raster_files: list, gridded_
                         combined_df[col_name] = vals
 
             except Exception as e:
-                log_func(f"WARNING: Failed to sample ungridded raster {file}: {e}", OUTPUTS)
+                Engine.write_message_dask(f"WARNING: Failed to sample ungridded raster {file}: {e}", OUTPUTS)
                 if col_name not in combined_df:
                     combined_df[col_name] = np.full(len(xs), np.nan, dtype=np.float32)
 
     return combined_df
 
 
-def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type: str, tile_id: str, is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, log_func) -> tuple:
+def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type: str, tile_id: str, is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool) -> tuple:
     """Combine dataframes, explicitly save to temporary disk, move to output, and aggressively drop memory."""
     
     if combined_df is None or combined_df.empty:
-        log_func(f" [SKIP] Tile '{tile_id}': No valid data assembled. Skipping file creation.", OUTPUTS)
+        if verbose:
+            Engine.write_message_dask(f" [SKIP] Tile '{tile_id}': No valid data assembled. Skipping file creation.", OUTPUTS)
         return pd.DataFrame()
 
     if data_type in ["training", "prediction"]:
@@ -272,7 +263,7 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
                 combined_df[f"delta_bathy_{y0_str}_{y1_str}"] = combined_df[b_y1] - combined_df[b_y0]
                 valid_pairs.append(f"{y0_str}_{y1_str}")
             else:
-                log_func(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.", OUTPUTS)
+                Engine.write_message_dask(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.", OUTPUTS)
 
         cols_to_drop = [c for c in combined_df.columns if re.search(r"(\d{4}_\d{4})$", c) and not c.startswith("delta_bathy_") and re.search(r"(\d{4}_\d{4})$", c).group(1) not in valid_pairs]
         if cols_to_drop:
@@ -297,7 +288,8 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
     else:
         shutil.copy(tmp_dst_path, final_save_path)
 
-    log_func(f" [{current_index}/{total_count}] [SUCCESS] Saved combined tile data to: {final_save_path}", OUTPUTS)
+    if verbose:
+        Engine.write_message_dask(f" [{current_index}/{total_count}] [SUCCESS] Saved combined tile data to: {final_save_path}", OUTPUTS)
 
     stats_df = _create_nan_stats_csv(combined_df, tile_id)
 
@@ -310,44 +302,49 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
 def _process_tile(params: list) -> pd.DataFrame:
     """Core worker task for processing a single tile. Designed for dask pickling."""
     
-    sub_grid, gridded_files, ungridded_files, static_patterns, is_aws, output_folder, data_type, tile_name, local_tmp_dir, current_index, total_count, log_func = params
+    # Unpack the new verbose flag passed via params
+    sub_grid, gridded_files, ungridded_files, static_patterns, is_aws, output_folder, data_type, tile_name, local_tmp_dir, current_index, total_count, verbose = params
 
     expected_path = UPath(output_folder) / f"{tile_name}_{data_type}_clipped_data.parquet"
-    
-    log_func(f"Processing tile {tile_name} ({current_index}/{total_count})...", OUTPUTS)
+
+    if verbose:
+        Engine.write_message_dask(f"Processing tile {tile_name} ({current_index}/{total_count})...", OUTPUTS)
 
     # Prediction must have bluetopo data. Training MUST have combined lidar data.
     has_bluetopo = any("bluetopo" in Path(f).name.lower() or Path(f).name.lower().startswith("bt.") for f in gridded_files + ungridded_files)
     has_combined_lidar = any("combined" in Path(f).name.lower() for f in gridded_files + ungridded_files)
 
     if data_type == "prediction" and not has_bluetopo:
-        log_func(f" [SKIP] Tile {tile_name}: Missing required BlueTopo data for prediction.", OUTPUTS)
+        if verbose:
+            Engine.write_message_dask(f" [SKIP] Tile {tile_name}: Missing required BlueTopo data for prediction.", OUTPUTS)
         return pd.DataFrame()
 
     if data_type == "training" and not has_combined_lidar:
-        log_func(f" [SKIP] Tile {tile_name}: Missing required combined LiDAR data for training.", OUTPUTS)
+        if verbose:
+            Engine.write_message_dask(f" [SKIP] Tile {tile_name}: Missing required combined LiDAR data for training.", OUTPUTS)
         return pd.DataFrame()
 
     try:
         # Check if the output file already exists. If so, skip raster processing and just read it to get the NaN statistics.
         if expected_path.exists():
-            log_func(f" [SKIP] Tile already processed: {tile_name}. Compiling statistics from existing data.", OUTPUTS)
+            if verbose:
+                Engine.write_message_dask(f" [SKIP] Tile already processed: {tile_name}. Compiling statistics from existing data.", OUTPUTS)
             df = pd.read_parquet(expected_path)
             stats = _create_nan_stats_csv(df, tile_name)
             del df
             return stats
 
         # Run fresh raster extraction
-        gridded_df = _subtile_process_gridded(sub_grid, gridded_files, is_aws, log_func)
-        combined_df = _subtile_process_ungridded(sub_grid, ungridded_files, gridded_df, static_patterns, is_aws, log_func)
+        gridded_df = _subtile_process_gridded(sub_grid, gridded_files, is_aws)
+        combined_df = _subtile_process_ungridded(sub_grid, ungridded_files, gridded_df, static_patterns, is_aws)
         
         # Save and calculate final table statistics
-        stats = _save_combined_data(combined_df, output_folder, data_type, tile_name, is_aws, local_tmp_dir, current_index, total_count, log_func)
+        stats = _save_combined_data(combined_df, output_folder, data_type, tile_name, is_aws, local_tmp_dir, current_index, total_count, verbose)
         del combined_df
         return stats
     
     except Exception as e:
-        log_func(f"ERROR: Error processing tile {tile_name}: {e}", OUTPUTS)
+        Engine.write_message_dask(f"ERROR: Error processing tile {tile_name}: {e}", OUTPUTS)
         return pd.DataFrame()
     finally:
         gc.collect()
@@ -513,7 +510,8 @@ class SubgridTilingEngine(Engine):
 
         return gridded_files, ungridded_files
 
-    def _process_pipeline(self, raster_dirs: list, output_dir: UPath, data_type: str) -> None:
+
+    def _process_pipeline(self, raster_dirs: list, output_dir: UPath, data_type: str, verbose_workers: bool = False) -> None:
         """Orchestrates the tile processing for a specific data type via Dask mapping."""
         
         self.write_message(f"--- Starting {data_type.upper()} pipeline ---", OUTPUTS)
@@ -544,10 +542,10 @@ class SubgridTilingEngine(Engine):
                 str(self.local_tmp_dir),
                 i + 1,
                 total_tiles,
-                _dask_worker_logger  # Uses the module-level logger to avoid pickling the Engine instance
+                verbose_workers # Passed dynamically to control per-tile spam
             ])
 
-        self.write_message(f"Submitting {total_tiles} tile tasks to Dask client map...", OUTPUTS)
+        self.write_message(f"Submitting {total_tiles} tile tasks to Dask client map... (Worker logs muted)", OUTPUTS)
         futures = self.client.map(_process_tile, params_list)
         results = self.client.gather(futures)
 
@@ -577,14 +575,16 @@ class SubgridTilingEngine(Engine):
                 self._process_pipeline(
                     raster_dirs=[self.prediction_out_dir], 
                     output_dir=self.prediction_tiles_dir, 
-                    data_type="prediction"
+                    data_type="prediction",
+                    verbose_workers=False  # Controls task-level logging verbosity
                 )
 
                 # Process Training Data
                 self._process_pipeline(
                     raster_dirs=[self.training_out_dir, self.combined_lidar_dir], 
                     output_dir=self.training_tiles_dir, 
-                    data_type="training"
+                    data_type="training",
+                    verbose_workers=False  # Controls task-level logging verbosity
                 )
         finally:
             self.cleanup_resources(OUTPUTS)

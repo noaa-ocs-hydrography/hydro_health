@@ -287,6 +287,13 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
 
+    @staticmethod
+    def write_message_dask(message: str, output_folder: str) -> None:
+        """Write a message to the main logfile in the output folder"""
+
+        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
+            writer.write(message + '\n')        
+
     def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""
 
