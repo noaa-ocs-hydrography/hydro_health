@@ -28,4 +28,4 @@ steps:
 - tool: run_lidar_gap_fill_engine
   run: true
 - tool: run_training_rasters_engine
-  run: false
+  run: true
