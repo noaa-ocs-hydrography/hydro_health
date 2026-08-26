@@ -5,24 +5,24 @@ pilot_mode: false
 # resolution: [20, 100]
 steps:
 - tool: run_bluetopo_tile_engine
-  run: true
+  run: false
 - tool: run_digital_coast_engine
-  run: true
+  run: false
 - tool: run_laz_conversion_engine
   run: false
 - tool: run_metadata_engine
-  run: true
+  run: false
 - tool: run_vrt_creation
   run: true
 - tool: run_raster_mask_engine
   run: true
 - tool: grid_digital_coast_files
-  run: false
+  run: true
 - tool: run_tsm_layer_engine
   run: false
 - tool: run_sediment_layer_engine
   run: false
 - tool: run_prediction_rasters_engine
-  run: true
+  run: false
 - tool: run_training_rasters_engine
-  run: true
+  run: false

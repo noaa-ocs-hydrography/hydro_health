@@ -21,15 +21,15 @@ MASK:
   SUBFOLDER: masks 
   MASK_PRED_PATH: ER_3/masks/prediction_mask_ER_3.tif
   MASK_TRAINING_PATH: ER_3/masks/training_mask_ER_3.tif
-  PREDICTION_MASK_PQ: ER_3/masks/prediction_mask.parquet
-  TRAINING_MASK_PQ: ER_3/masks/training_mask.parquet
+  PREDICTION_MASK_PQ: prediction_mask.parquet
+  TRAINING_MASK_PQ: training_mask.parquet
 MODEL:
   MODEL_SUBGRIDS: ER_3/model_subgrids
   PREPROCESSED_DIR: ER_3/model_variables/Prediction/pre_processed
   PREDICTION_OUTPUT_DIR: ER_3/model_variables/Prediction/processed
   PREDICTION_TILES_DIR: ER_3/model_variables/Prediction/prediction_tiles
   TRAINING_TILES_DIR: ER_3/model_variables/Training/training_tiles
-  SUBGRIDS: ER_3/model_subgrids/Prediction.subgrid.WGS84_8m.gpkg
+  SUBGRIDS: model_subgrids/Prediction.subgrid.WGS84_8m.gpkg
   PREDICTION_SUB_GRIDS: ER_3/model_subgrids/prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: ER_3/model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: ER_3/model_variables/Training/processed
