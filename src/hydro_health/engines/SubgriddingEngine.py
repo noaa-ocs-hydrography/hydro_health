@@ -55,7 +55,7 @@ class SubgriddingEngine:
                 if not intersection.is_empty:
                     rec = row.to_dict()
                     rec["geometry"] = intersection
-                    rec["subgrid_tile"] = f"{orig_id}_{grid_counter}"
+                    rec["tile_id"] = f"{orig_id}_{grid_counter}"
                     subgrid_records.append(rec)
                     grid_counter += 1
 
@@ -115,6 +115,7 @@ class SubgriddingEngine:
     def run(self, reference_tile_id: str=None, workers: int=6) -> gpd.GeoDataFrame:
         """Subdivides the target layer geometries and appends the result layer back to the GeoPackage."""
 
+        # TODO this Engine will eventually rebuild all the Master_Grids.gpkg subgrids when there is a new BT tile scheme
         master_grids = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
         master_grids_gpkg = pathlib.Path(master_grids)
         input_layer = get_config_item('SHARED', 'TILES')
@@ -126,7 +127,7 @@ class SubgriddingEngine:
         print(f"Reference dimensions calculated -> dx: {dx:.4f}, dy: {dy:.4f}")
 
         subgrid_gdf = self._parallel_split_tiles(gdf, dx, dy, workers)
-        output_layer = 'named_subgrid_tiles'
+        output_layer = 'model_subgrids'
         self._write_layer(subgrid_gdf, master_grids_gpkg, output_layer)
 
         print(
@@ -140,6 +141,9 @@ if __name__ == "__main__":
 
     # TODO this writes out to the Master_Grids.gpkg
     # Need to dynamically create a temp layer or write to S3?
+
+    # TODO 1. write to model_subgrids/Prediction.subgrid.WGS84_8m.gpkg, which is git ignored 
+
     engine = SubgriddingEngine()
     engine.run()
     print('done')
