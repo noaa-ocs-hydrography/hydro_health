@@ -43,7 +43,7 @@ def get_approved_providers(ecoregion: str) -> bool:
         approved_providers = []
         for provider, data in ecoregion_providers.items():
             if data['use']:
-                provider_id = '_'.join(provider.split('_')[2:])  # No year, ex: DEM_USDA_NRCS_USGS_59010
+                provider_id = '_'.join(provider.split('_')[3:])  # No year, ex: DEM_USDA_NRCS_USGS_59010
                 approved_providers.append(provider_id)
     return approved_providers
 

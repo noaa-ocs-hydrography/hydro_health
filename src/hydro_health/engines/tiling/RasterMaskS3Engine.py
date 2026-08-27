@@ -362,7 +362,7 @@ class RasterMaskS3Engine(Engine):
         search_paths = [f"s3://{bucket}/{ecoregion}/{dc_sub}/DigitalCoast"]
         if manual_downloads: 
             search_paths.append(f"{search_paths[0]}_manual_downloads")
-        self.write_message(f"- approved: {approved_providers}", outputs)
+        self.write_message(f"- approved: {approved_providers}", outputs)  # these start with year
         found = []
         for path in search_paths: 
             all_vrts = s3.glob(f"{path}/**/mosaic_*.vrt")
