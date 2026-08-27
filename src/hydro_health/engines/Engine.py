@@ -156,17 +156,14 @@ class Engine:
 
         return geometry_coords
     
-    def log_system_metrics(self, local_tmp_dir: str) -> str:
-        """Standardized helper to collect and format system metrics (RAM, Disk Space, Temp Size)."""
+    def log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
         try:
-            tmp_path = pathlib.Path(local_tmp_dir)
-            total, used, free = shutil.disk_usage(tmp_path if tmp_path.exists() else Path.home())
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
             free_gb = free / (1024**3)
             total_gb = total / (1024**3)
             
-            tmp_size_bytes = 0
-            if tmp_path.exists():
-                tmp_size_bytes = sum(f.stat().st_size for f in tmp_path.rglob('*') if f.is_file())
+            tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file()) if self.local_tmp_dir.exists() else 0
             tmp_mb = tmp_size_bytes / (1024**2)
             
             ram_info = "Unknown"
@@ -183,8 +180,7 @@ class Engine:
                     if mem_avail and mem_total:
                         avail_gb = int(mem_avail.group(1)) / (1024**2)
                         tot_gb = int(mem_total.group(1)) / (1024**2)
-                        pct = 100 - (avail_gb / tot_gb * 100)
-                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {pct:.1f}%)"
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {100 - (avail_gb / tot_gb * 100):.1f}%)"
             
             return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
         except Exception as e:
