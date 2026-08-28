@@ -361,8 +361,8 @@ class RasterMaskS3Engine(Engine):
         
         search_paths = [f"s3://{bucket}/{ecoregion}/{dc_sub}/DigitalCoast"]
         if manual_downloads: 
-            search_paths.append(f"{search_paths[0]}_manual_downloads")
-        self.write_message(f"- approved: {approved_providers}", outputs)
+            search_paths.append(f"s3://{bucket}/{ecoregion}/{dc_sub}/Digital_Coast_Manual_Downloads")
+        # self.write_message(f"- approved: {approved_providers}", outputs)
         found = []
         for path in search_paths: 
             all_vrts = s3.glob(f"{path}/**/mosaic_*.vrt")
@@ -576,7 +576,7 @@ class RasterMaskS3Engine(Engine):
                 vrts = self.find_provider_vrts(er, manual_downloads, outputs)
                 if vrts:
                     vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
-                    self.write_message(f"- vrt list: {vrt_list}", outputs)
+                    # self.write_message(f"- vrt list: {vrt_list}", outputs)
                     result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                     self.write_message(result_string, outputs)
 
