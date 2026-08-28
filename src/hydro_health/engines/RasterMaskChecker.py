@@ -18,7 +18,11 @@ class RasterMaskChecker:
     def __init__(self):
         self.s3 = boto3.client('s3')
         self.bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        self.prefix = 'ER_3/model_variables/Prediction/raw/DigitalCoast'
+        # Configured both S3 prefixes to search
+        self.prefixes = [
+            'ER_3/model_variables/Prediction/raw/DigitalCoast/',
+            'ER_3/model_variables/Prediction/raw/Digital_Coast_Manual_Downloads/'
+        ]
 
     def _download_shapefile_set(self, shp_key):
         temp_dir = tempfile.mkdtemp()
@@ -38,45 +42,50 @@ class RasterMaskChecker:
         return local_shp_path
 
     def load_s3_shapefiles(self, ecoregion='ER_3', simplify_tolerance=0.0001):
-        """Finds shapefiles, filters by approved providers, dissolves, and returns GeoDataFrame."""
+        """Finds shapefiles across all prefixes, filters by approved providers, dissolves, and returns GeoDataFrame."""
         # Get list of approved providers in lowercase for case-insensitive comparison
         approved_providers = [p.lower() for p in get_approved_providers(ecoregion)]
         paginator = self.s3.get_paginator('list_objects_v2')
         all_gdfs = []
 
-        for page in paginator.paginate(Bucket=self.bucket, Prefix=self.prefix):
-            for obj in page.get('Contents', []):
-                key = obj['Key']
-                if key.endswith('.shp') and 'tileindex' in key.lower() and 'NCEI' not in key:
-                    
-                    # Extract provider folder name from the S3 key
-                    provider_folder = "Unknown"
-                    parts = key.split('/')
-                    if 'DigitalCoast' in parts:
-                        dc_index = parts.index('DigitalCoast')
-                        if dc_index + 1 < len(parts):
-                            provider_folder = parts[dc_index + 1]
+        # Loop through each configured S3 prefix
+        for current_prefix in self.prefixes:
+            # Determine the parent directory name to use as anchor for finding provider folders
+            prefix_anchor = [part for part in current_prefix.split('/') if part][-1]
 
-                    # Filter out providers that are not in the approved list
-                    provider_end = '_'.join(provider_folder.lower().split('_')[1:])
-                    
-                    if provider_end not in approved_providers:
-                        print(f' - skipping unapproved provider {provider_end}')
-                        continue
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=current_prefix):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    if key.endswith('.shp') and 'tileindex' in key.lower() and 'NCEI' not in key:
+                        
+                        # Extract provider folder name dynamically relative to the current prefix anchor
+                        provider_folder = "Unknown"
+                        parts = key.split('/')
+                        if prefix_anchor in parts:
+                            anchor_index = parts.index(prefix_anchor)
+                            if anchor_index + 1 < len(parts):
+                                provider_folder = parts[anchor_index + 1]
 
-                    path = self._download_shapefile_set(key)
-                    if path:
-                        gdf = gpd.read_file(path).to_crs(epsg=4326)
+                        # Filter out providers that are not in the approved list
+                        provider_end = '_'.join(provider_folder.lower().split('_')[1:])
                         
-                        # Dissolve all features into a single geometry per shapefile
-                        gdf_dissolved = gdf.dissolve()
-                        
-                        gdf_dissolved['geometry'] = gdf_dissolved.simplify(
-                            tolerance=simplify_tolerance, preserve_topology=True
-                        )
-                        gdf_dissolved['filename'] = os.path.basename(key)
-                        gdf_dissolved['provider_folder'] = provider_folder
-                        all_gdfs.append(gdf_dissolved[['filename', 'provider_folder', 'geometry']])
+                        if provider_end not in approved_providers:
+                            print(f' - skipping unapproved provider {provider_end}')
+                            continue
+
+                        path = self._download_shapefile_set(key)
+                        if path:
+                            gdf = gpd.read_file(path).to_crs(epsg=4326)
+                            
+                            # Dissolve all features into a single geometry per shapefile
+                            gdf_dissolved = gdf.dissolve()
+                            
+                            gdf_dissolved['geometry'] = gdf_dissolved.simplify(
+                                tolerance=simplify_tolerance, preserve_topology=True
+                            )
+                            gdf_dissolved['filename'] = os.path.basename(key)
+                            gdf_dissolved['provider_folder'] = provider_folder
+                            all_gdfs.append(gdf_dissolved[['filename', 'provider_folder', 'geometry']])
         
         return pd.concat(all_gdfs, ignore_index=True) if all_gdfs else None
 
@@ -149,7 +158,7 @@ class RasterMaskChecker:
                 filename = str(single_gdf.iloc[0]['filename'])
                 provider_folder = str(single_gdf.iloc[0]['provider_folder'])
                 
-                # Format layer pane label using Provider Folder + Filename
+                # Format layer pane label using Provider Folder
                 layer_label = f"{provider_folder}"
                 file_layer = folium.FeatureGroup(name=layer_label, show=True)
                 
