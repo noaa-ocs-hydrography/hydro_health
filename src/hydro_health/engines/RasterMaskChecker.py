@@ -90,7 +90,7 @@ class RasterMaskChecker:
 
     def create_interactive_map(self, ecoregion='ER_3', output_file=None):
         if output_file is None:
-            output_file = pathlib.Path(OUTPUTS) / 'overlap_check.html'
+            output_file = pathlib.Path(OUTPUTS) / 'provider_review.html'
 
         # 1. Load Data (Passing ecoregion to filter approved providers)
         s3_gdf = self.load_s3_shapefiles(ecoregion=ecoregion)
