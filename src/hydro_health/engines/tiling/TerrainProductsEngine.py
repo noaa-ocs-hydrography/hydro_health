@@ -363,7 +363,7 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
         out_shear     = resolve_out_path("_shearproxy.tif")
 
         out_tci   = resolve_out_path("_tci.tif")
-        out_rug   = resolve_out_path("_rugosity_tri.tif")
+        out_rug   = resolve_out_path("_rugosity.tif")
         out_slope = resolve_out_path("_slope.tif")
         out_fine  = resolve_out_path("_bpi_fine.tif")
         out_broad = resolve_out_path("_bpi_broad.tif")
@@ -414,13 +414,13 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
             missing_shear = not UPath(out_shear).exists()
 
             missing_numpy_dict = {
-                "_tci.tif": not UPath(out_tci).exists(),
-                "_rugosity_tri.tif": False if is_bluetopo else (not UPath(out_rug).exists()),
+                "_rugosity.tif": not UPath(out_rug).exists(),
                 "_slope.tif": False if is_bluetopo else (not UPath(out_slope).exists()),
                 "_bpi_fine.tif": not UPath(out_fine).exists(),
                 "_bpi_broad.tif": not UPath(out_broad).exists(),
                 "_terrain_classification.tif": not UPath(out_class).exists(),
-                "_gradmag.tif": not UPath(out_gradmag).exists()
+                "_gradmag.tif": not UPath(out_gradmag).exists(),
+                "_tci.tif": not UPath(out_tci).exists()
             }
             missing_numpy = any(missing_numpy_dict.values())
 
@@ -598,7 +598,7 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                     _save_numpy_to_raster(tci_arr, out_tci, profile, local_tmp_dir, log_prefix=progress_str)
                     del tci_arr; gc.collect()
 
-                if missing_numpy_dict["_rugosity_tri.tif"]:
+                if missing_numpy_dict["_rugosity.tif"]:
                     rugosity = _calculate_tri(bathy_array)
                     profile.update(dtype=rugosity.dtype.name, nodata=np.nan, count=1, compress='LZW')
                     _save_numpy_to_raster(rugosity, out_rug, profile, local_tmp_dir, log_prefix=progress_str)
@@ -895,23 +895,6 @@ class TerrainProductsEngine(Engine):
 
         pdf_path = self.outputs_dir / f"Terrain_Products_Report_{self.param_lookup.get('eco_regions').value[0]}.pdf"
         
-        # Extended list of all 13 output layers generated during terrain processing, with units
-        products_to_plot = [
-            ("_slope_deg.tif", "Slope (WBT) [Degrees]"),
-            ("_gradmag.tif", "Slope/Gradient [Radians]"),
-            ("_rugosity_tri.tif", "Rugosity (TRI) [Meters]"),
-            ("_tci.tif", "Terrain Complexity (TCI) [Meters]"),
-            ("_bpi_fine.tif", "BPI Fine [Meters]"),
-            ("_bpi_broad.tif", "BPI Broad [Meters]"),
-            ("_terrain_classification.tif", "Terrain Classification [Class]"),
-            ("_curv_profile.tif", "Profile Curvature [1/Meters]"),
-            ("_curv_plan.tif", "Plan Curvature [1/Meters]"),
-            ("_curv_total.tif", "Total Curvature [1/Meters]"),
-            ("_flowdir.tif", "Flow Direction [Degrees]"),
-            ("_flowacc.tif", "Flow Accumulation [Cells]"),
-            ("_shearproxy.tif", "Shear Stress Proxy [Unitless]")
-        ]
-        
         try:
             with PdfPages(str(pdf_path)) as pdf:
                 # Sort files to ensure LiDAR plots first. This allows us to capture its 'correct' colorbar bounds.
@@ -922,9 +905,27 @@ class TerrainProductsEngine(Engine):
                 
                 for src_type, file_path in files_to_plot:
                     base_name = os.path.splitext(os.path.basename(file_path))[0]
+                    
+                    # Dynamically build products to plot to enforce exactly 2 slope layers per source
+                    products_to_plot = [
+                        ("_slope.tif" if src_type == "BlueTopo" else "_slope_deg.tif", "Slope [Degrees]"),
+                        ("_gradmag.tif", "Slope/Gradient [Radians]"),
+                        ("_rugosity.tif", "Rugosity (TRI) [Meters]"),
+                        ("_tci.tif", "Terrain Complexity (TCI) [Meters]"),
+                        ("_bpi_fine.tif", "BPI Fine [Meters]"),
+                        ("_bpi_broad.tif", "BPI Broad [Meters]"),
+                        ("_terrain_classification.tif", "Terrain Classification [Class]"),
+                        ("_curv_profile.tif", "Profile Curvature [1/Meters]"),
+                        ("_curv_plan.tif", "Plan Curvature [1/Meters]"),
+                        ("_curv_total.tif", "Total Curvature [1/Meters]"),
+                        ("_flowdir.tif", "Flow Direction [Degrees]"),
+                        ("_flowacc.tif", "Flow Accumulation [Cells]"),
+                        ("_shearproxy.tif", "Shear Stress Proxy [Unitless]")
+                    ]
+                    
                     # Expanding grid to 4x4 to fit 13 layers
                     fig, axes = plt.subplots(4, 4, figsize=(20, 20))
-                    fig.suptitle(f"Terrain Output Profile - {src_type} ({len(products_to_plot)} Products)\nSource: {base_name}", fontsize=18, fontweight='bold', y=0.98)
+                    fig.suptitle(f"Terrain Output Profile - {src_type} (13 Products)\nSource: {base_name}", fontsize=18, fontweight='bold', y=0.98)
                     axes = axes.flatten()
                     
                     # Turn off axes for unused subplots
@@ -935,16 +936,16 @@ class TerrainProductsEngine(Engine):
                         ax = axes[idx]
                         layer_path = UPath(self.terrain_outputs_dir) / (base_name + suffix)
                         
-                        # Correctly route BlueTopo rugosity to PREDICTION_OUTPUT_DIR
+                        # Correctly route BlueTopo slope to PREDICTION_OUTPUT_DIR
                         if src_type == "BlueTopo":
                             ext = UPath(file_path).suffix
                             match = re.search(r'(BlueTopo_[A-Za-z0-9_]+_\d{8})', base_name, re.IGNORECASE)
                             core_name = match.group(1) if match else base_name
                             
-                            if suffix == "_rugosity_tri.tif":
-                                layer_path = UPath(self.prediction_output_dir) / f"{core_name}_rugosity{ext}"
+                            if suffix == "_slope.tif":
+                                layer_path = UPath(self.prediction_output_dir) / f"{core_name}_slope{ext}"
                                 if not layer_path.exists():
-                                    layer_path = UPath(self.prediction_output_dir) / f"{base_name}_rugosity{ext}"
+                                    layer_path = UPath(self.prediction_output_dir) / f"{base_name}_slope{ext}"
 
                         if layer_path.exists():
                             try:
@@ -964,8 +965,8 @@ class TerrainProductsEngine(Engine):
                                     # Robust fallback to catch un-flagged NoData (-9999), Inf, or extreme anomalies in BlueTopo
                                     arr = np.where((arr < -9998) | (arr > 1e30) | np.isinf(arr), np.nan, arr)
                                     
-                                    # Explicitly mask exact zeros to NoData for BlueTopo Rugosity as requested
-                                    if src_type == "BlueTopo" and suffix == "_rugosity_tri.tif":
+                                    # Explicitly mask exact zeros to NoData for BlueTopo Rugosity and ALL Slope layers as requested
+                                    if (src_type == "BlueTopo" and suffix == "_rugosity.tif") or suffix in ["_slope.tif", "_slope_deg.tif", "_gradmag.tif"]:
                                         arr = np.where(arr == 0.0, np.nan, arr)
                                         
                                     valid_mask = ~np.isnan(arr)
