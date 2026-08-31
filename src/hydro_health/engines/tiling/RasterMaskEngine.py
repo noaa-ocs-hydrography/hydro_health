@@ -77,14 +77,13 @@ class RasterMaskEngine(Engine):
         else:
             sub_path = get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
 
-        mask_sub = get_config_item('MASK', 'SUBFOLDER')
         suffix = str(sub_path).lstrip('/')
 
         base_dir = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
         if output_prefix:
-            mask_path = base_dir / output_prefix / ecoregion / mask_sub / suffix
+            mask_path = base_dir / output_prefix / ecoregion / suffix
         else:
-            mask_path = base_dir / ecoregion / mask_sub / suffix
+            mask_path = base_dir / ecoregion / suffix
 
         mask_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -99,7 +98,8 @@ class RasterMaskEngine(Engine):
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path)
 
-        combined_geometry = mask_gdf_df.union_all()
+        # one-line fix for geopandas version issues with union_all
+        combined_geometry = getattr(mask_gdf_df, "union_all", lambda: getattr(mask_gdf_df, "unary_union", getattr(mask_gdf_df.geometry, "unary_union", None)))()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
         grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')
@@ -169,7 +169,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
 
     gpkg = INPUTS / 'Master_Grids.gpkg'
     gpkg_ds = ogr.Open(str(gpkg))
-    ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions')
+    ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions_50m')
 
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)
@@ -221,6 +221,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
 
 def _create_training_mask(param_inputs: list) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""
+    
     ecoregion_path, outputs = param_inputs
     mask_subfolder = ecoregion_path / get_config_item('MASK', 'SUBFOLDER')
     prediction_file = mask_subfolder / f'prediction_mask_{ecoregion_path.stem}.tif'
