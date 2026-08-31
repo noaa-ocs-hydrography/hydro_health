@@ -48,7 +48,7 @@ class ManualDownloadEngine:
         
         engine = RasterVRTS3Engine(self.param_lookup)
         engine.setup_dask('aws')
-        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', data_folder='Digital_Coast_Manual_Downloads', skip_existing=False)
+        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', manual_downloads=True)
         engine.close_dask()
 
     def rebuild_training_mask(self) -> None:
@@ -64,8 +64,7 @@ class ManualDownloadEngine:
         # TODO need to add output_prefix to calls
         output_prefix = False
 
-        # TODO this process creates missing Manual Download VRTs
-        # Need to run normal VRT process before
+        # TODO VRT process runs both normal and manual downloads if using manual_downloads param
         # self.process_vrt(output_prefix)
         self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()

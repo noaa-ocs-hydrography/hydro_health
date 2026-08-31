@@ -92,7 +92,6 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
         nodata = band.GetNoDataValue()
         
         src_srs = ds.GetSpatialRef()
-        # Ensure we are using a consistent axis order (Long, Lat)
         src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         
         bin_id = src_srs.GetAuthorityCode(None)
@@ -101,7 +100,6 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
                 srs_json = json.loads(src_srs.ExportToPROJJSON())
                 components = srs_json.get('components', [{}])
                 comp_name = components[0].get('name', '')
-                # Fixed string matching using _clean to handle hidden characters
                 horizontal_name = _clean(comp_name.split(' + ')[0])
                 match = [cr.code for cr in all_crs_info if _clean(cr.name) == horizontal_name]
                 if match:
@@ -110,26 +108,25 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
                 pass
 
         if not bin_id:
-            # Cleanup for the fallback to ensure key safety
             fallback_name = src_srs.GetName()
             bin_id = src_srs.GetAuthorityCode('DATUM') or _clean(fallback_name).replace(" ", "_")
             
         parts = geotiff_prefix.split('/')
         try:
-            dc_index = parts.index(data_type)
+            # Handle standard data types as well as Manual Downloads dynamically
+            dc_index = [i for i, part in enumerate(parts) if part in (data_type, 'Digital_Coast_Manual_Downloads')][0]
             provider = parts[dc_index + 1]
         except (ValueError, IndexError):
             provider = parts[-4]
             
         return {
-            # Use provider to keep single VRT for each provider folder
             'bin_key': provider, 
             'vsi_path': vsi_path,
             'nodata': nodata,
             'wkt': src_srs.ExportToWkt()
         }
     except Exception as e:
-        print(f" - Error obtaining metdata: {geotiff_prefix}: {e}")
+        print(f" - Error obtaining metadata: {geotiff_prefix}: {e}")
         return None
     finally:
         ds = None
@@ -229,9 +226,8 @@ class RasterVRTS3Engine(Engine):
             output_geotiffs[key]['tiles'].append(res['vsi_path'])
         return output_geotiffs
     
-    def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="") -> None:
+    def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="", manual_downloads: bool=False) -> None:
         """Main cloud execution method routing control using structural parameters"""
-            # engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix)
 
         _set_gdal_s3_options()
         self.setup_dask(self.param_lookup['env'])
@@ -240,12 +236,9 @@ class RasterVRTS3Engine(Engine):
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         sub = get_config_item(data_type.upper(), 'SUBFOLDER')
         
-        if output_prefix:
-            base_s3 = f"s3://{bucket}/{output_prefix}/{ecoregion}/{sub}/{data_type}"
-            s3_output_path = f"{output_prefix}/{ecoregion}/{sub}/{data_type}"
-        else:
-            base_s3 = f"s3://{bucket}/{ecoregion}/{sub}/{data_type}"
-            s3_output_path = f"{ecoregion}/{sub}/{data_type}"
+        prefix_segment = f"{output_prefix}/" if output_prefix else ""
+        base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{sub}/{data_type}"
+        s3_output_path = f"{prefix_segment}{ecoregion}/{sub}/{data_type}"
 
         if data_type == 'BlueTopo':
             geotiffs = s3_files.glob(f"{base_s3}/**/{self.glob_lookup[file_type]}")
@@ -254,13 +247,22 @@ class RasterVRTS3Engine(Engine):
                 with tempfile.TemporaryDirectory() as td:
                     self.build_output_vrts(s3_output_path, file_type, output_geotiffs, pathlib.Path(td), data_type)
         else:
-            provider_folders = s3_files.glob(f"{base_s3}/*")
-            for provider_path in provider_folders:
+            providers_to_process = [(folder, data_type, s3_output_path) for folder in s3_files.glob(f"{base_s3}/*")]
+            if manual_downloads:
+                manual_data_type = 'Digital_Coast_Manual_Downloads'
+                manual_base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{sub}/{manual_data_type}"
+                manual_s3_output_path = f"{prefix_segment}{ecoregion}/{sub}/{manual_data_type}"
+                
+                manual_folders = s3_files.glob(f"{manual_base_s3}/*")
+                providers_to_process.extend([(folder, manual_data_type, manual_s3_output_path) for folder in manual_folders])
+
+            for provider_path, current_datatype, current_out_path in providers_to_process:
                 geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
                 if not geotiffs: 
                     continue
-                output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, data_type)
+                
+                output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, current_datatype)
                 with tempfile.TemporaryDirectory() as td:
-                    self.build_output_vrts(s3_output_path, file_type, output_geotiffs, pathlib.Path(td), data_type)
+                    self.build_output_vrts(current_out_path, file_type, output_geotiffs, pathlib.Path(td), current_datatype)
 
         self.close_dask()

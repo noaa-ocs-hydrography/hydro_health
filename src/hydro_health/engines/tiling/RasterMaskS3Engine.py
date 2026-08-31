@@ -372,7 +372,8 @@ class RasterMaskS3Engine(Engine):
                 if vrt_provider.lower() in approved_providers:  # could use any() to be more inclusive
                     found.append(vrt_path)
                 else:
-                    self.write_message(f"- Skipping unapproved provider: {vrt_provider}", outputs)
+                    data_type = 'Digital_Coast_Manual_Downloads' if manual_downloads else 'Digital_Coast'
+                    self.write_message(f"- Skipping {data_type} unapproved provider: {vrt_provider}", outputs)
         if found:
             self.write_message(f"- Found {len(found)} DigitalCoast providers", outputs)
         return found
