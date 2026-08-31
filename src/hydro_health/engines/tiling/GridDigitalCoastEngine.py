@@ -301,11 +301,11 @@ class GridDigitalCoastEngine(Engine):
                 
                 for vrt in vrt_files:
                     vrt_stem = pathlib.Path(vrt).stem
-                    vrt_provider = '_'.join(vrt_stem.split('_')[2:])
+                    vrt_provider = '_'.join(vrt_stem.split('_')[3:])  # Start after year
                     if vrt_provider.lower() in approved_providers:
                         approved_vrt_files.append(vrt)
                     else:
-                        print(f" - Skipping unapproved S3 provider: {vrt_provider}")
+                        self.write_message(f" - Skipping unapproved {digital_coast_folder} S3 provider: {vrt_provider}", outputs)
 
                 if approved_vrt_files:
                     params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in approved_vrt_files]

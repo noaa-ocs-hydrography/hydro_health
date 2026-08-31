@@ -24,11 +24,11 @@ class ManualDownloadEngine:
     def __init__(self, param_lookup) -> None:
         self.param_lookup = param_lookup
 
-    def process_grid_tiles(self) -> None:
+    def process_grid_tiles(self, output_prefix) -> None:
         """Tile manually downloaded VRT files to BlueTopo"""
 
         engine = GridDigitalCoastEngine(self.param_lookup)
-        engine.run(manual_download=True)
+        engine.run(output_prefix=output_prefix, manual_download=True)
 
     def process_masks(self, output_prefix) -> None:
         """Create masks with manual download additions"""
@@ -66,11 +66,11 @@ class ManualDownloadEngine:
 
         # TODO VRT process runs both normal and manual downloads if using manual_downloads param
         # self.process_vrt(output_prefix)
-        self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
+        # self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()
         # TODO this grid tiling process only does the manual downloads
         # Need to run both folders separately or fix code
-        # self.process_grid_tiles(output_prefix)
+        self.process_grid_tiles(output_prefix)
         print('Done')
 
 if __name__ == '__main__':
