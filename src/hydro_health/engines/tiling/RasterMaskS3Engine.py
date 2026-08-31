@@ -588,5 +588,5 @@ class RasterMaskS3Engine(Engine):
                 self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                 
                 mask_path = UPath(f"{er_base_dir}/{suffix}")
-                out_path = UPath(f"{er_subgrid_dir}/{mask_type}_subgrids.gpkg")
+                out_path = UPath(f"{er_subgrid_dir}/{mask_type}_intersecting_subgrids.gpkg")
                 self.create_subgrids(mask_path, out_path, mask_type, outputs)

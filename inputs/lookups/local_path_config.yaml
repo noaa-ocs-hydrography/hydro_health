@@ -18,8 +18,8 @@ LIDAR_PLOTS:
   RESAMPLED_VRTS: model_variables\Prediction\raw\DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks
-  MASK_PRED_PATH: ER_3\masks\prediction_mask_ER_3.tif
-  MASK_TRAINING_PATH: ER_3\masks\training_mask_ER_3.tif
+  MASK_PRED_PATH: masks\prediction_mask_ER_3.tif
+  MASK_TRAINING_PATH: masks\training_mask_ER_3.tif
   PREDICTION_MASK_PQ: masks\prediction_mask.parquet
   TRAINING_MASK_PQ: masks\training_mask.parquet
 MODEL:
@@ -32,7 +32,7 @@ MODEL:
   SUBGRIDS: model_subgrids\Prediction.subgrid.WGS84_8m.gpkg
   PREDICTION_SUB_GRIDS: model_subgrids\prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: model_subgrids\training_intersecting_subgrids.gpkg
-  TRAINING_OUTPUT_DIR: ER_3\model_variables\Training\processed
+  TRAINING_OUTPUT_DIR: model_variables\Training\processed
   TILED_LIDAR_DIR: model_variables\Prediction\pre_processed\tiled
   TILED_LIDAR_PROC: model_variables\Prediction\pre_processed\tiled_processed
 PREPROCESSED:
@@ -59,6 +59,8 @@ SHARED:
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads
 TERRAIN:
+  COMBINED_LIDAR_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\combined_lidar_tifs
+  DICTIONARIES_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\dictionaries
   INPUT_DIR: model_variables\Prediction\processed
   FILLED_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\filled_tifs
   OUTPUTS: model_variables\Prediction\processed\terrain_digitalcoast_outputs  

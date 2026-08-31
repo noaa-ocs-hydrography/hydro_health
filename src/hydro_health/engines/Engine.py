@@ -9,6 +9,8 @@ import boto3
 import geopandas as gpd
 import dask
 import math
+import shutil
+import logging
 import string
 import re
 
@@ -17,6 +19,8 @@ from osgeo import osr, gdal
 from dask.distributed import Client, LocalCluster
 
 from hydro_health.helpers.tools import get_config_item
+
+logger = logging.getLogger(__name__)
 
 
 gdal.UseExceptions()
@@ -78,6 +82,17 @@ class Engine:
             url = url.replace(char, '')
         return url.strip()
     
+    def cleanup_resources(self, output_folder: str):
+        """Wipe temp disks and safely teardown parallel execution pools."""
+        self.close_dask()
+
+        if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                self.write_message("Successfully wiped master local temp directory.", output_folder)
+            except Exception as e:
+                self.write_message(f"Failed to wipe master local temp directory: {e}", output_folder)
+
     def close_dask(self) -> None:
         """Shut down Dask objects"""
 
@@ -140,6 +155,36 @@ class Engine:
                 geometry_coords.append(tile_wkt)
 
         return geometry_coords
+    
+    def log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
+        try:
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            
+            tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file()) if self.local_tmp_dir.exists() else 0
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            ram_info = "Unknown"
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {100 - (avail_gb / tot_gb * 100):.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
 
     def make_esri_projection(self, file_name, epsg=4326):
         """Create an Esri .prj file for a shapefile"""
@@ -250,6 +295,8 @@ class Engine:
     def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
+        print(f"Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
+        
         if env == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
@@ -271,6 +318,13 @@ class Engine:
 
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
+
+    @staticmethod
+    def write_message_dask(message: str, output_folder: str) -> None:
+        """Write a message to the main logfile in the output folder"""
+
+        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
+            writer.write(message + '\n')        
 
     def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""

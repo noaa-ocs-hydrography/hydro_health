@@ -7,6 +7,16 @@ import yaml
 
 from datetime import datetime
 
+import logging
+
+# Add this near the top of run_hydro_health.py
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True # Overrides any other hidden logging settings
+)
+
+
 os.environ['PROJ_NETWORK'] = 'OFF'
 
 HH_MODEL = pathlib.Path(__file__).parents[2]
@@ -96,6 +106,10 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_hurricane_layer_engine()
             elif step["tool"] == "run_prediction_rasters_engine" and step["run"]:
                 runners.run_prediction_rasters_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_lidar_gap_fill_engine" and step["run"]:
+                runners.run_lidar_gap_fill_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_terrain_products_engine" and step["run"]:
+                runners.run_terrain_products_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_training_rasters_engine" and step["run"]:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
