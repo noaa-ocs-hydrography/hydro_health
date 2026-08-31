@@ -272,7 +272,7 @@ class GridDigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download: bool, output_prefix: str) -> None:
+    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_downloads: bool, output_prefix: str) -> None:
         """Processor for gridding S3 VRT files with dask (Approved providers only)"""
 
         s3_files = s3fs.S3FileSystem()
@@ -292,7 +292,7 @@ class GridDigitalCoastEngine(Engine):
             bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
             
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
+            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_downloads else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
             
             if vrt_files:
@@ -349,7 +349,7 @@ class GridDigitalCoastEngine(Engine):
             else:
                 print(f" - No VRTs found for {ecoregion.stem} locally.")
 
-    def run(self, output_prefix: str, manual_download=False) -> None:
+    def run(self, output_prefix: str, manual_downloads=False) -> None:
         """Main execution method routing control using structural parameters"""
 
         outputs = self.param_lookup['output_directory'].valueAsText
@@ -365,6 +365,6 @@ class GridDigitalCoastEngine(Engine):
         if self.param_lookup['env'] in ['local', 'remote']:
             self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, output_prefix)
         else:
-            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_download, output_prefix)
+            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_downloads, output_prefix)
 
         self.close_dask()

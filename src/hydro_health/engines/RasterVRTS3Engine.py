@@ -21,6 +21,17 @@ def _clean(s: str) -> str:
     return " ".join(s.split()).lower().strip()
 
 
+def _check_equal_crs(wkt1: str, wkt2: str) -> bool:
+    """Check if two WKT strings represent the exact same CRS."""
+
+    if not wkt1 or not wkt2:
+        return False
+    srs1, srs2 = osr.SpatialReference(), osr.SpatialReference()
+    srs1.ImportFromWkt(wkt1)
+    srs2.ImportFromWkt(wkt2)
+    return bool(srs1.IsSame(srs2))
+
+
 def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
     """Original BlueTopo logic: Creates individual Warped VRTs (EPSG:4326) on S3"""
 
@@ -175,8 +186,7 @@ class RasterVRTS3Engine(Engine):
                     srcNodata=info.get('nodata_val'),
                     VRTNodata=info.get('nodata_val'),
                     addAlpha=True,
-                    allowProjectionDifference=True,
-                    outputSRS=info.get('wkt')  # Force output CRS to first found
+                    outputSRS=info.get('primary_wkt')
                 )
             else:
                 # Mosaic of 4326 VRTs
@@ -209,21 +219,46 @@ class RasterVRTS3Engine(Engine):
         return output_geotiffs
 
     def get_digitalcoast_geotiffs(self, geotiffs: list, data_type: str) -> dict:
-        """Get all DigitalCoast tifs with original CRS"""
+        """Get all DigitalCoast tifs and reproject mismatched CRS tiles into memory VRTs."""
 
         task_params = [(gtif, self.all_crs, data_type) for gtif in geotiffs]
         results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, task_params)) if r is not None]
 
         output_geotiffs = {}
+        
         for res in results:
             key = res['bin_key']
+            tile_wkt = res['wkt']
+            vsi_path = res['vsi_path']
+            
             if key not in output_geotiffs:
+                # Set the first tile's CRS (e.g., EPSG:6346) as the master projection for this bin
                 output_geotiffs[key] = {
                     'tiles': [], 
                     'nodata_val': res['nodata'],
-                    'wkt': res['wkt']
+                    'primary_wkt': tile_wkt
                 }
-            output_geotiffs[key]['tiles'].append(res['vsi_path'])
+            
+            primary_wkt = output_geotiffs[key]['primary_wkt']
+            
+            if _check_equal_crs(tile_wkt, primary_wkt):
+                output_geotiffs[key]['tiles'].append(vsi_path)
+            else:
+                # Need to warp unique CRS files into their own temp VRT
+                warped_vrt_path = f"/vsimem/reprojected_{os.path.basename(vsi_path)}.vrt"
+                warp_options = gdal.WarpOptions(
+                    format='VRT',
+                    srcSRS=tile_wkt,
+                    dstSRS=primary_wkt,
+                    resampleAlg='near',
+                    srcNodata=res['nodata'],
+                    dstNodata=res['nodata']
+                )
+                gdal.Warp(warped_vrt_path, vsi_path, options=warp_options)
+                
+                # Pass the reprojected VRT path to the master list
+                output_geotiffs[key]['tiles'].append(warped_vrt_path)
+
         return output_geotiffs
     
     def run(self, outputs: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="", manual_downloads: bool=False) -> None:
