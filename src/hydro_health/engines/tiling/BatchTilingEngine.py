@@ -44,8 +44,8 @@ def _save_parquet_file(df: pd.DataFrame, output_dir: str, file_name: str, is_aws
     else:
         shutil.copy(tmp_path, final_path)
         
-    if verbose:
-        Engine.write_message_dask(f"{verbose_prefix} [SUCCESS] Saved tile to: {final_path}", OUTPUTS)
+    # Unconditionally log the save location so we can track exactly where outputs are going
+    Engine.write_message_dask(f"{verbose_prefix} [SUCCESS] Saved tile to: {final_path}", OUTPUTS)
         
     if Path(tmp_path).exists():
         os.remove(tmp_path)
@@ -94,6 +94,9 @@ def _process_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: st
             wide_gdf[delta_name] = wide_gdf[b_y1] - wide_gdf[b_y0]
             valid_pairs.append((y0, y1))
             
+    if not valid_pairs:
+        Engine.write_message_dask(f"{progress_str} [WARNING] {tile_name} (Training): No matching bathymetry year pairs found for {year_ranges}! Columns present: {list(wide_gdf.columns)}", OUTPUTS)
+
     # Drop year-pair columns without a matching delta
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
     cols_to_drop = []
@@ -247,6 +250,9 @@ def _process_prediction_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: 
             wide_gdf[delta_name] = wide_gdf[b_y1] - wide_gdf[b_y0]
             valid_pairs.append((y0, y1))
             
+    if not valid_pairs:
+        Engine.write_message_dask(f"{progress_str} [WARNING] {tile_name} (Prediction): No matching bathymetry year pairs found for {year_ranges}! Columns present: {list(wide_gdf.columns)}", OUTPUTS)
+
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
     cols_to_drop = []
     for c in wide_gdf.columns:
@@ -375,26 +381,12 @@ def _transform_tile_task(params: list) -> str:
             saved, cols_str = _process_training_tile(gdf, output_dir, tile_name, year_ranges, is_aws, local_tmp_dir, current_index, total_count, verbose)
         else:
             saved, cols_str = _process_prediction_tile(gdf, output_dir, tile_name, year_ranges, is_aws, local_tmp_dir, current_index, total_count, verbose)
-        
-        # Clean up intermediate input file
-        tmp_dst_path = str(f_path)
-        is_batch = tmp_dst_path.endswith("_batch.parquet")
-        
-        if not is_batch:
-            try:
-                upath_obj = UPath(f_path)
-                if upath_obj.exists():
-                    upath_obj.unlink()
-            except Exception as e:
-                Engine.write_message_dask(f"WARNING: Could not cleanly unlink intermediate UPath {f_path}: {e}", OUTPUTS)
-                
-            if Path(tmp_dst_path).exists():
-                try:
-                    os.remove(tmp_dst_path)
-                except Exception as e:
-                    Engine.write_message_dask(f"WARNING: Failed to explicitly delete temp file {tmp_dst_path}: {e}", OUTPUTS)
 
-        return f"Success: {tile_name} (Generated: {len(saved)} files)\n   -> {cols_str}"
+        if saved:
+            for s in saved:
+                Engine.write_message_dask(f"   -> [OUTPUT VERIFIED] Batch file generated successfully at: {UPath(output_dir) / s}", OUTPUTS)
+
+        return f"Success: {tile_name} (Generated: {len(saved)} files in {output_dir})\n   -> {cols_str}"
 
     except Exception as e:
         Engine.write_message_dask(f"ERROR: Failed transforming {os.path.basename(f_path)}: {str(e)}", OUTPUTS)
