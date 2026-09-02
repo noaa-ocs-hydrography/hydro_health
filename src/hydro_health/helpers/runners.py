@@ -26,6 +26,7 @@ from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
 from hydro_health.engines.tiling.TerrainProductsEngine import TerrainProductsEngine
+from hydro_health.engines.tiling.XGBoostModelingEngine import XGBoostModelingEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
 
 
@@ -141,7 +142,7 @@ def run_lidar_gap_fill_engine(param_lookup: dict[dict], output_prefix: str|bool)
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
-    
+
 
 def run_terrain_products_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
@@ -192,6 +193,20 @@ def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> N
     profiler.enable()
 
     processor = DataPrepEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+
+
+def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = XGBoostModelingEngine(param_lookup, output_prefix)
 
     processor.run()
     profiler.disable()
