@@ -32,3 +32,5 @@ steps:
   run: false
 - tool: run_subgrid_tiling_engine
   run: true  
+- tool: run_data_prep_engine
+  run: true  
