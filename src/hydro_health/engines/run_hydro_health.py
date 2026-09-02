@@ -117,7 +117,9 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_data_prep_engine" and step["run"]:
                 runners.run_data_prep_engine(param_lookup, output_prefix)    
             elif step["tool"] == "run_xgboost_modeling_engine" and step["run"]:
-                runners.run_xgboost_modeling_engine(param_lookup, output_prefix)    
+                runners.run_xgboost_modeling_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_ml_raster_export_engine" and step["run"]:
+                runners.run_ml_raster_export_engine(param_lookup, output_prefix)        
 
     write_config_log(config_path, config, env)
     end = time.time()

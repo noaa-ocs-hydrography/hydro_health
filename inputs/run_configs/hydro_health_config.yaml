@@ -36,3 +36,5 @@ steps:
   run: true  
 - tool: run_xgboost_modeling_engine
   run: true  
+- tool: run_ml_raster_export_engine
+  run: true  
