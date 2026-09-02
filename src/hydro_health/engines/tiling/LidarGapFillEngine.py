@@ -394,7 +394,7 @@ class LidarGapFillEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
+            self.setup_dask(env, n_workers=3, threads_per_worker=1, memory_limit="10GB") 
             
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)
