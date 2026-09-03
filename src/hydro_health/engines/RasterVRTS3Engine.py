@@ -2,8 +2,9 @@ import pathlib
 import s3fs
 import tempfile
 import boto3
-import json
+import shutil
 import os
+from collections import defaultdict
 
 from pyproj.database import query_crs_info
 from pyproj.enums import PJType
@@ -12,86 +13,36 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 
-def _clean(s: str) -> str:
-    """Helper to normalize strings for comparison (removes non-breaking spaces, etc.)"""
+def _set_gdal_s3_options() -> None:
+    """Configure GDAL /vsis3/ driver to resolve AWS IAM Role credentials from EC2 IMDS."""
 
-    if not s: 
-        return ""
-    # Replaces non-breaking spaces (\xa0) with standard spaces and strips whitespace
-    return " ".join(s.split()).lower().strip()
-
-
-def _check_equal_crs(wkt1: str, wkt2: str) -> bool:
-    """Check if two WKT strings represent the exact same CRS."""
-
-    if not wkt1 or not wkt2:
-        return False
-    srs1, srs2 = osr.SpatialReference(), osr.SpatialReference()
-    srs1.ImportFromWkt(wkt1)
-    srs2.ImportFromWkt(wkt2)
-    return bool(srs1.IsSame(srs2))
-
-
-def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
-    """Original BlueTopo logic: Creates individual Warped VRTs (EPSG:4326) on S3"""
-
-    _set_gdal_s3_options()
-    geotiff_prefix, s3_bucket, _ = params
-    gdal.UseExceptions()
+    gdal.SetConfigOption('AWS_NO_SIGN_REQUEST', 'NO')
+    gdal.SetConfigOption('AWS_EC2_METADATA_DISABLED', 'FALSE')
+    
+    gdal.SetConfigOption('AWS_REGION', 'us-east-2')
+    
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
-    
-    geotiff_stem = str(pathlib.Path(geotiff_prefix).stem)
-    vsi_geotiff_path = f'/vsis3/{geotiff_prefix}'
-    
-    with tempfile.NamedTemporaryFile(suffix=f"_{geotiff_stem}.vrt", delete=False) as tmp:
-        local_vrt_path = tmp.name
-
-    src_ds = None
-    try:
-        src_ds = gdal.Open(vsi_geotiff_path)
-        if src_ds is None:
-            raise FileNotFoundError(f"GDAL could not open {vsi_geotiff_path}")
-            
-        warp_options = {
-            'format': 'VRT',
-            'dstSRS': 'EPSG:4326',
-            'resampleAlg': gdal.GRA_Bilinear,
-            'srcNodata': -999999,
-            'dstNodata': -999999,  # Ensures the "empty" space in the reprojected VRT is transparent
-            'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'] # Optional: helps with clean edges
-        }
-
-        warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, **warp_options)
-        projection_wkt = warped_vrt_ds.GetProjection()
-        spatial_ref = osr.SpatialReference(wkt=projection_wkt)
-        datum_code = spatial_ref.GetAuthorityCode('DATUM')
-        warped_vrt_ds = None 
-        
-        geotiff_parent = '/'.join(geotiff_prefix.split('/')[1:-1])
-        s3_vrt_key = f"{geotiff_parent}/{geotiff_stem}.vrt"
-        
-        boto3.client('s3').upload_file(local_vrt_path, s3_bucket, s3_vrt_key)
-        final_s3_vrt_path = f"/vsis3/{s3_bucket}/{s3_vrt_key}"
-
-        return str(datum_code), final_s3_vrt_path, projection_wkt
-
-    except Exception as e:
-        raise RuntimeError(f'_process_single_bluetopo failed: {geotiff_prefix} - {str(e)}')
-    finally:
-        src_ds = None
-        if os.path.exists(local_vrt_path):
-            os.remove(local_vrt_path)
+    gdal.SetConfigOption('VSI_CACHE', 'FALSE')  # Prevents stale VSI 404 cache hits
+    gdal.SetConfigOption('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
+    gdal.SetConfigOption('GDAL_HTTP_MULTIPLEX', 'YES')
 
 
 def _read_geotiff_metadata(params: list) -> dict[str]:
-    """Read the CRS metadata from each geotiff for use with VRT output"""
+    """Read CRS metadata and extract pure integer EPSG codes across parallel Dask tasks."""
 
     _set_gdal_s3_options()
 
-    geotiff_prefix, all_crs_info, data_type = params
-    vsi_path = f'/vsis3/{geotiff_prefix}'
+    raw_prefix, all_crs_info, data_type = params
+    s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
     
-    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
+    # Standardize relative key (strip leading s3:// or bucket name)
+    clean_path = raw_prefix.replace('s3://', '').lstrip('/')
+    parts = clean_path.split('/')
+    if parts[0] == s3_bucket:
+        parts = parts[1:]
+    
+    relative_s3_key = '/'.join(parts)
+    vsi_path = f'/vsis3/{s3_bucket}/{relative_s3_key}'
     
     ds = None
     try:
@@ -103,56 +54,50 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
         nodata = band.GetNoDataValue()
         
         src_srs = ds.GetSpatialRef()
-        src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+        epsg_code = None
         
-        bin_id = src_srs.GetAuthorityCode(None)
-        if not bin_id:
-            try:
-                srs_json = json.loads(src_srs.ExportToPROJJSON())
-                components = srs_json.get('components', [{}])
-                comp_name = components[0].get('name', '')
-                horizontal_name = _clean(comp_name.split(' + ')[0])
-                match = [cr.code for cr in all_crs_info if _clean(cr.name) == horizontal_name]
-                if match:
-                    bin_id = match[0]
-            except:
-                pass
-
-        if not bin_id:
-            fallback_name = src_srs.GetName()
-            bin_id = src_srs.GetAuthorityCode('DATUM') or _clean(fallback_name).replace(" ", "_")
+        if src_srs:
+            src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+            src_srs.AutoIdentifyEPSG()
             
-        parts = geotiff_prefix.split('/')
-        try:
-            # Handle standard data types as well as Manual Downloads dynamically
-            dc_index = [i for i, part in enumerate(parts) if part in (data_type, 'Digital_Coast_Manual_Downloads')][0]
-            provider = parts[dc_index + 1]
-        except (ValueError, IndexError):
-            provider = parts[-4]
+            auth_code = (
+                src_srs.GetAuthorityCode("PROJCS") or 
+                src_srs.GetAuthorityCode("GEOGCS") or 
+                src_srs.GetAuthorityCode(None)
+            )
+            
+            if auth_code and auth_code.isdigit():
+                epsg_code = int(auth_code)
+            else:
+                srs_name = src_srs.GetName()
+                if "16N" in srs_name or "16" in srs_name:
+                    epsg_code = 6345
+                elif "17N" in srs_name or "17" in srs_name:
+                    epsg_code = 6346
+
+        # Robust provider folder extraction
+        provider = None
+        for i, part in enumerate(parts):
+            if part in ('DigitalCoast', 'Digital_Coast_Manual_Downloads') and (i + 1) < len(parts):
+                provider = parts[i + 1]
+                break
+        
+        if not provider:
+            provider = parts[-3] if len(parts) >= 3 else parts[0]
             
         return {
             'bin_key': provider, 
             'vsi_path': vsi_path,
+            'relative_s3_key': relative_s3_key,
             'nodata': nodata,
-            'wkt': src_srs.ExportToWkt()
+            'epsg': epsg_code
         }
     except Exception as e:
-        print(f" - Error obtaining metadata: {geotiff_prefix}: {e}")
+        print(f" - Error obtaining metadata: {relative_s3_key}: {e}")
         return None
     finally:
         ds = None
 
-
-def _set_gdal_s3_options() -> None:
-    """Set the default S3 options for GDAL usage"""
-
-    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
-    gdal.SetConfigOption('AWS_VIRTUAL_HOSTING', 'FALSE') # Depends on your S3 setup
-    gdal.SetConfigOption('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
-    gdal.SetConfigOption('GDAL_HTTP_MULTIPLEX', 'YES')
-    gdal.SetConfigOption('VSI_CACHE', 'TRUE')
-    gdal.SetConfigOption('VSI_CACHE_SIZE', '10000000') # 10MB cache
-    
 
 class RasterVRTS3Engine(Engine):
     """Class for handling S3 network-based VRT creation and re-uploads"""
@@ -170,94 +115,148 @@ class RasterVRTS3Engine(Engine):
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
 
     def build_output_vrts(self, s3_output_path: str, file_type: str, output_geotiffs: dict, temp_output_path: pathlib.Path, data_type: str) -> None:
-        """Master VRT Builder: Custom logic per data_type"""
+        """Master VRT Builder: Constructs a unified VRT referencing standardized native and reprojected S3 GeoTIFFs."""
 
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
-        for bin_key, info in output_geotiffs.items():
+        for provider, info in output_geotiffs.items():
             tifs = info['tiles'] 
-            vrt_filename = temp_output_path / f'mosaic_{file_type}_{bin_key}.vrt'
+            vrt_filename = temp_output_path / f'mosaic_{file_type}_{provider}.vrt'
+            nodata = info.get('nodata_val', -999999)
             
             if data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
-                # Force the VRT to use the first tile's WKT and allow differences
-                options = gdal.BuildVRTOptions(
-                    resampleAlg='near', 
-                    srcNodata=info.get('nodata_val'),
-                    VRTNodata=info.get('nodata_val'),
-                    addAlpha=True,
-                    outputSRS=info.get('primary_wkt')
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='near',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
                 )
             else:
-                # Mosaic of 4326 VRTs
-                options = gdal.BuildVRTOptions(
+                vrt_options = gdal.BuildVRTOptions(
                     resampleAlg='bilinear',
                     allowProjectionDifference=True
                 )
 
-            gdal.BuildVRT(str(vrt_filename), tifs, options=options)
+            # Build Master VRT directly against persistent /vsis3/ GeoTIFF targets
+            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
 
             if vrt_filename.exists():
                 s3_key = f'{s3_output_path}/{vrt_filename.name}'
-                print(f' - Uploading {data_type} Master VRT to: {s3_key}')
+                print(f' - Uploading Master VRT to: {s3_key}')
                 s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
 
-    def get_bluetopo_tifs(self, geotiffs: list) -> dict:
-        """Get all BlueTopo VRT files warped to 4326"""
+    def get_digitalcoast_geotiffs(self, geotiffs: list, data_type: str, temp_dir: pathlib.Path) -> dict:
+        """Bins tiles by provider, selects majority CRS, reprojects ONLY non-matching tiles to 'reprojected/'."""
 
+        _set_gdal_s3_options()
+        s3_client = boto3.client('s3')
         s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        params = [(gtif, s3_bucket, None) for gtif in geotiffs]
-        results = self.client.gather(self.client.map(_process_single_bluetopo, params))
+        
+        # Filter out existing reprojected files upfront
+        clean_geotiffs = [gt for gt in geotiffs if '/reprojected/' not in gt]
 
-        output_geotiffs = {}
-        for crs_code, s3_path, wkt in results:
-            # Normalized key to ensure consistency
-            clean_key = _clean(str(crs_code)).replace('/', '').replace(' ', '_')
-            if clean_key not in output_geotiffs:
-                output_geotiffs[clean_key] = {'crs': osr.SpatialReference(wkt=wkt), 'tiles': []}
-            output_geotiffs[clean_key]['tiles'].append(s3_path)
-        return output_geotiffs
-
-    def get_digitalcoast_geotiffs(self, geotiffs: list, data_type: str) -> dict:
-        """Get all DigitalCoast tifs and reproject mismatched CRS tiles into memory VRTs."""
-
-        task_params = [(gtif, self.all_crs, data_type) for gtif in geotiffs]
+        task_params = [(gtif, self.all_crs, data_type) for gtif in clean_geotiffs]
         results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, task_params)) if r is not None]
 
-        output_geotiffs = {}
-        
+        provider_bins = defaultdict(list)
+        provider_nodata = defaultdict(lambda: None)
+
         for res in results:
-            key = res['bin_key']
-            tile_wkt = res['wkt']
-            vsi_path = res['vsi_path']
+            provider = res['bin_key']
+            provider_bins[provider].append(res)
             
-            if key not in output_geotiffs:
-                # Set the first tile's CRS (e.g., EPSG:6346) as the master projection for this bin
-                output_geotiffs[key] = {
-                    'tiles': [], 
-                    'nodata_val': res['nodata'],
-                    'primary_wkt': tile_wkt
-                }
+            if provider_nodata[provider] is None and res['nodata'] is not None:
+                provider_nodata[provider] = res['nodata']
+
+        output_geotiffs = {}
+
+        for provider, tile_list in provider_bins.items():
+            if not tile_list:
+                continue
+
+            # Tally EPSG integers
+            epsg_counts = defaultdict(int)
+            for t in tile_list:
+                epsg_counts[t['epsg']] += 1
             
-            primary_wkt = output_geotiffs[key]['primary_wkt']
+            # Select target EPSG integer by majority count
+            primary_epsg = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
+            primary_crs = f"EPSG:{primary_epsg}"
+            nodata_val = provider_nodata[provider] if provider_nodata[provider] is not None else -999999
             
-            if _check_equal_crs(tile_wkt, primary_wkt):
-                output_geotiffs[key]['tiles'].append(vsi_path)
-            else:
-                # Need to warp unique CRS files into their own temp VRT
-                warped_vrt_path = f"/vsimem/reprojected_{os.path.basename(vsi_path)}.vrt"
-                warp_options = gdal.WarpOptions(
-                    format='VRT',
-                    srcSRS=tile_wkt,
-                    dstSRS=primary_wkt,
-                    resampleAlg='near',
-                    srcNodata=res['nodata'],
-                    dstNodata=res['nodata']
-                )
-                gdal.Warp(warped_vrt_path, vsi_path, options=warp_options)
+            print(f"\n -> [{provider}] Target Primary CRS set to: {primary_crs}")
+            print(f" -> EPSG Counts: {dict(epsg_counts)}")
+
+            target_srs = osr.SpatialReference()
+            target_srs.ImportFromEPSG(primary_epsg)
+            target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+
+            print(f"\n[DIAGNOSTIC] Provider: {provider}")
+            print(f"[DIAGNOSTIC] Total tiles in list: {len(tile_list)}")
+            print(f"[DIAGNOSTIC] EPSG Counts: {dict(epsg_counts)}")
+            print(f"[DIAGNOSTIC] Winning Primary EPSG: {primary_epsg}")
+            
+            # Print the first 3 native vs minority comparisons
+            for t in tile_list[:3]:
+                print(f"  Tile EPSG: {t['epsg']} | Target EPSG: {primary_epsg} | Match: {t['epsg'] == primary_epsg}")
+
+            final_vsi_tiles = []
+            for tile in tile_list:
+                tile_epsg = tile['epsg']
+                vsi_path = tile['vsi_path'] # Pure /vsis3/bucket/key URI
+                # Fallback to 's3_prefix' if 'relative_s3_key' is not set
+                relative_s3_key = tile.get('relative_s3_key') or tile.get('s3_prefix')
                 
-                # Pass the reprojected VRT path to the master list
-                output_geotiffs[key]['tiles'].append(warped_vrt_path)
+                parts = relative_s3_key.split('/')
+                filename = parts[-1]
+                parent_prefix = '/'.join(parts[:-1])
+
+                # Integer check: 6345 == 6345
+                if tile_epsg == primary_epsg:
+                    # NATIVE MATCH: Use native /vsis3/ URI
+                    final_vsi_tiles.append(vsi_path)
+                else:
+                    # MINORITY TILE: Point to /reprojected/ subfolder
+                    reprojected_s3_key = f"{parent_prefix}/reprojected/{filename}"
+                    reprojected_vsi_path = f"/vsis3/{s3_bucket}/{reprojected_s3_key}"
+                    
+                    try:
+                        s3_client.head_object(Bucket=s3_bucket, Key=reprojected_s3_key)
+                        print(f" - Found existing reprojected GeoTIFF: {reprojected_s3_key}")
+                    except Exception:
+                        print(f" - Reprojecting {filename} (EPSG:{tile_epsg} -> EPSG:{primary_epsg}) to S3: {reprojected_s3_key}")
+                        
+                        src_srs = osr.SpatialReference()
+                        src_srs.ImportFromEPSG(tile_epsg)
+                        src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+
+                        local_tif_path = temp_dir / filename
+                        warp_options = gdal.WarpOptions(
+                            format='GTiff',
+                            srcSRS=src_srs,
+                            dstSRS=target_srs,
+                            resampleAlg='near',
+                            srcNodata=nodata_val,
+                            dstNodata=nodata_val,
+                            creationOptions=['COMPRESS=LZW', 'TILED=YES']
+                        )
+                        
+                        warped_ds = gdal.Warp(str(local_tif_path), vsi_path, options=warp_options)
+                        warped_ds = None
+                        
+                        s3_client.upload_file(str(local_tif_path), s3_bucket, reprojected_s3_key)
+                        
+                        if local_tif_path.exists():
+                            os.remove(local_tif_path)
+                    
+                    final_vsi_tiles.append(reprojected_vsi_path)
+
+            output_geotiffs[provider] = {
+                'tiles': final_vsi_tiles,
+                'nodata_val': provider_nodata[provider],
+                'primary_crs': primary_crs
+            }
 
         return output_geotiffs
     
@@ -266,6 +265,9 @@ class RasterVRTS3Engine(Engine):
 
         _set_gdal_s3_options()
         self.setup_dask(self.param_lookup['env'])
+        local_tmp_path = pathlib.Path.home() / "local_tmp_dir"
+        local_tmp_path.mkdir(parents=True, exist_ok=True)
+        gdal.SetConfigOption('CPL_TMPDIR', str(local_tmp_path))
         
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
@@ -292,12 +294,20 @@ class RasterVRTS3Engine(Engine):
                 providers_to_process.extend([(folder, manual_data_type, manual_s3_output_path) for folder in manual_folders])
 
             for provider_path, current_datatype, current_out_path in providers_to_process:
-                geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
+                # if '2019_DEM_NOAA_NGS_69338' in provider_path:
+                print(f'running: {provider_path}')
+                geotiffs = [
+                    gt for gt in s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}") 
+                    if '/reprojected/' not in gt
+                ]
+                
                 if not geotiffs: 
                     continue
                 
-                output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, current_datatype)
-                with tempfile.TemporaryDirectory() as td:
-                    self.build_output_vrts(current_out_path, file_type, output_geotiffs, pathlib.Path(td), current_datatype)
+                with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
+                    temp_path = pathlib.Path(td)
+                    output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, current_datatype, temp_path)
+                    self.build_output_vrts(current_out_path, file_type, output_geotiffs, temp_path, current_datatype)
 
+        shutil.rmtree(local_tmp_path)
         self.close_dask()
