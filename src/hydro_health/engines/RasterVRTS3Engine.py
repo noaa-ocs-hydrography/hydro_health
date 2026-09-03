@@ -13,6 +13,15 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 
+def _clean(s: str) -> str:
+    """Helper to normalize strings for comparison (removes non-breaking spaces, etc.)"""
+
+    if not s: 
+        return ""
+    # Replaces non-breaking spaces (\xa0) with standard spaces and strips whitespace
+    return " ".join(s.split()).lower().strip()
+
+
 def _set_gdal_s3_options() -> None:
     """Configure GDAL /vsis3/ driver to resolve AWS IAM Role credentials from EC2 IMDS."""
 
@@ -27,15 +36,64 @@ def _set_gdal_s3_options() -> None:
     gdal.SetConfigOption('GDAL_HTTP_MULTIPLEX', 'YES')
 
 
-def _read_geotiff_metadata(params: list) -> dict[str]:
-    """Read CRS metadata and extract pure integer EPSG codes across parallel Dask tasks."""
+def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
+    """Original BlueTopo logic: Creates individual Warped VRTs (EPSG:4326) on S3"""
+
+    _set_gdal_s3_options()
+    geotiff_prefix, s3_bucket, _ = params
+    gdal.UseExceptions()
+    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
+    
+    geotiff_stem = str(pathlib.Path(geotiff_prefix).stem)
+    vsi_geotiff_path = f'/vsis3/{geotiff_prefix}'
+    
+    with tempfile.NamedTemporaryFile(suffix=f"_{geotiff_stem}.vrt", delete=False) as tmp:
+        local_vrt_path = tmp.name
+
+    src_ds = None
+    try:
+        src_ds = gdal.Open(vsi_geotiff_path)
+        if src_ds is None:
+            raise FileNotFoundError(f"GDAL could not open {vsi_geotiff_path}")
+            
+        warp_options = {
+            'format': 'VRT',
+            'dstSRS': 'EPSG:4326',
+            'resampleAlg': gdal.GRA_Bilinear,
+            'srcNodata': -999999,
+            'dstNodata': -999999,  # Ensures the "empty" space in the reprojected VRT is transparent
+            'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'] # Optional: helps with clean edges
+        }
+
+        warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, **warp_options)
+        projection_wkt = warped_vrt_ds.GetProjection()
+        spatial_ref = osr.SpatialReference(wkt=projection_wkt)
+        datum_code = spatial_ref.GetAuthorityCode('DATUM')
+        warped_vrt_ds = None 
+        
+        geotiff_parent = '/'.join(geotiff_prefix.split('/')[1:-1])
+        s3_vrt_key = f"{geotiff_parent}/{geotiff_stem}.vrt"
+        
+        boto3.client('s3').upload_file(local_vrt_path, s3_bucket, s3_vrt_key)
+        final_s3_vrt_path = f"/vsis3/{s3_bucket}/{s3_vrt_key}"
+
+        return str(datum_code), final_s3_vrt_path, projection_wkt
+
+    except Exception as e:
+        raise RuntimeError(f'_process_single_bluetopo failed: {geotiff_prefix} - {str(e)}')
+    finally:
+        src_ds = None
+        if os.path.exists(local_vrt_path):
+            os.remove(local_vrt_path)
+
+
+def _read_geotiff_metadata(raw_prefix: list) -> dict[str]:
+    """Read CRS metadata without dropping tiles when AutoIdentifyEPSG throws SRS errors."""
 
     _set_gdal_s3_options()
 
-    raw_prefix, all_crs_info, data_type = params
     s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
     
-    # Standardize relative key (strip leading s3:// or bucket name)
     clean_path = raw_prefix.replace('s3://', '').lstrip('/')
     parts = clean_path.split('/')
     if parts[0] == s3_bucket:
@@ -55,27 +113,35 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
         
         src_srs = ds.GetSpatialRef()
         epsg_code = None
+        raw_wkt = None
         
         if src_srs:
             src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-            src_srs.AutoIdentifyEPSG()
+            raw_wkt = src_srs.ExportToWkt()
             
-            auth_code = (
-                src_srs.GetAuthorityCode("PROJCS") or 
-                src_srs.GetAuthorityCode("GEOGCS") or 
-                src_srs.GetAuthorityCode(None)
-            )
-            
-            if auth_code and auth_code.isdigit():
-                epsg_code = int(auth_code)
-            else:
-                srs_name = src_srs.GetName()
-                if "16N" in srs_name or "16" in srs_name:
-                    epsg_code = 6345
-                elif "17N" in srs_name or "17" in srs_name:
-                    epsg_code = 6346
+            # GDAL native EPSG lookup
+            try:
+                src_srs.AutoIdentifyEPSG()
+                auth_code = (
+                    src_srs.GetAuthorityCode("PROJCS") or 
+                    src_srs.GetAuthorityCode("GEOGCS") or 
+                    src_srs.GetAuthorityCode(None)
+                )
+                if auth_code and auth_code.isdigit():
+                    epsg_code = int(auth_code)
+            except Exception:
+                pass
 
-        # Robust provider folder extraction
+            # Fallback to Authority Tag if EPSG is None
+            if not epsg_code:
+                raw_code = (
+                    src_srs.GetAuthorityCode("PROJCS") or 
+                    src_srs.GetAuthorityCode("GEOGCS") or
+                    src_srs.GetAuthorityCode(None)
+                )
+                if raw_code and raw_code.isdigit():
+                    epsg_code = int(raw_code)
+
         provider = None
         for i, part in enumerate(parts):
             if part in ('DigitalCoast', 'Digital_Coast_Manual_Downloads') and (i + 1) < len(parts):
@@ -90,7 +156,8 @@ def _read_geotiff_metadata(params: list) -> dict[str]:
             'vsi_path': vsi_path,
             'relative_s3_key': relative_s3_key,
             'nodata': nodata,
-            'epsg': epsg_code
+            'epsg': epsg_code,
+            'wkt': raw_wkt
         }
     except Exception as e:
         print(f" - Error obtaining metadata: {relative_s3_key}: {e}")
@@ -146,8 +213,24 @@ class RasterVRTS3Engine(Engine):
                 print(f' - Uploading Master VRT to: {s3_key}')
                 s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
 
-    def get_digitalcoast_geotiffs(self, geotiffs: list, data_type: str, temp_dir: pathlib.Path) -> dict:
-        """Bins tiles by provider, selects majority CRS, reprojects ONLY non-matching tiles to 'reprojected/'."""
+    def get_bluetopo_tifs(self, geotiffs: list) -> dict:
+        """Get all BlueTopo VRT files warped to 4326"""
+
+        s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        params = [(gtif, s3_bucket, None) for gtif in geotiffs]
+        results = self.client.gather(self.client.map(_process_single_bluetopo, params))
+
+        output_geotiffs = {}
+        for crs_code, s3_path, wkt in results:
+            # Normalized key to ensure consistency
+            clean_key = _clean(str(crs_code)).replace('/', '').replace(' ', '_')
+            if clean_key not in output_geotiffs:
+                output_geotiffs[clean_key] = {'crs': osr.SpatialReference(wkt=wkt), 'tiles': []}
+            output_geotiffs[clean_key]['tiles'].append(s3_path)
+        return output_geotiffs
+    
+    def get_digitalcoast_geotiffs(self, geotiffs: list, temp_dir: pathlib.Path, outputs: str) -> dict:
+        """Bins tiles by provider, selects majority CRS (EPSG or WKT fallback), and reprojects ONLY non-matching tiles to 'reprojected/'."""
 
         _set_gdal_s3_options()
         s3_client = boto3.client('s3')
@@ -156,8 +239,7 @@ class RasterVRTS3Engine(Engine):
         # Filter out existing reprojected files upfront
         clean_geotiffs = [gt for gt in geotiffs if '/reprojected/' not in gt]
 
-        task_params = [(gtif, self.all_crs, data_type) for gtif in clean_geotiffs]
-        results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, task_params)) if r is not None]
+        results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, clean_geotiffs)) if r is not None]
 
         provider_bins = defaultdict(list)
         provider_nodata = defaultdict(lambda: None)
@@ -175,46 +257,55 @@ class RasterVRTS3Engine(Engine):
             if not tile_list:
                 continue
 
-            # Tally EPSG integers
+            # Group by integer EPSG if valid; otherwise group by 'UNKNOWN_WKT' string
             epsg_counts = defaultdict(int)
             for t in tile_list:
-                epsg_counts[t['epsg']] += 1
+                key = t['epsg'] if t['epsg'] is not None else 'UNKNOWN_WKT'
+                epsg_counts[key] += 1
             
-            # Select target EPSG integer by majority count
-            primary_epsg = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
-            primary_crs = f"EPSG:{primary_epsg}"
+            # Select target majority key
+            primary_key = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
             nodata_val = provider_nodata[provider] if provider_nodata[provider] is not None else -999999
             
-            print(f"\n -> [{provider}] Target Primary CRS set to: {primary_crs}")
-            print(f" -> EPSG Counts: {dict(epsg_counts)}")
-
             target_srs = osr.SpatialReference()
-            target_srs.ImportFromEPSG(primary_epsg)
+            
+            # First try to read EPSG as an integer
+            if isinstance(primary_key, int):
+                primary_epsg = primary_key
+                primary_crs = f"EPSG:{primary_epsg}"
+                target_srs.ImportFromEPSG(primary_epsg)
+            else:
+                # Fallback to first geotiff WKT value if no EPSG found
+                # TODO HHPM-252 card to read EPSG from metadata.txt
+                primary_epsg = None
+                primary_crs = "CUSTOM_WKT"
+                first_wkt = next((t['wkt'] for t in tile_list if t.get('wkt')), None)
+                if not first_wkt:
+                    print(f" - Error: No valid WKT or EPSG found for provider {provider}")
+                    continue
+                target_srs.ImportFromWkt(first_wkt)
+
             target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
-            print(f"\n[DIAGNOSTIC] Provider: {provider}")
-            print(f"[DIAGNOSTIC] Total tiles in list: {len(tile_list)}")
-            print(f"[DIAGNOSTIC] EPSG Counts: {dict(epsg_counts)}")
-            print(f"[DIAGNOSTIC] Winning Primary EPSG: {primary_epsg}")
-            
-            # Print the first 3 native vs minority comparisons
-            for t in tile_list[:3]:
-                print(f"  Tile EPSG: {t['epsg']} | Target EPSG: {primary_epsg} | Match: {t['epsg'] == primary_epsg}")
+            print(f"\n -> [{provider}] Target Primary CRS set to: {primary_crs}")
+            print(f" -> EPSG/WKT Counts: {dict(epsg_counts)}")
 
             final_vsi_tiles = []
             for tile in tile_list:
                 tile_epsg = tile['epsg']
+                tile_wkt = tile.get('wkt')
                 vsi_path = tile['vsi_path'] # Pure /vsis3/bucket/key URI
-                # Fallback to 's3_prefix' if 'relative_s3_key' is not set
                 relative_s3_key = tile.get('relative_s3_key') or tile.get('s3_prefix')
                 
                 parts = relative_s3_key.split('/')
                 filename = parts[-1]
                 parent_prefix = '/'.join(parts[:-1])
 
-                # Integer check: 6345 == 6345
-                if tile_epsg == primary_epsg:
-                    # NATIVE MATCH: Use native /vsis3/ URI
+                # Determine match condition (handles both Integer and WKT cases)
+                is_match = (tile_epsg == primary_epsg) if primary_epsg is not None else (tile_wkt == first_wkt)
+
+                if is_match:
+                    # MAJORITY TILE: Use the original geotiff vsi path
                     final_vsi_tiles.append(vsi_path)
                 else:
                     # MINORITY TILE: Point to /reprojected/ subfolder
@@ -225,10 +316,14 @@ class RasterVRTS3Engine(Engine):
                         s3_client.head_object(Bucket=s3_bucket, Key=reprojected_s3_key)
                         print(f" - Found existing reprojected GeoTIFF: {reprojected_s3_key}")
                     except Exception:
-                        print(f" - Reprojecting {filename} (EPSG:{tile_epsg} -> EPSG:{primary_epsg}) to S3: {reprojected_s3_key}")
+                        print(f" - Reprojecting {filename} ({tile_epsg or 'CUSTOM_WKT'} -> {primary_crs}) to S3: {reprojected_s3_key}")
                         
                         src_srs = osr.SpatialReference()
-                        src_srs.ImportFromEPSG(tile_epsg)
+                        if tile_epsg is not None:
+                            src_srs.ImportFromEPSG(tile_epsg)
+                        elif tile_wkt:
+                            src_srs.ImportFromWkt(tile_wkt)
+                        
                         src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
                         local_tif_path = temp_dir / filename
@@ -306,7 +401,7 @@ class RasterVRTS3Engine(Engine):
                 
                 with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
                     temp_path = pathlib.Path(td)
-                    output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, current_datatype, temp_path)
+                    output_geotiffs = self.get_digitalcoast_geotiffs(geotiffs, temp_path, outputs)
                     self.build_output_vrts(current_out_path, file_type, output_geotiffs, temp_path, current_datatype)
 
         shutil.rmtree(local_tmp_path)
