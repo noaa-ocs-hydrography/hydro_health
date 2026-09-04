@@ -33,8 +33,8 @@ class ManualDownloadEngine:
     def process_masks(self) -> None:
         """Create masks with manual download additions"""
 
-        engine = RasterMaskS3Engine(self.param_lookup)
-        engine.run(str(OUTPUTS), manual_downloads=True)
+        engine = RasterMaskS3Engine(self.param_lookup, pilot_mode=False)
+        engine.run(str(OUTPUTS), output_prefix=False, manual_downloads=True)
 
     def process_metadata(self) -> None:
         """Build metdata text file for manually downloaded DEMs"""
@@ -66,18 +66,19 @@ class ManualDownloadEngine:
 
         # TODO this process creates missing Manual Download VRTs
         # Need to run normal VRT process before
-        self.process_vrt(output_prefix)
-        self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
+        # self.process_vrt(output_prefix)
+        self.process_masks()  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()
         # TODO this grid tiling process only does the manual downloads
         # Need to run both folders separately or fix code
-        self.process_grid_tiles(output_prefix)
+        # self.process_grid_tiles(output_prefix)
         print('Done')
 
 if __name__ == '__main__':
     param_lookup = {
         'output_directory': Param(str(OUTPUTS)),
-        'env': 'aws'
+        'env': 'aws',
+        'eco_regions': Param(['ER_3'])
     }
     engine = ManualDownloadEngine(param_lookup)
     engine.run()

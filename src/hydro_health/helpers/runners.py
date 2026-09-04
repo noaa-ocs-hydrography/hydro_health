@@ -55,14 +55,14 @@ def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dic
     engine.run(tiles, output_prefix, resolution)
 
 
-def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str) -> None:
+def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str, pilot_mode: bool) -> None:
     """Create prediction and training masks for found ecoregions"""
 
     outputs = param_lookup['output_directory'].valueAsText
     if param_lookup['env'] in ['local', 'remote']:
-        engine = RasterMaskEngine(param_lookup)
+        engine = RasterMaskEngine(param_lookup, pilot_mode)
     else:
-        engine = RasterMaskS3Engine(param_lookup)
+        engine = RasterMaskS3Engine(param_lookup, pilot_mode)
     engine.run(outputs, output_prefix)
 
 

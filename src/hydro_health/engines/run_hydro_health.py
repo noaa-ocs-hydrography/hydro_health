@@ -74,7 +74,7 @@ def run_hydro_health(config_name: str) -> None:
     with open(config_path, "r") as lookup:
         config = yaml.safe_load(lookup)
 
-        pilot_mode = config['pilot_mode']
+        pilot_mode = config.get('pilot_mode', False)
         output_prefix = config.get('output_prefix', False)
         resolution = config.get('resolution', [8])
 
@@ -95,7 +95,7 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_vrt_creation" and step["run"]:
                 runners.run_raster_vrt_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
-                runners.run_raster_mask_engine(param_lookup, output_prefix)
+                runners.run_raster_mask_engine(param_lookup, output_prefix, pilot_mode)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 runners.run_grid_digital_coast(param_lookup, output_prefix)
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:

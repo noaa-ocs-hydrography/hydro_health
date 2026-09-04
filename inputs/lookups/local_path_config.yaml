@@ -1,5 +1,6 @@
 BLUETOPO:
   SUBFOLDER: model_variables/Prediction/pre_processed
+  REFERENCE_TILE: BH4S257K
 DIGITALCOAST:
   SUBFOLDER: model_variables\Prediction\raw
   API: https://coast.noaa.gov/dataviewer/api/v1/search/missions
