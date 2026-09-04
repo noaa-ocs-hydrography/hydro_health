@@ -306,7 +306,7 @@ class RasterMaskEngine(Engine):
                     self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                     
                     mask_pq_path = er_mask_dir / suffix
-                    subgrid_out_path = er_subgrids_dir / f"{mask_type}_subgrids.gpkg"
+                    subgrid_out_path = er_subgrids_dir / f"{mask_type}_intersecting_subgrids.gpkg"
                     
                     if mask_pq_path.exists():
                         self.create_subgrids(mask_pq_path, subgrid_out_path, mask_type, outputs)

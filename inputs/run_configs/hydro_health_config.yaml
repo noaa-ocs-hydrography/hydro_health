@@ -13,9 +13,9 @@ steps:
 - tool: run_metadata_engine
   run: false
 - tool: run_vrt_creation
-  run: true
+  run: false
 - tool: run_raster_mask_engine
-  run: true
+  run: false
 - tool: grid_digital_coast_files
   run: true
 - tool: run_tsm_layer_engine
@@ -24,5 +24,11 @@ steps:
   run: false
 - tool: run_prediction_rasters_engine
   run: false
+- tool: run_lidar_gap_fill_engine
+  run: false
+- tool: run_terrain_products_engine
+  run: false
 - tool: run_training_rasters_engine
   run: false
+- tool: run_subgrid_tiling_engine
+  run: true  
