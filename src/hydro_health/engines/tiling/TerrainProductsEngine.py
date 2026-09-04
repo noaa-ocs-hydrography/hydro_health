@@ -4,8 +4,6 @@ import os
 import re
 import gc
 import shutil
-import platform
-import subprocess
 import tempfile
 import warnings
 import traceback
@@ -20,7 +18,6 @@ from scipy.signal import fftconvolve
 
 import dask.array as da
 from upath import UPath
-from whitebox import WhiteboxTools
 
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
@@ -315,32 +312,6 @@ def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_d
 
 def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[int, int]], terrain_outputs_dir: str, prediction_output_dir: str, dictionary_dir: str, local_tmp_dir: str, current_index: int, total_count: int) -> Tuple[bool, str]:
     """Module-level worker to process one bathymetry raster, completely detached from the class."""
-    import sys
-    if sys.stdout is None:
-        class DummyFile:
-            def write(self, x): pass
-            def flush(self): pass
-        sys.stdout = DummyFile()
-    if sys.stderr is None:
-        class DummyFile:
-            def write(self, x): pass
-            def flush(self): pass
-        sys.stderr = DummyFile()
-
-    if platform.system() == "Windows" and not hasattr(subprocess, "_wbt_patched"):
-        _orig_popen = subprocess.Popen
-        def _no_window_popen(*args, **kwargs):
-            kwargs['creationflags'] = getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
-            return _orig_popen(*args, **kwargs)
-        subprocess.Popen = _no_window_popen
-        
-        try:
-            import whitebox.whitebox_tools
-            whitebox.whitebox_tools.Popen = _no_window_popen
-        except Exception:
-            pass
-        subprocess._wbt_patched = True
-
     try:
         base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
         progress_str = f"[{current_index}/{total_count}] " if current_index and total_count else ""
@@ -374,10 +345,6 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
         except ImportError:
             return (False, f"Failed: Whitebox library is not installed in the worker environment.")
 
-        import whitebox
-        if not os.path.exists(os.path.join(os.path.dirname(whitebox.__file__), "WBT", "whitebox_tools.exe")):
-            whitebox.download_wbt()
-
         wbt = WhiteboxTools()
         wbt.verbose = False
         wbt.set_default_callback(lambda x: None)
@@ -408,7 +375,6 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                 (out_flowacc, lambda i, o: wbt.d8_flow_accumulation(i, o, out_type="cells"), local_flowacc)
             ]
 
-            # Implicit Skipping Logic
             missing_wbt = [item for item in outputs_wbt if not UPath(item[0]).exists()]
             missing_tci = not UPath(out_tci).exists()
             missing_shear = not UPath(out_shear).exists()
@@ -433,9 +399,12 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                 shutil.copyfileobj(f_in, f_out)
                 
             with rasterio.open(local_bathy_raw) as src:
-                profile = src.profile
+                profile = src.profile.copy()
                 s_nodata = src.nodata
-                profile.update(nodata=-9999.0, dtype='float32')
+                
+                # Fix: Update to explicitly enforce tiled=True and block sizes.
+                # When src.profile inherits blockxsize but tiled=False, GDAL logs CPLE_IllegalArg.
+                profile.update(nodata=-9999.0, dtype='float32', tiled=True, blockxsize=256, blockysize=256)
                 
                 with rasterio.open(local_bathy, 'w', **profile) as dst:
                     for ji, window in src.block_windows(1):
@@ -489,9 +458,9 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                             meta = s.meta.copy()
                             s_nodata = s.nodata if s.nodata is not None else -9999.0
                             p_nodata = p.nodata if p.nodata is not None else -9999.0
-                            
-                            meta.update(compress='LZW', nodata=s_nodata, dtype='float32')
-                            
+
+                            meta.update(compress='LZW', tiled=True, blockxsize=256, blockysize=256, nodata=s_nodata, dtype='float32')
+
                             out_u = UPath(out_shear)
                             with tempfile.NamedTemporaryFile(suffix='.tif', delete=False, dir=str(local_tmp_dir)) as tmp_file:
                                 local_shear_path = tmp_file.name
@@ -549,7 +518,7 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                             
                         bathy_array[window.toslices()] = chunk
                         del chunk
-                # Apply external Degree Slope mask to remove BlueTopo edge artifacts from ALL products
+                        
                 if is_bluetopo:
                     ext = UPath(bathy_path).suffix
                     match = re.search(r'(BlueTopo_[A-Za-z0-9_]+_\d{8})', base_name, re.IGNORECASE)
@@ -584,29 +553,29 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                                     ext_slope[ext_slope == 0.0] = np.nan
                                     
                                     ext_gradmag = np.radians(ext_slope)
-                                    profile.update(dtype=ext_gradmag.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                                    profile.update(dtype=ext_gradmag.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                                     _save_numpy_to_raster(ext_gradmag, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str)
                                     del ext_gradmag
                             else:
                                 Engine.write_message_dask(f"[WARNING] Shape mismatch on {base_name}. Cannot apply external mask.", OUTPUTS)
-                            del ext_slope
-                            gc.collect()
+                        del ext_slope
+                        gc.collect()
 
                 if missing_numpy_dict["_tci.tif"]:
                     tci_arr = _calculate_tci(bathy_array)
-                    profile.update(dtype=tci_arr.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    profile.update(dtype=tci_arr.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(tci_arr, out_tci, profile, local_tmp_dir, log_prefix=progress_str)
                     del tci_arr; gc.collect()
 
                 if missing_numpy_dict["_rugosity.tif"]:
                     rugosity = _calculate_tri(bathy_array)
-                    profile.update(dtype=rugosity.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    profile.update(dtype=rugosity.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(rugosity, out_rug, profile, local_tmp_dir, log_prefix=progress_str)
                     del rugosity; gc.collect()
 
                 if missing_numpy_dict["_slope.tif"]:
                     slope_raw = _calculate_slope(bathy_array, cell_size)
-                    profile.update(dtype=slope_raw.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    profile.update(dtype=slope_raw.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(slope_raw, out_slope, profile, local_tmp_dir, log_prefix=progress_str)
                     if missing_numpy_dict["_terrain_classification.tif"]:
                         slope = np.memmap(os.path.join(tmpdir, "s.dat"), dtype='float32', mode='w+', shape=shape_2d)
@@ -631,14 +600,14 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                             del slope_raw
                         else:
                             gradmag_raw = np.radians(_calculate_slope(bathy_array, cell_size))
-                            
-                        profile.update(dtype=gradmag_raw.dtype.name, nodata=np.nan, count=1, compress='LZW')
+
+                        profile.update(dtype=gradmag_raw.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                         _save_numpy_to_raster(gradmag_raw, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str)
                         del gradmag_raw; gc.collect()
 
                 if missing_numpy_dict["_bpi_fine.tif"]:
                     bpi_fine = _calculate_bpi(bathy_array, cell_size, best_radii['fine'][0], best_radii['fine'][1])
-                    profile.update(dtype=bpi_fine.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    profile.update(dtype=bpi_fine.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(bpi_fine, out_fine, profile, local_tmp_dir, log_prefix=progress_str)
                     if missing_numpy_dict["_terrain_classification.tif"]:
                         bpi_fine_mem = np.memmap(os.path.join(tmpdir, "f.dat"), dtype='float32', mode='w+', shape=shape_2d)
@@ -652,7 +621,7 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
 
                 if missing_numpy_dict["_bpi_broad.tif"]:
                     bpi_broad = _calculate_bpi(bathy_array, cell_size, best_radii['broad'][0], best_radii['broad'][1])
-                    profile.update(dtype=bpi_broad.dtype.name, nodata=np.nan, count=1, compress='LZW')
+                    profile.update(dtype=bpi_broad.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(bpi_broad, out_broad, profile, local_tmp_dir, log_prefix=progress_str)
                     if missing_numpy_dict["_terrain_classification.tif"]:
                         bpi_broad_mem = np.memmap(os.path.join(tmpdir, "b.dat"), dtype='float32', mode='w+', shape=shape_2d)
@@ -685,8 +654,8 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                                            (f_c >= rule['FineBPI_Lower']) & (f_c <= rule['FineBPI_Upper']) &
                                            (s_c >= rule['Slope_Lower']) & (s_c <= rule['Slope_Upper']))
                                 c_c[valid_mask & matches & np.isnan(c_c)] = rule['Class_ID']
-                    
-                    profile.update(dtype=classified_array.dtype.name, nodata=np.nan, count=1, compress='LZW')
+
+                    profile.update(dtype=classified_array.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(classified_array, out_class, profile, local_tmp_dir, log_prefix=progress_str)
                     del classified_array
 
@@ -999,9 +968,9 @@ class TerrainProductsEngine(Engine):
                                     else:
                                         ax.text(0.5, 0.5, 'All NoData', ha='center', va='center')
                                         
-                                    ax.set_title(title)
-                                    ax.axis('off')
-                                    
+                                ax.set_title(title)
+                                ax.axis('off')
+                                
                                 os.remove(local_tmp)
                             except Exception as e:
                                 ax.text(0.5, 0.5, f"Error reading data:\n{e}", ha='center', va='center', wrap=True)
@@ -1022,12 +991,12 @@ class TerrainProductsEngine(Engine):
         except Exception as e:
             self.write_message(f"Failed to generate PDF report: {e}", OUTPUTS)
 
-    def run(self, max_concurrent: int = 4) -> None:
+    def run(self) -> None:
         """Main entry point for evaluating directories and processing rasters in parallel."""
         env = self.param_lookup.get('env', 'local')
         
         try:
-            self.setup_dask(env, n_workers=max_concurrent, threads_per_worker=1, memory_limit="6GB")
+            self.setup_dask(env, n_workers=10, threads_per_worker=1, memory_limit="3GB")
 
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)
