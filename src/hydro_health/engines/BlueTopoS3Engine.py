@@ -60,7 +60,6 @@ def _process_tile(param_inputs: list) -> str:
         engine.create_survey_end_date_tiff(tiff_file_path)
         engine.create_catzoc_all(tiff_file_path, increased_scale=True)
         engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
-        engine.create_rugosity(tiff_file_path)
         engine.create_slope(tiff_file_path)
         
         mb_tiff_file = engine.rename_multiband(tiff_file_path)
@@ -260,12 +259,6 @@ class BlueTopoS3Engine(Engine):
             factors = [2, 4, 8, 16]
             dst.build_overviews(factors, rasterio.enums.Resampling.average)
             dst.update_tags(ns='rio_overview', resampling='average')
-
-    def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
-        """Generate a rugosity/roughness raster from the DEM"""
-        rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
-        rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
-        gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
 
     def create_slope(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a slope raster from the DEM"""
