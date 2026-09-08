@@ -996,7 +996,7 @@ class TerrainProductsEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            self.setup_dask(env, n_workers=10, threads_per_worker=1, memory_limit="3GB")
+            self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="7GB")
 
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)
