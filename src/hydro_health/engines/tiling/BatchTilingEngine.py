@@ -21,17 +21,20 @@ from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
 
+
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
 def _standardize_col_name(col: str) -> str:
     """Helper to ensure column names are standardized."""
+
     return str(col).strip()
 
 
 def _save_parquet_file(df: pd.DataFrame, output_dir: str, file_name: str, is_aws: bool, local_tmp_dir: str, verbose_prefix: str, verbose: bool) -> None:
     """Save dataframe to local temporary disk, push to final destination, and immediately delete the temp file."""
+
     # Use a UUID to ensure multiple Dask workers don't collide when writing the temporary file
     unique_tmp_name = f"{uuid.uuid4().hex}_{file_name}"
     tmp_path = str(Path(local_tmp_dir) / unique_tmp_name)
@@ -51,8 +54,11 @@ def _save_parquet_file(df: pd.DataFrame, output_dir: str, file_name: str, is_aws
         os.remove(tmp_path)
 
 
-def _process_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, year_ranges: list, is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool) -> Tuple[List[str], str]:
+def _process_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, year_ranges: list, 
+                           is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool
+                           ) -> Tuple[List[str], str]:
     """Processes a training tile and writes out BOTH a wide format and batch format data files."""
+
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
     saved_files = []
     
@@ -95,7 +101,8 @@ def _process_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: st
             valid_pairs.append((y0, y1))
             
     if not valid_pairs:
-        Engine.write_message_dask(f"{progress_str} [WARNING] {tile_name} (Training): No matching bathymetry year pairs found for {year_ranges}! Columns present: {list(wide_gdf.columns)}", OUTPUTS)
+        Engine.write_message_dask(f"{progress_str} [WARNING] {tile_name} (Training): No matching bathymetry year pairs \
+                                  found for {year_ranges}! Columns present: {list(wide_gdf.columns)}", OUTPUTS)
 
     # Drop year-pair columns without a matching delta
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
@@ -199,8 +206,11 @@ def _process_training_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: st
     return saved_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
 
 
-def _process_prediction_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, year_ranges: list, is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool) -> Tuple[List[str], str]:
+def _process_prediction_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: str, year_ranges: list, 
+                             is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool
+                             ) -> Tuple[List[str], str]:
     """Processes a prediction tile and writes out BOTH a wide format and batch format data files."""
+
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
     saved_files = []
 
@@ -251,7 +261,8 @@ def _process_prediction_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: 
             valid_pairs.append((y0, y1))
             
     if not valid_pairs:
-        Engine.write_message_dask(f"{progress_str} [WARNING] {tile_name} (Prediction): No matching bathymetry year pairs found for {year_ranges}! Columns present: {list(wide_gdf.columns)}", OUTPUTS)
+        Engine.write_message_dask(f"{progress_str} [WARNING] {tile_name} (Prediction): No matching bathymetry year pairs \
+                                  found for {year_ranges}! Columns present: {list(wide_gdf.columns)}", OUTPUTS)
 
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
     cols_to_drop = []
@@ -355,6 +366,7 @@ def _process_prediction_tile(gdf: gpd.GeoDataFrame, output_dir: str, tile_name: 
 
 def _transform_tile_task(params: list) -> str:
     """Dask Worker: Reads file -> Calls specific processor -> Cleans up temp -> Returns status. Designed for top-level pickling."""
+
     f_path, mode, year_ranges, output_dir, tile_name, is_aws, local_tmp_dir, current_index, total_count, verbose = params
     
     # Implicit skip logic based on output presence
@@ -403,6 +415,7 @@ class BatchTilingEngine(Engine):
 
     def __init__(self, param_lookup: dict, output_prefix: str | bool = False, year_ranges: Optional[List[Tuple[int, int]]] = None) -> None:
         """Initialize the BatchTilingEngine configurations and environment variables"""
+
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
@@ -423,6 +436,7 @@ class BatchTilingEngine(Engine):
 
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths dynamically for aws or local environments and the given eco region."""
+
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix and isinstance(self.output_prefix, str) else OUTPUTS / region
         self.write_message(f"BatchTilingEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
@@ -441,6 +455,7 @@ class BatchTilingEngine(Engine):
 
     def _process_pipeline(self, base_dir: UPath, mode: Literal["training", "prediction"], verbose_workers: bool = False) -> None:
         """Orchestrates the tile format transformation pipeline via Dask mapping."""
+
         self.write_message(f"--- Starting {mode.upper()} format pipeline ---", OUTPUTS)
         self.write_message(self.log_system_metrics(), OUTPUTS)
         
@@ -503,6 +518,7 @@ class BatchTilingEngine(Engine):
 
     def run(self) -> None:
         """Main entry point for executing the batch format transformations"""
+
         try:
             self.setup_dask(self.env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
             
