@@ -7,6 +7,16 @@ import yaml
 
 from datetime import datetime
 
+import logging
+
+# Add this near the top of run_hydro_health.py
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    force=True # Overrides any other hidden logging settings
+)
+
+
 os.environ['PROJ_NETWORK'] = 'OFF'
 
 HH_MODEL = pathlib.Path(__file__).parents[2]
@@ -56,13 +66,14 @@ def run_hydro_health(config_name: str) -> None:
 
     output_directory = pathlib.Path(param_lookup['output_directory'].valueAsText)
     if os.path.exists(output_directory / 'log_prints.txt'):
-        now = time.time()
-        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{now}.txt')
+        now = datetime.now()
+        date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
+        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{date_time_str}.txt')
     print('Output folder:', output_directory)
 
     config_path = INPUTS / "run_configs" / config_name
     with open(config_path, "r") as lookup:
-        config = yaml.safe_load(lookup)
+        config = yaml.safe_load(lookup) 
 
         pilot_mode = config.get('pilot_mode', False)
         output_prefix = config.get('output_prefix', False)
@@ -96,8 +107,17 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_hurricane_layer_engine()
             elif step["tool"] == "run_prediction_rasters_engine" and step["run"]:
                 runners.run_prediction_rasters_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_lidar_gap_fill_engine" and step["run"]:
+                runners.run_lidar_gap_fill_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_terrain_products_engine" and step["run"]:
+                runners.run_terrain_products_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_training_rasters_engine" and step["run"]:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
+                runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
+                runners.run_batch_tiling_engine(param_lookup, output_prefix)    
+
     write_config_log(config_path, config, env)
     end = time.time()
     print(f"Total Runtime: {(end - start) / 60} minutes")
