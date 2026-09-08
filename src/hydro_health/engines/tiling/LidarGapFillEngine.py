@@ -269,36 +269,6 @@ class LidarGapFillEngine(Engine):
         
         self.inputs_dir = INPUTS
 
-    def log_system_metrics(self) -> str:
-        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
-        try:
-            total, used, free = shutil.disk_usage(self.local_tmp_dir)
-            free_gb = free / (1024**3)
-            total_gb = total / (1024**3)
-            
-            tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file()) if self.local_tmp_dir.exists() else 0
-            tmp_mb = tmp_size_bytes / (1024**2)
-            
-            ram_info = "Unknown"
-            try:
-                import psutil
-                vm = psutil.virtual_memory()
-                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
-            except ImportError:
-                if os.path.exists('/proc/meminfo'):
-                    with open('/proc/meminfo', 'r') as f:
-                        meminfo = f.read()
-                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
-                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
-                    if mem_avail and mem_total:
-                        avail_gb = int(mem_avail.group(1)) / (1024**2)
-                        tot_gb = int(mem_total.group(1)) / (1024**2)
-                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {100 - (avail_gb / tot_gb * 100):.1f}%)"
-            
-            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
-        except Exception as e:
-            return f"   [SysMetrics] Error collecting system metrics: {e}"
-
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths dynamically for aws or local environments and the given eco region."""
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
@@ -424,7 +394,7 @@ class LidarGapFillEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
+            self.setup_dask(env, n_workers=3, threads_per_worker=1, memory_limit="10GB") 
             
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)

@@ -25,10 +25,10 @@ steps:
 - tool: run_prediction_rasters_engine
   run: false
 - tool: run_lidar_gap_fill_engine
-  run: false
+  run: true
 - tool: run_terrain_products_engine
   run: false
 - tool: run_training_rasters_engine
   run: false
 - tool: run_subgrid_tiling_engine
-  run: true  
+  run: false  
