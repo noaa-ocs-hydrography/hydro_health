@@ -303,7 +303,7 @@ class BlueTopoS3Engine(Engine):
 
             data = {
                 "value": float(row_dict.get('value', 0) or 0),
-                "survey_date_end": _parse_survey_date(end_date_str)
+                "survey_date_end": self.parse_survey_date(end_date_str)
             }
             table_data.append(data)
         attribute_table_df = pd.DataFrame(table_data)
