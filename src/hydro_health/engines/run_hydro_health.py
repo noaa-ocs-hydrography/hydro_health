@@ -66,13 +66,14 @@ def run_hydro_health(config_name: str) -> None:
 
     output_directory = pathlib.Path(param_lookup['output_directory'].valueAsText)
     if os.path.exists(output_directory / 'log_prints.txt'):
-        now = time.time()
-        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{now}.txt')
+        now = datetime.now()
+        date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
+        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{date_time_str}.txt')
     print('Output folder:', output_directory)
 
     config_path = INPUTS / "run_configs" / config_name
     with open(config_path, "r") as lookup:
-        config = yaml.safe_load(lookup)
+        config = yaml.safe_load(lookup) 
 
         pilot_mode = config.get('pilot_mode', False)
         output_prefix = config.get('output_prefix', False)
@@ -114,6 +115,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
                 runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
+                runners.run_batch_tiling_engine(param_lookup, output_prefix)    
 
     write_config_log(config_path, config, env)
     end = time.time()

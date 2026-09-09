@@ -361,8 +361,8 @@ class RasterMaskS3Engine(Engine):
         
         search_paths = [f"s3://{bucket}/{ecoregion}/{dc_sub}/DigitalCoast"]
         if manual_downloads: 
-            search_paths.append(f"{search_paths[0]}_manual_downloads")
-        self.write_message(f"- approved: {approved_providers}", outputs)  # these start with year
+            search_paths.append(f"s3://{bucket}/{ecoregion}/{dc_sub}/Digital_Coast_Manual_Downloads")
+        # self.write_message(f"- approved: {approved_providers}", outputs)
         found = []
         for path in search_paths: 
             all_vrts = s3.glob(f"{path}/**/mosaic_*.vrt")
@@ -372,7 +372,8 @@ class RasterMaskS3Engine(Engine):
                 if vrt_provider.lower() in approved_providers:  # could use any() to be more inclusive
                     found.append(vrt_path)
                 else:
-                    self.write_message(f"- Skipping unapproved provider: {vrt_provider}", outputs)
+                    data_type = 'Digital_Coast_Manual_Downloads' if manual_downloads else 'Digital_Coast'
+                    self.write_message(f"- Skipping {data_type} unapproved provider: {vrt_provider}", outputs)
         if found:
             self.write_message(f"- Found {len(found)} DigitalCoast providers", outputs)
         return found
@@ -576,7 +577,7 @@ class RasterMaskS3Engine(Engine):
                 vrts = self.find_provider_vrts(er, manual_downloads, outputs)
                 if vrts:
                     vrt_list = [f"s3://{v}" if not v.startswith('s3://') else v for v in vrts]
-                    self.write_message(f"- vrt list: {vrt_list}", outputs)
+                    # self.write_message(f"- vrt list: {vrt_list}", outputs)
                     result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                     self.write_message(result_string, outputs)
 
@@ -591,5 +592,5 @@ class RasterMaskS3Engine(Engine):
                     self.raster_mask_to_parquet(ecoregion_path, tif_path, mask_type, outputs)
                     
                     mask_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{suffix}")
-                    out_path = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrid_path}/{mask_type}_subgrids.gpkg")
+                    out_path = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrid_path}/{mask_type}_intersecting_subgrids.gpkg")
                     self.create_subgrids(mask_path, out_path, mask_type, outputs, s3_files)

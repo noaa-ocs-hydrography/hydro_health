@@ -24,17 +24,20 @@ class ManualDownloadEngine:
     def __init__(self, param_lookup) -> None:
         self.param_lookup = param_lookup
 
-    def process_grid_tiles(self) -> None:
+    def process_grid_tiles(self, output_prefix) -> None:
         """Tile manually downloaded VRT files to BlueTopo"""
 
         engine = GridDigitalCoastEngine(self.param_lookup)
-        engine.run(manual_download=True)
+        engine.run(output_prefix=output_prefix, manual_downloads=False)
 
-    def process_masks(self) -> None:
+        engine = GridDigitalCoastEngine(self.param_lookup)
+        engine.run(output_prefix=output_prefix, manual_downloads=True)
+
+    def process_masks(self, output_prefix) -> None:
         """Create masks with manual download additions"""
 
         engine = RasterMaskS3Engine(self.param_lookup, pilot_mode=False)
-        engine.run(str(OUTPUTS), output_prefix=False, manual_downloads=True)
+        engine.run(str(OUTPUTS), output_prefix, manual_downloads=True)
 
     def process_metadata(self) -> None:
         """Build metdata text file for manually downloaded DEMs"""
@@ -48,7 +51,7 @@ class ManualDownloadEngine:
         
         engine = RasterVRTS3Engine(self.param_lookup)
         engine.setup_dask('aws')
-        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', data_folder='Digital_Coast_Manual_Downloads', skip_existing=False)
+        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', manual_downloads=True)
         engine.close_dask()
 
     def rebuild_training_mask(self) -> None:
@@ -64,12 +67,11 @@ class ManualDownloadEngine:
         # TODO need to add output_prefix to calls
         output_prefix = False
 
-        # TODO this process creates missing Manual Download VRTs
-        # Need to run normal VRT process before
-        # self.process_vrt(output_prefix)
-        self.process_masks()  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
+        # TODO VRT process runs both normal and manual downloads if using manual_downloads param
+        self.process_vrt(output_prefix)
+        self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()
-        # TODO this grid tiling process only does the manual downloads
+        # TODO this grid tiling process calls the regular and manual downloads processes
         # Need to run both folders separately or fix code
         # self.process_grid_tiles(output_prefix)
         print('Done')
@@ -77,8 +79,8 @@ class ManualDownloadEngine:
 if __name__ == '__main__':
     param_lookup = {
         'output_directory': Param(str(OUTPUTS)),
-        'env': 'aws',
-        'eco_regions': Param(['ER_3'])
+        'eco_regions': Param(['ER_3']),
+        'env': 'aws'
     }
     engine = ManualDownloadEngine(param_lookup)
     engine.run()
