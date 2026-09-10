@@ -440,7 +440,7 @@ class BatchTilingEngine(Engine):
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix and isinstance(self.output_prefix, str) else OUTPUTS / region
         self.write_message(f"BatchTilingEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         s3_dir_base = f"s3://{bucket}/{region}"
 
         training_tiles_dir = get_config_item('MODEL', 'TRAINING_TILES_DIR')

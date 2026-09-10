@@ -115,7 +115,7 @@ def test_create_file_paths(mock_dependencies, env_name, expected_prefix):
     
     # If we are in AWS mode, we need get_config_item to return a bucket name
     def custom_config(section, key):
-        if key == 'BUCKET_NAME': return 'mock_bucket_name'
+        if key == 'OUTPUT_BUCKET': return 'mock_bucket_name'
         return f"mock_{key.lower()}"
     
     mock_dependencies['get_config'].side_effect = custom_config

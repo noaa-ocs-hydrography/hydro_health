@@ -486,7 +486,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
             self.processed_dir = str(UPath(processed_dir))
 
         elif get_environment() == 'aws':
-            bucket = get_config_item('S3', 'BUCKET_NAME').strip('/')
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET').strip('/')
             base_path = UPath(f"s3://{bucket}")
             self.filled_dir = str(base_path / filled_dir.strip('/'))
             self.combined = str(base_path / combined_dir.strip('/'))
@@ -1227,7 +1227,7 @@ class CreateSeabedTerrainLayerEngine(ModelDataPreProcessor):
 
         raw_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
         if self.is_aws:
-            bucket = get_config_item('S3', 'BUCKET_NAME').strip('/')
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET').strip('/')
             clean_out_dir = str(raw_output_dir).replace("s3://", "").strip('/')
             if not clean_out_dir.startswith(bucket):
                 main_output_dir = f"s3://{bucket}/{clean_out_dir}"
