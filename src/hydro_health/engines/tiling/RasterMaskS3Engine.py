@@ -139,6 +139,26 @@ class RasterMaskS3Engine(Engine):
         self.pilot_mode = pilot_mode
         self.local_tmp_dir = None
 
+    def create_mask_vector_files(self, output_prefix: str, ecoregion: str, s3_files: s3fs.S3FileSystem, outputs: str) -> None:
+        """Main factory function for creating additional mask vector datasets"""
+
+        tasks = [
+            ('prediction', str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')),
+            ('training', str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/'))
+        ]
+
+        ecoregion_path = f'{output_prefix}/{ecoregion}' if output_prefix else ecoregion
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
+        for mask_type, suffix in tasks:
+            tif_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{mask_type}_mask_{ecoregion}.tif")
+            self.raster_mask_to_parquet(ecoregion_path, tif_path, mask_type, outputs)
+            
+            mask_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{suffix}")
+            out_path = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrid_path}/{mask_type}_intersecting_subgrids.gpkg")
+            self.create_subgrids(mask_path, out_path, mask_type, outputs, s3_files)
+
     def create_prediction_mask(self, ecoregion: str, output_prefix: str, wkt_geom: str) -> None:
         """Build the base prediction mask (Value 1) for the ecoregion polygon."""
 
@@ -204,6 +224,8 @@ class RasterMaskS3Engine(Engine):
         grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')
         grid_gpkg_str = str(grid_gpkg_path)
 
+        # TODO read S3 model_subgrid layer
+
         self.write_message(f" -> Reading local grid GeoPackage from EC2: {grid_gpkg_str}", outputs)
         
         sub_grids = gpd.read_file(grid_gpkg_str, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
@@ -221,7 +243,6 @@ class RasterMaskS3Engine(Engine):
             s3_files.put(local_tmp_path, str(output_path))
 
         self.write_message(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}", outputs)
-        return
 
     def create_training_mask(self, ecoregion: str, s3_vrt_paths: list[str], output_prefix: str, outputs: str) -> str:
         """Tile-based merge using bitwise OR to combine bathymetry masks."""
@@ -552,14 +573,7 @@ class RasterMaskS3Engine(Engine):
         """Main run script for RasterMaskS3Engine"""
 
         s3_files = s3fs.S3FileSystem()
-        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        existing_ers = [f.split('/')[-1] for f in s3_files.glob(f"s3://{bucket}/ER*")]
-        
-        mask_sub = get_config_item('MASK', 'SUBFOLDER')
-        subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
-        
-        pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
-        train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
+        existing_ers = [f.split('/')[-1] for f in s3_files.glob(f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER*")]
 
         # Create temp directory for subgrid creation
         self.local_tmp_dir = pathlib.Path.home() / "local_tmp_dir"
@@ -581,16 +595,4 @@ class RasterMaskS3Engine(Engine):
                     result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                     self.write_message(result_string, outputs)
 
-                tasks = [
-                    ('prediction', pred_suffix),
-                    ('training', train_suffix)
-                ]
-
-                ecoregion_path = f'{output_prefix}/{er}' if output_prefix else er
-                for mask_type, suffix in tasks:
-                    tif_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{mask_type}_mask_{er}.tif")
-                    self.raster_mask_to_parquet(ecoregion_path, tif_path, mask_type, outputs)
-                    
-                    mask_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{suffix}")
-                    out_path = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrid_path}/{mask_type}_intersecting_subgrids.gpkg")
-                    self.create_subgrids(mask_path, out_path, mask_type, outputs, s3_files)
+                self.create_mask_vector_files(output_prefix, er, s3_files, outputs)

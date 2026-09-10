@@ -3,6 +3,7 @@ import sys
 import concurrent.futures
 import geopandas as gpd
 import numpy as np
+import boto3
 
 from typing import List, Tuple
 from shapely.geometry import box, Polygon
@@ -23,7 +24,7 @@ class SubgriddingEngine:
     tile_id_col = "tile"
 
     @staticmethod
-    def calculate_reference_subgrid_size(ref_tile_geom: Polygon,) -> Tuple[float, float]:
+    def calculate_reference_subgrid_size(ref_tile_geom: Polygon) -> Tuple[float, float]:
         """Calculates dx and dy (half width and height of reference tile)."""
 
         minx, miny, maxx, maxy = ref_tile_geom.bounds
@@ -94,56 +95,68 @@ class SubgriddingEngine:
         subgrid_gdf["geometry"] = subgrid_gdf.geometry.make_valid()
         return subgrid_gdf
 
-    @staticmethod
-    def _write_layer(subgrid_gdf: gpd.GeoDataFrame, gpkg_path: pathlib.Path, output_layer: str) -> None:
-        """Writes the layer back to the GeoPackage using fiona with explicit layer targeting."""
+    def upload_to_s3(self, local_path: pathlib.Path, bucket: str, s3_key: str) -> None:
+        """Uploads a local file to an S3 bucket."""
+        print(f"Uploading {local_path.name} to s3://{bucket}/{s3_key}...")
+        s3_client = boto3.client("s3")
+        s3_client.upload_file(str(local_path), bucket, s3_key)
+        print("S3 upload complete.")
 
-        print(f"Writing layer '{output_layer}' to GeoPackage...")
+    def write_layer(self, ecoregion: str, subgrid_gdf: gpd.GeoDataFrame, output_layer: str) -> pathlib.Path:
+        """Writes the layer to a local GeoPackage in OUTPUTS and pushes to S3."""
 
-        # Remove unnecessary layers
+        # Remove unused columns
         cols_to_remove = ["GeoTIFF_Link", "RAT_Link", "GeoTIFF_SHA256_Checksum", "RAT_SHA256_Checksum"]
         subgrid_gdf = subgrid_gdf.drop(columns=[c for c in cols_to_remove if c in subgrid_gdf.columns])
 
-        # Explicit layer-write without appending onto existing GDAL metadata pointers
+        # Rename tile column to original_tile
+        if self.tile_id_col in subgrid_gdf.columns:
+            subgrid_gdf = subgrid_gdf.rename(columns={self.tile_id_col: "original_tile"})
+
+        # Write to local gpkg
+        OUTPUTS.mkdir(parents=True, exist_ok=True)
+        out_gpkg_path = OUTPUTS / "model_subgrids.gpkg"
+
+        print(f"Writing layer '{output_layer}' to {out_gpkg_path}...")
         subgrid_gdf.to_file(
-            str(gpkg_path),
+            str(out_gpkg_path),
             driver="GPKG",
             layer=output_layer,
             overwrite=True
         )
 
-    def run(self, reference_tile_id: str=None, workers: int=6) -> gpd.GeoDataFrame:
-        """Subdivides the target layer geometries and appends the result layer back to the GeoPackage."""
+        # Upload to S3
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        s3_key = f"{ecoregion}/model_subgrids/model_subgrids.gpkg"
+        self.upload_to_s3(out_gpkg_path, bucket, s3_key)
+        out_gpkg_path.unlink()
 
-        # TODO this Engine will eventually rebuild all the Master_Grids.gpkg subgrids when there is a new BT tile scheme
+        return out_gpkg_path
+
+    def run(self, ecoregion: str, workers: int = 6) -> gpd.GeoDataFrame:
+        """Subdivides target layer geometries, saves output locally, and uploads to S3."""
+
         master_grids = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
         master_grids_gpkg = pathlib.Path(master_grids)
         input_layer = get_config_item('SHARED', 'TILES')
         print(f"Reading layer '{input_layer}' from {master_grids_gpkg}...")
         gdf = gpd.read_file(master_grids_gpkg, layer=input_layer)
 
-        reference_tile = reference_tile_id if reference_tile_id else get_config_item('BLUETOPO', 'REFERENCE_TILE')
+        reference_tile = get_config_item('BLUETOPO', 'REFERENCE_TILE')
         dx, dy = self.get_reference_dimensions(gdf, reference_tile)
         print(f"Reference dimensions calculated -> dx: {dx:.4f}, dy: {dy:.4f}")
 
         subgrid_gdf = self._parallel_split_tiles(gdf, dx, dy, workers)
-        output_layer = 'model_subgrids'
-        self._write_layer(subgrid_gdf, master_grids_gpkg, output_layer)
+        output_layer = 'final_model_subgrids'
 
-        print(
-            f"Done. Processed {len(subgrid_gdf)} subgrid polygons into '{output_layer}'."
-        )
-        return subgrid_gdf
+        self.write_layer(ecoregion, subgrid_gdf, output_layer)
+
+        print(f"Done. Processed {len(subgrid_gdf)} subgrid polygons into '{output_layer}'.")
 
 
 if __name__ == "__main__":
     print('starting')
-
-    # TODO this writes out to the Master_Grids.gpkg
-    # Need to dynamically create a temp layer or write to S3?
-
-    # TODO 1. write to model_subgrids/Prediction.subgrid.WGS84_8m.gpkg, which is git ignored 
-
     engine = SubgriddingEngine()
-    engine.run()
+    ecoregion = 'ER_3'
+    engine.run(ecoregion=ecoregion)
     print('done')
