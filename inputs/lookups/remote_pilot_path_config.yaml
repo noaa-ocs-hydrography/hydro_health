@@ -29,7 +29,8 @@ MODEL:
   PREDICTION_OUTPUT_DIR: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\processed
   PREDICTION_TILES_DIR: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\prediction_tiles
   TRAINING_TILES_DIR: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Training\training_tiles
-  SUBGRIDS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_subgrids\Prediction.subgrid.WGS84_8m.gpkg
+  SUBGRIDS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_subgrids\model_subgrids.gpkg
+  SUBGRIDS_LAYER: final_model_subgrids
   PREDICTION_SUB_GRIDS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_subgrids\prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_subgrids\training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Training\processed  
@@ -42,7 +43,7 @@ SEDIMENT:
   RASTER_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\pre_processed\sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
-  MASTER_GRIDS: Master_Reference_Layers.gpkg
+  MASTER_GRIDS: Master_Grid_Reference_Layers.gpkg
   TILES: BlueTopo_Tile_Scheme_20260626_132625
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_FOLDER: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run

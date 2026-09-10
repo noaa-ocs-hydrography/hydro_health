@@ -157,7 +157,7 @@ class RasterMaskS3Engine(Engine):
             
             mask_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{suffix}")
             out_path = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrid_path}/{mask_type}_intersecting_subgrids.gpkg")
-            self.create_subgrids(mask_path, out_path, mask_type, outputs, s3_files)
+            self.create_subgrids(mask_path, out_path, ecoregion, mask_type, outputs, s3_files)
 
     def create_prediction_mask(self, ecoregion: str, output_prefix: str, wkt_geom: str) -> None:
         """Build the base prediction mask (Value 1) for the ecoregion polygon."""
@@ -207,7 +207,7 @@ class RasterMaskS3Engine(Engine):
             
             boto3.client('s3').upload_file(tmp.name, bucket, s3_key)
 
-    def create_subgrids(self, mask_gdf, output_path, process_type, outputs: str, s3_files: s3fs.S3FileSystem) -> None:
+    def create_subgrids(self, mask_gdf: UPath, output_path: str, ecoregion: str, process_type, outputs: str, s3_files: s3fs.S3FileSystem) -> None:
         """Create subgrids layer by intersecting grid tiles with the mask geometries."""
         
         mask_gdf_path = str(mask_gdf)
@@ -218,20 +218,19 @@ class RasterMaskS3Engine(Engine):
         
         # Union the subgrids geometry
         combined_geometry = mask_gdf_df.union_all()
-        mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
+        mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)        
 
-        # Fetch local GPKG path from instance attributes or default to local INPUTS directory
-        grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')
-        grid_gpkg_str = str(grid_gpkg_path)
-
-        # TODO read S3 model_subgrid layer
-
-        self.write_message(f" -> Reading local grid GeoPackage from EC2: {grid_gpkg_str}", outputs)
-        
-        sub_grids = gpd.read_file(grid_gpkg_str, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
+        subgrids_s3_prefix = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('MODEL', 'SUBGRIDS')}"
+        self.write_message(f" -> Reading model_subgrids GeoPackage from EC2: {subgrids_s3_prefix}", outputs)
+        with s3_files.open(subgrids_s3_prefix, mode="rb") as s3_file:
+            sub_grids = gpd.read_file(s3_file, layer=get_config_item('MODEL', 'SUBGRIDS_LAYER')).to_crs(mask_gdf_df.crs)
 
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
-        intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
+        intersecting_sub_grids = (
+            intersecting_sub_grids
+            .drop_duplicates(subset=["tile_id"])
+            .drop(columns=["index_right"], errors="ignore")
+        )
         
         with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
             local_tmp_path = str(Path(task_tmp_dir) / "subgrids_tmp.gpkg")

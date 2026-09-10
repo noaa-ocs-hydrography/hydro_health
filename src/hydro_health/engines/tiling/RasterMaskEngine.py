@@ -4,6 +4,7 @@ import shutil
 import numpy as np
 import geopandas as gpd
 import rasterio
+import s3fs
 
 from pathlib import Path
 from shapely.geometry import shape
@@ -18,13 +19,14 @@ from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 
 def _create_prediction_mask(param_inputs: list) -> None:
     """Rasterize the Ecoregion boundary into a tiled, compressed GeoTIFF"""
     ecoregion_path, param_lookup = param_inputs
 
-    gpkg = INPUTS / 'Master_Grids.gpkg'
+    gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
     gpkg_ds = ogr.Open(str(gpkg))
     ecoregions_layer = gpkg_ds.GetLayerByName('Enhanced_EcoRegions_50m')
 
@@ -77,10 +79,9 @@ def _create_prediction_mask(param_inputs: list) -> None:
     target_ds = None
 
 
-def _create_training_mask(param_inputs: list) -> str:
+def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""
     
-    ecoregion_path, outputs = param_inputs
     mask_subfolder = ecoregion_path / get_config_item('MASK', 'SUBFOLDER')
     prediction_file = mask_subfolder / f'prediction_mask_{ecoregion_path.stem}.tif'
     training_file = mask_subfolder / f'training_mask_{ecoregion_path.stem}.tif'
@@ -172,8 +173,40 @@ class RasterMaskEngine(Engine):
         self.param_lookup = param_lookup
         self.pilot_mode = pilot_mode
 
+    def create_mask_vector_files(self, er_dir: Path, output_prefix: str, s3_files: s3fs.S3FileSystem, outputs: str = None) -> None:
+        """Helper to orchestrate vector Parquet generation and S3-based subgrid creation per ecoregion."""
+        
+        er = er_dir.name
+        pilot_mode = getattr(self, 'pilot_mode', False)
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        subgrids_sub = get_config_item('MODEL', 'MODEL_SUBGRIDS')
+        
+        pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
+        train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
+
+        tasks = [
+            ('prediction', pred_suffix),
+            ('training', train_suffix)
+        ]
+
+        er_mask_dir = er_dir / mask_sub
+        er_subgrids_dir = er_dir / subgrids_sub
+
+        for mask_type, suffix in tasks:
+            tif_path = er_mask_dir / f"{mask_type}_mask_{er}.tif"
+            
+            if tif_path.exists():
+                self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
+                
+                mask_pq_path = er_mask_dir / suffix
+                subgrid_out_path = er_subgrids_dir / f"{mask_type}_intersecting_subgrids.gpkg"
+                
+                if mask_pq_path.exists():
+                    self.create_subgrids(mask_pq_path, subgrid_out_path, er, mask_type, outputs, s3_files=s3_files)
+
     def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
         """Convert a raster mask to a GeoDataFrame using memory-safe block processing."""
+
         self.write_message(f"Creating {process_type} mask GeoDataFrame from: {raster_path}", outputs)
 
         geometries = []
@@ -239,21 +272,34 @@ class RasterMaskEngine(Engine):
 
         return gdf
 
-    def create_subgrids(self, mask_gdf_path: Path, output_path: Path, process_type: str, outputs: str = None) -> None:
-        """Create subgrids layer by intersecting Master_Grids tiles with mask geometries."""
+    def create_subgrids(self, mask_gdf_path: Path, output_path: Path, ecoregion: str, process_type: str, outputs: str = None, s3_files: s3fs.S3FileSystem = None) -> None:
+        """Create subgrids layer by intersecting grid tiles from S3 GeoPackage with mask geometries."""
+
+        if s3_files is None:
+            s3_files = s3fs.S3FileSystem()
+
         self.write_message(f"Preparing {process_type} sub-grids from: {mask_gdf_path}", outputs)
 
         mask_gdf_df = gpd.read_parquet(mask_gdf_path)
 
-        # one-line fix for geopandas version issues with union_all
+        # Union the subgrids geometry safely
         combined_geometry = getattr(mask_gdf_df, "union_all", lambda: getattr(mask_gdf_df, "unary_union", getattr(mask_gdf_df.geometry, "unary_union", None)))()
         mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
 
-        grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')
-        sub_grids = gpd.read_file(str(grid_gpkg_path), layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
+        subgrids_s3_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('MODEL', 'SUBGRIDS')}"
+        self.write_message(f" -> Reading model_subgrids GeoPackage from S3: {subgrids_s3_path}", outputs)
+
+        with s3_files.open(subgrids_s3_path, mode="rb") as s3_file:
+            sub_grids = gpd.read_file(s3_file, layer=get_config_item('MODEL', 'SUBGRIDS_LAYER')).to_crs(mask_gdf_df.crs)
 
         intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
-        intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
+        
+        tile_id_col = "tile_id" if "tile_id" in intersecting_sub_grids.columns else "original_tile"
+        intersecting_sub_grids = (
+            intersecting_sub_grids
+            .drop_duplicates(subset=[tile_id_col])
+            .drop(columns=["index_right"], errors="ignore")
+        )
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         intersecting_sub_grids.to_file(str(output_path), driver="GPKG")
@@ -263,17 +309,14 @@ class RasterMaskEngine(Engine):
     def run(self, outputs: str, output_prefix: str) -> None:
         """Main execution flow using Dask for rasters followed by local parquet/subgrid creation."""
 
-        base_dir = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
-        output_folder = base_dir / output_prefix if output_prefix else base_dir
+        output_folder = OUTPUTS / output_prefix if output_prefix else OUTPUTS
 
         ecoregions = [d for d in output_folder.glob('ER_*') if d.is_dir()]
         self.setup_dask(self.param_lookup['env'])
 
-        # 1. Run original raster generation tasks via Dask
         self.client.gather(self.client.map(_create_prediction_mask, [[er, self.param_lookup] for er in ecoregions]))
-        training_params = [[er, outputs] for er in ecoregions]
         results = self.client.gather(
-            self.client.map(_create_training_mask, training_params)
+            self.client.map(_create_training_mask, ecoregions)
         )
 
         for r in results:
@@ -281,32 +324,6 @@ class RasterMaskEngine(Engine):
 
         self.close_dask()    
 
-        # 2. Vector Post-Processing (Parquet & Subgrids)
-        pilot_mode = getattr(self, 'pilot_mode', False)
-        mask_sub = get_config_item('MASK', 'SUBFOLDER')
-        subgrids_sub = get_config_item('MODEL', 'MODEL_SUBGRIDS')
-        pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
-        train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
-
-        tasks = [
-            ('prediction', pred_suffix),
-            ('training', train_suffix)
-        ]
-
-        for er_dir in ecoregions:
-            er = er_dir.name
-            er_mask_dir = er_dir / mask_sub
-            er_subgrids_dir = er_dir / subgrids_sub
-
-            for mask_type, suffix in tasks:
-                # FIX: Added underscores to match "prediction_mask_ER_xx.tif" and "training_mask_ER_xx.tif"
-                tif_path = er_mask_dir / f"{mask_type}_mask_{er}.tif"
-                
-                if tif_path.exists():
-                    self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
-                    
-                    mask_pq_path = er_mask_dir / suffix
-                    subgrid_out_path = er_subgrids_dir / f"{mask_type}_intersecting_subgrids.gpkg"
-                    
-                    if mask_pq_path.exists():
-                        self.create_subgrids(mask_pq_path, subgrid_out_path, mask_type, outputs)
+        s3_files = s3fs.S3FileSystem()
+        for ecoregion in ecoregions:
+            self.create_mask_vector_files(ecoregion, output_prefix, s3_files, outputs)
