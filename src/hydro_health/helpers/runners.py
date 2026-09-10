@@ -56,15 +56,16 @@ def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dic
     engine.run(tiles, output_prefix, resolution)
 
 
-def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str) -> None:
+def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str, pilot_mode: bool) -> None:
     """Create prediction and training masks for found ecoregions"""
 
     outputs = param_lookup['output_directory'].valueAsText
     if param_lookup['env'] in ['local', 'remote']:
-        engine = RasterMaskEngine(param_lookup)
+        engine = RasterMaskEngine(param_lookup, pilot_mode)
+        engine.run(outputs, output_prefix)
     else:
-        engine = RasterMaskS3Engine(param_lookup)
-    engine.run(outputs, output_prefix)
+        engine = RasterMaskS3Engine(param_lookup, pilot_mode)
+        engine.run(outputs, output_prefix, manual_downloads=True)
 
 
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
@@ -95,6 +96,9 @@ def run_grid_digital_coast(param_lookup: dict[dict], output_prefix: str) -> None
 
     engine = GridDigitalCoastEngine(param_lookup)
     engine.run(output_prefix)
+
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run(output_prefix, manual_downloads=True)
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
@@ -208,9 +212,9 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix = output_prefix)
+            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix=output_prefix)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix = output_prefix)
+        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
 
 def run_tsm_layer_engine() -> None:

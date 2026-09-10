@@ -70,7 +70,9 @@ class Engine:
 
         provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI, NGS not used by BlueTopo
         for text in provider_list_text:
-            if text in feature_json['attributes']['provider_results_name']:
+            # 9/8/2026 DigitalCoast API changed from feature_json['attributes']['provider_results_name']
+            provider_names = [provider['abbreviated_name'] for provider in feature_json['attributes']['providers']]
+            if text in provider_names:
                 return True
         return False
 
@@ -115,7 +117,7 @@ class Engine:
             raise Exception(f"Digital Coast Error: {response.reason}")
 
         tile_index_links = []
-        for feature in datasets_json['features']:
+        for feature in datasets_json['data']['datasets']:
             # print(feature['attributes']['DataType'], feature['attributes']['Year'], feature['attributes']['provider_results_name'])
             if not self.approved_dataset(feature):
                 continue
@@ -130,14 +132,14 @@ class Engine:
 
             # Write out JSON
             output_json = output_folder_path / 'feature.json'
-            external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
-            feature['attributes']['ExternalProviderLink'] = external_provider_links
+            # 9/4/2026 DigitalCoast API updated from feature['attributes']['ExternalProviderLink']
+            feature['attributes']['ExternalProviderLink'] = feature['attributes']['links']
             with open(output_json, 'w') as writer:
                 writer.write(json.dumps(feature['attributes'], indent=4))
 
-            for external_data in external_provider_links:
-                if external_data['label'] == 'Bulk Download':
-                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['DataType'], 'link': external_data['link'], 'provider_path': output_folder_path})
+            for external_data in feature['attributes']['links']:
+                if external_data['title'] == 'Bulk Download':
+                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['dataType'], 'link': external_data['uri'], 'provider_path': output_folder_path})
         return tile_index_links
 
     def get_ecoregion_geometry_strings(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str) -> str:
