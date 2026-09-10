@@ -53,6 +53,35 @@ def _save_numpy_to_raster(data_array: np.ndarray, out_path: str, profile: dict, 
             except OSError:
                 pass
 
+def _get_worker_metrics(tmp_dir: str) -> str:
+    """Safely fetches worker system metrics (RAM, Disk, Tmp Size) without relying on the class instance."""
+    try:
+        import psutil
+        import shutil
+        import os
+        
+        vm = psutil.virtual_memory()
+        ram_free = vm.available / (1024**3)
+        ram_total = vm.total / (1024**3)
+        ram_used_pct = vm.percent
+        
+        du = shutil.disk_usage(tmp_dir)
+        disk_free = du.free / (1024**3)
+        disk_total = du.total / (1024**3)
+        
+        tmp_size = 0
+        if os.path.exists(tmp_dir):
+            for path, dirs, files in os.walk(tmp_dir):
+                for f in files:
+                    fp = os.path.join(path, f)
+                    if not os.path.islink(fp):
+                        tmp_size += os.path.getsize(fp)
+        tmp_mb = tmp_size / (1024**2)
+        
+        return f"[SysMetrics] RAM | Free: {ram_free:.1f}GB / {ram_total:.1f}GB (Used: {ram_used_pct}%) || Disk Free | {disk_free:.1f}GB / {disk_total:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+    except Exception:
+        return ""
+
 def _calculate_bpi(bathy_array: np.ndarray, cell_size: float, inner_radius: float, outer_radius: float) -> np.ndarray:
     """Calculates BPI using chunked Dask logic to prevent massive mem allocations."""
     if cell_size <= 0:
@@ -217,6 +246,8 @@ def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_d
         return True, f"Skipping dictionary creation for {year} (Already exists)"
         
     Engine.write_message_dask(f"Processing regional dictionary for: {year} ({len(files)} files)", OUTPUTS)
+    metrics = _get_worker_metrics(str(local_tmp_dir))
+    if metrics: Engine.write_message_dask(metrics, OUTPUTS)
     
     try:
         def _getsize(path):
@@ -234,6 +265,15 @@ def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_d
         for f in files_to_sample:
             try:
                 with rasterio.open(str(f)) as src:
+                    try:
+                        epsg = src.crs.to_epsg() if src.crs else None
+                    except Exception:
+                        epsg = None
+                        
+                    if epsg != 32617:
+                        Engine.write_message_dask(f"[ERROR] Skipping file {UPath(f).name} for dictionary sampling: Invalid CRS (EPSG:{epsg}). Expected EPSG:32617.", OUTPUTS)
+                        continue
+
                     bathy_array = src.read(1).astype(np.float32)
                     
                     if src.nodata is not None and not np.isnan(src.nodata):
@@ -309,6 +349,39 @@ def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_d
         return False, f"Failed dictionary creation for {year}: {e}\n{err}"
     finally:
         gc.collect()
+
+def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, prediction_output_dir: str) -> bool:
+    """Module-level worker to quickly check if a tile needs processing to calculate remaining work."""
+    try:
+        base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
+        is_bluetopo = 'bluetopo' in base_name.lower()
+        
+        out_dir_path = UPath(terrain_outputs_dir)
+        def resolve_out_path(suffix): return str(out_dir_path / (base_name + suffix))
+        
+        wbt_suffixes = [
+            "_slope_deg.tif", "_flowdir.tif", "_curv_profile.tif", 
+            "_curv_plan.tif", "_curv_total.tif", "_flowacc.tif"
+        ]
+        
+        for suffix in wbt_suffixes:
+            if not UPath(resolve_out_path(suffix)).exists(): return True
+            
+        if not UPath(resolve_out_path("_shearproxy.tif")).exists(): return True
+        
+        numpy_suffixes = [
+            "_rugosity.tif", "_bpi_fine.tif", "_bpi_broad.tif", 
+            "_terrain_classification.tif", "_gradmag.tif", "_tci.tif"
+        ]
+        for suffix in numpy_suffixes:
+            if not UPath(resolve_out_path(suffix)).exists(): return True
+            
+        if not is_bluetopo and not UPath(resolve_out_path("_slope.tif")).exists(): return True
+        
+        return False
+    except Exception:
+        # Default to processing if the check fails for any reason
+        return True
 
 def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[int, int]], terrain_outputs_dir: str, prediction_output_dir: str, dictionary_dir: str, local_tmp_dir: str, current_index: int, total_count: int) -> Tuple[bool, str]:
     """Module-level worker to process one bathymetry raster, completely detached from the class."""
@@ -394,11 +467,23 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                  return (True, f"Skipped: {base_name} (All exist)")
 
             Engine.write_message_dask(f"-> [STARTING] {progress_str}Generating products for: {base_name}", OUTPUTS)
+            metrics = _get_worker_metrics(str(local_tmp_dir))
+            if metrics: Engine.write_message_dask(metrics, OUTPUTS)
 
             with UPath(bathy_path).open('rb') as f_in, open(local_bathy_raw, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
                 
             with rasterio.open(local_bathy_raw) as src:
+                try:
+                    epsg = src.crs.to_epsg() if src.crs else None
+                except Exception:
+                    epsg = None
+                    
+                if epsg != 32617:
+                    err_msg = f"ERROR: Invalid CRS (EPSG:{epsg} | {src.crs}). Expected EPSG:32617. Skipping tile {base_name}."
+                    Engine.write_message_dask(err_msg, OUTPUTS)
+                    return (False, err_msg)
+
                 profile = src.profile.copy()
                 s_nodata = src.nodata
                 
@@ -556,12 +641,12 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                                     profile.update(dtype=ext_gradmag.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                                     _save_numpy_to_raster(ext_gradmag, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str)
                                     del ext_gradmag
-                            else:
-                                Engine.write_message_dask(f"[WARNING] Shape mismatch on {base_name}. Cannot apply external mask.", OUTPUTS)
-                        del ext_slope
-                        gc.collect()
+                    else:
+                        Engine.write_message_dask(f"[WARNING] Shape mismatch on {base_name}. Cannot apply external mask.", OUTPUTS)
+                    del ext_slope
+                    gc.collect()
 
-                if missing_numpy_dict["_tci.tif"]:
+                if missing_numpy_dict["_tci.tif"]: 
                     tci_arr = _calculate_tci(bathy_array)
                     profile.update(dtype=tci_arr.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                     _save_numpy_to_raster(tci_arr, out_tci, profile, local_tmp_dir, log_prefix=progress_str)
@@ -583,7 +668,24 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                     if not missing_numpy_dict["_gradmag.tif"]:
                         del slope_raw
                 elif missing_numpy_dict["_terrain_classification.tif"]:
-                    with rasterio.open(local_slope if is_bluetopo else out_slope) as src_s:
+                    slope_src_path = out_slope
+                    
+                    if is_bluetopo:
+                        ext = UPath(bathy_path).suffix
+                        match = re.search(r'(BlueTopo_[A-Za-z0-9_]+_\d{8})', base_name, re.IGNORECASE)
+                        core_name = match.group(1) if match else base_name
+                        
+                        bluetopo_slope_path = str(UPath(prediction_output_dir) / f"{core_name}_slope{ext}")
+                        if not UPath(bluetopo_slope_path).exists():
+                            bluetopo_slope_path = str(UPath(prediction_output_dir) / f"{base_name}_slope{ext}")
+                            
+                        if UPath(bluetopo_slope_path).exists():
+                            slope_src_path = bluetopo_slope_path
+                        else:
+                            # Enforce the use of the external pre-calculated prediction slope
+                            raise FileNotFoundError(f"Missing external BlueTopo slope for classification: {bluetopo_slope_path}. Cannot fallback to unmasked WBT slope_deg.")
+
+                    with rasterio.open(slope_src_path) as src_s:
                         slope = np.memmap(os.path.join(tmpdir, "s.dat"), dtype='float32', mode='w+', shape=shape_2d)
                         for ji, window in src_s.block_windows(1):
                             slope_chunk = src_s.read(1, window=window).astype(np.float32)
@@ -661,9 +763,11 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
 
                 if 'slope' in locals():
                     del slope, bpi_fine_mem, bpi_broad_mem
-                gc.collect()
+            gc.collect()
 
             Engine.write_message_dask(f" - [SUCCESS] {progress_str}Completed terrain processing: {base_name}", OUTPUTS)
+            metrics = _get_worker_metrics(str(local_tmp_dir))
+            if metrics: Engine.write_message_dask(metrics, OUTPUTS)
             return (True, f"Success: {base_name}")
         
         finally:
@@ -753,6 +857,11 @@ class TerrainProductsEngine(Engine):
             if 'bluetopo' in fname:
                 if not re.match(r'^bluetopo_[a-z0-9_]+_\d{8}\.tiff?$', fname):
                     continue
+            else:
+                # STRICT FILTER: Ensure files include "combined" if they are not BlueTopo.
+                # This prevents processing weather/hurricane variables mixed into the same directories.
+                if 'combined' not in fname:
+                    continue
 
             valid_files.append(f_str)
             
@@ -796,7 +905,28 @@ class TerrainProductsEngine(Engine):
         """Step 2: Generate terrain products iteratively."""
         self.write_message(f"--- PHASE 2: Parallel Terrain Product Generation ---", OUTPUTS)
         
-        paths = valid_files
+        # --- Pre-scan to filter out already processed tiles ---
+        self.write_message("Scanning tiles to calculate remaining work...", OUTPUTS)
+        check_futures = self.client.map(
+            _check_unprocessed_worker,
+            valid_files,
+            [str(self.terrain_outputs_dir)] * len(valid_files),
+            [str(self.prediction_output_dir)] * len(valid_files)
+        )
+        check_results = self.client.gather(check_futures)
+        
+        paths = [f for f, needs_work in zip(valid_files, check_results) if needs_work]
+        skipped_count = len(valid_files) - len(paths)
+        
+        if skipped_count > 0:
+            self.write_message(f"Skipped {skipped_count} tiles (products already exist).", OUTPUTS)
+            
+        if not paths:
+            self.write_message("[SUCCESS] All terrain products are up to date. No remaining tiles.", OUTPUTS)
+            return
+            
+        self.write_message(f"Processing {len(paths)} remaining tiles...", OUTPUTS)
+        
         radiis_list = [best_radii] * len(paths)
         terr_outs = [str(self.terrain_outputs_dir)] * len(paths)
         pred_outs = [str(self.prediction_output_dir)] * len(paths)
@@ -996,7 +1126,7 @@ class TerrainProductsEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            self.setup_dask(env, n_workers=3, threads_per_worker=1, memory_limit="8GB")
+            self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="6GB") 
 
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)
