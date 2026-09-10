@@ -7,7 +7,6 @@ import pathlib
 import sys
 import rasterio
 import re
-import s3fs
 import shutil
 
 import geopandas as gpd
@@ -61,7 +60,6 @@ def _process_tile(param_inputs: list) -> str:
         engine.create_survey_end_date_tiff(tiff_file_path)
         engine.create_catzoc_all(tiff_file_path, increased_scale=True)
         engine.create_catzoc_latest(tiff_file_path, increased_scale=True)
-        engine.create_rugosity(tiff_file_path)
         engine.create_slope(tiff_file_path)
         
         mb_tiff_file = engine.rename_multiband(tiff_file_path)
@@ -79,29 +77,6 @@ def _process_tile(param_inputs: list) -> str:
         msg = f"[{tile_id}] Processing successfully completed."
         print(msg)
         return msg
-
-
-def _parse_survey_date(date_str: str) -> date | None:
-    """Robustly parse survey dates from metadata strings handling various formats and extracting years."""
-    if not date_str or str(date_str).strip().upper() in ["N/A", "UNKNOWN", "NULL", "NONE", "NAN", ""]:
-        return None
-        
-    date_str = str(date_str).strip()
-    
-    # Try common exact formats
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y%m%d", "%Y"):
-        try:
-            return datetime.strptime(date_str, fmt).date()
-        except ValueError:
-            continue
-            
-    # Fallback: extract the first numeric sequence (integer or float) that looks like a year and round to nearest whole year
-    match = re.search(r'\b((?:17|18|19|20)\d{2}(?:\.\d+)?)\b', date_str)
-    if match:
-        year = int(round(float(match.group(1))))
-        return date(year, 1, 1)
-        
-    return None
 
 
 class BlueTopoS3Engine(Engine):
@@ -147,8 +122,8 @@ class BlueTopoS3Engine(Engine):
 
             data = {
                 "value": float(row_data.get('value', 0) or 0),
-                'start_date': _parse_survey_date(start_date_str),
-                "end_date": _parse_survey_date(end_date_str),
+                'start_date': self.parse_survey_date(start_date_str),
+                "end_date": self.parse_survey_date(end_date_str),
                 'from_filename': row_data.get('source_survey_id'),
                 'feat_detect': bool(int(row_data.get('significant_features', 0))),
                 'feat_least_depth': bool(int(row_data.get('feature_least_depth', 0))),
@@ -235,7 +210,7 @@ class BlueTopoS3Engine(Engine):
             row_dict = {field_names[i]: f_val.text for i, f_val in enumerate(row.findall('F'))}
 
             end_date_str = row_dict.get('survey_date_end')
-            end_date = _parse_survey_date(end_date_str) or date.min
+            end_date = self.parse_survey_date(end_date_str) or date.min
 
             meta = {
                 "end_date": end_date,
@@ -285,12 +260,6 @@ class BlueTopoS3Engine(Engine):
             dst.build_overviews(factors, rasterio.enums.Resampling.average)
             dst.update_tags(ns='rio_overview', resampling='average')
 
-    def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
-        """Generate a rugosity/roughness raster from the DEM"""
-        rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
-        rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
-        gdal.DEMProcessing(str(rugosity_file_path), str(tiff_file_path), 'Roughness')
-
     def create_slope(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a slope raster from the DEM"""
 
@@ -327,7 +296,7 @@ class BlueTopoS3Engine(Engine):
 
             data = {
                 "value": float(row_dict.get('value', 0) or 0),
-                "survey_date_end": _parse_survey_date(end_date_str)
+                "survey_date_end": self.parse_survey_date(end_date_str)
             }
             table_data.append(data)
         attribute_table_df = pd.DataFrame(table_data)

@@ -9,14 +9,18 @@ import boto3
 import geopandas as gpd
 import dask
 import math
+import shutil
+import logging
 import string
-import yaml
+import re
 
-from datetime import date
+from datetime import datetime, date
 from osgeo import osr, gdal
 from dask.distributed import Client, LocalCluster
 
 from hydro_health.helpers.tools import get_config_item
+
+logger = logging.getLogger(__name__)
 
 
 gdal.UseExceptions()
@@ -66,7 +70,9 @@ class Engine:
 
         provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI, NGS not used by BlueTopo
         for text in provider_list_text:
-            if text in feature_json['attributes']['provider_results_name']:
+            # 9/8/2026 DigitalCoast API changed from feature_json['attributes']['provider_results_name']
+            provider_names = [provider['abbreviated_name'] for provider in feature_json['attributes']['providers']]
+            if text in provider_names:
                 return True
         return False
 
@@ -78,6 +84,17 @@ class Engine:
             url = url.replace(char, '')
         return url.strip()
     
+    def cleanup_resources(self, output_folder: str):
+        """Wipe temp disks and safely teardown parallel execution pools."""
+        self.close_dask()
+
+        if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
+            try:
+                shutil.rmtree(self.local_tmp_dir)
+                self.write_message("Successfully wiped master local temp directory.", output_folder)
+            except Exception as e:
+                self.write_message(f"Failed to wipe master local temp directory: {e}", output_folder)
+
     def close_dask(self) -> None:
         """Shut down Dask objects"""
 
@@ -100,7 +117,7 @@ class Engine:
             raise Exception(f"Digital Coast Error: {response.reason}")
 
         tile_index_links = []
-        for feature in datasets_json['features']:
+        for feature in datasets_json['data']['datasets']:
             # print(feature['attributes']['DataType'], feature['attributes']['Year'], feature['attributes']['provider_results_name'])
             if not self.approved_dataset(feature):
                 continue
@@ -115,14 +132,14 @@ class Engine:
 
             # Write out JSON
             output_json = output_folder_path / 'feature.json'
-            external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
-            feature['attributes']['ExternalProviderLink'] = external_provider_links
+            # 9/4/2026 DigitalCoast API updated from feature['attributes']['ExternalProviderLink']
+            feature['attributes']['ExternalProviderLink'] = feature['attributes']['links']
             with open(output_json, 'w') as writer:
                 writer.write(json.dumps(feature['attributes'], indent=4))
 
-            for external_data in external_provider_links:
-                if external_data['label'] == 'Bulk Download':
-                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['DataType'], 'link': external_data['link'], 'provider_path': output_folder_path})
+            for external_data in feature['attributes']['links']:
+                if external_data['title'] == 'Bulk Download':
+                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['dataType'], 'link': external_data['uri'], 'provider_path': output_folder_path})
         return tile_index_links
 
     def get_ecoregion_geometry_strings(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str) -> str:
@@ -140,6 +157,36 @@ class Engine:
                 geometry_coords.append(tile_wkt)
 
         return geometry_coords
+    
+    def log_system_metrics(self) -> str:
+        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
+        try:
+            total, used, free = shutil.disk_usage(self.local_tmp_dir)
+            free_gb = free / (1024**3)
+            total_gb = total / (1024**3)
+            
+            tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file()) if self.local_tmp_dir.exists() else 0
+            tmp_mb = tmp_size_bytes / (1024**2)
+            
+            ram_info = "Unknown"
+            try:
+                import psutil
+                vm = psutil.virtual_memory()
+                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
+            except ImportError:
+                if os.path.exists('/proc/meminfo'):
+                    with open('/proc/meminfo', 'r') as f:
+                        meminfo = f.read()
+                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
+                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
+                    if mem_avail and mem_total:
+                        avail_gb = int(mem_avail.group(1)) / (1024**2)
+                        tot_gb = int(mem_total.group(1)) / (1024**2)
+                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {100 - (avail_gb / tot_gb * 100):.1f}%)"
+            
+            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
+        except Exception as e:
+            return f"   [SysMetrics] Error collecting system metrics: {e}"
 
     def make_esri_projection(self, file_name, epsg=4326):
         """Create an Esri .prj file for a shapefile"""
@@ -250,6 +297,8 @@ class Engine:
     def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
+        print(f"Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
+        
         if env == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
@@ -272,6 +321,13 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')
 
+    @staticmethod
+    def write_message_dask(message: str, output_folder: str) -> None:
+        """Write a message to the main logfile in the output folder"""
+
+        with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
+            writer.write(message + '\n')        
+
     def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""
 
@@ -280,7 +336,7 @@ class Engine:
         
         manifest = {
             "engine": self.__class__.__name__,
-            "run_date": datetime.datetime.now().isoformat(),
+            "run_date": datetime.now().isoformat(),
             "duration_seconds": duration,
             "status": "completed"
         }
@@ -299,6 +355,29 @@ class Engine:
             manifest_prefix.parent.mkdir(parents=True, exist_ok=True)
             with open(manifest_prefix, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))
+
+    def parse_survey_date(self, date_str: str) -> date | None:
+        """Robustly parse survey dates from metadata strings handling various formats and extracting years."""
+
+        if not date_str or str(date_str).strip().upper() in ["N/A", "UNKNOWN", "NULL", "NONE", "NAN", ""]:
+            return None
+            
+        date_str = str(date_str).strip()
+        
+        # Try common exact formats
+        for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y-%m", "%Y%m%d", "%Y"):
+            try:
+                return datetime.strptime(date_str, fmt).date()
+            except ValueError:
+                continue
+                
+        # Fallback: extract the first numeric sequence (integer or float) that looks like a year and round to nearest whole year
+        match = re.search(r'\b((?:17|18|19|20)\d{2}(?:\.\d+)?)\b', date_str)
+        if match:
+            year = int(round(float(match.group(1))))
+            return date(year, 1, 1)
+            
+        return None
 
 
 # CATZOC score.py

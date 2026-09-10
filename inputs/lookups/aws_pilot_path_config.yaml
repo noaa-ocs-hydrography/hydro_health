@@ -50,7 +50,7 @@ SEDIMENT:
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grids.gpkg
-  TILES: BlueTopo_Tile_Scheme_20260505_132642
+  TILES: BlueTopo_Tile_Scheme_20260626_132625
   STATES: USA_Census_States_200km_Overlap
   ECOGRIDTILES: Eco_Region_Grid_Tiles
   MODELSUBGRIDTILES: Model_sub_Grid_Tiles
@@ -59,6 +59,7 @@ SHARED:
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 TERRAIN:
   COMBINED_LIDAR_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
+  DICTIONARIES_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/dictionaries
   INPUT_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs
   FILLED_DIR: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs/filled_tifs
   OUTPUTS: ER_3/pilot/model_variables/Prediction/processed/terrain_digitalcoast_outputs

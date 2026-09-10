@@ -43,7 +43,7 @@ def get_approved_providers(ecoregion: str) -> bool:
         approved_providers = []
         for provider, data in ecoregion_providers.items():
             if data['use']:
-                provider_id = '_'.join(provider.split('_')[2:])
+                provider_id = '_'.join(provider.split('_')[3:])  # No year, ex: DEM_USDA_NRCS_USGS_59010
                 approved_providers.append(provider_id)
     return approved_providers
 
@@ -123,10 +123,10 @@ def get_ecoregion_tiles(param_lookup: dict[str]) -> gpd.GeoDataFrame:
 
     ecoregion_layer = 'ENHANCED_ECOREGIONS'
     # if/else logic only allows one option of Eco Region selection or Draw Polygon
-    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ENHANCED_ECOREGIONS'), columns=['EcoRegion'])
+    all_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), columns=['EcoRegion'])
     if param_lookup['env'] == 'local':  # or param_lookup['env'] == 'aws':
         drawn_layer_gdf = gpd.read_file(param_lookup['drawn_polygon'].value)
-        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'ENHANCED_ECOREGIONS'), mask=drawn_layer_gdf)
+        selected_ecoregions = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', ecoregion_layer), mask=drawn_layer_gdf)
         selected_sub_grids = gpd.read_file(master_grid_geopackage, layer=get_config_item('SHARED', 'TILES'), columns=['tile'], mask=drawn_layer_gdf)
     else:
         # get eco region from shapefile that matches drop down choices

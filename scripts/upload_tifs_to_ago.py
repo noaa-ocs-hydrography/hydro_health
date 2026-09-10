@@ -52,8 +52,8 @@ def upload_tif_files_via_pro(folder_path, folder_name):
                 print(f"Failed to upload {file_name}. Error: {e}")
 
 
-LOCAL_FOLDER = r"C:\Users\Stephen.Patterson\Data\Repos\hydro_health\outputs"
-FOLDER_NAME = "ER3_Model_Outputs"
+LOCAL_FOLDER = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\HHM_simple\outputs\Files_upload_to_ArcGIS_AGO\Offshore_100m"
+FOLDER_NAME = "Hydro_Health_Simple"
 
 
 if __name__ == "__main__":

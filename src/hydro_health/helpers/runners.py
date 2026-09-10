@@ -5,6 +5,7 @@ import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
+from hydro_health.engines.tiling.BatchTilingEngine import BatchTilingEngine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
@@ -13,6 +14,8 @@ from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastE
 from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.tiling.LidarGapFillEngine import LidarGapFillEngine
 from hydro_health.engines.tiling.PredictionRastersEngine import PredictionRastersEngine
+from hydro_health.engines.tiling.SubgridTilingEngine import SubgridTilingEngine
+from hydro_health.engines.tiling.TrainingRastersEngine import TrainingRastersEngine
 from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
 from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
 from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
@@ -22,6 +25,7 @@ from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayer
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
+from hydro_health.engines.tiling.TerrainProductsEngine import TerrainProductsEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
 
 
@@ -52,15 +56,16 @@ def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dic
     engine.run(tiles, output_prefix, resolution)
 
 
-def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str) -> None:
+def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str, pilot_mode: bool) -> None:
     """Create prediction and training masks for found ecoregions"""
 
     outputs = param_lookup['output_directory'].valueAsText
     if param_lookup['env'] in ['local', 'remote']:
-        engine = RasterMaskEngine(param_lookup)
+        engine = RasterMaskEngine(param_lookup, pilot_mode)
+        engine.run(outputs, output_prefix)
     else:
-        engine = RasterMaskS3Engine(param_lookup)
-    engine.run(outputs, output_prefix)
+        engine = RasterMaskS3Engine(param_lookup, pilot_mode)
+        engine.run(outputs, output_prefix, manual_downloads=True)
 
 
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
@@ -91,6 +96,9 @@ def run_grid_digital_coast(param_lookup: dict[dict], output_prefix: str) -> None
 
     engine = GridDigitalCoastEngine(param_lookup)
     engine.run(output_prefix)
+
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run(output_prefix, manual_downloads=True)
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
@@ -123,6 +131,7 @@ def run_prediction_rasters_engine(param_lookup: dict[dict], output_prefix: str|b
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
+    
 
 def run_lidar_gap_fill_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
@@ -135,8 +144,61 @@ def run_lidar_gap_fill_engine(param_lookup: dict[dict], output_prefix: str|bool)
     processor.run()
     profiler.disable()
     stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
+
+def run_terrain_products_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = TerrainProductsEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10) 
+
+
+def run_training_rasters_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = TrainingRastersEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)    
 
+def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = SubgridTilingEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
+def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
+    processor = BatchTilingEngine(param_lookup, output_prefix) 
+    
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)        
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
@@ -150,9 +212,9 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
             print(f'Building {ecoregion} - {dataset} VRT file')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix = output_prefix)
+            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix=output_prefix)
         print(f'Building {ecoregion} - DigitalCoast VRT files')
-        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix = output_prefix)
+        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
 
 def run_tsm_layer_engine() -> None:

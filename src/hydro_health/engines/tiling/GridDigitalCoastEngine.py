@@ -13,6 +13,29 @@ from hydro_health.helpers.tools import get_config_item, get_approved_providers
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 
 
+def _is_raster_empty(ds, nodata_val=-9999) -> bool:
+    """Helper to check if a warped dataset is a 1x1 placeholder or pure NoData"""
+
+    if ds is None:
+        return True
+    
+    x_size, y_size = ds.RasterXSize, ds.RasterYSize
+    if x_size <= 1 or y_size <= 1 or ds.RasterCount == 0:
+        return True
+
+    band = ds.GetRasterBand(1)
+    try:
+        stats = band.ComputeRasterMinMax(False)
+        # If min and max both equal the nodata value, the tile is empty
+        if stats[0] == nodata_val and stats[1] == nodata_val:
+            return True
+    except Exception:
+        # If stats computation fails on a tiny/empty band, treat as empty
+        return True
+
+    return False
+
+
 def _grid_single_vrt_s3(params: list) -> str:
     """Grid a single S3 VRT"""
 
@@ -124,6 +147,18 @@ def _grid_single_vrt_s3(params: list) -> str:
                     "BLOCKYSIZE=512"
                 ]
             )
+
+            # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
+            check_ds = gdal.Open(local_tmp_path, gdal.GA_ReadOnly)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            check_ds = None
+
+            if empty_tile:
+                if os.path.exists(local_tmp_path):
+                    os.remove(local_tmp_path)
+                gdal.Unlink(in_memory_geojson)
+                engine.write_message(f" - Skipped empty warp: {s3_out_file}", param_lookup['output_directory'].valueAsText)
+                continue
 
             final_ds = gdal.Open(local_tmp_path, gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
@@ -247,6 +282,18 @@ def _grid_single_vrt_local(params: list) -> str:
                 ]
             )
 
+            # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
+            check_ds = gdal.Open(str(out_file), gdal.GA_ReadOnly)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            check_ds = None
+
+            if empty_tile:
+                if out_file.exists():
+                    out_file.unlink()
+                gdal.Unlink(in_memory_geojson)
+                engine.write_message(f" - Skipped empty warp: {out_file}", param_lookup['output_directory'].valueAsText)
+                continue
+
             final_ds = gdal.Open(str(out_file), gdal.GA_Update)
             final_ds.BuildOverviews("BILINEAR", [2, 4, 8])
             final_ds = None
@@ -267,7 +314,7 @@ class GridDigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download: bool, output_prefix: str) -> None:
+    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_downloads: bool, output_prefix: str) -> None:
         """Processor for gridding S3 VRT files with dask (Approved providers only)"""
 
         s3_files = s3fs.S3FileSystem()
@@ -287,7 +334,7 @@ class GridDigitalCoastEngine(Engine):
             bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
             
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
+            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_downloads else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
             
             if vrt_files:
@@ -296,17 +343,11 @@ class GridDigitalCoastEngine(Engine):
                 
                 for vrt in vrt_files:
                     vrt_stem = pathlib.Path(vrt).stem
-                    vrt_provider = vrt_stem.replace('mosaic_', '')
-                    
-                    is_approved = any(
-                        vrt_provider.lower() in ap or vrt_stem.lower() in ap or ap in vrt_provider.lower() 
-                        for ap in approved_providers
-                    )
-                    
-                    if is_approved:
+                    vrt_provider = '_'.join(vrt_stem.split('_')[3:])  # Start after year
+                    if vrt_provider.lower() in approved_providers:
                         approved_vrt_files.append(vrt)
                     else:
-                        print(f" - Skipping unapproved S3 provider: {vrt_provider}")
+                        self.write_message(f" - Skipping unapproved {digital_coast_folder} S3 provider: {vrt_provider}", outputs)
 
                 if approved_vrt_files:
                     params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in approved_vrt_files]
@@ -358,7 +399,7 @@ class GridDigitalCoastEngine(Engine):
             else:
                 print(f" - No VRTs found for {ecoregion.stem} locally.")
 
-    def run(self, output_prefix: str, manual_download=False) -> None:
+    def run(self, output_prefix: str, manual_downloads=False) -> None:
         """Main execution method routing control using structural parameters"""
 
         outputs = self.param_lookup['output_directory'].valueAsText
@@ -374,6 +415,6 @@ class GridDigitalCoastEngine(Engine):
         if self.param_lookup['env'] in ['local', 'remote']:
             self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, output_prefix)
         else:
-            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_download, output_prefix)
+            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_downloads, output_prefix)
 
         self.close_dask()
