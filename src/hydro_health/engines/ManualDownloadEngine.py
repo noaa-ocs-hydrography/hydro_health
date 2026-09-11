@@ -73,7 +73,7 @@ class ManualDownloadEngine:
         # self.rebuild_training_mask()
         # TODO this grid tiling process calls the regular and manual downloads processes
         # Need to run both folders separately or fix code
-        self.process_grid_tiles(output_prefix)
+        # self.process_grid_tiles(output_prefix)
         print('Done')
 
 if __name__ == '__main__':

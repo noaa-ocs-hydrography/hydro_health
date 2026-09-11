@@ -132,7 +132,7 @@ class TrainingRastersEngine(Engine):
         self.inputs_dir = INPUTS
         self.outputs_dir = OUTPUTS / output_prefix if output_prefix else OUTPUTS
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         mask_training_path = get_config_item('MASK', 'MASK_TRAINING_PATH')
         self.train_mask_path = UPath(f"s3://{bucket}/{mask_training_path}") if self.is_aws else UPath(self.outputs_dir / mask_training_path)
         prediction_output_dir = get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')

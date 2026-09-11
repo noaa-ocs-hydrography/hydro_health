@@ -9,7 +9,6 @@ import geopandas as gpd
 import pathlib
 import rasterio
 import sys
-import tempfile
 
 import numpy as np
 
@@ -19,39 +18,12 @@ from urllib3.util.retry import Retry
 from collections import defaultdict
 from botocore.client import Config
 from botocore import UNSIGNED
-from boto3.s3.transfer import TransferConfig
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 os.environ['SHAPE_RESTORE_SHX'] = 'YES'  # Reruns throwing fiona DriverError for .SHX
-
-S3_SYNC_CONFIG = TransferConfig(use_threads=False)
-
-
-def _to_win_long_path(path: pathlib.Path | str) -> str:
-    """Formats path for native Python file I/O (open, shutil, os.path) on Windows."""
-
-    path_str = str(pathlib.Path(path).resolve())
-    if os.name == 'nt' and not path_str.startswith(r'\\?\\'):
-        if path_str.startswith(r'\\'):  # UNC network path
-            return r'\\?\UNC' + path_str[1:]
-        return r'\\?\\' + path_str
-    return path_str
-
-
-def _get_short_temp_dir() -> str:
-    """Returns a short base directory for GDAL temporary processing."""
-
-    c_temp = pathlib.Path(r"C:\Temp")
-    if c_temp.exists() or os.name == 'nt':
-        try:
-            c_temp.mkdir(parents=True, exist_ok=True)
-            return str(c_temp)
-        except Exception:
-            pass
-    return tempfile.gettempdir()
 
 
 def _download_tile_index(param_inputs: list[list]) -> None:
@@ -64,120 +36,92 @@ def _download_tile_index(param_inputs: list[list]) -> None:
     if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link):
         _, data_file = download_link.replace('/index.html', '').split('.com')
         lidar_bucket = engine.get_bucket()
-        
         for obj_summary in lidar_bucket.objects.filter(Prefix=f"{data_file[1:]}"):
             if 'tileindex' in obj_summary.key and obj_summary.key.endswith('.zip'):
                 output_zip_file = provider_folder / obj_summary.key
                 file_parent_folder = output_zip_file.parents[0]
-                shp_path = file_parent_folder / pathlib.Path(str(output_zip_file.stem) + '.shp')
+                shp_path = output_zip_file.parents[0] / pathlib.Path(str(output_zip_file.stem) + '.shp')
                 provider_and_file = str(pathlib.Path(*shp_path.parts[-4:]))
-                
-                # Check existence using extended path in Python
-                abs_shp = _to_win_long_path(shp_path)
-
-                if os.path.exists(abs_shp):
+                if os.path.exists(shp_path):
                     engine.write_message(f' - Skipping index: {provider_and_file}', outputs)
                     continue
                 else:
                     engine.write_message(f' - Downloading index: {provider_and_file}', outputs)
-
-                # Ensure target destination parents exist
-                pathlib.Path(_to_win_long_path(file_parent_folder)).mkdir(parents=True, exist_ok=True)
-
-                abs_zip_path = _to_win_long_path(output_zip_file)
-
-                # Single-threaded transfer prevents Dask C-extension/GIL crashes
-                lidar_bucket.download_file(
-                    Key=obj_summary.key, 
-                    Filename=abs_zip_path,
-                    Config=S3_SYNC_CONFIG
-                )
+                file_parent_folder.mkdir(parents=True, exist_ok=True) 
+                with open(output_zip_file, 'wb') as tile_index:
+                    lidar_bucket.download_fileobj(obj_summary.key, tile_index)
 
 
 def _download_intersected_datasets(param_inputs: list[list]) -> None:
-    """Parallel process spatial filter and download of datasets using a short temp working dir for GDAL"""
+    """Parallel process spatial filter and download of datasets"""
 
     tile_gdf, shp_path, param_lookup, outputs = param_inputs
-
     engine = DigitalCoastEngine(param_lookup)
-    shp_path_obj = pathlib.Path(shp_path)
 
-    # Use a short temporary directory for GDAL/Fiona operations
-    with tempfile.TemporaryDirectory(dir=_get_short_temp_dir()) as tmp_dir:
-        tmp_folder = pathlib.Path(tmp_dir)
-        temp_shp = tmp_folder / shp_path_obj.name
-
-        # Copy original shapefile sidecar files (.shp, .shx, .dbf, .prj) to temp dir using Python
-        target_dir_long = _to_win_long_path(shp_path_obj.parent)
-        stem = shp_path_obj.stem
+    # GeoPandas handles standard pathlib.Path across Linux & Windows natively
+    shp_df = gpd.read_file(shp_path).to_crs(4326)
+    shp_df.columns = shp_df.columns.str.lower()
+    
+    if 'tile' in shp_df.columns:
+        shp_df.drop('tile', axis=1, inplace=True)
         
-        if os.path.exists(target_dir_long):
-            for filename in os.listdir(target_dir_long):
-                if filename.startswith(stem + "."):
-                    src_file = _to_win_long_path(shp_path_obj.parent / filename)
-                    shutil.copy(src_file, str(tmp_folder / filename))
+    df_joined = shp_df.sjoin(df=tile_gdf, how='left')
+    df_joined.to_file(shp_path, driver='ESRI Shapefile', encoding='utf-8')
 
-        shp_df = gpd.read_file(str(temp_shp)).to_crs(4326)
-        shp_df.columns = shp_df.columns.str.lower()
-        if 'tile' in shp_df.columns:
-            shp_df.drop('tile', axis=1, inplace=True)
-            
-        df_joined = shp_df.sjoin(df=tile_gdf, how='left')
-
-        try:
-            df_joined.to_file(str(temp_shp), driver='ESRI Shapefile', engine='pyogrio', encoding='utf-8')
-        except Exception:
-            df_joined.to_file(str(temp_shp), driver='ESRI Shapefile', engine='fiona', mode='w', encoding='utf-8')
-
-        # 3. Move updated shapefile back to final long output path using standard Python
-        for sidecar in tmp_folder.glob(f"{stem}.*"):
-            dst_file = _to_win_long_path(shp_path_obj.parent / sidecar.name)
-            shutil.copy(str(sidecar), dst_file)
-
-        if df_joined['url'].any():
-            df_joined = df_joined.loc[df_joined['tile'].notnull()]
-            shp_folder = shp_path_obj.parents[0]
-            urls = df_joined['url'].unique()
-            for i, url in enumerate(urls):
-                cleansed_url = engine.cleansed_url(url)
-                if not cleansed_url.endswith('.tif'):
-                    continue
-                dataset_name = cleansed_url.split('/')[-1]
-                output_file = shp_folder / dataset_name
+    if df_joined['url'].any():
+        df_joined = df_joined.loc[df_joined['tile'].notnull()]
+        shp_folder = shp_path.parents[0]
+        urls = df_joined['url'].unique()
+        
+        for i, url in enumerate(urls):
+            cleansed_url = engine.cleansed_url(url)
+            if not cleansed_url.endswith('.tif'):
+                continue
                 
-                win_out_file = _to_win_long_path(output_file)
+            dataset_name = cleansed_url.split('/')[-1]
+            output_file = shp_folder / dataset_name
 
-                if os.path.exists(win_out_file):
-                    engine.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', outputs)
-                    continue
-                else:
-                    engine.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', outputs)
+            # Apply extended path formatting ONLY when executing on Windows
+            if os.name == 'nt':
+                abs_str = str(output_file.resolve())
+                # Escaped backslash prevents string termination syntax errors
+                file_target = abs_str if abs_str.startswith("\\\\?\\") else "\\\\?\\" + abs_str
+            else:
+                file_target = output_file
 
-                try:
-                    retry_strategy = Retry(
-                        total=3,
-                        backoff_factor=1,
-                        status_forcelist=[404],
-                        allowed_methods=["GET"]
-                    )
-                    adapter = HTTPAdapter(max_retries=retry_strategy)
-                    request_session = requests.Session()
-                    request_session.mount("https://", adapter)
-                    request_session.mount("http://", adapter)
+            if os.path.exists(file_target):
+                engine.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', outputs)
+                continue
+            else:
+                engine.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', outputs)
 
-                    intersected_response = request_session.get(cleansed_url, timeout=5)
-                except requests.exceptions.ConnectionError:
-                    engine.write_message(f'Timeout error: {cleansed_url}', outputs)
-                    continue
+            try:
+                retry_strategy = Retry(
+                    total=3,
+                    backoff_factor=1,
+                    status_forcelist=[404],
+                    allowed_methods=["GET"]
+                )
+                adapter = HTTPAdapter(max_retries=retry_strategy)
+                request_session = requests.Session()
+                request_session.mount("https://", adapter)
+                request_session.mount("http://", adapter)
 
-                if intersected_response.status_code == 200:
-                    with open(win_out_file, 'wb') as file:
-                        file.write(intersected_response.content)
-                else:
-                    return f'Failed to download: {cleansed_url}'
-            return f'- {shp_path_obj.stem}'
-        else:
-            return f'- No intersect: {shp_path_obj.stem}'
+                intersected_response = request_session.get(cleansed_url, timeout=5)
+            except requests.exceptions.ConnectionError:
+                engine.write_message(f'Timeout error: {cleansed_url}', outputs)
+                continue
+
+            if intersected_response.status_code == 200:
+                output_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(file_target, 'wb') as file:
+                    file.write(intersected_response.content)
+            else:
+                return f'Failed to download: {cleansed_url}'
+                
+        return f'- {shp_path.stem}'
+    else:
+        return f'- No intersect: {shp_path.stem}'
 
 
 class DigitalCoastEngine(Engine):
@@ -187,51 +131,60 @@ class DigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
+    def breakup_cudem(self, digital_coast_folder) -> None:
+        """Create unique year folders for CUDEM data"""
+
+        cudem_folders = digital_coast_folder.glob('NOAA_NCEI_0*')
+        for folder in cudem_folders:
+            year_tifs = defaultdict(list)
+            tif_files = folder.rglob('*.tif')
+            for tif_file in tif_files:
+                year = str(tif_file.stem)[-6:-2]
+                year_tifs[year].append(tif_file)
+            for year in year_tifs:
+                print(f'Creating {year} folder for CUDEM')
+                project_folder = year_tifs[year][0].parents[0]
+                year_folder = digital_coast_folder / f'NOAA_NCEI_{year}_{str(folder.stem)[-4:]}' / 'dem' / project_folder.stem
+                year_folder.mkdir(parents=True, exist_ok=True)
+                for tif_file in year_tifs[year]:
+                    output_tif_file = year_folder / tif_file.name
+                    if output_tif_file.exists():
+                        output_tif_file.unlink()
+                    shutil.move(tif_file, year_folder)
+                tile_index_files = project_folder.glob('*index*.shp')
+                for tile_index in tile_index_files:
+                    tile_index_df = gpd.read_file(tile_index)
+                    tile_index_df.to_file(year_folder / tile_index.name)
+                feature_json = project_folder.parents[1] / 'feature.json'
+                shutil.copy(feature_json, year_folder.parents[1])
+            shutil.rmtree(folder)
+
     def check_tile_index_areas(self, digital_coast_folder, outputs) -> None:
-        """Exclude any small area surveys using a temp location for GeoPandas area calculations"""
+        """Exclude any small area surveys"""
 
         self.write_message('Checking area size of tileindex files', outputs)
         tile_index_shapefiles = [folder for folder in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(folder)]
-        
         for shp_path in tile_index_shapefiles:
-            with tempfile.TemporaryDirectory(dir=_get_short_temp_dir()) as tmp_dir:
-                tmp_folder = pathlib.Path(tmp_dir)
-                temp_shp = tmp_folder / shp_path.name
-                
-                # Copy sidecar files to temp dir
-                target_dir_long = _to_win_long_path(shp_path.parent)
-                stem = shp_path.stem
-                if os.path.exists(target_dir_long):
-                    for filename in os.listdir(target_dir_long):
-                        if filename.startswith(stem + "."):
-                            src_file = _to_win_long_path(shp_path.parent / filename)
-                            shutil.copy(src_file, str(tmp_folder / filename))
-
-                shp_df = gpd.read_file(str(temp_shp)).to_crs(9822)  # Albers Equal Area
-                shp_df['area'] = shp_df['geometry'].area
-                total_area = shp_df["area"].sum()
-                
-                if total_area < self.approved_size:
-                    self.write_message(f' - provider too small: {total_area} - {shp_path}', outputs)
-                    provider_dir = _to_win_long_path(shp_path.parents[2])
-                    if os.path.exists(provider_dir):
-                        shutil.rmtree(provider_dir)
+            shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
+            shp_df['area'] = shp_df['geometry'].area
+            total_area = shp_df["area"].sum()
+            if total_area < self.approved_size:
+                self.write_message(f' - provider too small: {total_area} - {shp_path}', outputs)
+                shutil.rmtree(shp_path.parents[2])
 
     def delete_unused_folder(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Delete any provider folders without a subfolder"""
 
-        dc_folder_long = _to_win_long_path(digital_coast_folder)
-        if os.path.exists(dc_folder_long):
+        if digital_coast_folder.exists():
             self.write_message('Deleting empty provider folders', outputs)
-            provider_folders = [f for f in pathlib.Path(dc_folder_long).glob('*') if f.is_dir()]
+            provider_folders = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
             for provider in provider_folders:
                 if 'unused_providers' != provider.stem:
-                    provider_folder = digital_coast_folder / provider.name
-                    provider_folder_long = _to_win_long_path(provider_folder)
-                    data_types = os.listdir(provider_folder_long)
+                    provider_folder = digital_coast_folder / provider
+                    data_types = os.listdir(provider_folder)
                     if not provider_folder.suffix and 'dem' not in data_types and 'laz' not in data_types:
                         self.write_message(f' - removing empty provider: {provider_folder}', outputs)
-                        shutil.rmtree(provider_folder_long)
+                        shutil.rmtree(provider_folder)
 
     def download_support_files(self, digital_coast_folder: pathlib.Path, tile_gdf: gpd.GeoDataFrame, ecoregion: str, outputs: str) -> None:
         """Download tile_index shapefiles"""
@@ -283,7 +236,7 @@ class DigitalCoastEngine(Engine):
                 self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 self.check_tile_index_areas(digital_coast_folder, outputs)
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
-                if os.path.exists(_to_win_long_path(digital_coast_folder)):
+                if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder, outputs)
         self.close_dask()
 
@@ -301,13 +254,6 @@ class DigitalCoastEngine(Engine):
         """Unzip all zip files in a folder"""
 
         for zipped_file in pathlib.Path(digital_coast_folder).rglob('*.zip'):
-            zip_path_str = _to_win_long_path(zipped_file)
-            extract_dir_str = _to_win_long_path(zipped_file.parents[0])
-
-            with zipfile.ZipFile(zip_path_str, 'r') as zipped:
-                zipped.extractall(extract_dir_str)
-
-            try:
-                zipped_file.unlink()
-            except OSError:
-                os.remove(zip_path_str)
+            with zipfile.ZipFile(zipped_file, 'r') as zipped:
+                zipped.extractall(str(zipped_file.parents[0]))
+            zipped_file.unlink()
