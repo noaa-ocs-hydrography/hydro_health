@@ -17,32 +17,36 @@ from upath import UPath
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
-
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
-
 def _process_training_raster(params: list) -> None:
-    """Process a training raster by extracting array blocks and masking them mathematically"""
+    """Process a training raster by extracting array blocks and masking them mathematically.
+    Executed at the module level to avoid pickling class instances via Dask."""
 
-    raster_path, mask_bounds, output_path, global_mask_path, current_index, total_count, param_lookup, output_prefix = params
-
-    engine = TrainingRastersEngine(param_lookup, output_prefix)
-
+    raster_path, mask_bounds, output_path_str, global_mask_path, current_index, total_count, is_aws, local_tmp_dir_str = params
+    
     raster_name = pathlib.Path(raster_path).name.lower()
     open_path = str(raster_path)
+    output_path = UPath(output_path_str)
 
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-    if engine.is_aws and open_path.startswith('s3://'):
+    # Implicit Skipping - Check existence before doing any heavy lifting
+    if output_path.exists():
+        Engine.write_message_dask(f" - [SKIP]{progress_str} File already exists: {raster_name}", str(OUTPUTS))
+        return
+
+    if is_aws and open_path.startswith('s3://'):
         open_path = open_path.replace('s3://', '/vsis3/')
 
-    engine.write_message(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}", OUTPUTS)
+    Engine.write_message_dask(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}", str(OUTPUTS))
 
     tmp_dst_path = str(output_path)
+    local_tmp_dir = pathlib.Path(local_tmp_dir_str)
 
     try:
-        with tempfile.TemporaryDirectory(dir=engine.local_tmp_dir) as task_tmp_dir:
+        with tempfile.TemporaryDirectory(dir=local_tmp_dir) as task_tmp_dir:
             try:
                 with rasterio.open(open_path) as src_pred:
                     src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
@@ -52,7 +56,7 @@ def _process_training_raster(params: list) -> None:
                     mask_box = box(*mask_bounds)
 
                     if not mask_box.intersects(raster_bounds_geom):
-                        engine.write_message(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.", OUTPUTS)
+                        Engine.write_message_dask(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.", str(OUTPUTS))
                         return
 
                     meta = src_pred.meta.copy()
@@ -62,11 +66,11 @@ def _process_training_raster(params: list) -> None:
                         'tiled': True
                     })
 
-                    if engine.is_aws:
+                    if is_aws:
                         tmp_dst_path = str(Path(task_tmp_dir) / "train_mask_tmp.tif")
 
                     open_mask_path = str(global_mask_path)
-                    if engine.is_aws and open_mask_path.startswith('s3://'):
+                    if is_aws and open_mask_path.startswith('s3://'):
                         open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
 
                     with rasterio.open(open_mask_path) as src_mask:
@@ -83,7 +87,6 @@ def _process_training_raster(params: list) -> None:
                         ) as vrt_mask:
                             with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
                                 with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
-
                                     for ji, window in src_pred.block_windows(1):
                                         pred_arr = src_pred.read(1, window=window)
                                         mask_arr = vrt_mask.read(1, window=window)
@@ -94,22 +97,21 @@ def _process_training_raster(params: list) -> None:
                                         masked_data = np.where(mask_arr == 2, pred_arr, meta['nodata'])
                                         dest.write(masked_data, 1, window=window)
 
-                    if engine.is_aws:
+                    if is_aws:
                         fs = s3fs.S3FileSystem()
                         fs.put(tmp_dst_path, str(output_path))
 
-                engine.write_message(f" - [✓ SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}", OUTPUTS)
-                engine.write_message(engine.log_system_metrics(), OUTPUTS)
+                Engine.write_message_dask(f" - [SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}", str(OUTPUTS))
 
             except Exception as e:
-                engine.write_message(f"Unexpected failure during array masking for {raster_name}: {e}", OUTPUTS)
+                Engine.write_message_dask(f"Unexpected failure during array masking for {raster_name}: {e}", str(OUTPUTS))
 
             finally:
                 if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
                     try:
                         os.remove(tmp_dst_path)
                     except Exception as e:
-                        engine.write_message(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", OUTPUTS)
+                        Engine.write_message_dask(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", str(OUTPUTS))
     finally:
         gc.collect()
 
@@ -118,8 +120,7 @@ class TrainingRastersEngine(Engine):
     """Class for parallel processing training rasters and applying mathematical masks"""
 
     def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
-        """Initialize paths, configurations, and environment for training rasters"""
-
+        """Initialize minimal environment constraints and base properties (Flat architecture)"""
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
@@ -129,29 +130,34 @@ class TrainingRastersEngine(Engine):
                 
         self.is_aws = param_lookup['env'] in ['remote', 'aws']  
 
-        self.inputs_dir = INPUTS
-        self.outputs_dir = OUTPUTS / output_prefix if output_prefix else OUTPUTS
+    def _resolve_paths(self, region: str) -> None:
+        """Resolve paths dynamically for aws or local environments and the given eco region."""
+        self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
+        self.write_message(f"TrainingRastersEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
         bucket = get_config_item('S3', 'BUCKET_NAME')
+        # Correctly handles the prefix logic for S3 paths
+        s3_dir_base = f"s3://{bucket}/{self.output_prefix}/{region}" if self.output_prefix else f"s3://{bucket}/{region}"
+
         mask_training_path = get_config_item('MASK', 'MASK_TRAINING_PATH')
-        self.train_mask_path = UPath(f"s3://{bucket}/{mask_training_path}") if self.is_aws else UPath(self.outputs_dir / mask_training_path)
+        self.train_mask_path = UPath(f"{s3_dir_base}/{mask_training_path}") if self.is_aws else UPath(self.outputs_dir / mask_training_path)
+        
         prediction_output_dir = get_config_item('MODEL', 'PREDICTION_OUTPUT_DIR')
-        self.prediction_out_dir = UPath(f"s3://{bucket}/{prediction_output_dir}") if self.is_aws else UPath(self.outputs_dir / prediction_output_dir)
+        self.prediction_out_dir = UPath(f"{s3_dir_base}/{prediction_output_dir}") if self.is_aws else UPath(self.outputs_dir / prediction_output_dir)
+        
         training_out_dir = get_config_item('MODEL', 'TRAINING_OUTPUT_DIR')
-        self.training_out_dir = UPath(f"s3://{bucket}/{training_out_dir}") if self.is_aws else UPath(self.outputs_dir / training_out_dir)
+        self.training_out_dir = UPath(f"{s3_dir_base}/{training_out_dir}") if self.is_aws else UPath(self.outputs_dir / training_out_dir)
         self.training_out_dir.mkdir(parents=True, exist_ok=True)
         
-        self.filled_folder_name = UPath(get_config_item('TERRAIN', 'FILLED_DIR')).name.lower()
         self.filled_folder_name = "filled_tifs"
 
         training_subgrid_path = get_config_item('MODEL', 'TRAINING_SUB_GRIDS')
         self.subgrid_paths = {
-            'training': UPath(f"s3://{bucket}/{training_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / training_subgrid_path)
+            'training': UPath(f"{s3_dir_base}/{training_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / training_subgrid_path)
         }
 
     def log_system_metrics(self) -> str:
         """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
-
         try:
             total, used, free = shutil.disk_usage(self.local_tmp_dir)
             free_gb = free / (1024**3)
@@ -186,7 +192,6 @@ class TrainingRastersEngine(Engine):
 
     def prepare_mask_bounds(self) -> tuple:
         """Extract spatial bounds directly from training mask TIFF."""
-
         global_mask_path = str(self.train_mask_path)
         open_mask_path = global_mask_path
         
@@ -201,18 +206,11 @@ class TrainingRastersEngine(Engine):
 
     def collect_training_files(self) -> list:
         """Scan directories and collect target raster paths ready for processing."""
-
         potential_train_inputs = []
         for ext in ["*.tif", "*.tiff"]:
             potential_train_inputs.extend(list(self.prediction_out_dir.rglob(ext)))
 
         training_files = []
-        removed_existing_train = 0
-        
-        existing_train_outputs = set()
-        for ext in ["*.tif", "*.tiff"]:
-            existing_train_outputs.update({f.name for f in self.training_out_dir.rglob(ext)})
-        
         for f in potential_train_inputs:
             name_lower = f.name.lower()
             parts_lower = [p.lower() for p in f.parts]
@@ -223,22 +221,23 @@ class TrainingRastersEngine(Engine):
             if 'mosaic' in name_lower and 'combined' not in name_lower and 'combined_lidar' not in parts_lower:
                 continue
                 
-            if f.name in existing_train_outputs:
-                removed_existing_train += 1
-                continue
-                
             training_files.append(f)
 
-        skip_train_msg = f" (Skipping {removed_existing_train} existing)" if removed_existing_train > 0 else ""
-        self.write_message(f"Queuing {len(training_files)} training files{skip_train_msg}...", OUTPUTS)
-        
+        # Sort files by size (smallest to largest)
+        try:
+            training_files.sort(key=lambda x: x.stat().st_size)
+            self.write_message("Sorted training files by size (smallest to largest).", OUTPUTS)
+        except Exception as e:
+            self.write_message(f"Warning: Could not sort files by size: {e}", OUTPUTS)
+
+        self.write_message(f"Queuing {len(training_files)} training files...", OUTPUTS)
         return training_files
 
     def execute_tasks(self, training_files: list, mask_train_bounds: tuple, global_mask_path: str):
         """Schedule and execute training tasks directly via dask map."""
-
         total_train = len(training_files)
         
+        # Pass raw string primitives and bounds, no class context.
         params = [
             [
                 str(file_path),
@@ -247,8 +246,8 @@ class TrainingRastersEngine(Engine):
                 global_mask_path,
                 i + 1,
                 total_train,
-                self.param_lookup,
-                self.output_prefix
+                self.is_aws,
+                str(self.local_tmp_dir)
             ]
             for i, file_path in enumerate(training_files)
         ]
@@ -261,7 +260,6 @@ class TrainingRastersEngine(Engine):
 
     def cleanup_resources(self):
         """Wipe temp disks and safely teardown parallel execution pools."""
-
         self.close_dask()
 
         if hasattr(self, 'local_tmp_dir') and self.local_tmp_dir.exists():
@@ -273,17 +271,20 @@ class TrainingRastersEngine(Engine):
 
     def run(self) -> None:
         """Main entry point for evaluating training masks and processing rasters in parallel"""
-
         try:
-            self.setup_dask(self.param_lookup['env'])
-            global_mask_path, mask_train_bounds = self.prepare_mask_bounds()
-            training_files = self.collect_training_files()
+            self.setup_dask(self.param_lookup['env'], n_workers=6, threads_per_worker=1, memory_limit="4GB")
+            
+            for eco_region in self.param_lookup['eco_regions'].value: 
+                self._resolve_paths(eco_region)
+                
+                global_mask_path, mask_train_bounds = self.prepare_mask_bounds()
+                training_files = self.collect_training_files()
 
-            if training_files:
-                self.write_message(f"Outputting training rasters to: {self.training_out_dir}", OUTPUTS)
-                self.execute_tasks(training_files, mask_train_bounds, global_mask_path)
-            else:
-                self.write_message("No new training rasters to process.", OUTPUTS)
+                if training_files:
+                    self.write_message(f"Outputting training rasters for {eco_region} to: {self.training_out_dir}", OUTPUTS)
+                    self.execute_tasks(training_files, mask_train_bounds, global_mask_path)
+                else:
+                    self.write_message(f"No new training rasters to process for {eco_region}.", OUTPUTS)
 
         finally:
             self.cleanup_resources()
