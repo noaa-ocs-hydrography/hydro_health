@@ -71,15 +71,11 @@ class MetadataEngine:
             provider_folder = feature_json.parents[0]
             with open(feature_json, 'r') as json_file:
                 feature = json.load(json_file)
-            external_provider_links = feature['ExternalProviderLink']
-            for external_data in external_provider_links:
-                json_label = external_data['label'] if external_data['label'] else external_data['altlabel']  # Some labels are empty
-                if json_label in ['Metadata', 'ISO metadata']:
-                    if 'iso' in external_data['link']:
-                        label = 'ISO metadata'
-                    else:
-                        label = 'Metadata'
-                    metadata_params.append([label, feature['Metalink'], provider_folder, outputs])
+            provider_links = feature['links']
+            for provider_link in provider_links:
+                if provider_link['linkTypeName'] == 'Metadata':
+                    label = 'Metadata'
+                    metadata_params.append([label, provider_link['uri'], provider_folder, outputs])
                     break
             
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as meta_pool:
