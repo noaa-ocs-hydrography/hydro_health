@@ -97,16 +97,16 @@ def _calculate_bpi(bathy_array: np.ndarray, cell_size: float, inner_radius: floa
     mask = x**2 + y**2 <= outer_cells**2
     mask[x**2 + y**2 <= inner_cells**2] = False
     
-    kernel = mask.astype(np.float64)
+    kernel = mask.astype(np.float32)
     chunk_size = 1024
     d_bathy = da.from_array(bathy_array, chunks=(chunk_size, chunk_size))
     
-    # Use float64 to prevent catastrophic precision loss during large FFT convolutions
-    d_valid = da.map_blocks(lambda b: (~np.isnan(b)).astype(np.float64), d_bathy, dtype=np.float64)
-    d_bathy_zeroed = da.where(da.isnan(d_bathy), 0.0, d_bathy).astype(np.float64)
+    # Enforced float32 to maximize memory efficiency
+    d_valid = da.map_blocks(lambda b: (~np.isnan(b)).astype(np.float32), d_bathy, dtype=np.float32)
+    d_bathy_zeroed = da.where(da.isnan(d_bathy), 0.0, d_bathy).astype(np.float32)
     
     def _conv(block):
-        return fftconvolve(block, kernel, mode='same').astype(np.float64)
+        return fftconvolve(block, kernel, mode='same').astype(np.float32)
         
     sum_array = d_bathy_zeroed.map_overlap(_conv, depth=outer_cells, boundary='reflect')
     count_array = d_valid.map_overlap(_conv, depth=outer_cells, boundary='reflect')
@@ -176,7 +176,7 @@ def _calculate_tri(bathy_array: np.ndarray) -> np.ndarray:
 
 def _calculate_tci(bathy_array: np.ndarray) -> np.ndarray:
     """Calculates Terrain Complexity Index (TCI) using local 3x3 standard deviation of elevation.
-       Vectorized and numerically stable to replace the missing WBT convergence index."""
+        Vectorized and numerically stable to replace the missing WBT convergence index."""
     sum_diff = np.zeros_like(bathy_array, dtype=np.float32)
     sum_sq_diff = np.zeros_like(bathy_array, dtype=np.float32)
     valid_count = np.zeros_like(bathy_array, dtype=np.float32)
@@ -641,10 +641,10 @@ def _process_terrain_raster_worker(bathy_path: str, best_radii: Dict[str, Tuple[
                                     profile.update(dtype=ext_gradmag.dtype.name, nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
                                     _save_numpy_to_raster(ext_gradmag, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str)
                                     del ext_gradmag
-                    else:
-                        Engine.write_message_dask(f"[WARNING] Shape mismatch on {base_name}. Cannot apply external mask.", OUTPUTS)
-                    del ext_slope
-                    gc.collect()
+                else:
+                    Engine.write_message_dask(f"[WARNING] Shape mismatch on {base_name}. Cannot apply external mask.", OUTPUTS)
+                del ext_slope
+                gc.collect()
 
                 if missing_numpy_dict["_tci.tif"]: 
                     tci_arr = _calculate_tci(bathy_array)
