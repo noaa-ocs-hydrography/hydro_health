@@ -44,7 +44,6 @@ def _process_tile(param_inputs: list[list]) -> None:
         mb_tiff_file.unlink() # delete the original multiband file
         engine.set_ground_to_nodata(tiff_file_path)
         engine.create_slope(tiff_file_path)
-        engine.create_rugosity(tiff_file_path)
         engine.finalize_cog(tiff_file_path) 
 
 
@@ -223,13 +222,6 @@ class BlueTopoEngine(Engine):
             factors = [2, 4, 8, 16]
             dst.build_overviews(factors, rasterio.enums.Resampling.average)
             dst.update_tags(ns='rio_overview', resampling='average')
-
-    def create_rugosity(self, tiff_file_path: pathlib.Path) -> None:
-        """Generate a rugosity/roughness raster from the DEM"""
-
-        rugosity_name = str(tiff_file_path.stem) + '_rugosity.tiff'
-        rugosity_file_path = tiff_file_path.parents[0] / rugosity_name
-        gdal.DEMProcessing(rugosity_file_path, tiff_file_path, 'Roughness')
 
     def create_slope(self, tiff_file_path: pathlib.Path) -> None:
         """Generate a slope raster from the DEM"""
