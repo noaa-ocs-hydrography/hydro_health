@@ -8,7 +8,9 @@ import s3fs
 import numpy as np
 import geopandas as gpd
 import rasterio
+import fiona
 
+from pyproj import Transformer
 from pathlib import Path
 from shapely.geometry import shape
 from shapely.ops import unary_union
@@ -139,6 +141,26 @@ class RasterMaskS3Engine(Engine):
         self.pilot_mode = pilot_mode
         self.local_tmp_dir = None
 
+    def create_mask_vector_files(self, output_prefix: str, ecoregion: str, s3_files: s3fs.S3FileSystem, outputs: str) -> None:
+        """Main factory function for creating additional mask vector datasets"""
+
+        tasks = [
+            ('prediction', str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')),
+            ('training', str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/'))
+        ]
+
+        ecoregion_path = f'{output_prefix}/{ecoregion}' if output_prefix else ecoregion
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        mask_sub = get_config_item('MASK', 'SUBFOLDER')
+        subgrids_gpkg_subpath = get_config_item('MODEL', 'SUBGRIDS')
+        for mask_type, suffix in tasks:
+            tif_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{mask_type}_mask_{ecoregion}.tif")
+            self.raster_mask_to_parquet(ecoregion_path, tif_path, mask_type, outputs)
+            
+            mask_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{suffix}")
+            subgrid_gpkg_prefix = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrids_gpkg_subpath}")
+            self.create_subgrids(mask_path, subgrid_gpkg_prefix, mask_type, outputs, s3_files)
+
     def create_prediction_mask(self, ecoregion: str, output_prefix: str, wkt_geom: str) -> None:
         """Build the base prediction mask (Value 1) for the ecoregion polygon."""
 
@@ -187,41 +209,75 @@ class RasterMaskS3Engine(Engine):
             
             boto3.client('s3').upload_file(tmp.name, bucket, s3_key)
 
-    def create_subgrids(self, mask_gdf, output_path, process_type, outputs: str, s3_files: s3fs.S3FileSystem) -> None:
+    def create_subgrids(self, mask_gdf: UPath, subgrid_gpkg_prefix: str, process_type: str, outputs: str, s3_files: s3fs.S3FileSystem) -> None:
         """Create subgrids layer by intersecting grid tiles with the mask geometries."""
         
         mask_gdf_path = str(mask_gdf)
         self.write_message(f"Preparing {process_type} sub-grids...", outputs)
-        self.write_message(f" -> Reading mask GeoDataFrame from: {mask_gdf_path}", outputs)
+        self.write_message(f" - Reading mask GeoDataFrame from: {mask_gdf_path}", outputs)
 
+        # Load mask GeoDataFrame directly
         mask_gdf_df = gpd.read_parquet(mask_gdf_path, filesystem=s3_files)
-        
-        # Union the subgrids geometry
-        combined_geometry = mask_gdf_df.union_all()
-        mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
+        subgrids_layer = get_config_item("MODEL", "SUBGRIDS_LAYER")
 
-        # Fetch local GPKG path from instance attributes or default to local INPUTS directory
-        grid_gpkg_path = INPUTS / get_config_item('MODEL', 'SUBGRIDS')
-        grid_gpkg_str = str(grid_gpkg_path)
-
-        self.write_message(f" -> Reading local grid GeoPackage from EC2: {grid_gpkg_str}", outputs)
-        
-        sub_grids = gpd.read_file(grid_gpkg_str, layer='prediction_subgrid').to_crs(mask_gdf_df.crs)
-
-        intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
-        intersecting_sub_grids = intersecting_sub_grids.drop_duplicates(subset="geometry")
-        
         with tempfile.TemporaryDirectory(dir=self.local_tmp_dir) as task_tmp_dir:
-            local_tmp_path = str(Path(task_tmp_dir) / "subgrids_tmp.gpkg")
-            
-            self.write_message(f" -> Writing GPKG locally to {local_tmp_path} before uploading...", outputs)
-            intersecting_sub_grids.to_file(local_tmp_path, driver="GPKG") 
-            
-            self.write_message(f" -> Uploading subgrids to S3: {output_path}", outputs)
-            s3_files.put(local_tmp_path, str(output_path))
+            local_tmp_path = Path(task_tmp_dir) / "subgrids_tmp.gpkg"
 
-        self.write_message(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}", outputs)
-        return
+            # Download base GeoPackage locally
+            self.write_message(f" -> Downloading base GeoPackage from S3...", outputs)
+            s3_files.get(str(subgrid_gpkg_prefix), str(local_tmp_path))
+
+            with fiona.open(str(local_tmp_path), layer=subgrids_layer) as src:
+                subgrid_crs = src.crs
+
+            # Transform mask bounding box instead of full dataset
+            mask_bounds = mask_gdf_df.total_bounds  # (xmin, ymin, xmax, ymax)
+            if mask_gdf_df.crs != subgrid_crs:
+                transformer = Transformer.from_crs(mask_gdf_df.crs, subgrid_crs, always_xy=True)
+                xmin, ymin = transformer.transform(mask_bounds[0], mask_bounds[1])
+                xmax, ymax = transformer.transform(mask_bounds[2], mask_bounds[3])
+                subgrid_bbox = (min(xmin, xmax), min(ymin, ymax), max(xmin, xmax), max(ymax, ymax))
+            else:
+                subgrid_bbox = mask_bounds
+
+            self.write_message(f" - Reading filtered subgrids locally via bbox...", outputs)
+
+            # Fast spatial index read on the local temporary file
+            sub_grids = gpd.read_file(
+                str(local_tmp_path), 
+                layer=subgrids_layer, 
+                bbox=subgrid_bbox, 
+                engine="fiona"
+            )
+
+            # Reproject only the spatial subset to mask CRS
+            if sub_grids.crs != mask_gdf_df.crs:
+                sub_grids = sub_grids.to_crs(mask_gdf_df.crs)
+
+            intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df[['geometry']], how="inner", predicate="intersects")
+
+            tile_id_col = "tile_id" if "tile_id" in intersecting_sub_grids.columns else "original_tile"
+            intersecting_sub_grids = (
+                intersecting_sub_grids
+                .drop_duplicates(subset=[tile_id_col])
+                .drop(columns=["index_right"], errors="ignore")
+            )
+
+            target_layer = f"{process_type}_intersecting_subgrids"
+
+            self.write_message(f" -> Writing layer '{target_layer}' to local GeoPackage...", outputs)
+            intersecting_sub_grids.to_file(
+                str(local_tmp_path),
+                layer=target_layer,
+                driver="GPKG",
+                mode="w",
+                engine="fiona"
+            )
+
+            self.write_message(f" - Uploading updated GeoPackage to S3: {subgrid_gpkg_prefix}", outputs)
+            s3_files.put(str(local_tmp_path), str(subgrid_gpkg_prefix))
+
+        self.write_message(f"[SUCCESS] Successfully wrote layer '{target_layer}' to: {subgrid_gpkg_prefix}", outputs)
 
     def create_training_mask(self, ecoregion: str, s3_vrt_paths: list[str], output_prefix: str, outputs: str) -> str:
         """Tile-based merge using bitwise OR to combine bathymetry masks."""
@@ -552,20 +608,13 @@ class RasterMaskS3Engine(Engine):
         """Main run script for RasterMaskS3Engine"""
 
         s3_files = s3fs.S3FileSystem()
-        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        existing_ers = [f.split('/')[-1] for f in s3_files.glob(f"s3://{bucket}/ER*")]
-        
-        mask_sub = get_config_item('MASK', 'SUBFOLDER')
-        subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
-        
-        pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
-        train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=self.pilot_mode)).lstrip('/')
+        existing_ers = [f.split('/')[-1] for f in s3_files.glob(f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER*")]
 
         # Create temp directory for subgrid creation
         self.local_tmp_dir = pathlib.Path.home() / "local_tmp_dir"
         self.local_tmp_dir.mkdir(parents=True, exist_ok=True)
         
-        gpkg = str(INPUTS / 'Master_Grids.gpkg')
+        gpkg = str(INPUTS / get_config_item('SHARED', 'MASTER_GRIDS'))
         gdf = gpd.read_file(gpkg, layer='Enhanced_EcoRegions_50m').to_crs("EPSG:32617")
         gdf = gdf[gdf['EcoRegion'].isin(existing_ers)]
 
@@ -581,16 +630,4 @@ class RasterMaskS3Engine(Engine):
                     result_string = self.create_training_mask(er, vrt_list, output_prefix, outputs)
                     self.write_message(result_string, outputs)
 
-                tasks = [
-                    ('prediction', pred_suffix),
-                    ('training', train_suffix)
-                ]
-
-                ecoregion_path = f'{output_prefix}/{er}' if output_prefix else er
-                for mask_type, suffix in tasks:
-                    tif_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{mask_type}_mask_{er}.tif")
-                    self.raster_mask_to_parquet(ecoregion_path, tif_path, mask_type, outputs)
-                    
-                    mask_path = UPath(f"s3://{bucket}/{ecoregion_path}/{mask_sub}/{suffix}")
-                    out_path = UPath(f"s3://{bucket}/{ecoregion_path}/{subgrid_path}/{mask_type}_intersecting_subgrids.gpkg")
-                    self.create_subgrids(mask_path, out_path, mask_type, outputs, s3_files)
+                self.create_mask_vector_files(output_prefix, er, s3_files, outputs)

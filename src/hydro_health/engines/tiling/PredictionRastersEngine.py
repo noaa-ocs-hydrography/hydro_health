@@ -292,7 +292,7 @@ class PredictionRastersEngine(Engine):
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.write_message(f"PredictionRastersEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         s3_dir_base = f"s3://{bucket}/{region}"
 
         mask_pq = get_config_item('MASK', 'PREDICTION_MASK_PQ')

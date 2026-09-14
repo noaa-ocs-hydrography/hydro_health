@@ -72,7 +72,7 @@ class Engine:
         for text in provider_list_text:
             # 9/8/2026 DigitalCoast API changed from feature_json['attributes']['provider_results_name']
             provider_names = [provider['abbreviated_name'] for provider in feature_json['attributes']['providers']]
-            if text in provider_names:
+            if any(text in provider_name for provider_name in provider_names):
                 return True
         return False
 
@@ -122,12 +122,14 @@ class Engine:
             if not self.approved_dataset(feature):
                 continue
             attrs = feature['attributes']
-            metalink = attrs.get('Metalink') or ''
+            metalink = [link['uri'] for link in attrs['links'] if link['linkTypeName'] == 'Metadata'][0]
             inport_number = metalink.rstrip('/').split('/')[-1]
             inport_suffix = inport_number if inport_number else 'No_InPort'
-            cleaned_provider = self.remove_special_chars(attrs.get('provider_details', 'No_Provider'))
-            folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_suffix}"
-            output_folder_path = digital_coast_folder / folder_name
+            # TODO providers list may have more than 1 provider
+            provider_abbr = [provider['abbreviated_name'] for provider in attrs['providers']][0]
+            cleaned_provider = self.remove_special_chars(provider_abbr)
+            provider_folder = f"{attrs['year']}_{attrs['dataType'].upper()}_{cleaned_provider}_{inport_suffix}"
+            output_folder_path = digital_coast_folder / provider_folder
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON
