@@ -15,7 +15,7 @@ steps:
 - tool: run_vrt_creation
   run: false
 - tool: run_raster_mask_engine
-  run: false
+  run: true
 - tool: grid_digital_coast_files
   run: false
 - tool: run_tsm_layer_engine

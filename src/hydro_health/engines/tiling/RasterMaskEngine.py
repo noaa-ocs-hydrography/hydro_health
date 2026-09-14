@@ -4,8 +4,9 @@ import shutil
 import numpy as np
 import geopandas as gpd
 import rasterio
-import s3fs
+import fiona
 
+from pyproj import Transformer
 from pathlib import Path
 from shapely.geometry import shape
 from shapely.ops import unary_union
@@ -24,6 +25,7 @@ OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 def _create_prediction_mask(param_inputs: list) -> None:
     """Rasterize the Ecoregion boundary into a tiled, compressed GeoTIFF"""
+    
     ecoregion_path, param_lookup = param_inputs
 
     gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
@@ -33,7 +35,6 @@ def _create_prediction_mask(param_inputs: list) -> None:
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)
 
-    # Create an in-memory layer for the filtered ecoregion
     mem_driver = ogr.GetDriverByName('Memory')
     tmp_ds = mem_driver.CreateDataSource('mem_ds')
     tmp_layer = tmp_ds.CreateLayer('mask_poly', srs=output_srs, geom_type=ogr.wkbPolygon)
@@ -41,9 +42,8 @@ def _create_prediction_mask(param_inputs: list) -> None:
     ecoregions_layer.SetAttributeFilter(f"EcoRegion = '{ecoregion_path.stem}'")
     for feat in ecoregions_layer:
         geom = feat.GetGeometryRef()
-        # Ensure transformation matches your get_transformation() logic
         target_srs = osr.SpatialReference()
-        target_srs.ImportFromEPSG(4326) # Source is usually WGS84
+        target_srs.ImportFromEPSG(4326)
         transform = osr.CoordinateTransformation(target_srs, output_srs)
         geom.Transform(transform)
 
@@ -73,7 +73,6 @@ def _create_prediction_mask(param_inputs: list) -> None:
     target_ds.SetGeoTransform((xmin, pixel_size, 0, ymax, 0, -pixel_size))
     target_ds.SetProjection(output_srs.ExportToWkt())
 
-    # Burn the polygon into the raster
     gdal.RasterizeLayer(target_ds, [1], tmp_layer, burn_values=[1])
     target_ds.FlushCache()
     target_ds = None
@@ -90,7 +89,6 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
     vrts = list(dc_vrt_folder.glob("mosaic_*.vrt"))
     if not vrts: return f"{ecoregion_path.stem}: No VRTs found."
 
-    # Copy prediction to training to start
     shutil.copy(str(prediction_file), str(training_file))
 
     ds = gdal.Open(str(training_file), gdal.GA_Update)
@@ -99,7 +97,6 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
     proj = ds.GetProjection()
     cols, rows = ds.RasterXSize, ds.RasterYSize
 
-    # Block processing to keep memory footprint low
     block_size = 4096
     total_burns = 0
 
@@ -112,27 +109,24 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
             num_cols = min(block_size, cols - x)
             mask_chunk = band.ReadAsArray(x, y, num_cols, num_rows)
 
-            # Skip reading VRTs if this block has no prediction pixels (value 1)
             if not np.any(mask_chunk == 1):
                 continue
 
             presence_chunk = np.zeros((num_rows, num_cols), dtype=np.uint8)
 
-            # Calculate world coordinate bounding box for this chunk: [minX, minY, maxX, maxY]
             chunk_min_x = geo_t[0] + x * geo_t[1]
-            chunk_max_y = geo_t[3] + y * geo_t[5]  # geo_t[5] is negative pixel height
+            chunk_max_y = geo_t[3] + y * geo_t[5]
             chunk_max_x = chunk_min_x + num_cols * geo_t[1]
             chunk_min_y = chunk_max_y + num_rows * geo_t[5]
 
             bounds = [chunk_min_x, chunk_min_y, chunk_max_x, chunk_max_y]
 
             for vrt in vrts:
-                vrt_provider = '_'.join(vrt.stem.split('_')[3:]) # No year, ex: DEM_USDA_NRCS_USGS_59010
+                vrt_provider = '_'.join(vrt.stem.split('_')[3:])
                 if vrt_provider.lower() not in approved_providers:
                     engine.write_message(f'- skipping unapproved provider: {vrt_provider}', outputs)
                     continue
 
-                # construct the MEM dataset with dstAlpha instead of loading
                 warp_options = gdal.WarpOptions(
                     format='MEM',
                     outputBounds=bounds,
@@ -173,13 +167,12 @@ class RasterMaskEngine(Engine):
         self.param_lookup = param_lookup
         self.pilot_mode = pilot_mode
 
-    def create_mask_vector_files(self, er_dir: Path, output_prefix: str, s3_files: s3fs.S3FileSystem, outputs: str = None) -> None:
+    def create_mask_vector_files(self, er_dir: Path, output_prefix: str, outputs: str = None) -> None:
         """Helper to orchestrate vector Parquet generation and S3-based subgrid creation per ecoregion."""
-        
+
+        print(f'Starting vector file creation')
         er = er_dir.name
         pilot_mode = getattr(self, 'pilot_mode', False)
-        mask_sub = get_config_item('MASK', 'SUBFOLDER')
-        subgrids_sub = get_config_item('MODEL', 'MODEL_SUBGRIDS')
         
         pred_suffix = str(get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
         train_suffix = str(get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)).lstrip('/')
@@ -189,20 +182,17 @@ class RasterMaskEngine(Engine):
             ('training', train_suffix)
         ]
 
-        er_mask_dir = er_dir / mask_sub
-        er_subgrids_dir = er_dir / subgrids_sub
-
         for mask_type, suffix in tasks:
-            tif_path = er_mask_dir / f"{mask_type}_mask_{er}.tif"
+            print(f' - Beginning {mask_type} from {suffix}')
+            tif_path = er_dir / get_config_item('MASK', 'SUBFOLDER') / f"{mask_type}_mask_{er}.tif"
             
             if tif_path.exists():
                 self.raster_mask_to_parquet(er, output_prefix, tif_path, mask_type, outputs)
                 
-                mask_pq_path = er_mask_dir / suffix
-                subgrid_out_path = er_subgrids_dir / f"{mask_type}_intersecting_subgrids.gpkg"
-                
+                mask_pq_path = er_dir / suffix
+                subgrid_gpkg_local = er_dir / get_config_item('MODEL', 'SUBGRIDS')
                 if mask_pq_path.exists():
-                    self.create_subgrids(mask_pq_path, subgrid_out_path, er, mask_type, outputs, s3_files=s3_files)
+                    self.create_subgrids(mask_pq_path, subgrid_gpkg_local, mask_type, outputs)
 
     def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
         """Convert a raster mask to a GeoDataFrame using memory-safe block processing."""
@@ -272,39 +262,66 @@ class RasterMaskEngine(Engine):
 
         return gdf
 
-    def create_subgrids(self, mask_gdf_path: Path, output_path: Path, ecoregion: str, process_type: str, outputs: str = None, s3_files: s3fs.S3FileSystem = None) -> None:
-        """Create subgrids layer by intersecting grid tiles from S3 GeoPackage with mask geometries."""
-
-        if s3_files is None:
-            s3_files = s3fs.S3FileSystem()
+    def create_subgrids(self, mask_gdf_path: Path, subgrid_gpkg_local: Path, process_type: str, outputs: str = None) -> None:
+        """Create subgrids layer by intersecting grid tiles from local GeoPackage with mask geometries."""
 
         self.write_message(f"Preparing {process_type} sub-grids from: {mask_gdf_path}", outputs)
 
-        mask_gdf_df = gpd.read_parquet(mask_gdf_path)
+        # Load mask GeoDataFrame directly without unifying geometries
+        mask_gdf = gpd.read_parquet(mask_gdf_path)
 
-        # Union the subgrids geometry safely
-        combined_geometry = getattr(mask_gdf_df, "union_all", lambda: getattr(mask_gdf_df, "unary_union", getattr(mask_gdf_df.geometry, "unary_union", None)))()
-        mask_gdf_df = gpd.GeoDataFrame(geometry=[combined_geometry], crs=mask_gdf_df.crs)
-
-        subgrids_s3_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('MODEL', 'SUBGRIDS')}"
-        self.write_message(f" -> Reading model_subgrids GeoPackage from S3: {subgrids_s3_path}", outputs)
-
-        with s3_files.open(subgrids_s3_path, mode="rb") as s3_file:
-            sub_grids = gpd.read_file(s3_file, layer=get_config_item('MODEL', 'SUBGRIDS_LAYER')).to_crs(mask_gdf_df.crs)
-
-        intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf_df, how="inner", predicate='intersects')
+        subgrids_layer = get_config_item('MODEL', 'SUBGRIDS_LAYER')
         
-        tile_id_col = "tile_id" if "tile_id" in intersecting_sub_grids.columns else "original_tile"
+        # Read CRS without loading dataset
+        with fiona.open(str(subgrid_gpkg_local), layer=subgrids_layer) as src:
+            subgrid_crs = src.crs
+
+        # Transform only the mask bounding box instead of entire model_subgrids
+        mask_bounds = mask_gdf.total_bounds  # (xmin, ymin, xmax, ymax)
+        if mask_gdf.crs != subgrid_crs:
+            transformer = Transformer.from_crs(mask_gdf.crs, subgrid_crs, always_xy=True)
+            xmin, ymin = transformer.transform(mask_bounds[0], mask_bounds[1])
+            xmax, ymax = transformer.transform(mask_bounds[2], mask_bounds[3])
+            subgrid_bbox = (min(xmin, xmax), min(ymin, ymax), max(xmin, xmax), max(ymin, ymax))
+        else:
+            subgrid_bbox = mask_bounds
+
+        self.write_message(f" -> Reading filtered subgrids from local GeoPackage via bbox...", outputs)
+
+        # Filter using spatial index with bbox param
+        sub_grids = gpd.read_file(
+            str(subgrid_gpkg_local), 
+            layer=subgrids_layer, 
+            bbox=subgrid_bbox, 
+            engine="fiona"
+        )
+
+        # Convert found polygons to mask CRS
+        if sub_grids.crs != mask_gdf.crs:
+            sub_grids = sub_grids.to_crs(mask_gdf.crs)
+
+        intersecting_sub_grids = gpd.sjoin(sub_grids, mask_gdf[['geometry']], how="inner", predicate="intersects")
+
+        tile_id_col = "tile_id"
         intersecting_sub_grids = (
             intersecting_sub_grids
             .drop_duplicates(subset=[tile_id_col])
             .drop(columns=["index_right"], errors="ignore")
         )
 
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        intersecting_sub_grids.to_file(str(output_path), driver="GPKG")
+        target_layer = f"{process_type}_intersecting_subgrids"
+        self.write_message(f" -> Writing layer '{target_layer}' directly to local GeoPackage...", outputs)
+        
+        # Use mode="w" to create/overwrite this specific layer without touching other layers
+        intersecting_sub_grids.to_file(
+            str(subgrid_gpkg_local), 
+            layer=target_layer, 
+            driver="GPKG", 
+            mode="w", 
+            engine="fiona"
+        )
 
-        self.write_message(f"[SUCCESS] Successfully saved {process_type} subgrids to: {output_path}", outputs)
+        self.write_message(f"[SUCCESS] Successfully saved '{target_layer}' layer to: {subgrid_gpkg_local}", outputs)
 
     def run(self, outputs: str, output_prefix: str) -> None:
         """Main execution flow using Dask for rasters followed by local parquet/subgrid creation."""
@@ -324,6 +341,5 @@ class RasterMaskEngine(Engine):
 
         self.close_dask()    
 
-        s3_files = s3fs.S3FileSystem()
         for ecoregion in ecoregions:
-            self.create_mask_vector_files(ecoregion, output_prefix, s3_files, outputs)
+            self.create_mask_vector_files(ecoregion, output_prefix, outputs)

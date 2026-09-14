@@ -11,7 +11,7 @@ from shapely.geometry import box, Polygon
 HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
 
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, get_environment
 
 
 INPUTS = pathlib.Path(__file__).parents[3] / "inputs"
@@ -97,6 +97,7 @@ class SubgriddingEngine:
 
     def upload_to_s3(self, local_path: pathlib.Path, bucket: str, s3_key: str) -> None:
         """Uploads a local file to an S3 bucket."""
+        
         print(f"Uploading {local_path.name} to s3://{bucket}/{s3_key}...")
         s3_client = boto3.client("s3")
         s3_client.upload_file(str(local_path), bucket, s3_key)
@@ -114,8 +115,8 @@ class SubgriddingEngine:
             subgrid_gdf = subgrid_gdf.rename(columns={self.tile_id_col: "original_tile"})
 
         # Write to local gpkg
-        OUTPUTS.mkdir(parents=True, exist_ok=True)
-        out_gpkg_path = OUTPUTS / "model_subgrids.gpkg"
+        out_gpkg_path = OUTPUTS / ecoregion / get_config_item('MODEL', 'SUBGRIDS')
+        out_gpkg_path.parent.mkdir(parents=True, exist_ok=True)
 
         print(f"Writing layer '{output_layer}' to {out_gpkg_path}...")
         subgrid_gdf.to_file(
@@ -126,10 +127,10 @@ class SubgriddingEngine:
         )
 
         # Upload to S3
-        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        s3_key = f"{ecoregion}/model_subgrids/model_subgrids.gpkg"
-        self.upload_to_s3(out_gpkg_path, bucket, s3_key)
-        out_gpkg_path.unlink()
+        if get_environment() == 'aws':
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            s3_key = f"{ecoregion}/{get_config_item('MODEL', 'SUBGRIDS')}"
+            self.upload_to_s3(out_gpkg_path, bucket, s3_key)
 
         return out_gpkg_path
 
