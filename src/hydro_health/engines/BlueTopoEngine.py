@@ -391,7 +391,7 @@ class BlueTopoEngine(Engine):
 
         self.setup_dask(self.param_lookup['env'])
         for current_res in resolution:
-            param_inputs = [[self.param_lookup, row[0], row[1], output_prefix, current_res] for _, row in tile_gdf.iterrows() if isinstance(row[1], str)]  # rows out of ER will be nan
+            param_inputs = [[self.param_lookup, row.iloc[0], row.iloc[1], output_prefix, current_res] for _, row in tile_gdf.iterrows() if isinstance(row.iloc[1], str)]  # rows out of ER will be nan
             future_tiles = self.client.map(_process_tile, param_inputs)
             tile_results = self.client.gather(future_tiles)
             self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
