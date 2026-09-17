@@ -34,6 +34,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
 
     output_srs = osr.SpatialReference()
     output_srs.ImportFromEPSG(32617)
+    output_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
     mem_driver = ogr.GetDriverByName('Memory')
     tmp_ds = mem_driver.CreateDataSource('mem_ds')
@@ -44,6 +45,7 @@ def _create_prediction_mask(param_inputs: list) -> None:
         geom = feat.GetGeometryRef()
         target_srs = osr.SpatialReference()
         target_srs.ImportFromEPSG(4326)
+        target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
         transform = osr.CoordinateTransformation(target_srs, output_srs)
         geom.Transform(transform)
 
@@ -78,9 +80,10 @@ def _create_prediction_mask(param_inputs: list) -> None:
     target_ds = None
 
 
-def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
+def _create_training_mask(param_inputs: dict) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""
-    
+
+    ecoregion_path, param_lookup = param_inputs
     mask_subfolder = ecoregion_path / get_config_item('MASK', 'SUBFOLDER')
     prediction_file = mask_subfolder / f'prediction_mask_{ecoregion_path.stem}.tif'
     training_file = mask_subfolder / f'training_mask_{ecoregion_path.stem}.tif'
@@ -124,7 +127,8 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
             for vrt in vrts:
                 vrt_provider = '_'.join(vrt.stem.split('_')[3:])
                 if vrt_provider.lower() not in approved_providers:
-                    engine.write_message(f'- skipping unapproved provider: {vrt_provider}', outputs)
+                    engine.write_message(f'- skipping unapproved provider: {vrt_provider}', 
+                                         param_lookup['output_directory'].valueAsText)
                     continue
 
                 warp_options = gdal.WarpOptions(
@@ -140,8 +144,10 @@ def _create_training_mask(ecoregion_path: pathlib.Path) -> str:
                 vrt_ds = gdal.Open(str(vrt))
                 tmp_ds = gdal.Warp('', vrt_ds, options=warp_options)
 
-                if tmp_ds is not None and tmp_ds.RasterCount >= 2:
-                    alpha_chunk = tmp_ds.GetRasterBand(2).ReadAsArray()
+                if tmp_ds is not None and tmp_ds.RasterCount >= 1:
+                    # Get the last band.  Previously used band 2.
+                    alpha_band_idx = tmp_ds.RasterCount 
+                    alpha_chunk = tmp_ds.GetRasterBand(alpha_band_idx).ReadAsArray()
                     presence_chunk |= (alpha_chunk > 0).astype(np.uint8)
 
                 tmp_ds = None
@@ -333,7 +339,7 @@ class RasterMaskEngine(Engine):
 
         self.client.gather(self.client.map(_create_prediction_mask, [[er, self.param_lookup] for er in ecoregions]))
         results = self.client.gather(
-            self.client.map(_create_training_mask, ecoregions)
+            self.client.map(_create_training_mask, [[er, self.param_lookup] for er in ecoregions])
         )
 
         for r in results:
