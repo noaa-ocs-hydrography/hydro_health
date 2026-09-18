@@ -1,5 +1,6 @@
 BLUETOPO:
   SUBFOLDER: model_variables/Prediction/pre_processed
+  REFERENCE_TILE: BH4S257K
 DIGITALCOAST:
   SUBFOLDER: model_variables/Prediction/raw
   API: https://coast.noaa.gov/dataviewer/api/v1/search/missions
@@ -29,7 +30,8 @@ MODEL:
   PREDICTION_OUTPUT_DIR: model_variables/Prediction/processed
   PREDICTION_TILES_DIR: model_variables/Prediction/prediction_tiles
   TRAINING_TILES_DIR: model_variables/Training/training_tiles
-  SUBGRIDS: model_subgrids/Prediction.subgrid.WGS84_8m.gpkg
+  SUBGRIDS: model_subgrids/model_subgrids.gpkg
+  SUBGRIDS_LAYER: final_model_subgrids
   PREDICTION_SUB_GRIDS: model_subgrids/prediction_intersecting_subgrids.gpkg
   TRAINING_SUB_GRIDS: model_subgrids/training_intersecting_subgrids.gpkg
   TRAINING_OUTPUT_DIR: model_variables/Training/processed
@@ -40,8 +42,6 @@ PREPROCESSED:
   HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
   SEDIMENT: model_variables/Prediction/pre_processed/sediment_rasters
   TSM: original_data_files/tsm_data/TSM_year_pair_rasters/
-S3:
-  BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
@@ -49,12 +49,9 @@ SEDIMENT:
   RASTER_PATH: model_variables/Prediction/pre_processed/sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
-  MASTER_GRIDS: Master_Grids.gpkg
+  MASTER_GRIDS: Master_Grid_Reference_Layers.gpkg
   TILES: BlueTopo_Tile_Scheme_20260626_132625
-  STATES: USA_Census_States_200km_Overlap
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
-  ECOGRIDTILES: Eco_Region_Grid_Tiles
-  MODELSUBGRIDTILES: Model_sub_Grid_Tiles
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
   MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads

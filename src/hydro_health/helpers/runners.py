@@ -207,7 +207,8 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
         engine = RasterVRTEngine(param_lookup)
     else:
         engine = RasterVRTS3Engine(param_lookup)
-    
+
+    # TODO move this logic into each run()
     for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:

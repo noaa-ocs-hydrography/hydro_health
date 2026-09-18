@@ -8,11 +8,12 @@ steps:
   run: false
 - tool: run_digital_coast_engine
   run: false
-- tool: run_laz_conversion_engine
-  run: false
+# - tool: run_laz_conversion_engine
+#   run: false
 - tool: run_metadata_engine
   run: false
 - tool: run_vrt_creation
+  run: false
   run: false
 - tool: run_raster_mask_engine
   run: false

@@ -113,7 +113,7 @@ def log_error(errors_list, msg):
 
 # --- CONFIGURATION ---
 # Dynamically fetch the paths using the original project configuration
-bucket = get_config_item('S3', 'BUCKET_NAME').strip('/')
+bucket = get_config_item('SHARED', 'OUTPUT_BUCKET').strip('/')
 raw_output_dir = get_config_item('TERRAIN', 'OUTPUTS')
 clean_out_dir = str(raw_output_dir).replace("s3://", "").strip('/')
 
