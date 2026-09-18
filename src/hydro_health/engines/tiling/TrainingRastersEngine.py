@@ -60,8 +60,10 @@ def _process_training_raster(params: list) -> None:
                         return
 
                     meta = src_pred.meta.copy()
+                    # Safe check for nan nodata when type casting
+                    is_src_nodata_nan = isinstance(src_nodata, (float, np.floating)) and np.isnan(src_nodata)
                     meta.update({
-                        'nodata': np.nan if np.isnan(src_nodata) else src_nodata,
+                        'nodata': np.nan if is_src_nodata_nan else src_nodata,
                         'compress': 'lzw',
                         'tiled': True
                     })
@@ -85,13 +87,45 @@ def _process_training_raster(params: list) -> None:
                             src_nodata=mask_nodata,
                             nodata=mask_nodata,
                         ) as vrt_mask:
+                            
+                            # --- FAST PRE-CHECK PHASE ---
+                            # Avoid expensive LZW writing and disk I/O if there's no valid data at all
+                            has_valid_data = False
+                            nodata_val = meta['nodata']
+                            is_nan_nodata = isinstance(nodata_val, (float, np.floating)) and np.isnan(nodata_val)
+
+                            for ji, window in src_pred.block_windows(1):
+                                mask_arr = vrt_mask.read(1, window=window)
+                                
+                                # ONLY read prediction array if the mask indicates training valid areas (== 2) here
+                                if np.any(mask_arr == 2):
+                                    pred_arr = src_pred.read(1, window=window)
+                                    
+                                    # Extract only the prediction pixels where the mask is 2
+                                    valid_pred_pixels = pred_arr[mask_arr == 2]
+                                    
+                                    if is_nan_nodata:
+                                        if np.any(~np.isnan(valid_pred_pixels)):
+                                            has_valid_data = True
+                                            break # Found valid data, exit pre-check immediately
+                                    else:
+                                        if np.any(valid_pred_pixels != nodata_val):
+                                            has_valid_data = True
+                                            break # Found valid data, exit pre-check immediately
+                            
+                            if not has_valid_data:
+                                Engine.write_message_dask(f" - [SKIP]{progress_str} No valid data within mask for {raster_name}. Skipping disk write.", str(OUTPUTS))
+                                return
+
+                            # --- ACTUAL WRITE PHASE ---
+                            # We confirmed valid data exists, proceed with the disk write
                             with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
                                 with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
                                     for ji, window in src_pred.block_windows(1):
                                         pred_arr = src_pred.read(1, window=window)
                                         mask_arr = vrt_mask.read(1, window=window)
 
-                                        if np.isnan(meta['nodata']) and pred_arr.dtype not in (np.float32, np.float64):
+                                        if is_nan_nodata and pred_arr.dtype not in (np.float32, np.float64):
                                             pred_arr = pred_arr.astype(np.float32)
 
                                         masked_data = np.where(mask_arr == 2, pred_arr, meta['nodata'])
@@ -114,7 +148,6 @@ def _process_training_raster(params: list) -> None:
                         Engine.write_message_dask(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", str(OUTPUTS))
     finally:
         gc.collect()
-
 
 class TrainingRastersEngine(Engine):
     """Class for parallel processing training rasters and applying mathematical masks"""
@@ -272,7 +305,7 @@ class TrainingRastersEngine(Engine):
     def run(self) -> None:
         """Main entry point for evaluating training masks and processing rasters in parallel"""
         try:
-            self.setup_dask(self.param_lookup['env'], n_workers=6, threads_per_worker=1, memory_limit="4GB")
+            self.setup_dask(self.param_lookup['env'], n_workers=2, threads_per_worker=1, memory_limit="12GB")
             
             for eco_region in self.param_lookup['eco_regions'].value: 
                 self._resolve_paths(eco_region)
@@ -287,4 +320,4 @@ class TrainingRastersEngine(Engine):
                     self.write_message(f"No new training rasters to process for {eco_region}.", OUTPUTS)
 
         finally:
-            self.cleanup_resources()
+            self.cleanup_resources() 
