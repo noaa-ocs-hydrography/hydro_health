@@ -398,11 +398,12 @@ class BlueTopoEngine(Engine):
             for ecoregion in self.param_lookup['eco_regions'].value:
                 if output_prefix == 'low_res':
                     beginning_prefix = f'{output_prefix}/{current_res}m'
+                    output_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
                 elif output_prefix:
                     beginning_prefix = output_prefix
+                    output_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
                 else:
-                    beginning_prefix = ''
-                output_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+                    output_path = f"{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
                 self.write_run_manifest(output_path, {'tiles': len(param_inputs)})
         self.close_dask()
         # log all tiles using tile_gdf

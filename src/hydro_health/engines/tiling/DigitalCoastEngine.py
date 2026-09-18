@@ -238,6 +238,8 @@ class DigitalCoastEngine(Engine):
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
                 if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder, outputs)
+            found_providers = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
+            self.write_run_manifest(digital_coast_folder, {'providers': len(found_providers)})
         self.close_dask()
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:
