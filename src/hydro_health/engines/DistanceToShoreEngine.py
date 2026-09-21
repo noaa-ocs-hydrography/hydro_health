@@ -1,7 +1,5 @@
-import os
 import pathlib
-import tempfile
-import boto3
+import sys
 import numpy as np
 import geopandas as gpd
 import rasterio
@@ -10,8 +8,15 @@ from scipy.ndimage import distance_transform_edt
 from shapely.geometry import box
 from upath import UPath
 
+HH_MODEL = pathlib.Path(__file__).parents[2]
+sys.path.append(str(HH_MODEL))
+
 from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+from hydro_health.helpers.tools import get_config_item, Param
+
+
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 class DistanceToShoreEngine(Engine):
@@ -151,6 +156,7 @@ class DistanceToShoreEngine(Engine):
             raise ValueError("Rasterization produced zero shoreline cells.")
 
         ref_profile.update(
+            driver="GTiff",
             dtype=rasterio.uint8,
             count=1,
             nodata=255,
@@ -227,22 +233,20 @@ class DistanceToShoreEngine(Engine):
         boundary_clip_buffer_m: float = 100.0,
     ) -> None:
         """Sequential workflow execution method for building distance to shore raster."""
-        
-        output_dir = pathlib.Path(outputs) / "Helpers"
+
+        output_dir = outputs / "Helpers"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        self.write_message("Starting Distance To Shore workflow...", outputs)
+        print("Starting Distance To Shore workflow...")
 
-        # 1. Build Water Mask
-        self.write_message("- Building Clean Prediction Water Mask...", outputs)
+        print("- Building Clean Prediction Water Mask...")
         clean_mask = self.build_clean_prediction_water_mask(
             prediction_bathy_path=prediction_bathy_path,
             output_dir=output_dir,
             prediction_boundary_path=prediction_boundary_path,
         )
 
-        # 2. Rasterize Shoreline
-        self.write_message("- Rasterizing Shoreline Vector...", outputs)
+        print("- Rasterizing Shoreline Vector...")
         shoreline = self.build_real_shoreline_raster(
             shoreline_path=shoreline_path,
             reference_raster_path=reference_raster_path,
@@ -251,13 +255,27 @@ class DistanceToShoreEngine(Engine):
             boundary_clip_buffer_m=boundary_clip_buffer_m,
         )
 
-        # 3. Compute Distance
-        self.write_message("- Calculating Euclidean Distance to Shoreline...", outputs)
+        print("- Calculating Euclidean Distance to Shoreline...")
         distance = self.build_distance_from_real_shoreline(
             shoreline_raster_path=shoreline["shoreline_raster"],
             clean_water_mask_path=clean_mask["water_mask"],
             output_dir=output_dir,
         )
 
-        self.write_message(f"Successfully generated distance raster: {distance['distance_raster']}", outputs)
-        self.write_message(f"Distance stats: {distance['statistics']}", outputs)
+        print(f"Successfully generated distance raster: {distance['distance_raster']}")
+        print(f"Distance stats: {distance['statistics']}")
+
+if __name__ == "__main__":
+    param_lookup = {
+        'env': Param('aws'),
+        'output_directory': Param(OUTPUTS)
+    }
+    engine = DistanceToShoreEngine(param_lookup, pilot_mode=False)
+    engine.run(
+        OUTPUTS,
+        prediction_bathy_path = OUTPUTS / r"ER_3\model_variables\Prediction\processed\bt.bathy.tif",
+        reference_raster_path = OUTPUTS / r"ER_3\model_variables\Prediction\processed\LOCAL_Pred_Start_Bathy_t_2004_2006_MOSAIC.vrt",
+        shoreline_path = OUTPUTS / r"ER_3\model_variables\Prediction\processed\composite_shoreline_final.shp",
+        prediction_boundary_path = OUTPUTS / r"ER_3\model_variables\Prediction\processed\pilot_model_base_boundary.shp",
+        boundary_clip_buffer_m = 100.0,
+    )
