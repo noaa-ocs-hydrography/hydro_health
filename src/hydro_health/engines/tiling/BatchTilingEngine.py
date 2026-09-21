@@ -145,7 +145,8 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
 
 
 def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, year_ranges: list, 
-                           is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool
+                           is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool,
+                           overwrite_files: bool = False,
                            ) -> Tuple[List[str], List[str], str]:
     """Processes a training tile and writes out BOTH a wide format and batch format data files."""
 
@@ -214,7 +215,7 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         y0_str, y1_str = str(y0), str(y1)
         pair_name = f"{y0_str}_{y1_str}"
         out_name_batch = f"{tile_name}_{pair_name}_training_batch.parquet"
-        if _output_exists(output_dir, out_name_batch):
+        if not overwrite_files and _output_exists(output_dir, out_name_batch):
             existing_files.append(out_name_batch)
             continue
         
@@ -305,7 +306,8 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
 
 
 def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, year_ranges: list, 
-                             is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool
+                             is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool,
+                             overwrite_files: bool = False,
                              ) -> Tuple[List[str], List[str], str]:
     """Processes a prediction tile and writes out BOTH a wide format and batch format data files."""
 
@@ -381,7 +383,7 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
         y0_str, y1_str = str(y0), str(y1)
         pair_name = f"{y0_str}_{y1_str}"
         out_name_batch = f"{tile_name}_{pair_name}_prediction_batch.parquet"
-        if _output_exists(output_dir, out_name_batch):
+        if not overwrite_files and _output_exists(output_dir, out_name_batch):
             existing_files.append(out_name_batch)
             continue
         
@@ -476,16 +478,27 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
 def _transform_tile_task(params: list) -> str:
     """Dask Worker: Reads file -> Calls specific processor -> Cleans up temp -> Returns status. Designed for top-level pickling."""
 
-    f_path, mode, year_ranges, output_dir, tile_name, is_aws, local_tmp_dir, current_index, total_count, verbose = params
+    (
+        f_path, mode, year_ranges, output_dir, tile_name, is_aws,
+        local_tmp_dir, current_index, total_count, verbose, overwrite_files,
+    ) = params
     
     try:
         # Geometry is not used in any output, so avoid GeoPandas/Shapely objects.
         gdf = _read_required_columns(f_path, mode, year_ranges)
 
         if mode == "training":
-            saved, existing, cols_str = _process_training_tile(gdf, output_dir, tile_name, year_ranges, is_aws, local_tmp_dir, current_index, total_count, verbose)
+            saved, existing, cols_str = _process_training_tile(
+                gdf, output_dir, tile_name, year_ranges, is_aws,
+                local_tmp_dir, current_index, total_count, verbose,
+                overwrite_files,
+            )
         elif mode == "prediction":
-            saved, existing, cols_str = _process_prediction_tile(gdf, output_dir, tile_name, year_ranges, is_aws, local_tmp_dir, current_index, total_count, verbose)
+            saved, existing, cols_str = _process_prediction_tile(
+                gdf, output_dir, tile_name, year_ranges, is_aws,
+                local_tmp_dir, current_index, total_count, verbose,
+                overwrite_files,
+            )
         else:
             raise ValueError(f"Unsupported transformation mode: {mode}")
 
@@ -553,7 +566,13 @@ def _safe_worker_plan() -> Tuple[int, str]:
 class BatchTilingEngine(Engine):
     """Class for transforming wide parquet files in batch/long format"""
 
-    def __init__(self, param_lookup: dict, output_prefix: str | bool = False, year_ranges: Optional[List[Tuple[int, int]]] = None) -> None:
+    def __init__(
+        self,
+        param_lookup: dict,
+        output_prefix: str | bool = False,
+        year_ranges: Optional[List[Tuple[int, int]]] = None,
+        overwrite_files: bool = True,
+    ) -> None:
         """Initialize the BatchTilingEngine configurations and environment variables"""
 
         super().__init__()
@@ -568,6 +587,8 @@ class BatchTilingEngine(Engine):
         inherited_yr = getattr(self, 'year_ranges', [])
         yr_val = year_ranges if year_ranges is not None else param_lookup.get('year_ranges', inherited_yr)
         self.year_ranges = yr_val.value if hasattr(yr_val, 'value') else (yr_val if isinstance(yr_val, list) else inherited_yr)
+
+        self.overwrite_files = overwrite_files
         
         self.local_tmp_dir = pathlib.Path(
             tempfile.gettempdir()
@@ -639,7 +660,8 @@ class BatchTilingEngine(Engine):
                 str(self.local_tmp_dir),
                 i + 1,
                 total_files,
-                verbose_workers
+                verbose_workers,
+                self.overwrite_files,
             ])
 
         batch_size = max(4, self._worker_count * 4)
@@ -680,6 +702,10 @@ class BatchTilingEngine(Engine):
                 f"1 thread per worker, and {worker_memory} per worker.",
                 OUTPUTS,
             )
+            self.write_message(
+                f"Overwrite existing batch files: {self.overwrite_files}",
+                OUTPUTS,
+            )
             self.setup_dask(
                 self.env,
                 n_workers=self._worker_count,
@@ -694,16 +720,16 @@ class BatchTilingEngine(Engine):
             
             for eco_region in eco_regions:
                 self._resolve_paths(eco_region)
-
-                self._process_pipeline(
-                    base_dir=self.training_tiles_dir, 
-                    mode="training",
-                    verbose_workers=False
-                )
                 
                 self._process_pipeline(
                     base_dir=self.prediction_tiles_dir, 
                     mode="prediction",
+                    verbose_workers=False
+                )
+                
+                self._process_pipeline(
+                    base_dir=self.training_tiles_dir, 
+                    mode="training",
                     verbose_workers=False
                 )
                 

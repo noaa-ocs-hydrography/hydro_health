@@ -1269,7 +1269,7 @@ class SubgridTilingEngine(Engine):
         self,
         param_lookup: dict,
         output_prefix: str | bool = False,
-        overwrite_outputs: bool = False,
+        overwrite_outputs: bool = True,
     ) -> None:
         """Initialize paths, configurations, and environment variables"""
         
@@ -1556,19 +1556,19 @@ class SubgridTilingEngine(Engine):
         try:
             n_workers = max(1, int(os.environ.get("SUBGRID_N_WORKERS", "6")))
             memory_limit = os.environ.get(
-                "SUBGRID_WORKER_MEMORY_LIMIT", "4.5GB"
+                "SUBGRID_WORKER_MEMORY_LIMIT", "3GB"
             )
             self.tile_batch_size = max(
                 1, int(os.environ.get("SUBGRID_TILE_BATCH_SIZE", str(n_workers)))
             )
             self.multiband_geotiff_every = max(
                 0, int(os.environ.get("SUBGRID_GEOTIFF_EVERY", "1"))
-            )
+            ) 
 
             self.setup_dask(
                 env,
                 n_workers=n_workers,
-                threads_per_worker=6,
+                threads_per_worker=8,
                 memory_limit=memory_limit,
             )
 
