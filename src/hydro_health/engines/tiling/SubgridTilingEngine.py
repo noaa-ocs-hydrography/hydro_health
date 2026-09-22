@@ -1328,10 +1328,20 @@ class SubgridTilingEngine(Engine):
 
         # Subgrid definitions 
         training_subgrid_path = get_config_item('MODEL', 'TRAINING_SUB_GRIDS')
+        training_subgrid_layer = get_config_item('MODEL', 'TRAINING_SUB_GRIDS_LAYER')
+        
         prediction_subgrid_path = get_config_item('MODEL', 'PREDICTION_SUB_GRIDS')
+        prediction_subgrid_layer = get_config_item('MODEL', 'PREDICTION_SUB_GRIDS_LAYER')
+        
         self.subgrid_paths = {
-            'training': UPath(f"{s3_dir_base}/{training_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / training_subgrid_path),
-            'prediction': UPath(f"{s3_dir_base}/{prediction_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / prediction_subgrid_path)
+            'training': {
+                'path': UPath(f"{s3_dir_base}/{training_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / training_subgrid_path),
+                'layer': training_subgrid_layer
+            },
+            'prediction': {
+                'path': UPath(f"{s3_dir_base}/{prediction_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / prediction_subgrid_path),
+                'layer': prediction_subgrid_layer
+            }
         }
 
         # Terrain defaults
