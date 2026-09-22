@@ -82,11 +82,19 @@ def _output_exists(output_dir: str, file_name: str) -> bool:
 def _deduplicate_pixels(df: pd.DataFrame) -> None:
     """Deduplicate using the smallest available stable pixel key."""
 
-    if "tile_id" in df.columns and "FID" in df.columns:
+    if (
+        "tile_id" in df.columns
+        and "FID" in df.columns
+        and df[["tile_id", "FID"]].notna().all(axis=1).all()
+    ):
         subset = ["tile_id", "FID"]
-    elif "FID" in df.columns:
+    elif "FID" in df.columns and df["FID"].notna().all():
         subset = ["FID"]
-    elif "X" in df.columns and "Y" in df.columns:
+    elif (
+        "X" in df.columns
+        and "Y" in df.columns
+        and df[["X", "Y"]].notna().all(axis=1).all()
+    ):
         subset = ["X", "Y"]
     else:
         subset = None
@@ -176,26 +184,12 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
     if 'y' in wide_gdf.columns: rename_dict_wide['y'] = 'Y'
     wide_gdf.rename(columns=rename_dict_wide, inplace=True)
 
-    valid_pairs = []
-    for y0, y1 in year_ranges: 
-        y0_str, y1_str = str(y0), str(y1)
-        
-        def get_bathy_col(year_str):
-            pattern = re.compile(rf"^bathy_{year_str}_filled$", re.IGNORECASE)
-            cols = [c for c in wide_gdf.columns if pattern.match(c)]
-            return cols[0] if cols else None
+    def get_bathy_col(year_str):
+        pattern = re.compile(rf"^bathy_{year_str}_filled$", re.IGNORECASE)
+        cols = [c for c in wide_gdf.columns if pattern.match(c)]
+        return cols[0] if cols else None
 
-        b_y0 = get_bathy_col(y0_str)
-        b_y1 = get_bathy_col(y1_str)
-
-        if b_y0 and b_y1:
-            valid_pairs.append((y0, y1))
-            
-    if not valid_pairs:
-        raise ValueError(
-            f"{tile_name} (Training): No matching bathymetry year pairs "
-            f"found for {year_ranges}. Columns present: {list(wide_gdf.columns)}"
-        )
+    valid_pairs = list(year_ranges)
 
     # Drop year-pair columns without a matching delta
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
@@ -254,7 +248,8 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
                 elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
                 elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
                 
-        pair_df['delta_bathy'] = wide_gdf[b_y1] - wide_gdf[b_y0]
+        if b_y0 and b_y1:
+            pair_df['delta_bathy'] = wide_gdf[b_y1] - wide_gdf[b_y0]
             
         hurr_col = f"hurr_strength_mean_{y0_str}_{y1_str}"
         if hurr_col in wide_gdf.columns: pair_df[hurr_col] = wide_gdf[hurr_col]
@@ -272,7 +267,7 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         if survey_cols: pair_df['survey_end_date'] = wide_gdf[survey_cols[0]]
 
         ordered_cols = [
-            'X', 'Y', 'FID', 'tile_id', 'year_ti', 'year_t', 
+            'X', 'Y', 'FID', 'tile_id', 'year_t', 'year_ti', 
             'bathy_ti', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
             'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
             'flowdir_cos_t', 'flowdir_sin_t', 'gradmag_t', 'rugosity_t', 
@@ -281,7 +276,15 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
             f'hurr_strength_mean_{y0_str}_{y1_str}', f'tsm_mean_{y0_str}_{y1_str}', 
             'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
         ]
-        
+
+        missing_cols = [c for c in ordered_cols if c not in pair_df.columns]
+        if missing_cols:
+            Engine.write_message_dask(
+                f"{progress_str} [WARNING] Training batch {tile_name} "
+                f"{pair_name} is missing columns: {missing_cols}. "
+                "The batch file will be written without them.",
+                OUTPUTS,
+            )
         final_cols = [c for c in ordered_cols if c in pair_df.columns]
         pair_df = pair_df[final_cols]
         _deduplicate_pixels(pair_df)
@@ -345,26 +348,12 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
     if filled_cols:
         wide_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
 
-    valid_pairs = []
-    for y0, y1 in year_ranges: 
-        y0_str, y1_str = str(y0), str(y1)
-        
-        def get_bt_col(year_str):
-            pattern = re.compile(rf"^bt\.(?:bluetopo_)?{year_str}$", re.IGNORECASE)
-            cols = [c for c in wide_gdf.columns if pattern.match(c)]
-            return cols[0] if cols else None
+    def get_bt_col(year_str):
+        pattern = re.compile(rf"^bt\.(?:bluetopo_)?{year_str}$", re.IGNORECASE)
+        cols = [c for c in wide_gdf.columns if pattern.match(c)]
+        return cols[0] if cols else None
 
-        b_y0 = get_bt_col(y0_str)
-        b_y1 = get_bt_col(y1_str)
-
-        if b_y0 and b_y1:
-            valid_pairs.append((y0, y1))
-            
-    if not valid_pairs:
-        raise ValueError(
-            f"{tile_name} (Prediction): No matching bathymetry year pairs "
-            f"found for {year_ranges}. Columns present: {list(wide_gdf.columns)}"
-        )
+    valid_pairs = list(year_ranges)
 
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
     cols_to_drop = []
@@ -398,7 +387,6 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
             cols = [c for c in wide_gdf.columns if pattern.match(c)]
             return cols[0] if cols else None
         
-        b_y0 = get_bt_col(y0_str)
         b_y1 = get_bt_col(y1_str)
         if b_y1: pair_df['bathy_t'] = wide_gdf[b_y1]
         
@@ -425,8 +413,6 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
                 elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
                 elif "unc" in base or "uncertainty" in base: pair_df['uc_t'] = wide_gdf[c]
                 
-        pair_df['delta_bathy'] = wide_gdf[b_y1] - wide_gdf[b_y0]
-            
         hurr_col = f"hurr_strength_mean_{y0_str}_{y1_str}"
         if hurr_col in wide_gdf.columns: pair_df[hurr_col] = wide_gdf[hurr_col]
         
@@ -447,11 +433,18 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
             'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
             'gradmag_t', 'rugosity_t', 'shearproxy_t', 'slope_t', 'slope_deg_t', 
             'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t', 
-            'delta_bathy',
             f'hurr_strength_mean_{y0_str}_{y1_str}', f'tsm_mean_{y0_str}_{y1_str}', 
             'grain_size_layer', 'prim_sed_layer', 'survey_end_date' 
         ]
-        
+
+        missing_cols = [c for c in ordered_cols if c not in pair_df.columns]
+        if missing_cols:
+            Engine.write_message_dask(
+                f"{progress_str} [WARNING] Prediction batch {tile_name} "
+                f"{pair_name} is missing columns: {missing_cols}. "
+                "The batch file will be written without them.",
+                OUTPUTS,
+            )
         final_cols = [c for c in ordered_cols if c in pair_df.columns]
         pair_df = pair_df[final_cols]
         _deduplicate_pixels(pair_df)
