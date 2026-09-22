@@ -189,7 +189,19 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         cols = [c for c in wide_gdf.columns if pattern.match(c)]
         return cols[0] if cols else None
 
-    valid_pairs = list(year_ranges)
+    valid_pairs = []
+    for y0, y1 in year_ranges:
+        if get_bathy_col(str(y0)) and get_bathy_col(str(y1)):
+            valid_pairs.append((y0, y1))
+
+    if not valid_pairs:
+        Engine.write_message_dask(
+            f"{progress_str} [WARNING] Training tile {tile_name} does not "
+            "contain both bathymetry years for any configured year pair. "
+            "No training batch files will be generated for this tile.",
+            OUTPUTS,
+        )
+        return saved_files, existing_files, "NO VALID YEAR PAIRS"
 
     # Drop year-pair columns without a matching delta
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
@@ -353,7 +365,19 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
         cols = [c for c in wide_gdf.columns if pattern.match(c)]
         return cols[0] if cols else None
 
-    valid_pairs = list(year_ranges)
+    valid_pairs = []
+    for y0, y1 in year_ranges:
+        if get_bt_col(str(y0)) and get_bt_col(str(y1)):
+            valid_pairs.append((y0, y1))
+
+    if not valid_pairs:
+        Engine.write_message_dask(
+            f"{progress_str} [WARNING] Prediction tile {tile_name} does not "
+            "contain both bathymetry years for any configured year pair. "
+            "No prediction batch files will be generated for this tile.",
+            OUTPUTS,
+        )
+        return saved_files, existing_files, "NO VALID YEAR PAIRS"
 
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
     cols_to_drop = []
@@ -715,19 +739,17 @@ class BatchTilingEngine(Engine):
                 self._resolve_paths(eco_region)
 
                 self._process_pipeline(
+                    base_dir=self.prediction_tiles_dir, 
+                    mode="prediction",
+                    verbose_workers=False
+                )
+
+                self._process_pipeline(
                     base_dir=self.training_tiles_dir, 
                     mode="training",
                     verbose_workers=False
                 )
                 
-                
-                # self._process_pipeline(
-                #     base_dir=self.prediction_tiles_dir, 
-                #     mode="prediction",
-                #     verbose_workers=False
-                # )
-                
-
         finally:
             try:
                 self.cleanup_resources(OUTPUTS)
