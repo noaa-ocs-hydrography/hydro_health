@@ -713,19 +713,21 @@ class BatchTilingEngine(Engine):
             
             for eco_region in eco_regions:
                 self._resolve_paths(eco_region)
-                
-                self._process_pipeline(
-                    base_dir=self.prediction_tiles_dir, 
-                    mode="prediction",
-                    verbose_workers=False
-                )
-                
+
                 self._process_pipeline(
                     base_dir=self.training_tiles_dir, 
                     mode="training",
                     verbose_workers=False
                 )
                 
+                
+                # self._process_pipeline(
+                #     base_dir=self.prediction_tiles_dir, 
+                #     mode="prediction",
+                #     verbose_workers=False
+                # )
+                
+
         finally:
             try:
                 self.cleanup_resources(OUTPUTS)
