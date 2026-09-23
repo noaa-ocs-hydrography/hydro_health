@@ -2,7 +2,6 @@
 
 import os
 import gc
-import gc
 import shutil
 import psutil
 import pathlib
