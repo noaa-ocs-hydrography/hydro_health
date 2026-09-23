@@ -1355,18 +1355,25 @@ class SubgridTilingEngine(Engine):
 
 
     def _load_subgrids(self, data_type: str) -> gpd.GeoDataFrame:
-        """Loads the subgrids definition for the given data type."""
-        
-        sub_grid_path = self.subgrid_paths.get(data_type)
-        if not sub_grid_path:
-            return None
+            """Loads the subgrids definition for the given data type."""
+            
+            # Get the dictionary containing both 'path' and 'layer'
+            subgrid_info = self.subgrid_paths.get(data_type)
+            
+            if not subgrid_info:
+                return None
 
-        self.write_message(f"Loading subgrids from: {sub_grid_path}", OUTPUTS)
-        try:
-            return gpd.read_file(str(sub_grid_path))
-        except Exception as e:
-            self.write_message(f"EXCEPTION: Reading subgrids from {sub_grid_path} failed. {e}", OUTPUTS)
-            return None
+            # Extract the specific path and layer values
+            file_path = subgrid_info['path']
+            layer_name = subgrid_info['layer']
+
+            self.write_message(f"Loading subgrids from: {file_path} (Layer: {layer_name})", OUTPUTS)
+            try:
+                # Pass both the path and the layer argument to GeoPandas
+                return gpd.read_file(str(file_path), layer=layer_name)
+            except Exception as e:
+                self.write_message(f"EXCEPTION: Reading subgrids from {file_path} (Layer: {layer_name}) failed. {e}", OUTPUTS)
+                return None
 
 
     def _get_filtered_raster_files(self, raster_dirs: list, data_type: str) -> list:
