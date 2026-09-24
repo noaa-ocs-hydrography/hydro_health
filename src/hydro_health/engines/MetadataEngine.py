@@ -1,30 +1,29 @@
 """Class for obtaining all available files"""
 
-import boto3
 import json
 import os
-import re
-import zipfile
 import requests
-import shutil
 import sys
 import geopandas as gpd
 import pathlib
 
 from bs4 import BeautifulSoup
-from botocore.client import Config
-from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
 
 from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class MetadataEngine:
+class MetadataEngine(Engine):
     """Class for parallel processing metadata for a region"""
+
+    def __init__(self, param_lookup: dict[dict]) -> None:
+        super().__init__()
+        self.param_lookup = param_lookup
 
     def download_metadata(self, param_inputs: list[list]) -> None:
         """Parallel process and download metadata dates"""
@@ -104,11 +103,14 @@ class MetadataEngine:
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
+            digital_coast_subfolder = pathlib.Path(ecoregion) / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if output_prefix:
-                digital_coast_folder = pathlib.Path(outputs) / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                digital_coast_subfolder = pathlib.Path(output_prefix) / digital_coast_subfolder
             else:
-                digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                digital_coast_folder = pathlib.Path(outputs) / digital_coast_subfolder
             self.read_json_files(digital_coast_folder, outputs)
+            found_metadata = list(digital_coast_folder.rglob('metadata.txt'))
+            self.write_run_manifest(digital_coast_subfolder, {'metadata': len(found_metadata)})
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""

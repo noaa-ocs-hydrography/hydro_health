@@ -244,16 +244,15 @@ class DigitalCoastS3Engine(Engine):
 
                 with tempfile.TemporaryDirectory() as temp_dir:
                     temp_digital_coast_outputs = pathlib.Path(temp_dir)
-                    
+
+                    digital_coast_subfolder = pathlib.Path(ecoregion) / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
                     if output_prefix:
-                        digital_coast_folder = temp_digital_coast_outputs / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-                    else:                   
-                        digital_coast_folder = temp_digital_coast_outputs / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                        digital_coast_subfolder = pathlib.Path(output_prefix) / digital_coast_subfolder
+                    
+                    digital_coast_folder = temp_digital_coast_outputs / digital_coast_subfolder
                     
                     self.download_support_files(ecoregion_tile_gdf, ecoregion, digital_coast_folder, outputs)
-                    print(f'digie coast: {digital_coast_folder}')
                     tile_index_shapefiles = [shp for shp in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(shp)]
-                    print(f'tile index: {tile_index_shapefiles}')
                     approved_index_shapefiles = self.check_tile_index_areas(tile_index_shapefiles, outputs)
 
                     chunk_size = 5
@@ -281,7 +280,8 @@ class DigitalCoastS3Engine(Engine):
                             digital_coast_index = provider_path_parts.index('DigitalCoast')
                             provider_folder = pathlib.Path(*provider_path_parts[:digital_coast_index + 2])
                             self.upload_files_to_s3(provider_folder, temp_digital_coast_outputs)
-
+                    found_providers = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
+                    self.write_run_manifest(digital_coast_subfolder, {'providers': len(found_providers)})
         self.close_dask()
 
     def unzip_all_files(self, digital_coast_folder: pathlib.Path) -> None:
