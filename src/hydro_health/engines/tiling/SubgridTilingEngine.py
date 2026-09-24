@@ -1269,7 +1269,7 @@ class SubgridTilingEngine(Engine):
         self,
         param_lookup: dict,
         output_prefix: str | bool = False,
-        overwrite_outputs: bool = True,
+        overwrite_outputs: bool = False,
     ) -> None:
         """Initialize paths, configurations, and environment variables"""
         
@@ -1277,18 +1277,6 @@ class SubgridTilingEngine(Engine):
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
         self.overwrite_outputs = overwrite_outputs
-        self.year_ranges = [
-            (1998, 2001),
-            (2004, 2006),
-            (2006, 2010),
-            (2010, 2015),
-            (2016, 2017),
-            (2017, 2018),
-            (2018, 2019),
-            (2019, 2020),
-            (2019, 2022),
-            (2022, 2024),
-        ]
 
         # Setup local temp dir mapping to ensure EC2 limits aren't exceeded
         self.local_tmp_dir = pathlib.Path(str(Path.home() / "hydro_health_local_tmp" / "subgrid_tmp"))
@@ -1571,9 +1559,9 @@ class SubgridTilingEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            n_workers = max(1, int(os.environ.get("SUBGRID_N_WORKERS", "6")))
+            n_workers = max(1, int(os.environ.get("SUBGRID_N_WORKERS", "13")))
             memory_limit = os.environ.get(
-                "SUBGRID_WORKER_MEMORY_LIMIT", "3GB"
+                "SUBGRID_WORKER_MEMORY_LIMIT", "2.5GB"
             )
             self.tile_batch_size = max(
                 1, int(os.environ.get("SUBGRID_TILE_BATCH_SIZE", str(n_workers)))
@@ -1585,7 +1573,7 @@ class SubgridTilingEngine(Engine):
             self.setup_dask(
                 env,
                 n_workers=n_workers,
-                threads_per_worker=8,
+                threads_per_worker=1,
                 memory_limit=memory_limit,
             )
 
