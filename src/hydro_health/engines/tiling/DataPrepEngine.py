@@ -4,7 +4,6 @@ import re
 import os
 import gc
 import shutil
-import tempfile
 import pathlib
 from pathlib import Path
 from typing import Sequence, Iterable
@@ -23,18 +22,14 @@ INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
 DYNAMIC_BASES = (
-    "hurr_count",
-    "hurr_strength",
-    "tsm",
-    "hurr_count_cumulative",
-    "hurr_strength_cumulative",
-    "tsm_cumulative",
+    "hurr_strength_mean",
+    "tsm_mean",
 )
 
 NON_PREDICTORS = {
     "X", "Y", "FID", "tile_id", "source", "dataset_role",
-    "year_t", "year_t1", "interval_years", "pair_id",
-    "bathy_t1", "delta_bathy", "delta_rate", "survey_end_date",
+    "year_t", "year_ti", "interval_years", "pair_id",
+    "bathy_ti", "delta_bathy", "delta_rate", "survey_end_date",
     "geometry", "prediction_row_usable", "sample_weight"
 }
 
@@ -58,15 +53,15 @@ def _safe_numeric_cols(df: pd.DataFrame, columns: Iterable[str]) -> pd.DataFrame
 
 def _ensure_training_targets(df: pd.DataFrame, pair: str, tolerance: float = 1e-8) -> pd.DataFrame:
     out = df.copy()
-    missing = {"bathy_t", "bathy_t1"} - set(out.columns)
+    missing = {"bathy_t", "bathy_ti"} - set(out.columns)
     if missing:
         raise ValueError(f"Missing required training fields: {sorted(missing)}")
     out = _safe_numeric_cols(
         out,
-        ["year_t", "year_t1", "bathy_t", "bathy_t1", "delta_bathy", "delta_rate", "interval_years"],
+        ["year_t", "year_ti", "bathy_t", "bathy_ti", "delta_bathy", "delta_rate", "interval_years"],
     )
-    if {"year_t", "year_t1"}.issubset(out.columns):
-        out["interval_years"] = out["year_t1"] - out["year_t"]
+    if {"year_t", "year_ti"}.issubset(out.columns):
+        out["interval_years"] = out["year_t"] - out["year_ti"]
     elif "interval_years" not in out.columns:
         out["interval_years"] = np.nan
         
@@ -74,7 +69,7 @@ def _ensure_training_targets(df: pd.DataFrame, pair: str, tolerance: float = 1e-
     invalid_interval = ~np.isfinite(out["interval_years"]) | (out["interval_years"] <= 0)
     out.loc[invalid_interval, "interval_years"] = fallback
     
-    recalculated = out["bathy_t1"] - out["bathy_t"]
+    recalculated = out["bathy_t"] - out["bathy_ti"]
     if "delta_bathy" in out:
         mismatch = (
             np.isfinite(out["delta_bathy"]) & np.isfinite(recalculated)
@@ -242,7 +237,7 @@ def _prep_tile_task(params: list) -> dict:
         )
         
         # Safe Coercion
-        numeric = set(predictors) | {"X", "Y", "FID", "bathy_t", "bathy_t1", "delta_bathy", "delta_rate", "interval_years"}
+        numeric = set(predictors) | {"X", "Y", "FID", "bathy_t", "bathy_ti", "delta_bathy", "delta_rate", "interval_years"}
         training_raw = _safe_numeric_cols(training_raw, numeric)
         if prediction_raw is not None:
             prediction_raw = _safe_numeric_cols(prediction_raw, set(predictors) | {"X", "Y", "FID", "bathy_t", "interval_years"})
@@ -258,7 +253,7 @@ def _prep_tile_task(params: list) -> dict:
         # Essential Rows Filter
         essential = (
             np.isfinite(training_raw["X"]) & np.isfinite(training_raw["Y"])
-            & np.isfinite(training_raw["bathy_t"]) & np.isfinite(training_raw["bathy_t1"])
+            & np.isfinite(training_raw["bathy_t"]) & np.isfinite(training_raw["bathy_ti"])
             & np.isfinite(training_raw["delta_bathy"]) & np.isfinite(training_raw["interval_years"])
             & (training_raw["interval_years"] > 0)
         )
@@ -325,13 +320,25 @@ class DataPrepEngine(Engine):
         # Edit this list to match the exact contents of what used to be in master_predictors.txt
         self.master_predictors = [
             "bathy_t",
-            "hurr_count",
-            "hurr_strength",
-            "tsm",
-            "hurr_count_cumulative",
-            "hurr_strength_cumulative",
-            "tsm_cumulative",
-            # Add your other features here! (e.g., "slope", "current_speed", etc.)
+            "bpi_broad_t",
+            "bpi_fine_t",
+            "curv_plan_t",
+            "curv_profile_t",
+            "curv_total_t",
+            "flowacc_t",
+            "flowdir_cos_t",
+            "flowdir_sin_t",
+            "gradmag_t",
+            "rugosity_t",
+            "shearproxy_t",
+            "slope_t",
+            "slope_deg_t",
+            "tci_t",
+            "terrain_classification_t",
+            "hurr_strength_mean",
+            "tsm_mean",
+            "grain_size_layer",
+            "prim_sed_layer",
         ]
 
         # EC2 Temp Storage configuration mapping
@@ -345,7 +352,7 @@ class DataPrepEngine(Engine):
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.write_message(f"DataPrepEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         s3_dir_base = f"s3://{bucket}/{region}"
 
         # Output Directories from SubgridTilingEngine
@@ -362,55 +369,91 @@ class DataPrepEngine(Engine):
         ml_prep_pred_dir = get_config_item('MODEL', 'ML_PREP_PRED_DIR')
         self.ml_prep_pred_dir = UPath(f"{s3_dir_base}/{ml_prep_pred_dir}") if self.is_aws else UPath(self.outputs_dir / ml_prep_pred_dir)
 
+    def _build_task_params(
+        self,
+        model_cfg: dict,
+        crs: str,
+        verbose_workers: bool,
+    ) -> list[list]:
+        """Build tasks for the training batch files that actually exist."""
+        fs = s3fs.S3FileSystem(anon=False) if self.is_aws else None
+
+        if self.is_aws:
+            training_batch_files = [
+                f"s3://{path}" if not path.startswith("s3://") else path
+                for path in fs.find(str(self.training_tiles_dir))
+                if path.endswith("_training_batch.parquet")
+            ]
+        else:
+            training_batch_files = [
+                str(path)
+                for path in Path(self.training_tiles_dir).rglob("*_training_batch.parquet")
+            ]
+
+        params_list = []
+        total_tasks = len(training_batch_files)
+
+        for idx, raw_train_uri in enumerate(training_batch_files, start=1):
+            filename = Path(raw_train_uri).name
+            match = re.fullmatch(
+                r"(?P<tile_id>.+)_(?P<pair>\d{4}_\d{4})_training_batch\.parquet",
+                filename,
+            )
+            if not match:
+                self.write_message(
+                    f"Skipping unrecognized training batch filename: {filename}",
+                    OUTPUTS,
+                )
+                continue
+
+            tile_id = match.group("tile_id")
+            pair = match.group("pair")
+            raw_pred_uri = str(
+                self.prediction_tiles_dir
+                / tile_id
+                / f"{tile_id}_{pair}_prediction_batch.parquet"
+            )
+            pred_exists = fs.exists(raw_pred_uri) if self.is_aws else Path(raw_pred_uri).exists()
+
+            params_list.append([
+                tile_id,
+                pair,
+                raw_train_uri,
+                raw_pred_uri if pred_exists else None,
+                self.master_predictors,
+                model_cfg,
+                crs,
+                self.is_aws,
+                str(self.ml_prep_train_dir / tile_id),
+                str(self.ml_prep_pred_dir / tile_id),
+                str(self.local_tmp_dir),
+                idx,
+                total_tasks,
+                verbose_workers,
+            ])
+
+        return params_list
+
     def run(self) -> None:
         """Main execution method pulling config rules and distributing Prep tasks."""
         env = self.param_lookup.get('env', 'local')
         model_cfg = self.param_lookup.get('model_config', {})
         crs = model_cfg.get('crs', "EPSG:32617")
-        year_pairs = model_cfg.get('year_pairs', [])
         verbose_workers = model_cfg.get('verbose_logging', False)
+        data_prep_workers = int(model_cfg.get('data_prep_workers', 2))
+        data_prep_memory_limit = str(model_cfg.get('data_prep_memory_limit', '4GB'))
 
         try:
-            self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
+            self.setup_dask(
+                env,
+                n_workers=data_prep_workers,
+                threads_per_worker=1,
+                memory_limit=data_prep_memory_limit,
+            )
             
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)
-                
-                # We now pull directly from the hardcoded list set in __init__
-                master_predictors = self.master_predictors
-                
-                # Fetch available tiles from training directory
-                if self.is_aws:
-                    fs = s3fs.S3FileSystem(anon=False)
-                    train_tile_dirs = [d.split('/')[-1] for d in fs.ls(str(self.training_tiles_dir)) if fs.isdir(d)]
-                else:
-                    train_tile_dirs = [d.name for d in self.training_tiles_dir.iterdir() if d.is_dir()]
-
-                params_list = []
-                total_tasks = len(train_tile_dirs) * len(year_pairs)
-                idx = 1
-                
-                for tile_id in train_tile_dirs:
-                    for pair in year_pairs:
-                        raw_train_uri = str(self.training_tiles_dir / tile_id / f"{tile_id}_training_clipped_data.parquet")
-                        raw_pred_uri = str(self.prediction_tiles_dir / tile_id / f"{tile_id}_prediction_clipped_data.parquet")
-                        
-                        # Validate raw files exist before queuing
-                        fs_check = s3fs.S3FileSystem(anon=False) if self.is_aws else None
-                        train_exists = fs_check.exists(raw_train_uri) if self.is_aws else Path(raw_train_uri).exists()
-                        pred_exists = fs_check.exists(raw_pred_uri) if self.is_aws else Path(raw_pred_uri).exists()
-                        
-                        if train_exists:
-                            out_train = str(self.ml_prep_train_dir / tile_id)
-                            out_pred = str(self.ml_prep_pred_dir / tile_id)
-                            
-                            params_list.append([
-                                tile_id, pair, raw_train_uri, raw_pred_uri if pred_exists else None, 
-                                master_predictors, model_cfg, crs, self.is_aws, 
-                                out_train, out_pred, str(self.local_tmp_dir), 
-                                idx, total_tasks, verbose_workers
-                            ])
-                            idx += 1
+                params_list = self._build_task_params(model_cfg, crs, verbose_workers)
 
                 self.write_message(f"Submitting {len(params_list)} ML Data Prep tasks to Dask client map...", OUTPUTS)
                 futures = self.client.map(_prep_tile_task, params_list)
