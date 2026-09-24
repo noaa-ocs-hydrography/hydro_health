@@ -218,7 +218,7 @@ class DigitalCoastEngine(Engine):
             if result:
                 self.write_message(f'Result: {result}', output_folder)
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool) -> None:
         """Main entry point for downloading Digital Coast data"""
 
         print('Downloading Digital Coast Datasets')
