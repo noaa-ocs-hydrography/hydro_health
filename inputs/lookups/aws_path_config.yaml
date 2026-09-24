@@ -24,6 +24,8 @@ MASK:
   PREDICTION_MASK_PQ: masks/prediction_mask.parquet
   TRAINING_MASK_PQ: masks/training_mask.parquet
 MODEL:
+  ML_PREP_TRAIN_DIR: model_variables/Training/training_tiles_cleaned
+  ML_PREP_PRED_DIR: model_variables/Prediction/prediction_tiles_cleaned
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables/Prediction/pre_processed
   PREDICTION_OUTPUT_DIR: model_variables/Prediction/processed
