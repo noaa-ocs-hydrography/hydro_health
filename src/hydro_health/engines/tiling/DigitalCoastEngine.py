@@ -227,17 +227,18 @@ class DigitalCoastEngine(Engine):
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             if isinstance(ecoregion, str):
+                digital_coast_subfolder = pathlib.Path(ecoregion) / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
                 if output_prefix:
-                    digital_coast_folder = pathlib.Path(outputs) / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-                else:
-                    digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-
+                    digital_coast_subfolder = pathlib.Path(output_prefix) / digital_coast_subfolder
+                digital_coast_folder = pathlib.Path(outputs) / digital_coast_subfolder
                 ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
                 self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
                 self.check_tile_index_areas(digital_coast_folder, outputs)
                 self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
                 if digital_coast_folder.exists():
                     self.delete_unused_folder(digital_coast_folder, outputs)
+            found_providers = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
+            self.write_run_manifest(digital_coast_subfolder, {'providers': len(found_providers)})
         self.close_dask()
 
     def process_intersected_datasets(self, digital_coast_folder: pathlib.Path, ecoregion_tile_gdf: gpd.GeoDataFrame, outputs: str) -> None:

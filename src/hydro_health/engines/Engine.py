@@ -41,17 +41,17 @@ class Engine:
         self.target_crs = "EPSG:32617"
         self.target_res = 8
         self.year_ranges = [
-                    (1998, 2001),
-                    (2004, 2006),
-                    (2006, 2010),
-                    (2010, 2015),
-                    (2016, 2017),
-                    (2017, 2018),
-                    (2018, 2019),
-                    (2019, 2020),
-                    (2019, 2022),
-                    (2022, 2024)
-                ]
+            (1998, 2001),
+            (2004, 2006),
+            (2006, 2010),
+            (2010, 2015),
+            (2016, 2017),
+            (2017, 2018),
+            (2018, 2019),
+            (2019, 2020),
+            (2019, 2022),
+            (2022, 2024)
+        ]
 
     # def __init__(self):
     #     # set up logging
@@ -349,13 +349,13 @@ class Engine:
             s3 = boto3.client('s3')
             s3.put_object(
                 Bucket=get_config_item('SHARED', 'OUTPUT_BUCKET'),
-                Key=f"{subfolder}/_manifest.json",
+                Key=f"{subfolder}/_manifest_{self.__class__.__name__}.json",
                 Body=json.dumps(manifest, indent=4)
             )
         else:
-            manifest_prefix = OUTPUTS / subfolder / '_manifest.json'
-            manifest_prefix.parent.mkdir(parents=True, exist_ok=True)
-            with open(manifest_prefix, 'w') as manifest_writer:
+            manifest_path = OUTPUTS / subfolder / f'_manifest_{self.__class__.__name__}.json'
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(manifest_path, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))
 
     def parse_survey_date(self, date_str: str) -> date | None:

@@ -112,9 +112,9 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], outpu
     """Entry point for parallel processing of provider metadata"""
 
     if param_lookup['env'] in ['local', 'remote']:
-        engine = MetadataEngine()
+        engine = MetadataEngine(param_lookup)
     else:
-        engine = MetadataS3Engine()
+        engine = MetadataS3Engine(param_lookup)
     outputs = param_lookup['output_directory'].valueAsText
     engine.run(tiles, output_prefix, outputs)
 
