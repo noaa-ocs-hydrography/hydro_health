@@ -14,13 +14,14 @@ steps:
   run: true
 - tool: run_vrt_creation
   run: false
+  run: false
 - tool: run_raster_mask_engine
   run: false
 - tool: grid_digital_coast_files
   run: false
 - tool: run_tsm_layer_engine
   run: false
-- tool: run_sediment_layer_engine
+- tool: run_sediment_layer_engine  
   run: false
 - tool: run_prediction_rasters_engine
   run: false
@@ -31,6 +32,6 @@ steps:
 - tool: run_training_rasters_engine
   run: false
 - tool: run_subgrid_tiling_engine
-  run: false
+  run: true
 - tool: run_batch_tiling_engine
-  run: false
+  run: true

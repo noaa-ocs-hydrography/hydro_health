@@ -32,8 +32,10 @@ MODEL:
   TRAINING_TILES_DIR: model_variables/Training/training_tiles
   SUBGRIDS: model_subgrids/model_subgrids.gpkg
   SUBGRIDS_LAYER: final_model_subgrids
-  PREDICTION_SUB_GRIDS: model_subgrids/prediction_intersecting_subgrids.gpkg
-  TRAINING_SUB_GRIDS: model_subgrids/training_intersecting_subgrids.gpkg
+  PREDICTION_SUB_GRIDS: model_subgrids/model_subgrids.gpkg
+  PREDICTION_SUB_GRIDS_LAYER: prediction_intersecting_subgrids
+  TRAINING_SUB_GRIDS: model_subgrids/model_subgrids.gpkg
+  TRAINING_SUB_GRIDS_LAYER: training_intersecting_subgrids
   TRAINING_OUTPUT_DIR: model_variables/Training/processed
   TILED_LIDAR_DIR: model_variables/Prediction/pre_processed/tiled
   TILED_LIDAR_PROC: model_variables/Prediction/pre_processed/tiled_processed
@@ -42,6 +44,8 @@ PREPROCESSED:
   HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
   SEDIMENT: model_variables/Prediction/pre_processed/sediment_rasters
   TSM: original_data_files/tsm_data/TSM_year_pair_rasters/
+S3:
+  BUCKET_NAME: ocs-dev-csdl-hydrohealth
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
