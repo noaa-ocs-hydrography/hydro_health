@@ -320,4 +320,4 @@ class TrainingRastersEngine(Engine):
                     self.write_message(f"No new training rasters to process for {eco_region}.", OUTPUTS)
 
         finally:
-            self.cleanup_resources() 
+            self.cleanup_resources()

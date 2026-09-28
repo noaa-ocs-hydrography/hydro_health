@@ -321,7 +321,7 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
                              is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool,
                              overwrite_files: bool = False,
                              ) -> Tuple[List[str], List[str], str]:
-    """Processes a prediction tile without year-pair logic and writes out batch format data."""
+    """Write one prediction batch for each configured pair """
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
     saved_files = []
     existing_files = []
@@ -341,20 +341,12 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
     if 'y' in wide_gdf.columns: rename_dict_wide['y'] = 'Y'
     wide_gdf.rename(columns=rename_dict_wide, inplace=True)
 
-    out_name_batch = f"{tile_name}_prediction_batch.parquet"
-    if not overwrite_files and _output_exists(output_dir, out_name_batch):
-        existing_files.append(out_name_batch)
-        return saved_files, existing_files, "ALREADY EXISTS"
-    
     pair_df = pd.DataFrame()
     if 'X' in wide_gdf.columns: pair_df['X'] = wide_gdf['X']
     if 'Y' in wide_gdf.columns: pair_df['Y'] = wide_gdf['Y']
     if 'FID' in wide_gdf.columns: pair_df['FID'] = wide_gdf['FID']
     if 'tile_id' in wide_gdf.columns: pair_df['tile_id'] = wide_gdf['tile_id']
     
-    hurr_cols = []
-    tsm_cols = []
-
     # Map incoming generic wide features directly to target prediction attributes 
     for c in wide_gdf.columns:
         lower_c = c.lower()
@@ -379,13 +371,7 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
         elif "slope" in base and "deg" not in base: pair_df['slope_t'] = wide_gdf[c]
         elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
         elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
-        elif "unc" in base or "uncertainty" in base: pair_df['uc_t'] = wide_gdf[c]
-        elif lower_c.startswith("hurr_strength_mean_"): 
-            pair_df[c] = wide_gdf[c]
-            hurr_cols.append(c)
-        elif lower_c.startswith("tsm_mean_"): 
-            pair_df[c] = wide_gdf[c]
-            tsm_cols.append(c)
+        elif "uc" in base: pair_df['uc_t'] = wide_gdf[c]
         elif "grain" in base or "sed_size" in base: pair_df['grain_size_layer'] = wide_gdf[c]
         elif "prim_sed" in base or "sed_type" in base: pair_df['prim_sed_layer'] = wide_gdf[c]
         elif "survey" in base: pair_df['survey_end_date'] = wide_gdf[c]
@@ -397,43 +383,63 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
         'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t'
     ]
 
-    # Include specific hurr/tsm if dynamically generated, fallback to strict user-defined names
-    if not hurr_cols: ordered_cols.append('hurr_strength_mean_2004_2006')
-    else: ordered_cols.extend(hurr_cols)
-        
-    if not tsm_cols: ordered_cols.append('tsm_mean_2004_2006')
-    else: ordered_cols.extend(tsm_cols)
-        
     ordered_cols.extend([
         'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
     ])
 
-    # Strip duplicate entries from requested list if multiple hurr strings matched
-    ordered_cols = list(dict.fromkeys(ordered_cols))
+    cols_created_batch = []
+    for y0, y1 in year_ranges:
+        pair_name = f"{y0}_{y1}"
+        hurr_col = f"hurr_strength_mean_{pair_name}"
+        tsm_col = f"tsm_mean_{pair_name}"
+        if hurr_col not in wide_gdf.columns or tsm_col not in wide_gdf.columns:
+            continue
+        if not wide_gdf[[hurr_col, tsm_col]].notna().all(axis=1).any():
+            continue
 
-    missing_cols = [c for c in ordered_cols if c not in pair_df.columns]
-    if missing_cols:
+        out_name_batch = f"{tile_name}_{pair_name}_prediction_batch.parquet"
+        if not overwrite_files and _output_exists(output_dir, out_name_batch):
+            existing_files.append(out_name_batch)
+            continue
+
+        batch_df = pair_df.copy()
+        batch_df['year_t'] = y1
+        batch_df['year_ti'] = y0
+        batch_df[hurr_col] = wide_gdf[hurr_col]
+        batch_df[tsm_col] = wide_gdf[tsm_col]
+
+        pair_cols = ordered_cols[:4] + ['year_t', 'year_ti'] + ordered_cols[4:-3] + [
+            hurr_col, tsm_col
+        ] + ordered_cols[-3:]
+        missing_cols = [c for c in pair_cols if c not in batch_df.columns]
+        if missing_cols:
+            Engine.write_message_dask(
+                f"{progress_str} [WARNING] Prediction batch {tile_name} "
+                f"{pair_name} is missing columns: {missing_cols}. "
+                "The batch file will be written without them.",
+                OUTPUTS,
+            )
+
+        final_cols = [c for c in pair_cols if c in batch_df.columns]
         Engine.write_message_dask(
-            f"{progress_str} [WARNING] Prediction batch {tile_name} "
-            f"is missing columns: {missing_cols}. "
-            "The batch file will be written without them.",
-            OUTPUTS,
+            f"{progress_str} [INFO] Prediction batch {tile_name} {pair_name} used columns: {final_cols}",
+            OUTPUTS
         )
-        
-    final_cols = [c for c in ordered_cols if c in pair_df.columns]
-    
-    Engine.write_message_dask(
-        f"{progress_str} [INFO] Prediction batch {tile_name} used columns: {final_cols}",
-        OUTPUTS
-    )
+        batch_df = batch_df[final_cols]
+        _deduplicate_pixels(batch_df)
+        _save_parquet_file(batch_df, output_dir, out_name_batch, is_aws, local_tmp_dir, progress_str, verbose)
+        saved_files.append(out_name_batch)
+        if not cols_created_batch:
+            cols_created_batch = batch_df.columns.tolist()
+        del batch_df
 
-    pair_df = pair_df[final_cols]
-    _deduplicate_pixels(pair_df)
-    
-    _save_parquet_file(pair_df, output_dir, out_name_batch, is_aws, local_tmp_dir, progress_str, verbose)
-    saved_files.append(out_name_batch)
+    if not saved_files and not existing_files:
+        Engine.write_message_dask(
+            f"{progress_str} [WARNING] Prediction tile {tile_name} has no configured year pair "
+            "with both hurricane and TSM data on at least one pixel. "
+            "No prediction batches generated.", OUTPUTS
+        )
 
-    cols_created_batch = pair_df.columns.tolist()
     del pair_df
     del wide_gdf
     
@@ -526,7 +532,7 @@ class BatchTilingEngine(Engine):
         param_lookup: dict,
         output_prefix: str | bool = False,
         year_ranges: Optional[List[Tuple[int, int]]] = None,
-        overwrite_files: bool = False,
+        overwrite_files: bool = True,
     ) -> None:
         """Initialize the BatchTilingEngine configurations and environment variables"""
         super().__init__()
