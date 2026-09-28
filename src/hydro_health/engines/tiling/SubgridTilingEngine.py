@@ -27,7 +27,6 @@ from hydro_health.engines.Engine import Engine
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs' 
 
-
 TERRAIN_PRODUCT_ALIASES = {
     "bathy": "bathy",
     "bpi_broad": "bpi_broad",
@@ -101,14 +100,12 @@ def _paired_static_variables(
     """Build static raster column names for the configured year pairs."""
     return [f"{prefix}_{start}_{end}" for start, end in year_pairs]
 
-
 def _extract_year_pair(name: str) -> tuple[int, int] | None:
     """Return the trailing YYYY_YYYY pair from a standardized column name."""
     match = re.search(r"((?:19|20)\d{2})_((?:19|20)\d{2})$", name)
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
-
 
 def _available_training_bathy_years(df: pd.DataFrame) -> list[int]:
     """Return sorted training bathymetry years containing at least one value."""
@@ -121,7 +118,6 @@ def _available_training_bathy_years(df: pd.DataFrame) -> list[int]:
         if match and df[column].notna().any():
             years.add(int(match.group(1)))
     return sorted(years)
-
 
 def _available_training_year_pairs(
     bathy_years: list[int], year_ranges: list[tuple[int, int]]
@@ -142,7 +138,6 @@ def _available_training_year_pairs(
             available_pairs.append(pair)
 
     return available_pairs
-
 
 def _standardize_bluetopo_col_name(
     col_name: str, original_tile: str = ""
@@ -172,7 +167,6 @@ def _standardize_bluetopo_col_name(
 
     # The un-suffixed BlueTopo surface is bathymetry.
     return "bt.bathy"
-
 
 def _standardize_combined_col_name(
     col_name: str, original_tile: str = ""
@@ -227,10 +221,9 @@ def _standardize_combined_col_name(
 
     return lower_name
 
-
 def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
     """Cleans raster filenames into consistent column names, standardizing years and prefixes."""
-    
+
     clean_name = col_name
 
     if "survey_end_date" in clean_name.lower():
@@ -279,13 +272,12 @@ def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
 
     return final_name
 
-
 def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
     """Calculates NaN stats for a tile."""
-    
+
     if df.empty:
         return pd.DataFrame()
-    
+
     new_row = {'tile_id': tile_id}
     change_cols = [c for c in df.columns if c.startswith('delta_bathy_')]
     for col in change_cols:
@@ -293,7 +285,6 @@ def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
         new_row[f"{year_pair}_nan_percent"] = round(df[col].isna().mean() * 100, 2)
 
     return pd.DataFrame([new_row])
-
 
 def _read_existing_nan_stats(path: UPath, tile_id: str, is_aws: bool) -> pd.DataFrame:
     """Read only delta columns from an existing Parquet output."""
@@ -316,7 +307,6 @@ def _read_existing_nan_stats(path: UPath, tile_id: str, is_aws: bool) -> pd.Data
         with fs.open(str(path), "rb") as src:
             return _read_from_parquet_file(pq.ParquetFile(src))
     return _read_from_parquet_file(pq.ParquetFile(str(path)))
-
 
 def _create_multiband_geotiff_from_parquet(
     parquet_path: str,
@@ -520,14 +510,12 @@ def _create_multiband_geotiff_from_parquet(
             del df
         gc.collect()
 
-
 def _to_rasterio_path(file: str, is_aws: bool) -> str:
     """Return a path Rasterio/GDAL can open directly."""
     open_path = str(file)
     if is_aws:
         return open_path.replace("s3://", "/vsis3/", 1)
     return open_path
-
 
 def _bounds_in_crs(bounds: tuple, source_crs, destination_crs) -> tuple:
     """Transform bounds only when both CRSs exist and differ."""
@@ -539,14 +527,12 @@ def _bounds_in_crs(bounds: tuple, source_crs, destination_crs) -> tuple:
         return bounds
     return transform_bounds(source_crs, destination_crs, *bounds, densify_pts=21)
 
-
 def _requested_window(src, bounds: tuple):
     """Return the full pixel-aligned window requested by geographic bounds."""
     requested = src.window(*bounds).round_offsets().round_lengths()
     if requested.width <= 0 or requested.height <= 0:
         return None
     return requested
-
 
 def _clipped_window(src, bounds: tuple):
     """Return a pixel-aligned window clipped to a raster, or None when disjoint."""
@@ -567,7 +553,6 @@ def _clipped_window(src, bounds: tuple):
         return None
     return clipped
 
-
 def _valid_mask(data: np.ndarray, nodata) -> np.ndarray:
     """Build a validity mask that handles numeric, NaN, and absent NoData values."""
     if np.issubdtype(data.dtype, np.floating):
@@ -583,7 +568,6 @@ def _valid_mask(data: np.ndarray, nodata) -> np.ndarray:
         except TypeError:
             valid &= data != nodata
     return valid
-
 
 def _crs_equivalent(left_crs, right_crs) -> bool:
     """Compare CRSs by full equality, then by canonical EPSG identifier."""
@@ -603,7 +587,6 @@ def _crs_equivalent(left_crs, right_crs) -> bool:
         and right_epsg is not None
         and left_epsg == right_epsg
     )
-
 
 def _transform_alignment_details(
     current_transform, reference_transform
@@ -637,7 +620,6 @@ def _transform_alignment_details(
     used_subpixel_tolerance = matches and max_difference > strict_tolerance
     return matches, max_difference, tolerance, used_subpixel_tolerance
 
-
 def _build_spatial_catalog(raster_files: list, is_aws: bool) -> list:
     """Read raster metadata once so every tile does not reopen every S3 file."""
     catalog = []
@@ -657,7 +639,6 @@ def _build_spatial_catalog(raster_files: list, is_aws: bool) -> list:
             )
     return catalog
 
-
 def _files_intersecting_tile(
     tile_bounds: tuple, subgrid_crs, raster_catalog: list
 ) -> list:
@@ -674,6 +655,45 @@ def _files_intersecting_tile(
             )
     return intersecting
 
+def _read_aligned_gridded_raster(
+    src,
+    window,
+    common_transform,
+    common_shape: tuple[int, int],
+    common_crs,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read one raster and align its values to the tile's destination grid."""
+    current_transform = src.window_transform(window)
+    current_shape = (int(window.height), int(window.width))
+    (transform_matches, _, _, _) = _transform_alignment_details(
+        current_transform, common_transform
+    )
+    shape_matches = current_shape == common_shape
+
+    data = src.read(1, window=window)
+    valid = _valid_mask(data, src.nodata)
+    values = data.astype(np.float32, copy=False)
+    values[~valid] = np.nan
+
+    if not shape_matches or not transform_matches:
+        aligned_values = np.full(common_shape, np.nan, dtype=np.float32)
+        reproject(
+            source=values,
+            destination=aligned_values,
+            src_transform=current_transform,
+            src_crs=src.crs,
+            src_nodata=np.nan,
+            dst_transform=common_transform,
+            dst_crs=common_crs,
+            dst_nodata=np.nan,
+            resampling=Resampling.nearest,
+            init_dest_nodata=True,
+            num_threads=1,
+        )
+        values = aligned_values
+        valid = np.isfinite(values)
+
+    return values, valid
 
 def _subtile_process_gridded(
     sub_grid: pd.Series,
@@ -717,9 +737,6 @@ def _subtile_process_gridded(
                 if requested_window is None or window is None:
                     continue
 
-                current_transform = src.window_transform(window)
-                current_shape = (int(window.height), int(window.width))
-
                 if common_transform is None:
                     common_transform = src.window_transform(requested_window)
                     common_shape = (
@@ -738,32 +755,9 @@ def _subtile_process_gridded(
                     )
                     continue
 
-                (transform_matches, _, _, _) = _transform_alignment_details(current_transform, common_transform)
-                shape_matches = current_shape == common_shape
-
-                data = src.read(1, window=window)
-                valid = _valid_mask(data, src.nodata)
-                values = data.astype(np.float32, copy=False)
-                values[~valid] = np.nan
-
-                if not shape_matches or not transform_matches:
-                    aligned_values = np.full(common_shape, np.nan, dtype=np.float32)
-                    reproject(
-                        source=values,
-                        destination=aligned_values,
-                        src_transform=current_transform,
-                        src_crs=src.crs,
-                        src_nodata=np.nan,
-                        dst_transform=common_transform,
-                        dst_crs=common_crs,
-                        dst_nodata=np.nan,
-                        resampling=Resampling.nearest,
-                        init_dest_nodata=True,
-                        num_threads=1,
-                    )
-                    del values, valid
-                    values = aligned_values
-                    valid = np.isfinite(values)
+                values, valid = _read_aligned_gridded_raster(
+                    src, window, common_transform, common_shape, common_crs
+                )
 
                 col_name = _standardize_col_name(Path(file).stem, original_tile)
                 values_flat = values.reshape(-1)
@@ -779,7 +773,7 @@ def _subtile_process_gridded(
                 else:
                     master_valid |= valid_flat
 
-                del data, values, values_flat, valid, valid_flat
+                del values, values_flat, valid, valid_flat
         except Exception as e:
             Engine.write_message_dask(
                 f"WARNING: Error reading gridded file {file}: {e}", OUTPUTS
@@ -804,6 +798,59 @@ def _subtile_process_gridded(
     del flattened_arrays, master_valid, mask_2d
     return combined_data, common_crs
 
+def _sample_ungridded_raster(
+    src,
+    tile_extent: tuple,
+    subgrid_crs,
+    point_crs,
+    xs: np.ndarray,
+    ys: np.ndarray,
+    bathy_pair_mask: np.ndarray | None,
+) -> np.ndarray | None:
+    """Sample a static raster at tile points, honoring the bathymetry mask."""
+    raster_bounds = _bounds_in_crs(tile_extent, subgrid_crs, src.crs)
+    window = _clipped_window(src, raster_bounds)
+    if window is None:
+        return None
+
+    sample_xs = xs
+    sample_ys = ys
+    if point_crs is not None and src.crs is not None:
+        source = CRS.from_user_input(point_crs)
+        destination = CRS.from_user_input(src.crs)
+        if source != destination:
+            tx, ty = transform(source, destination, xs, ys)
+            sample_xs = np.asarray(tx)
+            sample_ys = np.asarray(ty)
+
+    win_data = src.read(1, window=window)
+    win_transform = src.window_transform(window)
+    win_rows, win_cols = rasterio.transform.rowcol(
+        win_transform, sample_xs, sample_ys
+    )
+    win_rows = np.asarray(win_rows)
+    win_cols = np.asarray(win_cols)
+
+    in_window = (
+        (win_rows >= 0)
+        & (win_rows < win_data.shape[0])
+        & (win_cols >= 0)
+        & (win_cols < win_data.shape[1])
+    )
+    if bathy_pair_mask is not None:
+        in_window &= bathy_pair_mask
+    vals = np.full(len(xs), np.nan, dtype=np.float32)
+
+    if in_window.any():
+        extracted = win_data[
+            win_rows[in_window], win_cols[in_window]
+        ]
+        extracted_valid = _valid_mask(extracted, src.nodata)
+        extracted = extracted.astype(np.float32, copy=False)
+        extracted[~extracted_valid] = np.nan
+        vals[in_window] = extracted
+
+    return vals
 
 def _subtile_process_ungridded(
     sub_grid: pd.Series,
@@ -817,7 +864,7 @@ def _subtile_process_ungridded(
     training_year_pairs: list[tuple[int, int]] | None = None,
 ) -> pd.DataFrame:
     """Sample intersecting static rasters sequentially inside the tile worker."""
-    
+
     if gridded_df is None or gridded_df.empty:
         return pd.DataFrame()
 
@@ -856,47 +903,12 @@ def _subtile_process_ungridded(
 
         try:
             with rasterio.open(_to_rasterio_path(file, is_aws)) as src:
-                raster_bounds = _bounds_in_crs(tile_extent, subgrid_crs, src.crs)
-                window = _clipped_window(src, raster_bounds)
-                if window is None:
+                vals = _sample_ungridded_raster(
+                    src, tile_extent, subgrid_crs, point_crs, xs, ys,
+                    bathy_pair_mask,
+                )
+                if vals is None:
                     continue
-
-                sample_xs = xs
-                sample_ys = ys
-                if point_crs is not None and src.crs is not None:
-                    source = CRS.from_user_input(point_crs)
-                    destination = CRS.from_user_input(src.crs)
-                    if source != destination:
-                        tx, ty = transform(source, destination, xs, ys)
-                        sample_xs = np.asarray(tx)
-                        sample_ys = np.asarray(ty)
-
-                win_data = src.read(1, window=window)
-                win_transform = src.window_transform(window)
-                win_rows, win_cols = rasterio.transform.rowcol(
-                    win_transform, sample_xs, sample_ys
-                )
-                win_rows = np.asarray(win_rows)
-                win_cols = np.asarray(win_cols)
-
-                in_window = (
-                    (win_rows >= 0)
-                    & (win_rows < win_data.shape[0])
-                    & (win_cols >= 0)
-                    & (win_cols < win_data.shape[1])
-                )
-                if bathy_pair_mask is not None:
-                    in_window &= bathy_pair_mask
-                vals = np.full(len(xs), np.nan, dtype=np.float32)
-
-                if in_window.any():
-                    extracted = win_data[
-                        win_rows[in_window], win_cols[in_window]
-                    ]
-                    extracted_valid = _valid_mask(extracted, src.nodata)
-                    extracted = extracted.astype(np.float32, copy=False)
-                    extracted[~extracted_valid] = np.nan
-                    vals[in_window] = extracted
 
                 if col_name in combined_df:
                     existing = combined_df[col_name].to_numpy(copy=False)
@@ -906,7 +918,6 @@ def _subtile_process_ungridded(
                 else:
                     combined_df[col_name] = vals
 
-                del win_data, vals, win_rows, win_cols, in_window
         except Exception as e:
             Engine.write_message_dask(
                 f"WARNING: Failed to sample ungridded raster {file}: {e}",
@@ -914,7 +925,6 @@ def _subtile_process_ungridded(
             )
 
     return combined_df
-
 
 def _conform_output_schema(
     combined_df: pd.DataFrame,
@@ -1009,7 +1019,6 @@ def _conform_output_schema(
 
     return combined_df.loc[:, expected_columns].copy()
 
-
 def _add_training_deltas(
     combined_df: pd.DataFrame,
     training_year_pairs: list[tuple[int, int]],
@@ -1049,7 +1058,6 @@ def _add_training_deltas(
 
     return sorted_years
 
-
 def _prepare_combined_output(
     combined_df: pd.DataFrame,
     data_type: str,
@@ -1088,7 +1096,6 @@ def _prepare_combined_output(
     return combined_df[
         leading_columns + variable_columns + trailing_columns
     ]
-
 
 def _save_combined_data(
     combined_df: pd.DataFrame,
@@ -1155,15 +1162,94 @@ def _save_combined_data(
 
     return stats_df
 
+def _has_required_tile_input(
+    gridded_files: list,
+    data_type: str,
+    tile_name: str,
+    current_index: int,
+    total_count: int,
+) -> bool:
+    """Check whether a tile has its required BlueTopo or LiDAR input."""
+    # Prediction requires BlueTopo; training requires combined LiDAR.
+    has_bluetopo = any(
+        "bluetopo" in Path(f).name.lower()
+        or Path(f).name.lower().startswith("bt.")
+        for f in gridded_files
+    )
+    has_combined_lidar = any(
+        "combined" in Path(f).name.lower() for f in gridded_files
+    )
 
+    if data_type == "prediction" and not has_bluetopo:
+        Engine.write_message_dask(
+            f" [{current_index}/{total_count}] [SKIP MISSING INPUT] Tile "
+            f"{tile_name}: Missing required BlueTopo data for prediction.",
+            OUTPUTS,
+        )
+        return False
 
+    if data_type == "training" and not has_combined_lidar:
+        Engine.write_message_dask(
+            f" [{current_index}/{total_count}] [SKIP MISSING INPUT] Tile "
+            f"{tile_name}: Missing required combined LiDAR data for training.",
+            OUTPUTS,
+        )
+        return False
 
-def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: list, static_patterns: list, 
-                  is_aws: bool, output_folder: str, data_type: str, tile_name: str, local_tmp_dir: str, 
-                  current_index: int, total_count: int, verbose: bool, subgrid_crs,
-                  overwrite_outputs: bool, year_ranges: list[tuple[int, int]]) -> pd.DataFrame:
+    return True
+
+def _training_year_pairs_for_tile(
+    gridded_df: pd.DataFrame,
+    data_type: str,
+    year_ranges: list[tuple[int, int]],
+    tile_name: str,
+    current_index: int,
+    total_count: int,
+) -> list[tuple[int, int]]:
+    """Select and report configured pairs present in the tile bathymetry."""
+    valid_training_year_pairs = []
+    if data_type == "training":
+        available_bathy_years = _available_training_bathy_years(gridded_df)
+        valid_training_year_pairs = _available_training_year_pairs(
+            available_bathy_years, year_ranges
+        )
+        if not valid_training_year_pairs:
+            Engine.write_message_dask(
+                f" [{current_index}/{total_count}] "
+                f"[SKIP NO CONFIGURED BATHY PAIR] Tile {tile_name}: "
+                f"valid bathymetry years={available_bathy_years}; none "
+                f"form a configured year range from {year_ranges}.",
+                OUTPUTS,
+            )
+            return []
+
+        Engine.write_message_dask(
+            f" [{current_index}/{total_count}] [TRAINING YEAR PAIRS] Tile "
+            f"{tile_name}: valid bathymetry years={available_bathy_years}; "
+            f"using configured pairs={valid_training_year_pairs}.",
+            OUTPUTS,
+        )
+    return valid_training_year_pairs
+
+def _process_tile(
+    sub_grid: pd.Series,
+    gridded_files: list,
+    ungridded_files: list,
+    static_patterns: list,
+    is_aws: bool,
+    output_folder: str,
+    data_type: str,
+    tile_name: str,
+    local_tmp_dir: str,
+    current_index: int,
+    total_count: int,
+    verbose: bool,
+    subgrid_crs,
+    overwrite_outputs: bool,
+    year_ranges: list[tuple[int, int]],
+) -> pd.DataFrame:
     """Process and save one complete tile inside one Dask worker."""
-    
+
     expected_path = UPath(output_folder) / f"{tile_name}_{data_type}_clipped_data.parquet"
 
     Engine.write_message_dask(f"Processing tile {tile_name} ({current_index}/{total_count})...", OUTPUTS)
@@ -1193,59 +1279,26 @@ def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: lis
         )
         return pd.DataFrame()
 
-    # Prediction must have bluetopo data. Training MUST have combined lidar data.
-    has_bluetopo = any(
-        "bluetopo" in Path(f).name.lower()
-        or Path(f).name.lower().startswith("bt.")
-        for f in gridded_files
-    )
-    has_combined_lidar = any(
-        "combined" in Path(f).name.lower() for f in gridded_files
-    )
-
-    if data_type == "prediction" and not has_bluetopo:
-        Engine.write_message_dask(
-            f" [{current_index}/{total_count}] [SKIP MISSING INPUT] Tile "
-            f"{tile_name}: Missing required BlueTopo data for prediction.",
-            OUTPUTS,
-        )
-        return pd.DataFrame()
-
-    if data_type == "training" and not has_combined_lidar:
-        Engine.write_message_dask(
-            f" [{current_index}/{total_count}] [SKIP MISSING INPUT] Tile "
-            f"{tile_name}: Missing required combined LiDAR data for training.",
-            OUTPUTS,
-        )
+    if not _has_required_tile_input(
+        gridded_files, data_type, tile_name, current_index, total_count
+    ):
         return pd.DataFrame()
 
     try:
         gridded_df, point_crs = _subtile_process_gridded(
             sub_grid, gridded_files, is_aws, subgrid_crs
         )
-        valid_training_year_pairs = []
-        if data_type == "training":
-            available_bathy_years = _available_training_bathy_years(gridded_df)
-            valid_training_year_pairs = _available_training_year_pairs(
-                available_bathy_years, year_ranges
-            )
-            if not valid_training_year_pairs:
-                Engine.write_message_dask(
-                    f" [{current_index}/{total_count}] "
-                    f"[SKIP NO CONFIGURED BATHY PAIR] Tile {tile_name}: "
-                    f"valid bathymetry years={available_bathy_years}; none "
-                    f"form a configured year range from {year_ranges}.",
-                    OUTPUTS,
-                )
-                del gridded_df
-                return pd.DataFrame()
-
-            Engine.write_message_dask(
-                f" [{current_index}/{total_count}] [TRAINING YEAR PAIRS] Tile "
-                f"{tile_name}: valid bathymetry years={available_bathy_years}; "
-                f"using configured pairs={valid_training_year_pairs}.",
-                OUTPUTS,
-            )
+        valid_training_year_pairs = _training_year_pairs_for_tile(
+            gridded_df,
+            data_type,
+            year_ranges,
+            tile_name,
+            current_index,
+            total_count,
+        )
+        if data_type == "training" and not valid_training_year_pairs:
+            del gridded_df
+            return pd.DataFrame()
 
         combined_df = _subtile_process_ungridded(
             sub_grid,
@@ -1258,7 +1311,7 @@ def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: lis
             data_type,
             valid_training_year_pairs,
         )
-        
+
         # Save and calculate final table statistics
         stats = _save_combined_data(
             combined_df=combined_df,
@@ -1283,13 +1336,12 @@ def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: lis
             )
         del gridded_df, combined_df
         return stats
-    
+
     except Exception as e:
         Engine.write_message_dask(f"ERROR: Error processing tile {tile_name}: {e}", OUTPUTS)
         return pd.DataFrame()
     finally:
         gc.collect()
-
 
 class SubgridTilingEngine(Engine):
     """Process complete raster tiles as memory-isolated Dask tasks."""
@@ -1301,7 +1353,7 @@ class SubgridTilingEngine(Engine):
         overwrite_outputs: bool = False,
     ) -> None:
         """Initialize paths, configurations, and environment variables"""
-        
+
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
@@ -1318,7 +1370,7 @@ class SubgridTilingEngine(Engine):
 
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths dynamically for aws or local environments and the given eco region."""
-        
+
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.write_message(f"SubgridTilingEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
@@ -1346,10 +1398,10 @@ class SubgridTilingEngine(Engine):
         # Subgrid definitions 
         training_subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
         training_subgrid_layer = get_config_item('MODEL', 'TRAINING_SUB_GRIDS_LAYER')
-        
+
         prediction_subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
         prediction_subgrid_layer = get_config_item('MODEL', 'PREDICTION_SUB_GRIDS_LAYER')
-        
+
         self.subgrid_paths = {
             'training': {
                 'path': UPath(f"{s3_dir_base}/{training_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / training_subgrid_path),
@@ -1370,13 +1422,12 @@ class SubgridTilingEngine(Engine):
         combined_lidar_dir = get_config_item('TERRAIN', 'COMBINED_LIDAR_DIR')
         self.combined_lidar_dir = UPath(f"{s3_dir_base}/{combined_lidar_dir}") if self.is_aws else UPath(self.outputs_dir / combined_lidar_dir)
 
-
     def _load_subgrids(self, data_type: str) -> gpd.GeoDataFrame:
             """Loads the subgrids definition for the given data type."""
-            
+
             # Get the dictionary containing both 'path' and 'layer'
             subgrid_info = self.subgrid_paths.get(data_type)
-            
+
             if not subgrid_info:
                 return None
 
@@ -1392,10 +1443,9 @@ class SubgridTilingEngine(Engine):
                 self.write_message(f"EXCEPTION: Reading subgrids from {file_path} (Layer: {layer_name}) failed. {e}", OUTPUTS)
                 return None
 
-
     def _get_filtered_raster_files(self, raster_dirs: list, data_type: str) -> list:
         """Scans and filters raster files based on type rules."""
-        
+
         self.write_message("Scanning directories for raster files...", OUTPUTS)
         all_raster_files = []
 
@@ -1403,7 +1453,7 @@ class SubgridTilingEngine(Engine):
             if not raster_dir.exists():
                 self.write_message(f"Directory not found, skipping: {raster_dir}", OUTPUTS)
                 continue
-                
+
             for f in raster_dir.rglob("*"):
                 if f.suffix.lower() in {'.tif', '.tiff'}:
                     name_lower = f.name.lower()
@@ -1419,7 +1469,7 @@ class SubgridTilingEngine(Engine):
                         data_type == "prediction" and is_bluetopo_file
                     ):
                         continue
-                    
+
                     exclude_patterns = ["tsm_cumulative", "hurr_count_mean", "hurr_count_cumulative", "hurr_strength_cumulative"]
                     if any(x in name_lower for x in exclude_patterns) or \
                        re.search(r"hurr_count_\d{4}_\d{4}", name_lower) or \
@@ -1435,10 +1485,9 @@ class SubgridTilingEngine(Engine):
 
         return all_raster_files
 
-
     def _partition_raster_files(self, all_raster_files: list, sub_grids: gpd.GeoDataFrame) -> tuple:
         """Pre-partition files into gridded vs ungridded lists."""
-        
+
         valid_tids = [str(tid) for tid in sub_grids['original_tile'].unique() if pd.notna(tid) and str(tid).strip()]
         valid_tid_patterns = [
             re.compile(rf"(?:^|_){re.escape(tid)}(?:_|\.)", re.IGNORECASE)
@@ -1451,10 +1500,105 @@ class SubgridTilingEngine(Engine):
 
         return gridded_files, ungridded_files
 
+    def _collect_tile_batch(
+        self,
+        tasks: list,
+        valid_results: list,
+        created_parquet_count: int,
+    ) -> int:
+        """Collect completed tile results and create scheduled GeoTIFFs."""
+        if not tasks:
+            return created_parquet_count
+
+        for result in dask.compute(*tasks):
+            if result is not None and not result.empty:
+                if result.attrs.get("created_parquet", False):
+                    created_parquet_count += 1
+                    if (
+                        self.multiband_geotiff_every > 0
+                        and (created_parquet_count - 1)
+                        % self.multiband_geotiff_every
+                        == 0
+                    ):
+                        dask.compute(
+                            dask.delayed(
+                                _create_multiband_geotiff_from_parquet
+                            )(
+                                parquet_path=result.attrs["parquet_path"],
+                                raster_crs=result.attrs["raster_crs"],
+                                is_aws=self.is_aws,
+                                local_tmp_dir=str(self.local_tmp_dir),
+                                created_sequence=created_parquet_count,
+                                overwrite_outputs=self.overwrite_outputs,
+                            )
+                        )
+                valid_results.append(result)
+
+        return created_parquet_count
+
+    def _submit_tile_batches(
+        self,
+        sub_grids: gpd.GeoDataFrame,
+        gridded_files: list,
+        ungridded_catalog,
+        output_dir: UPath,
+        data_type: str,
+        verbose_workers: bool,
+    ) -> list[pd.DataFrame]:
+        """Schedule tile tasks in batches and collect their results."""
+        valid_results = []
+        pending_tasks = []
+        created_parquet_count = 0
+        total_tiles = len(sub_grids)
+        subgrid_crs = sub_grids.crs.to_wkt() if sub_grids.crs is not None else None
+
+        for i, (_, sub_grid) in enumerate(sub_grids.iterrows()):
+            tile_name = str(sub_grid['tile_id'])
+            output_folder = output_dir / tile_name
+
+            original_tile = str(sub_grid['original_tile'])
+            tile_pattern = re.compile(
+                rf"(?:^|_){re.escape(original_tile)}(?:_|\.)", re.IGNORECASE
+            )
+            tile_gridded_files = [
+                f for f in gridded_files if tile_pattern.search(Path(f).name)
+            ]
+            tile_ungridded_files = _files_intersecting_tile(
+                sub_grid.geometry.bounds, subgrid_crs, ungridded_catalog
+            )
+
+            pending_tasks.append(dask.delayed(_process_tile)(
+                sub_grid=sub_grid,
+                gridded_files=tile_gridded_files,
+                ungridded_files=tile_ungridded_files,
+                static_patterns=self.static_patterns,
+                is_aws=self.is_aws,
+                output_folder=str(output_folder),
+                data_type=data_type,
+                tile_name=tile_name,
+                local_tmp_dir=str(self.local_tmp_dir),
+                current_index=i + 1,
+                total_count=total_tiles,
+                verbose=verbose_workers,
+                subgrid_crs=subgrid_crs,
+                overwrite_outputs=self.overwrite_outputs,
+                year_ranges=self.year_ranges,
+            ))
+
+            if len(pending_tasks) >= self.tile_batch_size:
+                created_parquet_count = self._collect_tile_batch(
+                    pending_tasks, valid_results, created_parquet_count
+                )
+                pending_tasks.clear()
+
+        self._collect_tile_batch(
+            pending_tasks, valid_results, created_parquet_count
+        )
+        return valid_results
 
     def _process_pipeline(self, raster_dirs: list, output_dir: UPath, data_type: str, verbose_workers: bool = False) -> None:
         """Submit whole-tile tasks so large raster arrays remain on workers."""
-        
+
         self.write_message(f"--- Starting {data_type.upper()} pipeline ---", OUTPUTS)
         self.write_message(self.log_system_metrics(), OUTPUTS)
 
@@ -1499,78 +1643,15 @@ class SubgridTilingEngine(Engine):
             f"Overwrite outputs: {self.overwrite_outputs}. {geotiff_message}",
             OUTPUTS,
         )
-        
-        valid_results = []
-        pending_tasks = []
-        created_parquet_count = 0
-        subgrid_crs = sub_grids.crs.to_wkt() if sub_grids.crs is not None else None
 
-        def collect_batch(tasks: list) -> None:
-            nonlocal created_parquet_count
-            if not tasks:
-                return
-            for result in dask.compute(*tasks):
-                if result is not None and not result.empty:
-                    if result.attrs.get("created_parquet", False):
-                        created_parquet_count += 1
-                        if (
-                            self.multiband_geotiff_every > 0
-                            and (created_parquet_count - 1)
-                            % self.multiband_geotiff_every
-                            == 0
-                        ):
-                            dask.compute(
-                                dask.delayed(
-                                    _create_multiband_geotiff_from_parquet
-                                )(
-                                    parquet_path=result.attrs["parquet_path"],
-                                    raster_crs=result.attrs["raster_crs"],
-                                    is_aws=self.is_aws,
-                                    local_tmp_dir=str(self.local_tmp_dir),
-                                    created_sequence=created_parquet_count,
-                                    overwrite_outputs=self.overwrite_outputs,
-                                )
-                            )
-                    valid_results.append(result)
-
-        for i, (_, sub_grid) in enumerate(sub_grids.iterrows()):
-            tile_name = str(sub_grid['tile_id'])
-            output_folder = output_dir / tile_name
-
-            original_tile = str(sub_grid['original_tile'])
-            tile_pattern = re.compile(
-                rf"(?:^|_){re.escape(original_tile)}(?:_|\.)", re.IGNORECASE
-            )
-            tile_gridded_files = [
-                f for f in gridded_files if tile_pattern.search(Path(f).name)
-            ]
-            tile_ungridded_files = _files_intersecting_tile(
-                sub_grid.geometry.bounds, subgrid_crs, ungridded_catalog
-            )
-
-            pending_tasks.append(dask.delayed(_process_tile)(
-                sub_grid=sub_grid,
-                gridded_files=tile_gridded_files,
-                ungridded_files=tile_ungridded_files,
-                static_patterns=self.static_patterns,
-                is_aws=self.is_aws,
-                output_folder=str(output_folder),
-                data_type=data_type,
-                tile_name=tile_name,
-                local_tmp_dir=str(self.local_tmp_dir),
-                current_index=i + 1,
-                total_count=total_tiles,
-                verbose=verbose_workers,
-                subgrid_crs=subgrid_crs,
-                overwrite_outputs=self.overwrite_outputs,
-                year_ranges=self.year_ranges,
-            ))
-
-            if len(pending_tasks) >= self.tile_batch_size:
-                collect_batch(pending_tasks)
-                pending_tasks.clear()
-
-        collect_batch(pending_tasks)
+        valid_results = self._submit_tile_batches(
+            sub_grids,
+            gridded_files,
+            ungridded_catalog,
+            output_dir,
+            data_type,
+            verbose_workers,
+        )
 
         # Concatenate returned dataframes to construct final stats summary
         if valid_results:
@@ -1581,12 +1662,11 @@ class SubgridTilingEngine(Engine):
 
         self.write_message(self.log_system_metrics(), OUTPUTS)
 
-
     def run(self) -> None:
         """Main entry point for evaluating training masks and processing rasters in parallel"""
-        
+
         env = self.param_lookup.get('env', 'local')
-        
+
         try:
             n_workers = max(1, int(os.environ.get("SUBGRID_N_WORKERS", "16")))
             memory_limit = os.environ.get(
