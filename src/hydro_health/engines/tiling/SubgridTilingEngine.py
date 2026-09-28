@@ -95,27 +95,11 @@ TRAINING_TERRAIN_VARIABLES = [
     "terrain_classification",
 ]
 
-HURRICANE_VARIABLES = [
-    "hurr_strength_mean_2004_2006",
-    "hurr_strength_mean_2006_2010",
-    "hurr_strength_mean_2010_2015",
-    "hurr_strength_mean_2015_2022",
-]
-
-TSM_VARIABLES = [
-    "tsm_mean_2004_2006",
-    "tsm_mean_2006_2010",
-    "tsm_mean_2010_2015",
-    "tsm_mean_2015_2022",
-]
-
-STATIC_VARIABLES = [
-    "grain_size_layer",
-    *HURRICANE_VARIABLES,
-    "prim_sed_layer",
-    "survey_end_date",
-    *TSM_VARIABLES,
-]
+def _paired_static_variables(
+    year_pairs: list[tuple[int, int]], prefix: str
+) -> list[str]:
+    """Build static raster column names for the configured year pairs."""
+    return [f"{prefix}_{start}_{end}" for start, end in year_pairs]
 
 
 def _extract_year_pair(name: str) -> tuple[int, int] | None:
@@ -938,24 +922,26 @@ def _conform_output_schema(
     bathy_years: list[int],
     training_year_pairs: list[tuple[int, int]],
     tile_id: str,
+    year_ranges: list[tuple[int, int]],
 ) -> pd.DataFrame:
     """Add missing expected fields, remove unexpected fields, and order columns."""
     if data_type == "prediction":
         variable_columns = [
             f"bt.{variable}" for variable in PREDICTION_BT_VARIABLES
-        ] + STATIC_VARIABLES
+        ] + [
+            "grain_size_layer",
+            *_paired_static_variables(year_ranges, "hurr_strength_mean"),
+            "prim_sed_layer",
+            "survey_end_date",
+            *_paired_static_variables(year_ranges, "tsm_mean"),
+        ]
     elif data_type == "training":
-        valid_pair_set = set(training_year_pairs)
-        applicable_hurricane_variables = [
-            column
-            for column in HURRICANE_VARIABLES
-            if _extract_year_pair(column) in valid_pair_set
-        ]
-        applicable_tsm_variables = [
-            column
-            for column in TSM_VARIABLES
-            if _extract_year_pair(column) in valid_pair_set
-        ]
+        applicable_hurricane_variables = _paired_static_variables(
+            training_year_pairs, "hurr_strength_mean"
+        )
+        applicable_tsm_variables = _paired_static_variables(
+            training_year_pairs, "tsm_mean"
+        )
         variable_columns = [f"bathy_{year}_filled" for year in bathy_years]
 
         for variable in TRAINING_TERRAIN_VARIABLES[:8]:
@@ -1049,13 +1035,12 @@ def _add_training_deltas(
         else:
             Engine.write_message_dask(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.", OUTPUTS)
 
-    static_pair_columns = set(HURRICANE_VARIABLES + TSM_VARIABLES)
     cols_to_drop = [
         c
         for c in combined_df.columns
         if re.search(r"(\d{4}_\d{4})$", c)
         and not c.startswith("delta_bathy_")
-        and c not in static_pair_columns
+        and not c.startswith(("hurr_strength_mean_", "tsm_mean_"))
         and re.search(r"(\d{4}_\d{4})$", c).group(1)
         not in valid_pair_names
     ]
@@ -1070,6 +1055,7 @@ def _prepare_combined_output(
     data_type: str,
     tile_id: str,
     training_year_pairs: list[tuple[int, int]],
+    year_ranges: list[tuple[int, int]],
 ) -> pd.DataFrame:
     """Calculate training deltas, conform the schema, and order columns."""
     sorted_years = []
@@ -1084,6 +1070,7 @@ def _prepare_combined_output(
         sorted_years,
         list(training_year_pairs or []),
         tile_id,
+        year_ranges,
     )
 
     if 'FID' not in combined_df.columns:
@@ -1114,6 +1101,7 @@ def _save_combined_data(
     total_count: int,
     verbose: bool,
     training_year_pairs: list[tuple[int, int]] | None = None,
+    year_ranges: list[tuple[int, int]] | None = None,
 ) -> pd.DataFrame:
     """Prepare and save the combined tile data."""
     if combined_df is None or combined_df.empty:
@@ -1129,6 +1117,7 @@ def _save_combined_data(
         data_type,
         tile_id,
         list(training_year_pairs or []),
+        list(year_ranges or []),
     )
 
     output_folder_path = UPath(output_folder)
@@ -1165,6 +1154,8 @@ def _save_combined_data(
             os.remove(tmp_dst_path)
 
     return stats_df
+
+
 
 
 def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: list, static_patterns: list, 
@@ -1280,6 +1271,7 @@ def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: lis
             total_count=total_count,
             verbose=verbose,
             training_year_pairs=valid_training_year_pairs,
+            year_ranges=year_ranges,
         )
         if stats is not None and not stats.empty:
             stats.attrs["created_parquet"] = True
