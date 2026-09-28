@@ -327,7 +327,7 @@ def _read_existing_nan_stats(path: UPath, tile_id: str, is_aws: bool) -> pd.Data
         delta_df = parquet_file.read(columns=delta_cols).to_pandas()
         return _create_nan_stats_csv(delta_df, tile_id)
 
-    if is_aws and str(path).startswith("s3://"):
+    if is_aws:
         fs = s3fs.S3FileSystem()
         with fs.open(str(path), "rb") as src:
             return _read_from_parquet_file(pq.ParquetFile(src))
@@ -377,7 +377,7 @@ def _create_multiband_geotiff_from_parquet(
             )
             return None
 
-        if is_aws and parquet_path.startswith("s3://"):
+        if is_aws:
             fs = s3fs.S3FileSystem()
             with fs.open(parquet_path, "rb") as parquet_file:
                 df = pd.read_parquet(parquet_file, engine="pyarrow")
@@ -511,7 +511,7 @@ def _create_multiband_geotiff_from_parquet(
                 dst.set_band_description(band_index, str(column))
                 del band_data, values
 
-        if is_aws and final_tif_path.startswith("s3://"):
+        if is_aws:
             s3fs.S3FileSystem().put(tmp_tif_path, final_tif_path)
         else:
             shutil.copy2(tmp_tif_path, final_tif_path)
@@ -540,7 +540,7 @@ def _create_multiband_geotiff_from_parquet(
 def _to_rasterio_path(file: str, is_aws: bool) -> str:
     """Return a path Rasterio/GDAL can open directly."""
     open_path = str(file)
-    if is_aws and open_path.startswith("s3://"):
+    if is_aws:
         return open_path.replace("s3://", "/vsis3/", 1)
     return open_path
 
@@ -594,6 +594,7 @@ def _valid_mask(data: np.ndarray, nodata) -> np.ndarray:
     if nodata is not None:
         try:
             if not np.isnan(nodata):
+                # Update the boolean mask: keep pixels valid (True) ONLY if they don't match the nodata value
                 valid &= data != nodata
         except TypeError:
             valid &= data != nodata
@@ -753,14 +754,7 @@ def _subtile_process_gridded(
                     )
                     continue
 
-                (
-                    transform_matches,
-                    _,
-                    _,
-                    _,
-                ) = _transform_alignment_details(
-                    current_transform, common_transform
-                )
+                (transform_matches, _, _, _) = _transform_alignment_details(current_transform, common_transform)
                 shape_matches = current_shape == common_shape
 
                 data = src.read(1, window=window)
@@ -1115,7 +1109,7 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
     try:
         combined_df.to_parquet(tmp_dst_path, engine="pyarrow", index=False)
 
-        if is_aws and final_save_path.startswith("s3://"):
+        if is_aws:
             s3fs.S3FileSystem().put(tmp_dst_path, final_save_path)
         else:
             shutil.copy2(tmp_dst_path, final_save_path)
@@ -1293,7 +1287,7 @@ class SubgridTilingEngine(Engine):
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.write_message(f"SubgridTilingEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         s3_dir_base = f"s3://{bucket}/{region}"
 
         # Model output directories 
@@ -1315,10 +1309,10 @@ class SubgridTilingEngine(Engine):
             self.prediction_tiles_dir.mkdir(parents=True, exist_ok=True)
 
         # Subgrid definitions 
-        training_subgrid_path = get_config_item('MODEL', 'TRAINING_SUB_GRIDS')
+        training_subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
         training_subgrid_layer = get_config_item('MODEL', 'TRAINING_SUB_GRIDS_LAYER')
         
-        prediction_subgrid_path = get_config_item('MODEL', 'PREDICTION_SUB_GRIDS')
+        prediction_subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
         prediction_subgrid_layer = get_config_item('MODEL', 'PREDICTION_SUB_GRIDS_LAYER')
         
         self.subgrid_paths = {
@@ -1559,9 +1553,9 @@ class SubgridTilingEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            n_workers = max(1, int(os.environ.get("SUBGRID_N_WORKERS", "13")))
+            n_workers = max(1, int(os.environ.get("SUBGRID_N_WORKERS", "16")))
             memory_limit = os.environ.get(
-                "SUBGRID_WORKER_MEMORY_LIMIT", "2.5GB"
+                "SUBGRID_WORKER_MEMORY_LIMIT", "7GB"
             )
             self.tile_batch_size = max(
                 1, int(os.environ.get("SUBGRID_TILE_BATCH_SIZE", str(n_workers)))
@@ -1573,7 +1567,7 @@ class SubgridTilingEngine(Engine):
             self.setup_dask(
                 env,
                 n_workers=n_workers,
-                threads_per_worker=1,
+                threads_per_worker=2,
                 memory_limit=memory_limit,
             )
 

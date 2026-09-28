@@ -194,12 +194,8 @@ def _publish_local_raster(local_path: str, out_path: str) -> None:
         raise RuntimeError(f"Refusing to publish invalid raster {local_path}: {reason}")
 
     out_u = UPath(out_path)
-    token = uuid.uuid4().hex
     if _is_s3_path(out_u):
         out_u.parent.mkdir(parents=True, exist_ok=True)
-        # A completed S3 PUT becomes visible atomically. Uploading directly
-        # avoids a second server-side copy and prevents GDAL from seeing a key
-        # while an immediately-following move/overwrite is still settling.
         out_u.fs.put_file(local_path, str(out_u))
         try:
             out_u.fs.invalidate_cache(str(out_u))
@@ -208,10 +204,7 @@ def _publish_local_raster(local_path: str, out_path: str) -> None:
     else:
         destination = pathlib.Path(str(out_u))
         destination.parent.mkdir(parents=True, exist_ok=True)
-        # Do not append the token to the already-long raster filename. Windows
-        # commonly enforces a 260-character path limit, and terrain filenames
-        # can be close to it before an atomic-write suffix is added.
-        partial_path = destination.parent / f".hh-{token[:8]}.tmp"
+        partial_path = destination.parent / ".hh.tmp"
         try:
             shutil.copyfile(local_path, partial_path)
             os.replace(partial_path, destination)

@@ -168,7 +168,7 @@ class TrainingRastersEngine(Engine):
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.write_message(f"TrainingRastersEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         # Correctly handles the prefix logic for S3 paths
         s3_dir_base = f"s3://{bucket}/{self.output_prefix}/{region}" if self.output_prefix else f"s3://{bucket}/{region}"
 
@@ -184,7 +184,7 @@ class TrainingRastersEngine(Engine):
         
         self.filled_folder_name = "filled_tifs"
 
-        training_subgrid_path = get_config_item('MODEL', 'TRAINING_SUB_GRIDS')
+        training_subgrid_path = get_config_item('MODEL', 'SUBGRIDS')
         self.subgrid_paths = {
             'training': UPath(f"{s3_dir_base}/{training_subgrid_path}") if self.is_aws else UPath(self.outputs_dir / training_subgrid_path)
         }

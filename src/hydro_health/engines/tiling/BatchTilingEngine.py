@@ -30,20 +30,16 @@ OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 @lru_cache(maxsize=1)
 def _get_s3_filesystem() -> s3fs.S3FileSystem:
     """Reuse one S3 client per worker process."""
-
     return s3fs.S3FileSystem()
 
 
 def _standardize_col_name(col: str) -> str:
     """Helper to ensure column names are standardized."""
-
     return str(col).strip()
 
 
 def _save_parquet_file(df: pd.DataFrame, output_dir: str, file_name: str, is_aws: bool, local_tmp_dir: str, verbose_prefix: str, verbose: bool) -> None:
     """Save through a temporary file and always remove temporary artifacts."""
-
-    # Use a UUID to ensure multiple Dask workers don't collide when writing the temporary file
     unique_tmp_name = f"{uuid.uuid4().hex}_{file_name}"
     tmp_path = str(Path(local_tmp_dir) / unique_tmp_name)
     final_path = str(UPath(output_dir) / file_name)
@@ -52,7 +48,7 @@ def _save_parquet_file(df: pd.DataFrame, output_dir: str, file_name: str, is_aws
     try:
         df.to_parquet(tmp_path, index=False, engine="pyarrow")
 
-        if is_aws and final_path.startswith("s3://"):
+        if is_aws:
             _get_s3_filesystem().put(tmp_path, final_path)
         else:
             destination = Path(final_path)
@@ -75,13 +71,11 @@ def _save_parquet_file(df: pd.DataFrame, output_dir: str, file_name: str, is_aws
 
 def _output_exists(output_dir: str, file_name: str) -> bool:
     """Return whether one local or S3 output already exists."""
-
     return UPath(output_dir).joinpath(file_name).exists()
 
 
 def _deduplicate_pixels(df: pd.DataFrame) -> None:
     """Deduplicate using the smallest available stable pixel key."""
-
     if (
         "tile_id" in df.columns
         and "FID" in df.columns
@@ -103,10 +97,9 @@ def _deduplicate_pixels(df: pd.DataFrame) -> None:
 
 def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.DataFrame:
     """Decode only columns the batch transformation can actually use."""
-
-    requested_years = {str(year) for pair in year_ranges for year in pair}
-    end_years = {str(y1) for _, y1 in year_ranges}
-    pair_names = {f"{y0}_{y1}" for y0, y1 in year_ranges}
+    requested_years = {str(year) for pair in year_ranges for year in pair} if year_ranges else set()
+    end_years = {str(y1) for _, y1 in year_ranges} if year_ranges else set()
+    pair_names = {f"{y0}_{y1}" for y0, y1 in year_ranges} if year_ranges else set()
     feature_tokens = (
         "bpi_broad", "bpi_fine", "curv_plan", "curv_profile",
         "curv_total", "flowacc", "flowdir", "gradmag", "rugosity",
@@ -126,6 +119,9 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
 
             if mode == "prediction":
                 include = include or lower.startswith("bt.")
+                # Allow all tsm/hurr strength without pair filtering for prediction
+                include = include or lower.startswith(("hurr_strength_mean_", "tsm_mean_"))
+                include = include or any(token in lower for token in shared_tokens)
             else:
                 bathy_match = re.fullmatch(
                     r"bathy_(\d{4})_filled", lower
@@ -137,12 +133,12 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
                     any(lower.endswith(f"_{year}") for year in end_years)
                     and any(token in lower for token in feature_tokens)
                 )
+                include = include or any(token in lower for token in shared_tokens)
+                include = include or (
+                    lower.startswith(("hurr_strength_mean_", "tsm_mean_"))
+                    and any(lower.endswith(pair) for pair in pair_names)
+                )
 
-            include = include or any(token in lower for token in shared_tokens)
-            include = include or (
-                lower.startswith(("hurr_strength_mean_", "tsm_mean_"))
-                and any(lower.endswith(pair) for pair in pair_names)
-            )
             if include:
                 selected.append(original)
 
@@ -157,7 +153,6 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
                            overwrite_files: bool = False,
                            ) -> Tuple[List[str], List[str], str]:
     """Processes a training tile and writes out BOTH a wide format and batch format data files."""
-
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
     saved_files = []
     existing_files = []
@@ -176,8 +171,6 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
     if rename_dict_global:
         gdf.rename(columns=rename_dict_global, inplace=True)
 
-    # 1. WIDE FORMAT GENERATION
-    # Work on the already-loaded tile rather than holding a second full copy.
     wide_gdf = gdf
     rename_dict_wide = {}
     if 'x' in wide_gdf.columns: rename_dict_wide['x'] = 'X'
@@ -203,7 +196,6 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         )
         return saved_files, existing_files, "NO VALID YEAR PAIRS"
 
-    # Drop year-pair columns without a matching delta
     valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
     cols_to_drop = []
     for c in wide_gdf.columns:
@@ -214,7 +206,6 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
     if cols_to_drop:
         wide_gdf.drop(columns=cols_to_drop, inplace=True)
     
-    # 2. BATCH FORMAT GENERATION 
     cols_created_batch = []
     
     for y0, y1 in valid_pairs:
@@ -298,6 +289,12 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
                 OUTPUTS,
             )
         final_cols = [c for c in ordered_cols if c in pair_df.columns]
+        
+        Engine.write_message_dask(
+            f"{progress_str} [INFO] Training batch {tile_name} {pair_name} used columns: {final_cols}",
+            OUTPUTS
+        )
+
         pair_df = pair_df[final_cols]
         _deduplicate_pixels(pair_df)
         
@@ -324,8 +321,7 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
                              is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool,
                              overwrite_files: bool = False,
                              ) -> Tuple[List[str], List[str], str]:
-    """Processes a prediction tile and writes out BOTH a wide format and batch format data files."""
-
+    """Processes a prediction tile without year-pair logic and writes out batch format data."""
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
     saved_files = []
     existing_files = []
@@ -339,169 +335,123 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
     if rename_dict_global:
         gdf.rename(columns=rename_dict_global, inplace=True)
 
-    # STRICT PREDICTION COLUMN FILTERING
-    id_cols = [c for c in ["X", "Y", "x", "y", "FID", "tile_id"] if c in gdf.columns]
-    bt_cols = [c for c in gdf.columns if c.lower().startswith("bt.")]
-    other_cols = [c for c in gdf.columns if re.search(r"\d{4}_\d{4}", c) or any(p in c.lower() for p in ["grain", "sed", "survey", "tsm", "hurr"])]
-    
-    valid_cols = id_cols + bt_cols + other_cols
-    valid_cols = list(dict.fromkeys([c for c in valid_cols if c in gdf.columns]))
-    # _read_required_columns already performed this filtering without geometry.
-
-    # 1. WIDE FORMAT GENERATION
-    # Work on the filtered tile rather than holding another full copy.
     wide_gdf = gdf
     rename_dict_wide = {}
     if 'x' in wide_gdf.columns: rename_dict_wide['x'] = 'X'
     if 'y' in wide_gdf.columns: rename_dict_wide['y'] = 'Y'
     wide_gdf.rename(columns=rename_dict_wide, inplace=True)
 
-    filled_cols = [c for c in wide_gdf.columns if "_filled" in c and c not in other_cols]
-    if filled_cols:
-        wide_gdf.rename(columns={c: c.replace("_filled", "") for c in filled_cols}, inplace=True)
+    out_name_batch = f"{tile_name}_prediction_batch.parquet"
+    if not overwrite_files and _output_exists(output_dir, out_name_batch):
+        existing_files.append(out_name_batch)
+        return saved_files, existing_files, "ALREADY EXISTS"
+    
+    pair_df = pd.DataFrame()
+    if 'X' in wide_gdf.columns: pair_df['X'] = wide_gdf['X']
+    if 'Y' in wide_gdf.columns: pair_df['Y'] = wide_gdf['Y']
+    if 'FID' in wide_gdf.columns: pair_df['FID'] = wide_gdf['FID']
+    if 'tile_id' in wide_gdf.columns: pair_df['tile_id'] = wide_gdf['tile_id']
+    
+    hurr_cols = []
+    tsm_cols = []
 
-    def get_bt_col(year_str):
-        pattern = re.compile(rf"^bt\.(?:bluetopo_)?{year_str}$", re.IGNORECASE)
-        cols = [c for c in wide_gdf.columns if pattern.match(c)]
-        return cols[0] if cols else None
+    # Map incoming generic wide features directly to target prediction attributes 
+    for c in wide_gdf.columns:
+        lower_c = c.lower()
+        base = re.sub(r"^bt\.", "", lower_c)
+        base = re.sub(r"^bluetopo_", "", base)
 
-    valid_pairs = []
-    for y0, y1 in year_ranges:
-        if get_bt_col(str(y0)) and get_bt_col(str(y1)):
-            valid_pairs.append((y0, y1))
+        if "bathy" in base and "delta" not in base: pair_df['bathy_t'] = wide_gdf[c]
+        elif "bpi_broad" in base: pair_df['bpi_broad_t'] = wide_gdf[c]
+        elif "bpi_fine" in base: pair_df['bpi_fine_t'] = wide_gdf[c]
+        elif "curv_plan" in base: pair_df['curv_plan_t'] = wide_gdf[c]
+        elif "curv_profile" in base: pair_df['curv_profile_t'] = wide_gdf[c]
+        elif "curv_total" in base: pair_df['curv_total_t'] = wide_gdf[c]
+        elif "flowacc" in base: pair_df['flowacc_t'] = wide_gdf[c]
+        elif "flowdir" in base:
+            rad = np.deg2rad(wide_gdf[c].astype(np.float32))
+            pair_df['flowdir_sin_t'] = np.sin(rad)
+            pair_df['flowdir_cos_t'] = np.cos(rad)
+        elif "gradmag" in base: pair_df['gradmag_t'] = wide_gdf[c]
+        elif "rugosity" in base: pair_df['rugosity_t'] = wide_gdf[c]
+        elif "shearproxy" in base: pair_df['shearproxy_t'] = wide_gdf[c]
+        elif "slope_deg" in base: pair_df['slope_deg_t'] = wide_gdf[c]
+        elif "slope" in base and "deg" not in base: pair_df['slope_t'] = wide_gdf[c]
+        elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
+        elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
+        elif "unc" in base or "uncertainty" in base: pair_df['uc_t'] = wide_gdf[c]
+        elif lower_c.startswith("hurr_strength_mean_"): 
+            pair_df[c] = wide_gdf[c]
+            hurr_cols.append(c)
+        elif lower_c.startswith("tsm_mean_"): 
+            pair_df[c] = wide_gdf[c]
+            tsm_cols.append(c)
+        elif "grain" in base or "sed_size" in base: pair_df['grain_size_layer'] = wide_gdf[c]
+        elif "prim_sed" in base or "sed_type" in base: pair_df['prim_sed_layer'] = wide_gdf[c]
+        elif "survey" in base: pair_df['survey_end_date'] = wide_gdf[c]
 
-    if not valid_pairs:
+    ordered_cols = [
+        'X', 'Y', 'FID', 'tile_id', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
+        'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
+        'gradmag_t', 'rugosity_t', 'shearproxy_t', 'slope_t', 'slope_deg_t', 
+        'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t'
+    ]
+
+    # Include specific hurr/tsm if dynamically generated, fallback to strict user-defined names
+    if not hurr_cols: ordered_cols.append('hurr_strength_mean_2004_2006')
+    else: ordered_cols.extend(hurr_cols)
+        
+    if not tsm_cols: ordered_cols.append('tsm_mean_2004_2006')
+    else: ordered_cols.extend(tsm_cols)
+        
+    ordered_cols.extend([
+        'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
+    ])
+
+    # Strip duplicate entries from requested list if multiple hurr strings matched
+    ordered_cols = list(dict.fromkeys(ordered_cols))
+
+    missing_cols = [c for c in ordered_cols if c not in pair_df.columns]
+    if missing_cols:
         Engine.write_message_dask(
-            f"{progress_str} [WARNING] Prediction tile {tile_name} does not "
-            "contain both bathymetry years for any configured year pair. "
-            "No prediction batch files will be generated for this tile.",
+            f"{progress_str} [WARNING] Prediction batch {tile_name} "
+            f"is missing columns: {missing_cols}. "
+            "The batch file will be written without them.",
             OUTPUTS,
         )
-        return saved_files, existing_files, "NO VALID YEAR PAIRS"
-
-    valid_pair_strs = [f"{y0}_{y1}" for y0, y1 in valid_pairs]
-    cols_to_drop = []
-    for c in wide_gdf.columns:
-        m = re.search(r"(\d{4}_\d{4})$", c)
-        if m and not c.startswith("delta_bathy_"):
-            if m.group(1) not in valid_pair_strs:
-                cols_to_drop.append(c)
-    if cols_to_drop:
-        wide_gdf.drop(columns=cols_to_drop, inplace=True)
-
-    # 2. BATCH FORMAT GENERATION
-    cols_created_batch = []
+        
+    final_cols = [c for c in ordered_cols if c in pair_df.columns]
     
-    for y0, y1 in valid_pairs:
-        y0_str, y1_str = str(y0), str(y1)
-        pair_name = f"{y0_str}_{y1_str}"
-        out_name_batch = f"{tile_name}_{pair_name}_prediction_batch.parquet"
-        if not overwrite_files and _output_exists(output_dir, out_name_batch):
-            existing_files.append(out_name_batch)
-            continue
-        
-        pair_df = pd.DataFrame()
-        if 'X' in wide_gdf.columns: pair_df['X'] = wide_gdf['X']
-        if 'Y' in wide_gdf.columns: pair_df['Y'] = wide_gdf['Y']
-        if 'FID' in wide_gdf.columns: pair_df['FID'] = wide_gdf['FID']
-        if 'tile_id' in wide_gdf.columns: pair_df['tile_id'] = wide_gdf['tile_id']
-        
-        def get_bt_col(year_str):
-            pattern = re.compile(rf"^bt\.(?:bluetopo_)?{year_str}$", re.IGNORECASE)
-            cols = [c for c in wide_gdf.columns if pattern.match(c)]
-            return cols[0] if cols else None
-        
-        b_y1 = get_bt_col(y1_str)
-        if b_y1: pair_df['bathy_t'] = wide_gdf[b_y1]
-        
-        for c in wide_gdf.columns:
-            if c.endswith(f"_{y1_str}") and c != b_y1 and c.lower().startswith("bt."):
-                base = re.sub(r"^bt\.", "", c, flags=re.IGNORECASE)
-                base = base.replace(f"_{y1_str}", "").lower()
-                if "bpi_broad" in base: pair_df['bpi_broad_t'] = wide_gdf[c]
-                elif "bpi_fine" in base: pair_df['bpi_fine_t'] = wide_gdf[c]
-                elif "curv_plan" in base: pair_df['curv_plan_t'] = wide_gdf[c]
-                elif "curv_profile" in base: pair_df['curv_profile_t'] = wide_gdf[c]
-                elif "curv_total" in base: pair_df['curv_total_t'] = wide_gdf[c]
-                elif "flowacc" in base: pair_df['flowacc_t'] = wide_gdf[c]
-                elif "flowdir" in base:
-                    rad = np.deg2rad(wide_gdf[c].astype(np.float32))
-                    pair_df['flowdir_sin_t'] = np.sin(rad)
-                    pair_df['flowdir_cos_t'] = np.cos(rad)
-                elif "gradmag" in base: pair_df['gradmag_t'] = wide_gdf[c]
-                elif "rugosity" in base: pair_df['rugosity_t'] = wide_gdf[c]
-                elif "shearproxy" in base: pair_df['shearproxy_t'] = wide_gdf[c]
-                elif "slope_deg" in base: pair_df['slope_deg_t'] = wide_gdf[c]
-                elif "slope" in base: pair_df['slope_t'] = wide_gdf[c]
-                elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
-                elif "terrain_classification" in base: pair_df['terrain_classification_t'] = wide_gdf[c]
-                elif "unc" in base or "uncertainty" in base: pair_df['uc_t'] = wide_gdf[c]
-                
-        hurr_col = f"hurr_strength_mean_{y0_str}_{y1_str}"
-        if hurr_col in wide_gdf.columns: pair_df[hurr_col] = wide_gdf[hurr_col]
-        
-        tsm_col = f"tsm_mean_{y0_str}_{y1_str}"
-        if tsm_col in wide_gdf.columns: pair_df[tsm_col] = wide_gdf[tsm_col]
-        
-        grain_cols = [c for c in wide_gdf.columns if "grain" in c.lower() or "sed_size" in c.lower()]
-        if grain_cols: pair_df['grain_size_layer'] = wide_gdf[grain_cols[0]]
-        
-        sed_cols = [c for c in wide_gdf.columns if "prim_sed" in c.lower() or "sed_type" in c.lower()]
-        if sed_cols: pair_df['prim_sed_layer'] = wide_gdf[sed_cols[0]]
-        
-        survey_cols = [c for c in wide_gdf.columns if "survey" in c.lower()]
-        if survey_cols: pair_df['survey_end_date'] = wide_gdf[survey_cols[0]]
+    Engine.write_message_dask(
+        f"{progress_str} [INFO] Prediction batch {tile_name} used columns: {final_cols}",
+        OUTPUTS
+    )
 
-        ordered_cols = [
-            'X', 'Y', 'FID', 'tile_id', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
-            'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
-            'gradmag_t', 'rugosity_t', 'shearproxy_t', 'slope_t', 'slope_deg_t', 
-            'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t', 
-            f'hurr_strength_mean_{y0_str}_{y1_str}', f'tsm_mean_{y0_str}_{y1_str}', 
-            'grain_size_layer', 'prim_sed_layer', 'survey_end_date' 
-        ]
+    pair_df = pair_df[final_cols]
+    _deduplicate_pixels(pair_df)
+    
+    _save_parquet_file(pair_df, output_dir, out_name_batch, is_aws, local_tmp_dir, progress_str, verbose)
+    saved_files.append(out_name_batch)
 
-        missing_cols = [c for c in ordered_cols if c not in pair_df.columns]
-        if missing_cols:
-            Engine.write_message_dask(
-                f"{progress_str} [WARNING] Prediction batch {tile_name} "
-                f"{pair_name} is missing columns: {missing_cols}. "
-                "The batch file will be written without them.",
-                OUTPUTS,
-            )
-        final_cols = [c for c in ordered_cols if c in pair_df.columns]
-        pair_df = pair_df[final_cols]
-        _deduplicate_pixels(pair_df)
-        
-        _save_parquet_file(pair_df, output_dir, out_name_batch, is_aws, local_tmp_dir, progress_str, verbose)
-        saved_files.append(out_name_batch)
-            
-        if not cols_created_batch:
-            cols_created_batch = pair_df.columns.tolist()
-            
-        del pair_df
-
+    cols_created_batch = pair_df.columns.tolist()
+    del pair_df
     del wide_gdf
     
     summary = []
     if cols_created_batch: summary.append(f"BATCH COLS: {cols_created_batch}")
-
-    if existing_files:
-        summary.append(f"EXISTING FILES: {len(existing_files)}")
+    if existing_files: summary.append(f"EXISTING FILES: {len(existing_files)}")
 
     return saved_files, existing_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
 
 
 def _transform_tile_task(params: list) -> str:
-    """Dask Worker: Reads file -> Calls specific processor -> Cleans up temp -> Returns status. Designed for top-level pickling."""
-
+    """Dask Worker: Reads file -> Calls specific processor -> Cleans up temp -> Returns status."""
     (
         f_path, mode, year_ranges, output_dir, tile_name, is_aws,
         local_tmp_dir, current_index, total_count, verbose, overwrite_files,
     ) = params
     
     try:
-        # Geometry is not used in any output, so avoid GeoPandas/Shapely objects.
         gdf = _read_required_columns(f_path, mode, year_ranges)
 
         if mode == "training":
@@ -544,7 +494,6 @@ def _transform_tile_task(params: list) -> str:
 
 def _available_memory_bytes() -> int:
     """Return the smallest available host or container memory limit."""
-
     candidates = []
     try:
         candidates.append(
@@ -569,17 +518,6 @@ def _available_memory_bytes() -> int:
     return min(candidates) if candidates else 16 * 1024**3
 
 
-def _safe_worker_plan() -> Tuple[int, str]:
-    """Keep aggregate worker limits near 65 percent of available RAM."""
-
-    total_gib = _available_memory_bytes() / 1024**3
-    worker_budget_gib = max(2.0, total_gib * 0.65)
-    cpu_count = max(1, os.cpu_count() or 1)
-    worker_count = min(4, cpu_count, max(1, int(worker_budget_gib // 4.0)))
-    per_worker_gib = min(5.0, worker_budget_gib / worker_count)
-    return worker_count, f"{per_worker_gib:.2f}GB"
-
-
 class BatchTilingEngine(Engine):
     """Class for transforming wide parquet files in batch/long format"""
 
@@ -588,15 +526,13 @@ class BatchTilingEngine(Engine):
         param_lookup: dict,
         output_prefix: str | bool = False,
         year_ranges: Optional[List[Tuple[int, int]]] = None,
-        overwrite_files: bool = True,
+        overwrite_files: bool = False,
     ) -> None:
         """Initialize the BatchTilingEngine configurations and environment variables"""
-
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
         
-        # Flat variable assignment
         env_val = param_lookup.get('env', 'local')
         self.env = env_val.valueAsText if hasattr(env_val, 'valueAsText') and env_val.valueAsText else (env_val.value if hasattr(env_val, 'value') and env_val.value else env_val)
         self.is_aws = self.env in ['remote', 'aws']
@@ -617,7 +553,6 @@ class BatchTilingEngine(Engine):
 
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths dynamically for aws or local environments and the given eco region."""
-
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix and isinstance(self.output_prefix, str) else OUTPUTS / region
         self.write_message(f"BatchTilingEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
@@ -636,7 +571,6 @@ class BatchTilingEngine(Engine):
 
     def _process_pipeline(self, base_dir: UPath, mode: Literal["training", "prediction"], verbose_workers: bool = False) -> None:
         """Orchestrates the tile format transformation pipeline via Dask mapping."""
-
         self.write_message(f"--- Starting {mode.upper()} format pipeline ---", OUTPUTS)
         self.write_message(self.log_system_metrics(), OUTPUTS)
         
@@ -660,11 +594,9 @@ class BatchTilingEngine(Engine):
         params_list = []
         total_files = len(files_to_process)
         for i, fp in enumerate(files_to_process):
-            # Extract the actual tile_name, preserving subtile indices like _1, _2
             filename = fp.name
             tile_name = filename.split(f"_{mode}")[0]
             
-            # Map the output directly to the subtile directory where the input was located
             output_folder = str(fp.parent)
             
             params_list.append([
@@ -711,23 +643,16 @@ class BatchTilingEngine(Engine):
 
     def run(self) -> None:
         """Main entry point for executing the batch format transformations"""
-
         try:
-            self._worker_count, worker_memory = _safe_worker_plan()
-            self.write_message(
-                f"Starting Dask with {self._worker_count} worker(s), "
-                f"1 thread per worker, and {worker_memory} per worker.",
-                OUTPUTS,
-            )
             self.write_message(
                 f"Overwrite existing batch files: {self.overwrite_files}",
                 OUTPUTS,
             )
             self.setup_dask(
                 self.env,
-                n_workers=self._worker_count,
-                threads_per_worker=1,
-                memory_limit=worker_memory,
+                n_workers=16,
+                threads_per_worker=2,
+                memory_limit='6GB',
             )
             
             eco_val = self.param_lookup.get('eco_regions')
