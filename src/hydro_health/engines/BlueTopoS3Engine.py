@@ -53,9 +53,9 @@ def _process_tile(param_inputs: list) -> str:
         
         tile_folder = tiff_file_path.parents[0]
 
-        # Explicitly and safely warp the base tile to the target CRS and Resolution
-        print(f"[{tile_id}] Warping raw tile in memory to align generated derivatives...")
-        engine.warp_bluetopo_tile(tiff_file_path, target_res)
+        # Resample base tile to target resolution while preserving native local UTM projection
+        print(f"[{tile_id}] Resampling raw tile in memory to align generated derivatives...")
+        engine.resample_and_reproject(tiff_file_path, target_res)
         
         engine.create_survey_end_date_tiff(tiff_file_path)
         engine.create_catzoc_all(tiff_file_path, increased_scale=True)
@@ -85,7 +85,6 @@ class BlueTopoS3Engine(Engine):
     def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
-        self.target_crs = "EPSG:6350"
         self.skip_tiling = False
         
         # Local NVMe scratch directory isolated to BlueTopoS3Engine for current user
@@ -102,7 +101,8 @@ class BlueTopoS3Engine(Engine):
             # Safely replace NaNs with nodata before converting to int32
             contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            width, height = src.width, src.height  
+            width, height = src.width, src.height 
+            native_crs = src.crs
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
         tree = etree.parse(xml_file_path)
@@ -174,7 +174,7 @@ class BlueTopoS3Engine(Engine):
             tiled=True,
             blockxsize=512,
             blockysize=512,
-            crs=self.target_crs,
+            crs=native_crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
@@ -195,6 +195,7 @@ class BlueTopoS3Engine(Engine):
             contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
             width, height = src.width, src.height 
+            native_crs = src.crs
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
         tree = etree.parse(xml_file_path)
@@ -250,7 +251,7 @@ class BlueTopoS3Engine(Engine):
             tiled=True,
             blockxsize=512,
             blockysize=512,
-            crs=self.target_crs,
+            crs=native_crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
@@ -278,7 +279,8 @@ class BlueTopoS3Engine(Engine):
             # Safely replace NaNs with nodata before converting to int32
             contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            width, height = src.width, src.height  
+            width, height = src.width, src.height 
+            native_crs = src.crs
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
         tree = etree.parse(xml_file_path)
@@ -331,13 +333,13 @@ class BlueTopoS3Engine(Engine):
             height=height,
             dtype=rasterio.float32,
             compress="lzw",
-            crs=self.target_crs,
+            crs=native_crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
             dst.write(reclassified_band, 1)
 
-    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res:  int) -> pathlib.Path|bool:
+    def download_nbs_tile(self, temp_folder: pathlib.Path, tile_id: str, ecoregion_id: str, output_prefix: str|bool, target_res: int) -> pathlib.Path|bool:
         """Unconditionally download the NBS source tile and stage it for full processing."""
 
         nbs_bucket = self.get_bucket()
@@ -391,7 +393,6 @@ class BlueTopoS3Engine(Engine):
             str(temp_cog),
             str(tiff_path),
             format="COG",
-            outputSRS=self.target_crs,
             creationOptions=[
                 "COMPRESS=DEFLATE",
                 "PREDICTOR=3",
@@ -417,7 +418,7 @@ class BlueTopoS3Engine(Engine):
         return nbs_bucket
 
     def multiband_to_singleband(self, tiff_file_path: pathlib.Path, band: int) -> None:
-        """Convert multiband BlueTopo raster into a singleband file"""
+        """Convert multiband BlueTopo raster into a singleband file preserving native SRS"""
 
         band_name_lookup = {
             1: '',
@@ -430,7 +431,6 @@ class BlueTopoS3Engine(Engine):
             str(singleband_tile_name),
             str(tiff_file_path),
             bandList=[band],
-            outputSRS=self.target_crs,
             creationOptions=["COMPRESS=DEFLATE"]
         )
 
@@ -442,32 +442,26 @@ class BlueTopoS3Engine(Engine):
         mb_tiff_file = pathlib.Path(new_name)
         return mb_tiff_file
 
-    def warp_bluetopo_tile(self, tiff_file_path: pathlib.Path, target_res: int) -> None:
+    def resample_and_reproject(self, tiff_file_path: pathlib.Path, target_res: int) -> None:
         """
-        Safely reprojects a 3-band BlueTopo tile to EPSG:6350.
-        Uses Bilinear for Elevation (B1) & Uncertainty (B2), 
-        and NearestNeighbour for the Contributor metadata (B3) to prevent category corruption.
-        Intermediate files are placed in an isolated temporary directory to avoid polluting
-        the tile folder.
+        Resamples a 3-band BlueTopo tile to target_res while preserving its local UTM projection.
+        Uses Bilinear for Elevation (B1) & Uncertainty (B2), and NearestNeighbour for the Contributor metadata (B3).
+        Intermediate files are placed in an isolated temporary directory.
         """
         
         ds = gdal.Open(str(tiff_file_path))
         if ds is None: return
         
-        proj = ds.GetProjection()
-        src_srs = osr.SpatialReference(wkt=proj)
-        src_srs.AutoIdentifyEPSG()
-        auth_code = src_srs.GetAuthorityCode(None)
         gt = ds.GetGeoTransform()
         x_res = abs(gt[1])
         ds = None # EXPLICIT CLEANUP
         
-        # If it's already exactly EPSG:6350 AND the correct resolution, no warp needed
-        if str(auth_code) == "6350" and abs(x_res - target_res) < 0.1:
-            print(f"[{tiff_file_path.name}] Tile is already {self.target_crs} at {target_res}m. Skipping warp.")
+        # If the tile is already at the correct resolution, skip resampling
+        if abs(x_res - target_res) < 0.1:
+            print(f"[{tiff_file_path.name}] Tile is already at target resolution {target_res}m. Skipping resampling.")
             return
 
-        print(f"[{tiff_file_path.name}] Reprojecting and resampling base tile to {self.target_crs} at {target_res}m...")
+        print(f"[{tiff_file_path.name}] Resampling base tile to {target_res}m...")
         
         # Keep original XML safe
         xml_path = tiff_file_path.parent / f"{tiff_file_path.name}.aux.xml"
@@ -499,17 +493,17 @@ class BlueTopoS3Engine(Engine):
             ds2 = gdal.Translate(str(temp_b3_src), str(tiff_file_path), bandList=[3], creationOptions=creation_opts)
             ds2 = None
             
-            # Warp Bands 1 & 2 (Bilinear)
+            # Resample Bands 1 & 2 (Bilinear)
             ds3 = gdal.Warp(str(temp_b12_warp), str(temp_b12_src), options=gdal.WarpOptions(
-                format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
+                format="GTiff", xRes=target_res, yRes=target_res,
                 resampleAlg=gdal.GRA_Bilinear, targetAlignedPixels=True,
                 creationOptions=creation_opts
             ))
             ds3 = None
             
-            # Warp Band 3 (Nearest Neighbor)
+            # Resample Band 3 (Nearest Neighbor)
             ds4 = gdal.Warp(str(temp_b3_warp), str(temp_b3_src), options=gdal.WarpOptions(
-                format="GTiff", dstSRS=self.target_crs, xRes=target_res, yRes=target_res,
+                format="GTiff", xRes=target_res, yRes=target_res,
                 resampleAlg=gdal.GRA_NearestNeighbour, targetAlignedPixels=True,
                 creationOptions=creation_opts
             ))
