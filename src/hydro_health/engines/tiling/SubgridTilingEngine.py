@@ -1024,62 +1024,65 @@ def _conform_output_schema(
     return combined_df.loc[:, expected_columns].copy()
 
 
-def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type: str, tile_id: str, is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool, training_year_pairs: list[tuple[int, int]] | None = None) -> pd.DataFrame:
-    """Combine dataframes, explicitly save to temporary disk, move to output, and aggressively drop memory."""
-    
-    if combined_df is None or combined_df.empty:
-        Engine.write_message_dask(
-            f" [{current_index}/{total_count}] [SKIP NO DATA] Tile "
-            f"'{tile_id}': No valid data assembled; no Parquet file created.",
-            OUTPUTS,
-        )
-        return pd.DataFrame()
+def _add_training_deltas(
+    combined_df: pd.DataFrame,
+    training_year_pairs: list[tuple[int, int]],
+    tile_id: str,
+) -> list[int]:
+    """Calculate bathymetry deltas and remove invalid paired columns."""
+    sorted_years = sorted(
+        {year for year_pair in training_year_pairs for year in year_pair}
+    )
+    valid_pair_names = []
 
+    for y0, y1 in training_year_pairs:
+        y0_str, y1_str = str(y0), str(y1)
+
+        c_0 = [c for c in combined_df.columns if re.match(rf"^bathy_{y0_str}_filled$", c, re.IGNORECASE)]
+        c_1 = [c for c in combined_df.columns if re.match(rf"^bathy_{y1_str}_filled$", c, re.IGNORECASE)]
+        b_y0 = [c for c in c_0 if "filled" in c.lower()][0] if c_0 else None
+        b_y1 = [c for c in c_1 if "filled" in c.lower()][0] if c_1 else None
+
+        if b_y0 and b_y1:
+            combined_df[f"delta_bathy_{y0_str}_{y1_str}"] = combined_df[b_y1] - combined_df[b_y0]
+            valid_pair_names.append(f"{y0_str}_{y1_str}")
+        else:
+            Engine.write_message_dask(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.", OUTPUTS)
+
+    static_pair_columns = set(HURRICANE_VARIABLES + TSM_VARIABLES)
+    cols_to_drop = [
+        c
+        for c in combined_df.columns
+        if re.search(r"(\d{4}_\d{4})$", c)
+        and not c.startswith("delta_bathy_")
+        and c not in static_pair_columns
+        and re.search(r"(\d{4}_\d{4})$", c).group(1)
+        not in valid_pair_names
+    ]
+    if cols_to_drop:
+        combined_df.drop(columns=cols_to_drop, inplace=True)
+
+    return sorted_years
+
+
+def _prepare_combined_output(
+    combined_df: pd.DataFrame,
+    data_type: str,
+    tile_id: str,
+    training_year_pairs: list[tuple[int, int]],
+) -> pd.DataFrame:
+    """Calculate training deltas, conform the schema, and order columns."""
     sorted_years = []
-    valid_training_year_pairs = []
     if data_type == "training":
-        valid_training_year_pairs = list(training_year_pairs or [])
-        sorted_years = sorted(
-            {
-                year
-                for year_pair in valid_training_year_pairs
-                for year in year_pair
-            }
+        sorted_years = _add_training_deltas(
+            combined_df, list(training_year_pairs or []), tile_id
         )
-        valid_pair_names = []
-
-        for y0, y1 in valid_training_year_pairs:
-            y0_str, y1_str = str(y0), str(y1)
-
-            c_0 = [c for c in combined_df.columns if re.match(rf"^bathy_{y0_str}_filled$", c, re.IGNORECASE)]
-            c_1 = [c for c in combined_df.columns if re.match(rf"^bathy_{y1_str}_filled$", c, re.IGNORECASE)]
-            b_y0 = [c for c in c_0 if "filled" in c.lower()][0] if c_0 else None
-            b_y1 = [c for c in c_1 if "filled" in c.lower()][0] if c_1 else None
-
-            if b_y0 and b_y1:
-                combined_df[f"delta_bathy_{y0_str}_{y1_str}"] = combined_df[b_y1] - combined_df[b_y0]
-                valid_pair_names.append(f"{y0_str}_{y1_str}")
-            else:
-                Engine.write_message_dask(f"WARNING: MISSING BATHY DATA: Cannot calculate delta_bathy for {y0_str}_{y1_str} on tile '{tile_id}'.", OUTPUTS)
-
-        static_pair_columns = set(HURRICANE_VARIABLES + TSM_VARIABLES)
-        cols_to_drop = [
-            c
-            for c in combined_df.columns
-            if re.search(r"(\d{4}_\d{4})$", c)
-            and not c.startswith("delta_bathy_")
-            and c not in static_pair_columns
-            and re.search(r"(\d{4}_\d{4})$", c).group(1)
-            not in valid_pair_names
-        ]
-        if cols_to_drop:
-            combined_df.drop(columns=cols_to_drop, inplace=True)
 
     combined_df = _conform_output_schema(
         combined_df,
         data_type,
         sorted_years,
-        valid_training_year_pairs,
+        list(training_year_pairs or []),
         tile_id,
     )
 
@@ -1095,16 +1098,46 @@ def _save_combined_data(combined_df: pd.DataFrame, output_folder: str, data_type
         for c in combined_df.columns
         if c not in set(leading_columns + trailing_columns)
     ]
-    combined_df = combined_df[
+    return combined_df[
         leading_columns + variable_columns + trailing_columns
     ]
 
+
+def _save_combined_data(
+    combined_df: pd.DataFrame,
+    output_folder: str,
+    data_type: str,
+    tile_id: str,
+    is_aws: bool,
+    local_tmp_dir: str,
+    current_index: int,
+    total_count: int,
+    verbose: bool,
+    training_year_pairs: list[tuple[int, int]] | None = None,
+) -> pd.DataFrame:
+    """Prepare and save the combined tile data."""
+    if combined_df is None or combined_df.empty:
+        Engine.write_message_dask(
+            f" [{current_index}/{total_count}] [SKIP NO DATA] Tile "
+            f"'{tile_id}': No valid data assembled; no Parquet file created.",
+            OUTPUTS,
+        )
+        return pd.DataFrame()
+
+    combined_df = _prepare_combined_output(
+        combined_df,
+        data_type,
+        tile_id,
+        list(training_year_pairs or []),
+    )
+
     output_folder_path = UPath(output_folder)
-    if not is_aws: 
+    if not is_aws:
         output_folder_path.mkdir(parents=True, exist_ok=True)
 
-    final_save_path = str(output_folder_path / f"{tile_id}_{data_type}_clipped_data.parquet")
-    tmp_dst_path = str(Path(local_tmp_dir) / f"{tile_id}_{data_type}_clipped_data.parquet")
+    filename = f"{tile_id}_{data_type}_clipped_data.parquet"
+    final_save_path = str(output_folder_path / filename)
+    tmp_dst_path = str(Path(local_tmp_dir) / filename)
 
     try:
         combined_df.to_parquet(tmp_dst_path, engine="pyarrow", index=False)
@@ -1236,7 +1269,18 @@ def _process_tile(sub_grid: pd.Series, gridded_files: list, ungridded_files: lis
         )
         
         # Save and calculate final table statistics
-        stats = _save_combined_data(combined_df, output_folder, data_type, tile_name, is_aws, local_tmp_dir, current_index, total_count, verbose, valid_training_year_pairs)
+        stats = _save_combined_data(
+            combined_df=combined_df,
+            output_folder=output_folder,
+            data_type=data_type,
+            tile_id=tile_name,
+            is_aws=is_aws,
+            local_tmp_dir=local_tmp_dir,
+            current_index=current_index,
+            total_count=total_count,
+            verbose=verbose,
+            training_year_pairs=valid_training_year_pairs,
+        )
         if stats is not None and not stats.empty:
             stats.attrs["created_parquet"] = True
             stats.attrs["parquet_path"] = str(expected_path)
