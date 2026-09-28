@@ -53,7 +53,6 @@ class BlueTopoEngine(Engine):
     def __init__(self, param_lookup: dict[dict]):
         super().__init__()
         self.param_lookup = param_lookup
-        self.target_crs = "EPSG:6350"
 
     def create_catzoc_all(self, tiff_file_path: pathlib.Path, increased_scale: bool=False) -> None:
         """Generate an Initial Survey Score (ISS) raster of unique values for each survey area."""
@@ -65,7 +64,8 @@ class BlueTopoEngine(Engine):
             # Safely replace NaNs with nodata before converting to int32
             contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            width, height = src.width, src.height  
+            width, height = src.width, src.height
+            crs = src.crs
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
         tree = etree.parse(xml_file_path)
@@ -137,7 +137,7 @@ class BlueTopoEngine(Engine):
             tiled=True,
             blockxsize=512,
             blockysize=512,
-            crs=self.target_crs,
+            crs=crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
@@ -157,7 +157,8 @@ class BlueTopoEngine(Engine):
             # Safely replace NaNs with nodata before converting to int32
             contributor_band_values = np.nan_to_num(np.round(band3_raw), nan=nodata).astype(np.int32)
             transform = src.transform
-            width, height = src.width, src.height 
+            width, height = src.width, src.height
+            crs = src.crs
 
         xml_file_path = tiff_file_path.parents[0] / f'{tiff_file_path.stem}.tiff.aux.xml'
         tree = etree.parse(xml_file_path)
@@ -213,7 +214,7 @@ class BlueTopoEngine(Engine):
             tiled=True,
             blockxsize=512,
             blockysize=512,
-            crs=self.target_crs,
+            crs=crs,
             transform=transform,
             nodata=nodata,
         ) as dst:
@@ -316,26 +317,35 @@ class BlueTopoEngine(Engine):
         return output_tile_path
     
     def finalize_cog(self, tiff_path: pathlib.Path) -> None:
-        """The final pass to ensure perfect COG layout and overviews."""
+        """The final pass to ensure perfect Cloud-Optimized-Geotiff(COG) layout and overviews."""
+
         temp_cog = tiff_path.parent / f"temp_{tiff_path.name}"
         
         ds = gdal.Open(str(tiff_path), gdal.GA_Update)
         if ds is not None:
             ds.BuildOverviews("BILINEAR", [2, 4, 8, 16])
+            ds.FlushCache()
             ds = None
 
-        gdal.Translate(
-            str(temp_cog),
-            str(tiff_path),
-            creationOptions=[
-                "COMPRESS=DEFLATE",
-                "PREDICTOR=3",
-                "TILED=YES",
-                "BLOCKXSIZE=512",
-                "BLOCKYSIZE=512",
-                "COPY_SRC_OVERVIEWS=YES"
-            ]
-        )
+        src_ds = gdal.Open(str(tiff_path), gdal.GA_ReadOnly)
+        if src_ds is None:
+            raise RuntimeError(f"Failed to open source raster at {tiff_path}")
+
+        try:
+            gdal.Translate(
+                str(temp_cog),
+                str(tiff_path),
+                creationOptions=[
+                    "COMPRESS=DEFLATE",
+                    "PREDICTOR=3",
+                    "TILED=YES",
+                    "BLOCKXSIZE=512",
+                    "BLOCKYSIZE=512",
+                    "COPY_SRC_OVERVIEWS=YES"
+                ]
+            )
+        finally:
+            src_ds = None
         
         if temp_cog.exists():
             tiff_path.unlink()

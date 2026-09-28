@@ -37,12 +37,11 @@ def _set_gdal_s3_options() -> None:
 
 
 def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
-    """Original BlueTopo logic: Creates individual Warped VRTs (EPSG:4326) on S3"""
+    """BlueTopo logic: Creates individual Warped VRTs (EPSG:4326) on S3"""
 
     _set_gdal_s3_options()
     geotiff_prefix, s3_bucket, _ = params
     gdal.UseExceptions()
-    gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
     
     geotiff_stem = str(pathlib.Path(geotiff_prefix).stem)
     vsi_geotiff_path = f'/vsis3/{geotiff_prefix}'
@@ -56,16 +55,23 @@ def _process_single_bluetopo(params: list) -> tuple[str, str, str]:
         if src_ds is None:
             raise FileNotFoundError(f"GDAL could not open {vsi_geotiff_path}")
             
-        warp_options = {
-            'format': 'VRT',
-            'dstSRS': 'EPSG:4326',
-            'resampleAlg': gdal.GRA_Bilinear,
-            'srcNodata': -999999,
-            'dstNodata': -999999,  # Ensures the "empty" space in the reprojected VRT is transparent
-            'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'] # Optional: helps with clean edges
-        }
+        # Dynamically pull Nodata directly from single-band elevation raster
+        src_band = src_ds.GetRasterBand(1)
+        src_nodata = src_band.GetNoDataValue()
+        
+        # Fallback to float NaN if not explicitly defined in raster header
+        if src_nodata is None:
+            src_nodata = float('nan')
 
-        warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, **warp_options)
+        warp_options = gdal.WarpOptions(
+            format='VRT',
+            dstSRS='EPSG:4326',
+            resampleAlg=gdal.GRA_Bilinear,
+            srcNodata=src_nodata,
+            dstNodata=src_nodata
+        )
+
+        warped_vrt_ds = gdal.Warp(local_vrt_path, src_ds, options=warp_options)
         projection_wkt = warped_vrt_ds.GetProjection()
         spatial_ref = osr.SpatialReference(wkt=projection_wkt)
         datum_code = spatial_ref.GetAuthorityCode('DATUM')

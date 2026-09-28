@@ -38,7 +38,6 @@ class Engine:
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
         self.cluster = None
         self.client = None
-        self.target_crs = "EPSG:32617"
         self.target_res = 8
         self.year_ranges = [
                     (1998, 2001),
@@ -219,7 +218,6 @@ class Engine:
     def resample_and_reproject(self, tiff_path: pathlib.Path, target_res: int) -> None:
         """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""
 
-        print(f"  - Resampling and reprojecting base tile...")
         output_folder = self.param_lookup['output_directory'].valueAsText
         msg = f"Resampling {tiff_path.name} to {target_res}m and explicitly locking into {target_res}..."
         self.write_message(msg, output_folder)
@@ -241,31 +239,25 @@ class Engine:
             warped_band_path = tiff_path.parent / f"band_{band_idx}_warped.tiff"
 
             # Extract single band from source
-            ds_ext = gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
-            ds_ext = None  # Flush and release lock
+            gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
             temp_files_to_clean.append(raw_band_path)
 
             # Choose correct resampling algorithm
             # Bands 1 (Bathy) and 2 (Uncertainty) get Bilinear interpolation
             # Bands 3+ (Contributor IDs/Metadata indices) must get Nearest Neighbor to avoid float corruption
-            if band_idx in (1, 2):
-                resample_alg = gdal.GRA_Bilinear
-            else:
-                resample_alg = gdal.GRA_NearestNeighbour
+            resample_alg = gdal.GRA_Bilinear if band_idx in (1, 2) else gdal.GRA_NearestNeighbour
 
             # Warp single band to output parameters
-            ds_warp = gdal.Warp(
+            gdal.Warp(
                 str(warped_band_path),
                 str(raw_band_path),
                 xRes=target_res,
                 yRes=target_res,
                 targetAlignedPixels=True,
-                dstSRS=self.target_crs,
                 resampleAlg=resample_alg,
                 dstNodata=-9999,
                 creationOptions=["COMPRESS=DEFLATE"]
             )
-            ds_warp = None  # Flush and release lock
             warped_bands.append(str(warped_band_path))
             temp_files_to_clean.append(warped_band_path)
 
@@ -273,17 +265,13 @@ class Engine:
         temp_tiff = tiff_path.parent / f"warped_{tiff_path.name}"
         vrt_path = tiff_path.parent / f"warped_multiband.vrt"
 
-        vrt_ds = gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
-        vrt_ds = None  # Flush and release lock
+        gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
 
-        # Explicitly apply the self.target_crs here to strictly guarantee the finalized TIFF doesn't inherit a corrupted VRT CRS
-        ds_trans = gdal.Translate(
+        gdal.Translate(
             str(temp_tiff),
             str(vrt_path),
-            outputSRS=self.target_crs,
             creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
         )
-        ds_trans = None  # Flush and release lock
 
         # Clean up temporary intermediate files securely
         if vrt_path.exists():
