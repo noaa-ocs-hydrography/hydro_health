@@ -64,7 +64,7 @@ class MetadataEngine:
     def read_json_files(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Read JSON files to download metadata information"""
 
-        print('- Reading DigitalCoast JSON files')
+        print(' - Reading DigitalCoast JSON files')
         feature_json_files = [feature_json for feature_json in digital_coast_folder.rglob('feature.json') if 'unused_providers' not in str(feature_json)]
         metadata_params = []
         for feature_json in feature_json_files:
@@ -100,10 +100,10 @@ class MetadataEngine:
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, outputs: str) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
-        print('Downloading Metadata Datasets')
+        print('Starting MetadataEngine')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
-            print('Starting:', ecoregion)
+            print('- Starting:', ecoregion)
             if output_prefix:
                 digital_coast_folder = pathlib.Path(outputs) / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             else:

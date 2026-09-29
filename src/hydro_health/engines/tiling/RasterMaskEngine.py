@@ -1,6 +1,7 @@
 import os
 import pathlib
 import shutil
+import gc
 import numpy as np
 import geopandas as gpd
 import rasterio
@@ -8,9 +9,8 @@ import fiona
 
 from pyproj import Transformer
 from pathlib import Path
+from shapely import union_all
 from shapely.geometry import shape
-from shapely.ops import unary_union
-from upath import UPath
 from rasterio.features import shapes
 from osgeo import ogr, osr, gdal
 
@@ -77,10 +77,14 @@ def _create_prediction_mask(param_inputs: list) -> None:
 
     gdal.RasterizeLayer(target_ds, [1], tmp_layer, burn_values=[1])
     target_ds.FlushCache()
+    
+    # Explicitly release GDAL/OGR handles
     target_ds = None
+    tmp_ds = None
+    gpkg_ds = None
 
 
-def _create_training_mask(param_inputs: dict) -> str:
+def _create_training_mask(param_inputs: list) -> str:
     """Check actual raster data presence to upgrade prediction mask (1) to training mask (2)"""
 
     ecoregion_path, param_lookup = param_inputs
@@ -103,7 +107,6 @@ def _create_training_mask(param_inputs: dict) -> str:
     block_size = 4096
     total_burns = 0
 
-    engine = RasterMaskEngine(param_lookup={}, pilot_mode=False)
     approved_providers = [provider.lower() for provider in get_approved_providers(ecoregion_path.stem)]
 
     for y in range(0, rows, block_size):
@@ -127,8 +130,7 @@ def _create_training_mask(param_inputs: dict) -> str:
             for vrt in vrts:
                 vrt_provider = '_'.join(vrt.stem.split('_')[3:])
                 if vrt_provider.lower() not in approved_providers:
-                    engine.write_message(f'- skipping unapproved provider: {vrt_provider}', 
-                                         param_lookup['output_directory'].valueAsText)
+                    print(f'- skipping unapproved provider: {vrt_provider}', flush=True)
                     continue
 
                 warp_options = gdal.WarpOptions(
@@ -142,16 +144,21 @@ def _create_training_mask(param_inputs: dict) -> str:
                 )
 
                 vrt_ds = gdal.Open(str(vrt))
+                if vrt_ds is None:
+                    continue
+
                 tmp_ds = gdal.Warp('', vrt_ds, options=warp_options)
 
                 if tmp_ds is not None and tmp_ds.RasterCount >= 1:
-                    # Get the last band.  Previously used band 2.
                     alpha_band_idx = tmp_ds.RasterCount 
-                    alpha_chunk = tmp_ds.GetRasterBand(alpha_band_idx).ReadAsArray()
+                    band_ref = tmp_ds.GetRasterBand(alpha_band_idx)
+                    alpha_chunk = band_ref.ReadAsArray()
                     presence_chunk |= (alpha_chunk > 0).astype(np.uint8)
+                    band_ref = None
 
-                tmp_ds = None
-                vrt_ds = None
+                # Safely release warped GDAL datasets within the loop
+                del tmp_ds
+                del vrt_ds
 
             update_idx = (mask_chunk == 1) & (presence_chunk > 0)
             if np.any(update_idx):
@@ -160,11 +167,13 @@ def _create_training_mask(param_inputs: dict) -> str:
                 band.WriteArray(mask_chunk, x, y)
 
     band.FlushCache()
+    band = None
     ds.BuildOverviews("NONE", [])
     ds.BuildOverviews("NEAREST", [2, 4, 8, 16])
     ds = None
+    gc.collect()
 
-    return f"{ecoregion_path.stem}: {total_burns} training pixels marked."
+    return f"- {ecoregion_path.stem}: {total_burns} training pixels marked."
 
 
 class RasterMaskEngine(Engine):
@@ -176,7 +185,7 @@ class RasterMaskEngine(Engine):
     def create_mask_vector_files(self, er_dir: Path, output_prefix: str, outputs: str = None) -> None:
         """Helper to orchestrate vector Parquet generation and S3-based subgrid creation per ecoregion."""
 
-        print(f'Starting vector file creation')
+        print(f'- Beginning vector file creation', flush=True)
         er = er_dir.name
         pilot_mode = getattr(self, 'pilot_mode', False)
         
@@ -189,7 +198,7 @@ class RasterMaskEngine(Engine):
         ]
 
         for mask_type, suffix in tasks:
-            print(f' - Beginning {mask_type} from {suffix}')
+            print(f' - Beginning {mask_type} from {suffix}', flush=True)
             tif_path = er_dir / get_config_item('MASK', 'SUBFOLDER') / f"{mask_type}_mask_{er}.tif"
             
             if tif_path.exists():
@@ -233,38 +242,42 @@ class RasterMaskEngine(Engine):
 
                     win_transform = src.window_transform(window)
                     shapes_gen = shapes(mask_chunk, mask=valid_mask, transform=win_transform)
-                    chunk_geoms = [shape(geom) for geom, _ in shapes_gen]
-
-                    if chunk_geoms:
-                        geometries.append(unary_union(chunk_geoms))
+                    
+                    # Directly extract shapes into list
+                    geometries.extend([shape(geom) for geom, _ in shapes_gen])
 
             crs = src.crs
 
-        self.write_message(f" -> Extracted {len(geometries)} unified geometries. Building GeoDataFrame...", outputs)
+        self.write_message(f" -> Extracted {len(geometries)} raw geometries. Building GeoDataFrame...", outputs)
 
-        gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
-        if hasattr(self, 'target_crs') and self.target_crs:
+        if geometries:
+            # Create GeoDataFrame with all shapes directly
+            gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
+            
+            # Fast GeoPandas spatial union (much faster than raw shapely union_all on list)
+            print(" -> Unifying geometries...", flush=True)
+            unified_geom = gdf.geometry.union_all()
+            gdf = gpd.GeoDataFrame({'geometry': [unified_geom]}, crs=crs)
+            
+            # Make valid without running expensive buffer(0)
+            gdf['geometry'] = gdf.geometry.make_valid()
+        else:
+            gdf = gpd.GeoDataFrame({'geometry': []}, crs=crs)
+
+        if hasattr(self, 'target_crs') and self.target_crs and not gdf.empty:
             gdf = gdf.to_crs(self.target_crs)
 
-        gdf['geometry'] = gdf.geometry.make_valid().buffer(0)
-
-        if process_type == 'prediction':
-            sub_path = get_config_item('MASK', 'PREDICTION_MASK_PQ', pilot_mode=pilot_mode)
-        else:
-            sub_path = get_config_item('MASK', 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
-
+        sub_path = get_config_item('MASK', 'PREDICTION_MASK_PQ' if process_type == 'prediction' else 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
         suffix = str(sub_path).lstrip('/')
 
         base_dir = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
-        if output_prefix:
-            mask_path = base_dir / output_prefix / ecoregion / suffix
-        else:
-            mask_path = base_dir / ecoregion / suffix
+        mask_path = base_dir / output_prefix / ecoregion / suffix if output_prefix else base_dir / ecoregion / suffix
 
         mask_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.write_message(f"Saving {process_type} mask GeoDataFrame to: {mask_path}", outputs)
         gdf.to_parquet(str(mask_path))
+        print(f" -> Successfully saved {mask_path.name}", flush=True)
 
         return gdf
 
@@ -273,17 +286,17 @@ class RasterMaskEngine(Engine):
 
         self.write_message(f"Preparing {process_type} sub-grids from: {mask_gdf_path}", outputs)
 
-        # Load mask GeoDataFrame directly without unifying geometries
         mask_gdf = gpd.read_parquet(mask_gdf_path)
+        if mask_gdf.empty:
+            self.write_message(f" -> Mask GeoDataFrame is empty, skipping subgrid creation.", outputs)
+            return
 
         subgrids_layer = get_config_item('MODEL', 'SUBGRIDS_LAYER')
         
-        # Read CRS without loading dataset
         with fiona.open(str(subgrid_gpkg_local), layer=subgrids_layer) as src:
             subgrid_crs = src.crs
 
-        # Transform only the mask bounding box instead of entire model_subgrids
-        mask_bounds = mask_gdf.total_bounds  # (xmin, ymin, xmax, ymax)
+        mask_bounds = mask_gdf.total_bounds
         if mask_gdf.crs != subgrid_crs:
             transformer = Transformer.from_crs(mask_gdf.crs, subgrid_crs, always_xy=True)
             xmin, ymin = transformer.transform(mask_bounds[0], mask_bounds[1])
@@ -294,7 +307,6 @@ class RasterMaskEngine(Engine):
 
         self.write_message(f" -> Reading filtered subgrids from local GeoPackage via bbox...", outputs)
 
-        # Filter using spatial index with bbox param
         sub_grids = gpd.read_file(
             str(subgrid_gpkg_local), 
             layer=subgrids_layer, 
@@ -302,7 +314,10 @@ class RasterMaskEngine(Engine):
             engine="fiona"
         )
 
-        # Convert found polygons to mask CRS
+        if sub_grids.empty:
+            self.write_message(f" -> No subgrids matched bbox {subgrid_bbox}", outputs)
+            return
+
         if sub_grids.crs != mask_gdf.crs:
             sub_grids = sub_grids.to_crs(mask_gdf.crs)
 
@@ -318,7 +333,6 @@ class RasterMaskEngine(Engine):
         target_layer = f"{process_type}_intersecting_subgrids"
         self.write_message(f" -> Writing layer '{target_layer}' directly to local GeoPackage...", outputs)
         
-        # Use mode="w" to create/overwrite this specific layer without touching other layers
         intersecting_sub_grids.to_file(
             str(subgrid_gpkg_local), 
             layer=target_layer, 
@@ -332,6 +346,7 @@ class RasterMaskEngine(Engine):
     def run(self, outputs: str, output_prefix: str) -> None:
         """Main execution flow using Dask for rasters followed by local parquet/subgrid creation."""
 
+        print('Starting RasterMaskEngine', flush=True)
         output_folder = OUTPUTS / output_prefix if output_prefix else OUTPUTS
 
         ecoregions = [d for d in output_folder.glob('ER_*') if d.is_dir()]
@@ -343,7 +358,7 @@ class RasterMaskEngine(Engine):
         )
 
         for r in results:
-            print(r)
+            print(r, flush=True)
 
         self.close_dask()    
 

@@ -36,23 +36,7 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
-    if param_lookup['env'] in ['local', 'remote']:
-        run_bluetopo_tile_engine_local(tiles, param_lookup, output_prefix, resolution)
-    else:
-        run_bluetopo_tile_engine_s3(tiles, param_lookup, output_prefix, resolution)
-
-
-def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
-
     engine = BlueTopoEngine(param_lookup)
-    engine.run(tiles, output_prefix, resolution)
-
-
-def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
-    """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
-
-    engine = BlueTopoS3Engine(param_lookup)
     engine.run(tiles, output_prefix, resolution)
 
 
@@ -212,9 +196,9 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
     for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
-            print(f'Building {ecoregion} - {dataset} VRT file')
+            print(f'Starting {engine.__class__.__name__} for {ecoregion} - {dataset}')
             engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix=output_prefix)
-        print(f'Building {ecoregion} - DigitalCoast VRT files')
+        print(f'Starting {engine.__class__.__name__} for {ecoregion}')
         engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
 

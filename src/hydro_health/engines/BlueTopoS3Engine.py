@@ -537,7 +537,7 @@ class BlueTopoS3Engine(Engine):
                 self.write_message(result, output_folder)
 
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, resolution: list[int] = None) -> None:
-        output_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        print('Starting BlueTopoS3Engine')
         
         # Standardize the ecoregions mapped in param_lookup globally to "ER_#"
         all_ecoregions_raw = self.param_lookup['eco_regions'].value
@@ -552,38 +552,30 @@ class BlueTopoS3Engine(Engine):
             match = re.search(r'\d+', str(er_str))
             return int(match.group(0)) if match else 9999
             
-        all_ecoregions = sorted(set(all_ecoregions), key=_get_er_num)
-        
-        print(f"[BlueTopo Engine] Processing ecoregions in sequential order: {all_ecoregions}")
-        
+        all_ecoregions = sorted(set(all_ecoregions), key=_get_er_num)        
         if not all_ecoregions:
-            print("[BlueTopo Engine] No requested Ecoregions found in input. Exiting run.")
+            print("- No requested Ecoregions found in input. Exiting run.")
             return
 
         # Explicitly setting single worker / thread to protect 16GB RAM limit
-        self.setup_dask(self.param_lookup['env'], n_workers=1, threads_per_worker=1)
-        
-        # We explicitly rely on 'EcoRegion' as requested
-        er_col = 'EcoRegion' 
+        self.setup_dask(self.param_lookup['env'], n_workers=1, threads_per_worker=1) 
         
         # Fallback list to quickly grab the tile ID column without iterating the dataframe
         tile_col = next((c for c in tile_gdf.columns if str(c).lower() in ['tile', 'tile_id', 'name', 'id', 'bluetopo']), tile_gdf.columns[0])
 
+        er_col = 'EcoRegion'
         for current_res in resolution:
-            print(f"\n{'='*50}\n[BlueTopo Engine] STARTING PROCESSING FOR {current_res}m\n{'='*50}")
+            print(f"- Starting resolution {current_res}m\n{'='*50}")
 
             if not self.skip_tiling:
                 print(f'Checking and processing BlueTopo Datasets for {current_res}...')
                 param_inputs = []
-
-                print(f"[BlueTopo Engine] Mapped Tile column: '{tile_col}' and EcoRegion column: '{er_col}'")
 
                 for _, row in tile_gdf.iterrows():
                     # Check for NaNs safely
                     if pd.isna(row.get(er_col)):
                         continue
                     
-                    # We can safely assume row[er_col] is an int (1-6) per system design
                     ecoregion_id = row[er_col]
                     
                     if ecoregion_id not in all_ecoregions:
@@ -604,16 +596,16 @@ class BlueTopoS3Engine(Engine):
                 param_inputs = sorted(param_inputs, key=lambda x: _get_er_num(x[2]))
 
                 if param_inputs:
-                    print(f"Submitting {len(param_inputs)} tiles to Dask workers...")
+                    print(f"- Submitting {len(param_inputs)} tiles to Dask workers...")
                     future_tiles = self.client.map(_process_tile, param_inputs)
 
-                    print("Waiting for all Dask workers to complete...")
+                    print("- Waiting for all Dask workers to complete...")
                     tile_results = self.client.gather(future_tiles)
-                    print("All Dask workers finished successfully.")
+                    print("- All Dask workers finished successfully.")
 
                     self.print_async_results(tile_results, self.param_lookup['output_directory'].valueAsText)
                 else:
-                    print(f"[BlueTopo Engine] No tiles to process for {current_res}m.")
+                    print(f"- No tiles to process for {current_res}m.")
 
                 for ecoregion in all_ecoregions:
                     if output_prefix == 'low_res':
@@ -625,7 +617,7 @@ class BlueTopoS3Engine(Engine):
                     s3_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
                     self.write_run_manifest(s3_path, {'tiles': len(param_inputs)})
             else:   
-                print(f"[BlueTopo Engine] skip_tiling is set to True. Bypassing individual tile generation entirely for {current_res}.")
+                print(f"- Skip tiling. Bypassing individual tile generation entirely for {current_res}.")
 
         self.close_dask()
 

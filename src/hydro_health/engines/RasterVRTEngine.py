@@ -146,10 +146,10 @@ class RasterVRTEngine(Engine):
                 )
                 gdal.Warp(str(vrt_filename), tifs, options=warp_options)
 
-            print(f'- Finished Master VRT: {vrt_filename}')
+            print(f'- Finished Master VRT: {vrt_filename.name}')
 
     def run(self, output_folder: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="", data_folder: str="", manual_downloads: bool=False) -> None:
-        """Main execution method mimicking the S3 engine's control routing entirely local"""
+        """Main method for running VRT Engine locally"""
         
         sub = get_config_item(data_type.upper(), 'SUBFOLDER')
         

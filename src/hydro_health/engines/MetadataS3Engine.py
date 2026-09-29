@@ -96,7 +96,7 @@ class MetadataS3Engine:
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str, outputs: str) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
-        print('Downloading Metadata Datasets')
+        print('Starting MetadataS3Engine')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)

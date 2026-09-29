@@ -41,13 +41,6 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
-    elif env == 'remote':
-        param_lookup = {
-            'input_directory': Param(''),
-            'output_directory': Param(get_config_item('SHARED', 'OUTPUT_FOLDER')),
-            'eco_regions': Param(''),
-            'env': env
-        }
     else:
         param_lookup = {
             'input_directory': Param(''),

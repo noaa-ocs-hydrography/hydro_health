@@ -95,10 +95,21 @@ class Engine:
                 self.write_message(f"Failed to wipe master local temp directory: {e}", output_folder)
 
     def close_dask(self) -> None:
-        """Shut down Dask objects"""
+        """Shut down Dask objects safely without blocking indefinitely."""
 
-        self.client.close()
-        self.cluster.close()
+        if self.client:
+            try:
+                # Force pending tasks to cancel rather than hanging cluster shutdown
+                self.client.cancel(self.client.futures, force=True)
+                self.client.close(timeout=10)
+            except Exception as e:
+                print(f"- Warning during client close: {e}", flush=True)
+
+        if self.cluster:
+            try:
+                self.cluster.close(timeout=10)
+            except Exception as e:
+                print(f"- Warning during cluster close: {e}", flush=True)
     
     def get_available_datasets(self, geometry_coords: str, digital_coast_folder: str) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -287,14 +298,15 @@ class Engine:
     def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
-        print(f"Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
+        print(f"- Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
         
         if env == 'aws':
-            dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
+            # Previously "fork", which Gemini said has issues with GDAL usage with Dask.  Use "forkserver", or "spawn"
+            dask.config.set({"distributed.worker.multiprocessing-method": "forkserver"})
             self.set_proj_path()
         self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
         self.client = Client(self.cluster)
-        print(self.client.dashboard_link)
+        # print(self.client.dashboard_link)
 
     def set_proj_path(self):
         """Load proj.db path to resolve mismatch"""
