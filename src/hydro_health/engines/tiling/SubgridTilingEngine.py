@@ -987,7 +987,26 @@ def _conform_output_schema(
     else:
         return combined_df
 
-    expected_columns = ["X", "Y", *variable_columns]
+    configured_pairs = year_ranges if data_type == "prediction" else training_year_pairs
+    optional_columns = set(
+        _paired_static_variables(configured_pairs, "hurr_strength_mean")
+        + _paired_static_variables(configured_pairs, "tsm_mean")
+    )
+    skipped_columns = [
+        column for column in variable_columns
+        if column in optional_columns
+        and (column not in combined_df.columns or not combined_df[column].notna().any())
+    ]
+    if skipped_columns:
+        Engine.write_message_dask(
+            f"Tile {tile_id}: Skipping missing or all-NaN {data_type} "
+            f"hurricane/TSM columns: {skipped_columns}",
+            OUTPUTS,
+        )
+
+    expected_columns = [
+        "X", "Y", *(column for column in variable_columns if column not in skipped_columns)
+    ]
     missing_columns = [
         column for column in expected_columns if column not in combined_df.columns
     ]
@@ -996,7 +1015,7 @@ def _conform_output_schema(
             len(combined_df), np.nan, dtype=np.float32
         )
 
-    protected_columns = set(expected_columns) | {"FID", "tile_id"}
+    protected_columns = set(expected_columns) | optional_columns | {"FID", "tile_id"}
     unexpected_columns = [
         column
         for column in combined_df.columns
@@ -1350,7 +1369,7 @@ class SubgridTilingEngine(Engine):
         self,
         param_lookup: dict,
         output_prefix: str | bool = False,
-        overwrite_outputs: bool = False,
+        overwrite_outputs: bool = True,
     ) -> None:
         """Initialize paths, configurations, and environment variables"""
 
