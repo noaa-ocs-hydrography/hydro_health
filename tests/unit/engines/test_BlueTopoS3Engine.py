@@ -2,12 +2,14 @@ import pytest
 import pathlib
 import pandas as pd
 import geopandas as gpd
+import rasterio
 import numpy as np
 from unittest.mock import MagicMock, patch, mock_open
+from osgeo import gdal
 from botocore import UNSIGNED
 
 import sys
-HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[1]
+HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[3] / 'src'
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine, _process_tile
@@ -57,7 +59,7 @@ def test_download_nbs_tile(victim, tmp_path):
          patch(f'{TILING_PATH}.get_config_item', return_value="sub"), \
          patch('pathlib.Path.exists', return_value=False):
         
-        result = victim.download_nbs_tile(tmp_path, "T1", "ER1")
+        result = victim.download_nbs_tile(tmp_path, "T1", "ER1", False, 8)
         
         # Verify the download was called
         assert mock_bucket.download_file.call_count == 2
@@ -65,6 +67,8 @@ def test_download_nbs_tile(victim, tmp_path):
         assert result.suffix == '.tiff'
         assert "ER1" in str(result)
 
+
+import os
 
 def test_upload_current_tiles_to_s3(victim, tmp_path):
     """Test that the uploader correctly maps local paths to S3 keys based on ecoregion."""
@@ -74,14 +78,20 @@ def test_upload_current_tiles_to_s3(victim, tmp_path):
     dummy_file = eco_dir / "test_tile.tiff"
     dummy_file.write_text("data")
 
-    with patch('boto3.client') as mock_client:
-        victim.upload_current_tiles_to_s3(eco_dir, "my-bucket", "ER1")
+    # Match OS-specific path separators for local path evaluation
+    expected_s3_key = os.path.join("ER1", "test_tile.tiff")
+
+    with patch(f'{TILING_PATH}.get_config_item') as mock_cfg, \
+         patch('boto3.client') as mock_client:
         
-        # Ensure upload_file was called with the relative path starting at ER1
+        mock_cfg.return_value = "ocs-dev-csdl-hydrohealth"
+
+        victim.upload_current_tiles_to_s3(eco_dir, tmp_path)
+        
         mock_client.return_value.upload_file.assert_called_once_with(
-            fr'{tmp_path}\ER1\test_tile.tiff',  # cast pathlib object caused failure
-            "my-bucket", 
-            r"ER1\test_tile.tiff"
+            str(dummy_file), 
+            "ocs-dev-csdl-hydrohealth", 
+            expected_s3_key
         )
 
 
@@ -95,29 +105,41 @@ def test_create_slope(victim):
         mock_dem.assert_called_once_with(expected_out, str(test_path), 'slope')
 
 
-def test_set_ground_to_nodata(victim):
-    """Verify that values >= 0 are masked to -999999."""
+def test_set_ground_to_nodata(victim, tmp_path):
+    """Verify that values >= 0 are masked to -9999 using rasterio block processing."""
+    test_path = tmp_path / "test_tile.tiff"
 
-    test_path = pathlib.Path("/tmp/tile.tiff")
-    mock_ds = MagicMock()
-    # Mock a 2x2 array: two negative (keep), two positive (mask)
-    mock_array = np.array([[-10, 5], [0, -5]])
-    mock_ds.ReadAsArray.return_value = mock_array
+    # 1. Create a real 2x2 GeoTIFF on disk
+    input_data = np.array([[-10, 5], [0, -5]], dtype=np.float32)
     
-    with patch('osgeo.gdal.Open', return_value=mock_ds):
-        victim.set_ground_to_nodata(test_path)
-        
-        # Check that WriteArray was called with the masked data
-        written_array = mock_ds.GetRasterBand.return_value.WriteArray.call_args[0][0]
-        assert written_array[0, 1] == -999999  # 5 becomes nodata
-        assert written_array[1, 0] == -999999  # 0 becomes nodata
-        assert written_array[0, 0] == -10      # -10 stays
+    with rasterio.open(
+        test_path,
+        'w',
+        driver='GTiff',
+        height=2,
+        width=2,
+        count=1,
+        dtype=input_data.dtype,
+        nodata=-9999
+    ) as dst:
+        dst.write(input_data, 1)
+
+    # 2. Run the function
+    victim.set_ground_to_nodata(test_path)
+
+    # 3. Read back and verify output values
+    with rasterio.open(test_path, 'r') as src:
+        result = src.read(1)
+        assert result[0, 1] == -9999  # 5 becomes -9999
+        assert result[1, 0] == -9999  # 0 becomes -9999
+        assert result[0, 0] == -10    # -10 stays unchanged
+        assert result[1, 1] == -5     # -5 stays unchanged
 
 
 def test_process_tile_wrapper():
     """Tests the static _process_tile function's sequence of events."""
 
-    param_inputs = [{'env': 'aws'}, "bucket", "tile123", "eco456"]
+    param_inputs = [{'env': 'aws'}, 'tile.tiff', 'ER_3', '', '']
     
     with patch(f'{TILING_PATH}.BlueTopoS3Engine') as MockEngine, \
          patch('tempfile.TemporaryDirectory') as mock_temp:
