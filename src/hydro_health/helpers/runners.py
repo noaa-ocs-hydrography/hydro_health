@@ -4,7 +4,6 @@ import cProfile
 import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
-from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
 from hydro_health.engines.tiling.BatchTilingEngine import BatchTilingEngine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine

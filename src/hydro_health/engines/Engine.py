@@ -329,7 +329,7 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')        
 
-    def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
+    def write_run_manifest(self, subfolder: pathlib.Path, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""
 
         end_time = time.time()
@@ -343,16 +343,18 @@ class Engine:
         }
         if extra_info:
             manifest.update(extra_info)
-
+        
+        manfest_path = subfolder / f"_manifest_{self.__class__.__name__}.json"
+        print(f'Writing run manifest: {manfest_path}')
         if self.param_lookup['env'] == 'aws':
             s3 = boto3.client('s3')
             s3.put_object(
                 Bucket=get_config_item('SHARED', 'OUTPUT_BUCKET'),
-                Key=f"{subfolder}/_manifest_{self.__class__.__name__}.json",
+                Key=str(manfest_path),
                 Body=json.dumps(manifest, indent=4)
             )
         else:
-            manifest_path = OUTPUTS / subfolder / f'_manifest_{self.__class__.__name__}.json'
+            manifest_path = OUTPUTS / manfest_path
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             with open(manifest_path, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))

@@ -553,8 +553,10 @@ class BlueTopoEngine(Engine):
                         beginning_prefix = output_prefix
                     else:
                         beginning_prefix = ''
-                    
-                    manifest_path = f"{beginning_prefix}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo"
+
+                    manifest_path = pathlib.Path(beginning_prefix) / ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
+                    # TODO number of tiles might be lower if missing from BlueTopo bucket
+                    # should keep track during run or read # from S3
                     self.write_run_manifest(manifest_path, {'tiles': len(param_inputs)})
 
         self.close_dask()
