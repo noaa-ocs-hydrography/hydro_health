@@ -9,7 +9,7 @@ from shapely.geometry import Polygon
 from botocore import UNSIGNED
 
 import sys
-HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[1]
+HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[4] / 'src'
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 from hydro_health.helpers.tools import Param
@@ -72,7 +72,7 @@ def test_run_orchestration(victim, tmp_path):
         # will fail or create objects that rglob cannot search.
         mock_cfg.return_value = "subfolder"
         
-        victim.run(mock_gdf)
+        victim.run(mock_gdf, output_prefix=False)
         
         expected_path = tmp_path / "processed_providers.log"
         assert expected_path.exists()

@@ -11,10 +11,15 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor
 
 from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 
-class MetadataS3Engine:
+class MetadataS3Engine(Engine):
     """Class for parallel processing metadata for a region"""
+
+    def __init__(self, param_lookup: dict[dict]):
+        super().__init__()
+        self.param_lookup = param_lookup
 
     def upload_metadata_to_s3(self, param_inputs: list[list]) -> None:
         """Parallel process and download metadata dates"""
@@ -100,12 +105,14 @@ class MetadataS3Engine:
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
             print('Starting:', ecoregion)
-            # TODO manual download would read JSON files from N:
+            ecoregion_subpath = f"{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
             if output_prefix:
-                digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{output_prefix}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
-            else:
-                digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
+                ecoregion_subpath = f"{output_prefix}/{ecoregion_subpath}"
+            digital_coast_path = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion_subpath}"
             self.read_json_files(digital_coast_path, outputs)
+            s3_files = s3fs.S3FileSystem()
+            found_metadata = list(s3_files.glob(f"{digital_coast_path}/**/metadata.txt"))
+            self.write_run_manifest(ecoregion_subpath, {'metadata': len(found_metadata)})
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""
