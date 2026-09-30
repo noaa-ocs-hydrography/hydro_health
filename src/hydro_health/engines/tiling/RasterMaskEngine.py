@@ -6,7 +6,9 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 import fiona
+import pyarrow.parquet as pq
 
+from shapely import wkb
 from pyproj import Transformer
 from pathlib import Path
 from shapely import union_all
@@ -209,70 +211,74 @@ class RasterMaskEngine(Engine):
                 if mask_pq_path.exists():
                     self.create_subgrids(mask_pq_path, subgrid_gpkg_local, mask_type, outputs)
 
-    def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
-        """Convert a raster mask to a GeoDataFrame using memory-safe block processing."""
+    def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: pathlib.Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
+        """Fast C-level conversion of raster mask to Parquet using GDAL OGR memory layers and Shapely WKB streaming."""
 
         self.write_message(f"Creating {process_type} mask GeoDataFrame from: {raster_path}", outputs)
 
-        geometries = []
         pilot_mode = getattr(self, 'pilot_mode', False)
+        target_val = 1 if (process_type == 'prediction' or pilot_mode) else 2
 
-        with rasterio.open(raster_path) as src:
-            block_size = 4096
+        # 1. Open raster with GDAL
+        src_ds = gdal.Open(str(raster_path))
+        if src_ds is None:
+            raise FileNotFoundError(f"Could not open raster dataset: {raster_path}")
+        
+        src_band = src_ds.GetRasterBand(1)
 
-            for y in range(0, src.height, block_size):
-                for x in range(0, src.width, block_size):
-                    window = rasterio.windows.Window(
-                        x, y,
-                        min(block_size, src.width - x),
-                        min(block_size, src.height - y)
-                    )
+        # 2. Build in-memory OGR dataset using 'MEM' (no deprecation warnings!)
+        mem_driver = ogr.GetDriverByName('MEM')
+        vec_ds = mem_driver.CreateDataSource('mem_ds')
 
-                    mask_chunk = src.read(1, window=window, out_dtype='uint8')
+        srs = osr.SpatialReference()
+        srs.ImportFromWkt(src_ds.GetProjection())
+        srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
 
-                    if process_type == 'prediction':
-                        valid_mask = mask_chunk == 1
-                    elif process_type == 'training':
-                        valid_mask = (mask_chunk == 1) if pilot_mode else (mask_chunk == 2)
-                    else:
-                        raise ValueError(f"Unknown process_type: {process_type}")
+        mem_layer = vec_ds.CreateLayer('mask_polys', srs=srs, geom_type=ogr.wkbPolygon)
+        field_defn = ogr.FieldDefn("val", ogr.OFTInteger)
+        mem_layer.CreateField(field_defn)
 
-                    if not valid_mask.any():
-                        continue
+        # 3. Polygonize at C-level directly into OGR Layer
+        # Using src_band as the mask band so GDAL only creates shapes for pixel regions
+        gdal.Polygonize(src_band, src_band, mem_layer, 0, [], callback=None)
 
-                    win_transform = src.window_transform(window)
-                    shapes_gen = shapes(mask_chunk, mask=valid_mask, transform=win_transform)
-                    
-                    # Directly extract shapes into list
-                    geometries.extend([shape(geom) for geom, _ in shapes_gen])
+        # 4. Dissolve / Union inside GDAL SQL engine using SQLite dialect
+        sql = f"SELECT ST_Union(geometry) AS geometry FROM mask_polys WHERE val = {target_val}"
+        dissolved_layer = vec_ds.ExecuteSQL(sql, dialect="SQLite")
 
-            crs = src.crs
-
-        self.write_message(f" -> Extracted {len(geometries)} raw geometries. Building GeoDataFrame...", outputs)
-
-        if geometries:
-            # Create GeoDataFrame with all shapes directly
-            gdf = gpd.GeoDataFrame({'geometry': geometries}, crs=crs)
+        # 5. Extract geometries safely via ExportToIsoWkb (returns pure Python bytes)
+        geoms = []
+        if dissolved_layer is not None:
+            for feature in dissolved_layer:
+                geom_ref = feature.GetGeometryRef()
+                if geom_ref is not None and not geom_ref.IsEmpty():
+                    wkb_bytes = geom_ref.ExportToIsoWkb()
+                    if isinstance(wkb_bytes, (bytes, bytearray)):
+                        geoms.append(wkb.loads(bytes(wkb_bytes)))
             
-            # Fast GeoPandas spatial union (much faster than raw shapely union_all on list)
-            print(" -> Unifying geometries...", flush=True)
-            unified_geom = gdf.geometry.union_all()
-            gdf = gpd.GeoDataFrame({'geometry': [unified_geom]}, crs=crs)
-            
-            # Make valid without running expensive buffer(0)
+            vec_ds.ReleaseResultSet(dissolved_layer)
+
+        # Clean up GDAL pointers
+        src_ds = None
+        vec_ds = None
+
+        crs_wkt = srs.ExportToWkt()
+        if geoms:
+            gdf = gpd.GeoDataFrame({'geometry': geoms}, crs=crs_wkt)
             gdf['geometry'] = gdf.geometry.make_valid()
         else:
-            gdf = gpd.GeoDataFrame({'geometry': []}, crs=crs)
+            gdf = gpd.GeoDataFrame({'geometry': []}, crs=crs_wkt)
 
+        # Transform CRS if target CRS is configured
         if hasattr(self, 'target_crs') and self.target_crs and not gdf.empty:
             gdf = gdf.to_crs(self.target_crs)
 
+        # Path resolution and Parquet export
         sub_path = get_config_item('MASK', 'PREDICTION_MASK_PQ' if process_type == 'prediction' else 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
         suffix = str(sub_path).lstrip('/')
 
         base_dir = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
         mask_path = base_dir / output_prefix / ecoregion / suffix if output_prefix else base_dir / ecoregion / suffix
-
         mask_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.write_message(f"Saving {process_type} mask GeoDataFrame to: {mask_path}", outputs)
@@ -362,5 +368,6 @@ class RasterMaskEngine(Engine):
 
         self.close_dask()    
 
+        # Training parequet takes 1hr for one DigitalCoast provider
         for ecoregion in ecoregions:
             self.create_mask_vector_files(ecoregion, output_prefix, outputs)

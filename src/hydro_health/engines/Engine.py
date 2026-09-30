@@ -301,8 +301,7 @@ class Engine:
         print(f"- Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
         
         if env == 'aws':
-            # Previously "fork", which Gemini said has issues with GDAL usage with Dask.  Use "forkserver", or "spawn"
-            dask.config.set({"distributed.worker.multiprocessing-method": "forkserver"})
+            dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
         self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
         self.client = Client(self.cluster)
