@@ -94,7 +94,6 @@ def _deduplicate_pixels(df: pd.DataFrame) -> None:
         subset = None
     df.drop_duplicates(subset=subset, inplace=True, ignore_index=True)
 
-
 def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.DataFrame:
     """Decode only columns the batch transformation can actually use."""
     requested_years = {str(year) for pair in year_ranges for year in pair} if year_ranges else set()
@@ -146,7 +145,6 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
             raise ValueError("No usable columns were found in the Parquet schema")
         source.seek(0)
         return pd.read_parquet(source, engine="pyarrow", columns=selected)
-
 
 def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, year_ranges: list, 
                            is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool,
@@ -315,7 +313,6 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         summary.append(f"EXISTING FILES: {len(existing_files)}")
 
     return saved_files, existing_files, "  ||  ".join(summary) if summary else "NO PARQUET FILES GENERATED"
-
 
 def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, year_ranges: list, 
                              is_aws: bool, local_tmp_dir: str, current_index: int, total_count: int, verbose: bool,
@@ -496,34 +493,6 @@ def _transform_tile_task(params: list) -> str:
         Engine.write_message_dask(message, OUTPUTS)
         logger.exception(message)
         return f"Failed: {os.path.basename(f_path)} - {type(e).__name__}: {e}"
-
-
-def _available_memory_bytes() -> int:
-    """Return the smallest available host or container memory limit."""
-    candidates = []
-    try:
-        candidates.append(
-            os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
-        )
-    except (ValueError, OSError, AttributeError):
-        pass
-
-    for limit_path in (
-        Path("/sys/fs/cgroup/memory.max"),
-        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
-    ):
-        try:
-            raw_value = limit_path.read_text(encoding="utf-8").strip()
-            if raw_value != "max":
-                value = int(raw_value)
-                if 0 < value < 2**60:
-                    candidates.append(value)
-        except (OSError, ValueError):
-            continue
-
-    return min(candidates) if candidates else 16 * 1024**3
-
-
 class BatchTilingEngine(Engine):
     """Class for transforming wide parquet files in batch/long format"""
 

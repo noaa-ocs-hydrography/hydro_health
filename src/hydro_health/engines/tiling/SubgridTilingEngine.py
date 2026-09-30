@@ -1271,8 +1271,6 @@ def _process_tile(
 
     expected_path = UPath(output_folder) / f"{tile_name}_{data_type}_clipped_data.parquet"
 
-    Engine.write_message_dask(f"Processing tile {tile_name} ({current_index}/{total_count})...", OUTPUTS)
-
     # Report an existing output even if its original source raster is no longer
     # present in the current discovery results.
     try:
