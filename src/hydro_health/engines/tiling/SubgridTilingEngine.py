@@ -308,6 +308,169 @@ def _read_existing_nan_stats(path: UPath, tile_id: str, is_aws: bool) -> pd.Data
             return _read_from_parquet_file(pq.ParquetFile(src))
     return _read_from_parquet_file(pq.ParquetFile(str(path)))
 
+def _prepare_geotiff_dataframe(parquet_path: str, is_aws: bool) -> tuple | None:
+    """Read the Parquet and select numeric bands with finite coordinates."""
+    if is_aws:
+        fs = s3fs.S3FileSystem()
+        with fs.open(parquet_path, "rb") as parquet_file:
+            df = pd.read_parquet(parquet_file, engine="pyarrow")
+    else:
+        df = pd.read_parquet(parquet_path, engine="pyarrow")
+
+    if df.empty or "X" not in df.columns or "Y" not in df.columns:
+        Engine.write_message_dask(
+            f" [GEOTIFF SKIP] Cannot create GeoTIFF for {parquet_path}: "
+            "the Parquet is empty or lacks X/Y columns.",
+            OUTPUTS,
+        )
+        return None
+
+    excluded_columns = {"FID", "X", "Y", "tile_id"}
+    band_columns = [
+        column
+        for column in df.columns
+        if column not in excluded_columns
+        and pd.api.types.is_numeric_dtype(df[column])
+    ]
+    if not band_columns:
+        Engine.write_message_dask(
+            f" [GEOTIFF SKIP] No numeric variable columns found in "
+            f"{parquet_path}.",
+            OUTPUTS,
+        )
+        return None
+
+    finite_xy = np.isfinite(df["X"].to_numpy()) & np.isfinite(
+        df["Y"].to_numpy()
+    )
+    if not finite_xy.all():
+        df = df.loc[finite_xy].copy()
+    if df.empty:
+        Engine.write_message_dask(
+            f" [GEOTIFF SKIP] No finite coordinates found in {parquet_path}.",
+            OUTPUTS,
+        )
+        return None
+    return df, band_columns
+
+
+def _reconstruct_geotiff_grid(df: pd.DataFrame, parquet_path: str) -> tuple | None:
+    """Infer a regular raster grid and map coordinates to pixel indices."""
+    x_values = np.sort(df["X"].unique())
+    y_values = np.sort(df["Y"].unique())[::-1]
+    if len(x_values) < 2 or len(y_values) < 2:
+        Engine.write_message_dask(
+            f" [GEOTIFF SKIP] Cannot infer pixel size for {parquet_path}; "
+            "at least two unique X and Y coordinates are required.",
+            OUTPUTS,
+        )
+        return None
+
+    x_diffs = np.diff(x_values)
+    y_diffs = np.abs(np.diff(y_values))
+    x_resolution = float(np.median(x_diffs))
+    y_resolution = float(np.median(y_diffs))
+    tolerance = max(x_resolution, y_resolution) * 1e-5
+
+    if (
+        x_resolution <= 0
+        or y_resolution <= 0
+        or not np.allclose(x_diffs, x_resolution, rtol=1e-5, atol=tolerance)
+        or not np.allclose(y_diffs, y_resolution, rtol=1e-5, atol=tolerance)
+    ):
+        Engine.write_message_dask(
+            f" [GEOTIFF SKIP] Coordinates in {parquet_path} do not form "
+            "a regular raster grid.",
+            OUTPUTS,
+        )
+        return None
+
+    width = len(x_values)
+    height = len(y_values)
+    transform_out = rasterio.transform.from_origin(
+        float(x_values[0] - x_resolution / 2),
+        float(y_values[0] + y_resolution / 2),
+        x_resolution,
+        y_resolution,
+    )
+
+    x_coords = df["X"].to_numpy()
+    y_coords = df["Y"].to_numpy()
+    col_indices = np.rint(
+        (x_coords - x_values[0]) / x_resolution
+    ).astype(np.int64)
+    row_indices = np.rint(
+        (y_values[0] - y_coords) / y_resolution
+    ).astype(np.int64)
+
+    indices_valid = (
+        (row_indices >= 0)
+        & (row_indices < height)
+        & (col_indices >= 0)
+        & (col_indices < width)
+    )
+    if not indices_valid.all():
+        Engine.write_message_dask(
+            f" [GEOTIFF SKIP] Some coordinates in {parquet_path} fall "
+            "outside the reconstructed grid.",
+            OUTPUTS,
+        )
+        return None
+    return height, width, transform_out, row_indices, col_indices
+
+
+def _write_multiband_geotiff(
+    tmp_tif_path: str,
+    df: pd.DataFrame,
+    band_columns: list,
+    grid: tuple,
+    raster_crs,
+    parquet_path: str,
+    created_sequence: int,
+) -> None:
+    """Write metadata and numeric bands using one band array at a time."""
+    height, width, transform_out, row_indices, col_indices = grid
+
+    profile = {
+        "driver": "GTiff",
+        "height": height,
+        "width": width,
+        "count": len(band_columns),
+        "dtype": "float32",
+        "crs": CRS.from_user_input(raster_crs),
+        "transform": transform_out,
+        "nodata": np.nan,
+        "compress": "LZW",
+        "predictor": 3,
+        "BIGTIFF": "IF_SAFER",
+    }
+
+    with rasterio.open(tmp_tif_path, "w", **profile) as dst:
+        dst.update_tags(
+            source_parquet=parquet_path,
+            created_parquet_sequence=created_sequence,
+        )
+        for band_index, column in enumerate(band_columns, start=1):
+            band_data = np.full((height, width), np.nan, dtype=np.float32)
+            values = pd.to_numeric(df[column], errors="coerce").to_numpy(
+                dtype=np.float32
+            )
+            band_data[row_indices, col_indices] = values
+            dst.write(band_data, band_index)
+            dst.set_band_description(band_index, str(column))
+            del band_data, values
+
+
+def _publish_multiband_geotiff(
+    tmp_tif_path: str, final_tif_path: str, is_aws: bool,
+) -> None:
+    """Copy the completed local GeoTIFF to its output location."""
+    if is_aws:
+        s3fs.S3FileSystem().put(tmp_tif_path, final_tif_path)
+    else:
+        shutil.copy2(tmp_tif_path, final_tif_path)
+
+
 def _create_multiband_geotiff_from_parquet(
     parquet_path: str,
     raster_crs,
@@ -351,144 +514,22 @@ def _create_multiband_geotiff_from_parquet(
             )
             return None
 
-        if is_aws:
-            fs = s3fs.S3FileSystem()
-            with fs.open(parquet_path, "rb") as parquet_file:
-                df = pd.read_parquet(parquet_file, engine="pyarrow")
-        else:
-            df = pd.read_parquet(parquet_path, engine="pyarrow")
-
-        if df.empty or "X" not in df.columns or "Y" not in df.columns:
-            Engine.write_message_dask(
-                f" [GEOTIFF SKIP] Cannot create GeoTIFF for {parquet_path}: "
-                "the Parquet is empty or lacks X/Y columns.",
-                OUTPUTS,
-            )
+        prepared = _prepare_geotiff_dataframe(parquet_path, is_aws)
+        if prepared is None:
             return None
+        df, band_columns = prepared
+        del prepared
 
-        excluded_columns = {"FID", "X", "Y", "tile_id"}
-        band_columns = [
-            column
-            for column in df.columns
-            if column not in excluded_columns
-            and pd.api.types.is_numeric_dtype(df[column])
-        ]
-        if not band_columns:
-            Engine.write_message_dask(
-                f" [GEOTIFF SKIP] No numeric variable columns found in "
-                f"{parquet_path}.",
-                OUTPUTS,
-            )
-            return None
-
-        finite_xy = np.isfinite(df["X"].to_numpy()) & np.isfinite(
-            df["Y"].to_numpy()
-        )
-        if not finite_xy.all():
-            df = df.loc[finite_xy].copy()
-        if df.empty:
-            Engine.write_message_dask(
-                f" [GEOTIFF SKIP] No finite coordinates found in {parquet_path}.",
-                OUTPUTS,
-            )
-            return None
-
-        x_values = np.sort(df["X"].unique())
-        y_values = np.sort(df["Y"].unique())[::-1]
-        if len(x_values) < 2 or len(y_values) < 2:
-            Engine.write_message_dask(
-                f" [GEOTIFF SKIP] Cannot infer pixel size for {parquet_path}; "
-                "at least two unique X and Y coordinates are required.",
-                OUTPUTS,
-            )
-            return None
-
-        x_diffs = np.diff(x_values)
-        y_diffs = np.abs(np.diff(y_values))
-        x_resolution = float(np.median(x_diffs))
-        y_resolution = float(np.median(y_diffs))
-        tolerance = max(x_resolution, y_resolution) * 1e-5
-
-        if (
-            x_resolution <= 0
-            or y_resolution <= 0
-            or not np.allclose(x_diffs, x_resolution, rtol=1e-5, atol=tolerance)
-            or not np.allclose(y_diffs, y_resolution, rtol=1e-5, atol=tolerance)
-        ):
-            Engine.write_message_dask(
-                f" [GEOTIFF SKIP] Coordinates in {parquet_path} do not form "
-                "a regular raster grid.",
-                OUTPUTS,
-            )
-            return None
-
-        width = len(x_values)
-        height = len(y_values)
-        transform_out = rasterio.transform.from_origin(
-            float(x_values[0] - x_resolution / 2),
-            float(y_values[0] + y_resolution / 2),
-            x_resolution,
-            y_resolution,
-        )
-
-        x_coords = df["X"].to_numpy()
-        y_coords = df["Y"].to_numpy()
-        col_indices = np.rint(
-            (x_coords - x_values[0]) / x_resolution
-        ).astype(np.int64)
-        row_indices = np.rint(
-            (y_values[0] - y_coords) / y_resolution
-        ).astype(np.int64)
-
-        indices_valid = (
-            (row_indices >= 0)
-            & (row_indices < height)
-            & (col_indices >= 0)
-            & (col_indices < width)
-        )
-        if not indices_valid.all():
-            Engine.write_message_dask(
-                f" [GEOTIFF SKIP] Some coordinates in {parquet_path} fall "
-                "outside the reconstructed grid.",
-                OUTPUTS,
-            )
+        grid = _reconstruct_geotiff_grid(df, parquet_path)
+        if grid is None:
             return None
 
         tmp_tif_path = str(Path(local_tmp_dir) / geotiff_name)
-
-        profile = {
-            "driver": "GTiff",
-            "height": height,
-            "width": width,
-            "count": len(band_columns),
-            "dtype": "float32",
-            "crs": CRS.from_user_input(raster_crs),
-            "transform": transform_out,
-            "nodata": np.nan,
-            "compress": "LZW",
-            "predictor": 3,
-            "BIGTIFF": "IF_SAFER",
-        }
-
-        with rasterio.open(tmp_tif_path, "w", **profile) as dst:
-            dst.update_tags(
-                source_parquet=parquet_path,
-                created_parquet_sequence=created_sequence,
-            )
-            for band_index, column in enumerate(band_columns, start=1):
-                band_data = np.full((height, width), np.nan, dtype=np.float32)
-                values = pd.to_numeric(df[column], errors="coerce").to_numpy(
-                    dtype=np.float32
-                )
-                band_data[row_indices, col_indices] = values
-                dst.write(band_data, band_index)
-                dst.set_band_description(band_index, str(column))
-                del band_data, values
-
-        if is_aws:
-            s3fs.S3FileSystem().put(tmp_tif_path, final_tif_path)
-        else:
-            shutil.copy2(tmp_tif_path, final_tif_path)
+        _write_multiband_geotiff(
+            tmp_tif_path, df, band_columns, grid, raster_crs,
+            parquet_path, created_sequence,
+        )
+        _publish_multiband_geotiff(tmp_tif_path, final_tif_path, is_aws)
 
         Engine.write_message_dask(
             f" [GEOTIFF SUCCESS] Created sampled multiband GeoTIFF "

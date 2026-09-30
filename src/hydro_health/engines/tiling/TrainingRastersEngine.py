@@ -20,6 +20,70 @@ from hydro_health.engines.Engine import Engine
 INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
 
+def _check_intersection(src_pred: rasterio.DatasetReader, mask_bounds: tuple, raster_name: str, progress_str: str) -> bool:
+    """Check if the raster bounds intersect with the mask bounds."""
+    rb = src_pred.bounds
+    raster_bounds_geom = box(min(rb[0], rb[2]), min(rb[1], rb[3]), max(rb[0], rb[2]), max(rb[1], rb[3]))
+    mask_box = box(*mask_bounds)
+
+    if not mask_box.intersects(raster_bounds_geom):
+        Engine.write_message_dask(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.", str(OUTPUTS))
+        return False
+    return True
+
+def _prepare_metadata(src_pred: rasterio.DatasetReader) -> tuple:
+    """Prepare the metadata for the output raster."""
+    src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
+    meta = src_pred.meta.copy()
+    
+    is_src_nodata_nan = isinstance(src_nodata, (float, np.floating)) and np.isnan(src_nodata)
+    meta.update({
+        'nodata': np.nan if is_src_nodata_nan else src_nodata,
+        'compress': 'lzw',
+        'tiled': True
+    })
+    return meta, src_nodata
+
+def _pre_check_valid_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, meta: dict) -> bool:
+    """Fast pre-check to avoid expensive LZW writing if there's no valid data."""
+    nodata_val = meta['nodata']
+    is_nan_nodata = isinstance(nodata_val, (float, np.floating)) and np.isnan(nodata_val)
+
+    for ji, window in src_pred.block_windows(1):
+        mask_arr = vrt_mask.read(1, window=window)
+        
+        # ONLY read prediction array if the mask indicates training valid areas (== 2) here
+        if np.any(mask_arr == 2):
+            pred_arr = src_pred.read(1, window=window)
+            
+            # Extract only the prediction pixels where the mask is 2
+            valid_pred_pixels = pred_arr[mask_arr == 2]
+            
+            if is_nan_nodata:
+                if np.any(~np.isnan(valid_pred_pixels)):
+                    return True
+            else:
+                if np.any(valid_pred_pixels != nodata_val):
+                    return True
+    return False
+
+def _write_masked_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, tmp_dst_path: str, meta: dict) -> None:
+    """Write the masked data to the temporary destination path."""
+    nodata_val = meta['nodata']
+    is_nan_nodata = isinstance(nodata_val, (float, np.floating)) and np.isnan(nodata_val)
+
+    with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
+        with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
+            for ji, window in src_pred.block_windows(1):
+                pred_arr = src_pred.read(1, window=window)
+                mask_arr = vrt_mask.read(1, window=window)
+
+                if is_nan_nodata and pred_arr.dtype not in (np.float32, np.float64):
+                    pred_arr = pred_arr.astype(np.float32)
+
+                masked_data = np.where(mask_arr == 2, pred_arr, meta['nodata'])
+                dest.write(masked_data, 1, window=window)
+
 def _process_training_raster(params: list) -> None:
     """Process a training raster by extracting array blocks and masking them mathematically.
     Executed at the module level to avoid pickling class instances via Dask."""
@@ -32,12 +96,11 @@ def _process_training_raster(params: list) -> None:
 
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-    # Implicit Skipping - Check existence before doing any heavy lifting
     if output_path.exists():
         Engine.write_message_dask(f" - [SKIP]{progress_str} File already exists: {raster_name}", str(OUTPUTS))
         return
 
-    if is_aws and open_path.startswith('s3://'):
+    if is_aws:
         open_path = open_path.replace('s3://', '/vsis3/')
 
     Engine.write_message_dask(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}", str(OUTPUTS))
@@ -49,30 +112,16 @@ def _process_training_raster(params: list) -> None:
         with tempfile.TemporaryDirectory(dir=local_tmp_dir) as task_tmp_dir:
             try:
                 with rasterio.open(open_path) as src_pred:
-                    src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
-
-                    rb = src_pred.bounds
-                    raster_bounds_geom = box(min(rb[0], rb[2]), min(rb[1], rb[3]), max(rb[0], rb[2]), max(rb[1], rb[3]))
-                    mask_box = box(*mask_bounds)
-
-                    if not mask_box.intersects(raster_bounds_geom):
-                        Engine.write_message_dask(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.", str(OUTPUTS))
+                    if not _check_intersection(src_pred, mask_bounds, raster_name, progress_str):
                         return
 
-                    meta = src_pred.meta.copy()
-                    # Safe check for nan nodata when type casting
-                    is_src_nodata_nan = isinstance(src_nodata, (float, np.floating)) and np.isnan(src_nodata)
-                    meta.update({
-                        'nodata': np.nan if is_src_nodata_nan else src_nodata,
-                        'compress': 'lzw',
-                        'tiled': True
-                    })
+                    meta, _ = _prepare_metadata(src_pred)
 
                     if is_aws:
                         tmp_dst_path = str(Path(task_tmp_dir) / "train_mask_tmp.tif")
 
                     open_mask_path = str(global_mask_path)
-                    if is_aws and open_mask_path.startswith('s3://'):
+                    if is_aws:
                         open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
 
                     with rasterio.open(open_mask_path) as src_mask:
@@ -88,48 +137,11 @@ def _process_training_raster(params: list) -> None:
                             nodata=mask_nodata,
                         ) as vrt_mask:
                             
-                            # --- FAST PRE-CHECK PHASE ---
-                            # Avoid expensive LZW writing and disk I/O if there's no valid data at all
-                            has_valid_data = False
-                            nodata_val = meta['nodata']
-                            is_nan_nodata = isinstance(nodata_val, (float, np.floating)) and np.isnan(nodata_val)
-
-                            for ji, window in src_pred.block_windows(1):
-                                mask_arr = vrt_mask.read(1, window=window)
-                                
-                                # ONLY read prediction array if the mask indicates training valid areas (== 2) here
-                                if np.any(mask_arr == 2):
-                                    pred_arr = src_pred.read(1, window=window)
-                                    
-                                    # Extract only the prediction pixels where the mask is 2
-                                    valid_pred_pixels = pred_arr[mask_arr == 2]
-                                    
-                                    if is_nan_nodata:
-                                        if np.any(~np.isnan(valid_pred_pixels)):
-                                            has_valid_data = True
-                                            break # Found valid data, exit pre-check immediately
-                                    else:
-                                        if np.any(valid_pred_pixels != nodata_val):
-                                            has_valid_data = True
-                                            break # Found valid data, exit pre-check immediately
-                            
-                            if not has_valid_data:
+                            if not _pre_check_valid_data(src_pred, vrt_mask, meta):
                                 Engine.write_message_dask(f" - [SKIP]{progress_str} No valid data within mask for {raster_name}. Skipping disk write.", str(OUTPUTS))
                                 return
 
-                            # --- ACTUAL WRITE PHASE ---
-                            # We confirmed valid data exists, proceed with the disk write
-                            with rasterio.Env(CHECK_DISK_FREE_SPACE="FALSE"):
-                                with rasterio.open(tmp_dst_path, 'w', **meta) as dest:
-                                    for ji, window in src_pred.block_windows(1):
-                                        pred_arr = src_pred.read(1, window=window)
-                                        mask_arr = vrt_mask.read(1, window=window)
-
-                                        if is_nan_nodata and pred_arr.dtype not in (np.float32, np.float64):
-                                            pred_arr = pred_arr.astype(np.float32)
-
-                                        masked_data = np.where(mask_arr == 2, pred_arr, meta['nodata'])
-                                        dest.write(masked_data, 1, window=window)
+                            _write_masked_data(src_pred, vrt_mask, tmp_dst_path, meta)
 
                     if is_aws:
                         fs = s3fs.S3FileSystem()
@@ -148,6 +160,7 @@ def _process_training_raster(params: list) -> None:
                         Engine.write_message_dask(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", str(OUTPUTS))
     finally:
         gc.collect()
+
 
 class TrainingRastersEngine(Engine):
     """Class for parallel processing training rasters and applying mathematical masks"""
@@ -228,7 +241,7 @@ class TrainingRastersEngine(Engine):
         global_mask_path = str(self.train_mask_path)
         open_mask_path = global_mask_path
         
-        if self.is_aws and open_mask_path.startswith('s3://'):
+        if self.is_aws:
             open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
 
         self.write_message(f"Extracting spatial bounds directly from training mask TIFF: {open_mask_path}", OUTPUTS)
@@ -321,3 +334,4 @@ class TrainingRastersEngine(Engine):
 
         finally:
             self.cleanup_resources()
+            
