@@ -413,5 +413,5 @@ class RasterMaskEngine(Engine):
         gc.collect() # Ensure worker connections and lingering dataset handles are released
 
         for ecoregion in ecoregions:
-            print('- Starting parquest creation')
+            print('- Starting parquet creation')
             self.create_mask_vector_files(ecoregion, output_prefix, outputs)
