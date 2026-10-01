@@ -218,24 +218,24 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
         engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
 
-def run_tsm_layer_engine() -> None:
+def run_tsm_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of TSM model data"""
 
-    engine = CreateTSMLayerEngine()
+    engine = CreateTSMLayerEngine(param_lookup, output_prefix)
     engine.run()
 
 
-def run_sediment_layer_engine() -> None:
+def run_sediment_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of sediment model data"""
 
-    engine = CreateSedimentLayerEngine()
+    engine = CreateSedimentLayerEngine(param_lookup, output_prefix)
     engine.run()
 
-def run_hurricane_layer_engine() -> None:
-    """Entry point for parallel processing of sediment model data"""
+def run_hurricane_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for parallel processing of hurricane model data"""
 
-    engine = CreateHurricaneLayerEngine()
-    engine.run()    
+    engine = CreateHurricaneLayerEngine(param_lookup, output_prefix)
+    engine.run()
 
 
 def run_stofs_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
