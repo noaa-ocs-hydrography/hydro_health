@@ -102,7 +102,7 @@ class MetadataEngine(Engine):
         print('Starting MetadataEngine')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
-            print('Starting:', ecoregion)
+            print('- Starting:', ecoregion)
             digital_coast_subfolder = pathlib.Path(ecoregion) / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if output_prefix:
                 digital_coast_subfolder = pathlib.Path(output_prefix) / digital_coast_subfolder

@@ -17,6 +17,8 @@ from rasterio.features import shapes
 from osgeo import ogr, osr, gdal
 
 os.environ["GDAL_MEM_ENABLE_OPEN"] = "YES"
+os.environ["GDAL_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers
@@ -211,69 +213,111 @@ class RasterMaskEngine(Engine):
                 if mask_pq_path.exists():
                     self.create_subgrids(mask_pq_path, subgrid_gpkg_local, mask_type, outputs)
 
+    # current method
+    # # def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: pathlib.Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
+    #     self.write_message(f"Creating {process_type} mask GeoDataFrame from: {raster_path}", outputs)
+
+    #     pilot_mode = getattr(self, 'pilot_mode', False)
+    #     target_val = 1 if (process_type == 'prediction' or pilot_mode) else 2
+
+    #     src_ds = gdal.Open(str(raster_path))
+    #     if src_ds is None:
+    #         raise FileNotFoundError(f"Could not open raster dataset: {raster_path}")
+        
+    #     src_band = src_ds.GetRasterBand(1)
+    #     srs_wkt = src_ds.GetProjection()
+
+    #     # Use OGR MEM driver isolated instance
+    #     mem_driver = ogr.GetDriverByName('MEM')
+    #     vec_ds = mem_driver.CreateDataSource('mem_ds')
+
+    #     srs = osr.SpatialReference()
+    #     srs.ImportFromWkt(srs_wkt)
+    #     srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+
+    #     mem_layer = vec_ds.CreateLayer('mask_polys', srs=srs, geom_type=ogr.wkbPolygon)
+    #     field_defn = ogr.FieldDefn("val", ogr.OFTInteger)
+    #     mem_layer.CreateField(field_defn)
+
+    #     # Polygonize
+    #     gdal.Polygonize(src_band, src_band, mem_layer, 0, [], callback=None)
+
+    #     # SQL Union
+    #     sql = f"SELECT ST_Union(geometry) AS geometry FROM mask_polys WHERE val = {target_val}"
+    #     dissolved_layer = vec_ds.ExecuteSQL(sql, dialect="SQLite")
+
+    #     geoms = []
+    #     if dissolved_layer is not None:
+    #         for feature in dissolved_layer:
+    #             geom_ref = feature.GetGeometryRef()
+    #             if geom_ref is not None and not geom_ref.IsEmpty():
+    #                 wkb_bytes = geom_ref.ExportToIsoWkb()
+    #                 if isinstance(wkb_bytes, (bytes, bytearray)):
+    #                     geoms.append(wkb.loads(bytes(wkb_bytes)))
+            
+    #         vec_ds.ReleaseResultSet(dissolved_layer)
+
+    #     # CRITICAL: Close and destroy all GDAL C-objects explicitly before passing to GeoPandas
+    #     mem_layer = None
+    #     src_band = None
+    #     src_ds = None
+    #     vec_ds = None
+
+    #     crs_wkt = srs.ExportToWkt()
+    #     srs = None
+
+    #     if geoms:
+    #         gdf = gpd.GeoDataFrame({'geometry': geoms}, crs=crs_wkt)
+    #         gdf['geometry'] = gdf.geometry.make_valid()
+    #     else:
+    #         gdf = gpd.GeoDataFrame({'geometry': []}, crs=crs_wkt)
+
+    #     if hasattr(self, 'target_crs') and self.target_crs and not gdf.empty:
+    #         gdf = gdf.to_crs(self.target_crs)
+
+    #     sub_path = get_config_item('MASK', 'PREDICTION_MASK_PQ' if process_type == 'prediction' else 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
+    #     suffix = str(sub_path).lstrip('/')
+
+    #     base_dir = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
+    #     mask_path = base_dir / output_prefix / ecoregion / suffix if output_prefix else base_dir / ecoregion / suffix
+    #     mask_path.parent.mkdir(parents=True, exist_ok=True)
+
+    #     self.write_message(f"Saving {process_type} mask GeoDataFrame to: {mask_path}", outputs)
+    #     gdf.to_parquet(str(mask_path))
+    #     print(f" -> Successfully saved {mask_path.name}", flush=True)
+
+    #     # Force Python GC to drop lingering C extensions before next iteration
+    #     gc.collect()
+
+    #     return gdf
+
+    # C use method
     def raster_mask_to_parquet(self, ecoregion: str, output_prefix: str, raster_path: pathlib.Path, process_type: str, outputs: str = None) -> gpd.GeoDataFrame:
-        """Fast C-level conversion of raster mask to Parquet using GDAL OGR memory layers and Shapely WKB streaming."""
-
-        self.write_message(f"Creating {process_type} mask GeoDataFrame from: {raster_path}", outputs)
-
         pilot_mode = getattr(self, 'pilot_mode', False)
         target_val = 1 if (process_type == 'prediction' or pilot_mode) else 2
 
-        # 1. Open raster with GDAL
-        src_ds = gdal.Open(str(raster_path))
-        if src_ds is None:
-            raise FileNotFoundError(f"Could not open raster dataset: {raster_path}")
-        
-        src_band = src_ds.GetRasterBand(1)
-
-        # 2. Build in-memory OGR dataset using 'MEM' (no deprecation warnings!)
-        mem_driver = ogr.GetDriverByName('MEM')
-        vec_ds = mem_driver.CreateDataSource('mem_ds')
-
-        srs = osr.SpatialReference()
-        srs.ImportFromWkt(src_ds.GetProjection())
-        srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-        mem_layer = vec_ds.CreateLayer('mask_polys', srs=srs, geom_type=ogr.wkbPolygon)
-        field_defn = ogr.FieldDefn("val", ogr.OFTInteger)
-        mem_layer.CreateField(field_defn)
-
-        # 3. Polygonize at C-level directly into OGR Layer
-        # Using src_band as the mask band so GDAL only creates shapes for pixel regions
-        gdal.Polygonize(src_band, src_band, mem_layer, 0, [], callback=None)
-
-        # 4. Dissolve / Union inside GDAL SQL engine using SQLite dialect
-        sql = f"SELECT ST_Union(geometry) AS geometry FROM mask_polys WHERE val = {target_val}"
-        dissolved_layer = vec_ds.ExecuteSQL(sql, dialect="SQLite")
-
-        # 5. Extract geometries safely via ExportToIsoWkb (returns pure Python bytes)
-        geoms = []
-        if dissolved_layer is not None:
-            for feature in dissolved_layer:
-                geom_ref = feature.GetGeometryRef()
-                if geom_ref is not None and not geom_ref.IsEmpty():
-                    wkb_bytes = geom_ref.ExportToIsoWkb()
-                    if isinstance(wkb_bytes, (bytes, bytearray)):
-                        geoms.append(wkb.loads(bytes(wkb_bytes)))
+        with rasterio.open(raster_path) as src:
+            image = src.read(1)
+            mask = image == target_val
             
-            vec_ds.ReleaseResultSet(dissolved_layer)
+            # Extract shapes natively in C without OGR SQLite overhead
+            polygons = [
+                shape(geom) for geom, val in shapes(image, mask=mask, transform=src.transform)
+                if val == target_val
+            ]
+            crs = src.crs
 
-        # Clean up GDAL pointers
-        src_ds = None
-        vec_ds = None
-
-        crs_wkt = srs.ExportToWkt()
-        if geoms:
-            gdf = gpd.GeoDataFrame({'geometry': geoms}, crs=crs_wkt)
+        if polygons:
+            # Vectorized C-level union
+            dissolved_geom = union_all(polygons)
+            gdf = gpd.GeoDataFrame({'geometry': [dissolved_geom]}, crs=crs)
             gdf['geometry'] = gdf.geometry.make_valid()
         else:
-            gdf = gpd.GeoDataFrame({'geometry': []}, crs=crs_wkt)
+            gdf = gpd.GeoDataFrame({'geometry': []}, crs=crs)
 
-        # Transform CRS if target CRS is configured
         if hasattr(self, 'target_crs') and self.target_crs and not gdf.empty:
             gdf = gdf.to_crs(self.target_crs)
 
-        # Path resolution and Parquet export
         sub_path = get_config_item('MASK', 'PREDICTION_MASK_PQ' if process_type == 'prediction' else 'TRAINING_MASK_PQ', pilot_mode=pilot_mode)
         suffix = str(sub_path).lstrip('/')
 
@@ -281,10 +325,7 @@ class RasterMaskEngine(Engine):
         mask_path = base_dir / output_prefix / ecoregion / suffix if output_prefix else base_dir / ecoregion / suffix
         mask_path.parent.mkdir(parents=True, exist_ok=True)
 
-        self.write_message(f"Saving {process_type} mask GeoDataFrame to: {mask_path}", outputs)
         gdf.to_parquet(str(mask_path))
-        print(f" -> Successfully saved {mask_path.name}", flush=True)
-
         return gdf
 
     def create_subgrids(self, mask_gdf_path: Path, subgrid_gpkg_local: Path, process_type: str, outputs: str = None) -> None:
@@ -350,13 +391,15 @@ class RasterMaskEngine(Engine):
         self.write_message(f"[SUCCESS] Successfully saved '{target_layer}' layer to: {subgrid_gpkg_local}", outputs)
 
     def run(self, outputs: str, output_prefix: str) -> None:
-        """Main execution flow using Dask for rasters followed by local parquet/subgrid creation."""
-
         print('Starting RasterMaskEngine', flush=True)
-        output_folder = OUTPUTS / output_prefix if output_prefix else OUTPUTS
+        
+        # Flush GDAL C-cache from prior classes in the run script
+        gc.collect()
 
+        output_folder = OUTPUTS / output_prefix if output_prefix else OUTPUTS
         ecoregions = [d for d in output_folder.glob('ER_*') if d.is_dir()]
-        self.setup_dask(self.param_lookup['env'])
+
+        self.setup_dask(self.param_lookup['env'], n_workers=3, threads_per_worker=1)
 
         self.client.gather(self.client.map(_create_prediction_mask, [[er, self.param_lookup] for er in ecoregions]))
         results = self.client.gather(
@@ -367,7 +410,8 @@ class RasterMaskEngine(Engine):
             print(r, flush=True)
 
         self.close_dask()    
+        gc.collect() # Ensure worker connections and lingering dataset handles are released
 
-        # Training parequet takes 1hr for one DigitalCoast provider
         for ecoregion in ecoregions:
+            print('- Starting parquest creation')
             self.create_mask_vector_files(ecoregion, output_prefix, outputs)

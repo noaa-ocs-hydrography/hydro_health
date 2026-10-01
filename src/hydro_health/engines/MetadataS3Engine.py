@@ -104,7 +104,7 @@ class MetadataS3Engine(Engine):
         print('Starting MetadataS3Engine')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
-            print('Starting:', ecoregion)
+            print('- Starting:', ecoregion)
             ecoregion_subpath = f"{ecoregion}/{get_config_item('DIGITALCOAST', 'SUBFOLDER')}/DigitalCoast"
             if output_prefix:
                 ecoregion_subpath = f"{output_prefix}/{ecoregion_subpath}"

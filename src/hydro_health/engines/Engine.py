@@ -345,7 +345,7 @@ class Engine:
             manifest.update(extra_info)
         
         manfest_path = subfolder / f"_manifest_{self.__class__.__name__}.json"
-        print(f'Writing run manifest: {manfest_path}')
+        print(f'- Writing run manifest: {manfest_path}')
         if self.param_lookup['env'] == 'aws':
             s3 = boto3.client('s3')
             s3.put_object(
