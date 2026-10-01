@@ -1,5 +1,5 @@
 import pathlib
-import json
+from collections import defaultdict
 from pyproj.database import query_crs_info
 from pyproj.enums import PJType
 from osgeo import gdal, osr
@@ -16,47 +16,74 @@ class RasterVRTEngine(Engine):
         self.glob_lookup = {
             'elevation': '*[0-9].tiff',
             'uncertainty': '*_unc.tiff',
+            'survey_end_date': '*survey_end_date.tiff',
             'slope': '*_slope.tiff',
-            'rugosity': '*_rugosity.tiff',
-            'catzoc_decay_all': '*decay_all*.tiff',
-            'catzoc_decay_latest': '*decay_latest*.tiff',
+            'catzoc_decay_all': '*ISS_all*.tiff',
+            'catzoc_decay_latest': '*ISS_latest*.tiff',
             'NCMP': '*.tif'
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
 
     def get_local_bluetopo_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
-        """Groups BlueTopo tiles by their native CRS/UTM Zone bin_key"""
-        output_geotiffs = {}
+        """Groups BlueTopo tiles strictly by their native EPSG UTM CRS code."""
+
+        utm_bins = defaultdict(list)
 
         for geotiff_path in geotiffs:
             ds = gdal.Open(str(geotiff_path))
             if ds is None:
                 continue
 
+            epsg_code = None
             try:
                 src_srs = ds.GetSpatialRef()
                 if src_srs:
                     src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-                    bin_id = src_srs.GetAuthorityCode(None) or src_srs.GetAuthorityCode('DATUM') or "unknown_crs"
-                else:
-                    bin_id = "unknown_crs"
+                    try:
+                        src_srs.AutoIdentifyEPSG()
+                        auth_code = (
+                            src_srs.GetAuthorityCode("PROJCS") or 
+                            src_srs.GetAuthorityCode("GEOGCS") or 
+                            src_srs.GetAuthorityCode(None)
+                        )
+                        if auth_code and auth_code.isdigit():
+                            epsg_code = int(auth_code)
+                    except Exception:
+                        pass
 
-                if bin_id not in output_geotiffs:
-                    output_geotiffs[bin_id] = {'tiles': []}
+                    if not epsg_code:
+                        raw_code = (
+                            src_srs.GetAuthorityCode("PROJCS") or 
+                            src_srs.GetAuthorityCode("GEOGCS") or 
+                            src_srs.GetAuthorityCode(None)
+                        )
+                        if raw_code and raw_code.isdigit():
+                            epsg_code = int(raw_code)
 
-                output_geotiffs[bin_id]['tiles'].append(geotiff_path)
+                crs_key = f"EPSG_{epsg_code}" if epsg_code else "UNKNOWN_CRS"
+                utm_bins[crs_key].append(str(geotiff_path))
 
             except Exception as e:
-                print(f" - Error obtaining metadata for {geotiff_path}: {e}")
+                print(f" - Error obtaining SRS for {geotiff_path}: {e}")
             finally:
                 ds = None
 
-        return output_geotiffs
+        output_dict = {}
+        for crs_key, tile_paths in utm_bins.items():
+            print(f" -> BlueTopo Local Bin [{crs_key}]: {len(tile_paths)} tiles")
+            output_dict[crs_key] = {
+                'tiles': tile_paths,
+                'nodata_val': -9999.0
+            }
+
+        return output_dict
 
     def get_local_digitalcoast_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
-        """Reads metadata from local files to build DigitalCoast bins"""
-        output_geotiffs = {}
-        
+        """Reads metadata from local files to build DigitalCoast provider bins."""
+
+        provider_bins = defaultdict(list)
+        provider_nodata = defaultdict(lambda: None)
+
         for geotiff_path in geotiffs:
             ds = gdal.Open(str(geotiff_path))
             if ds is None: 
@@ -67,28 +94,23 @@ class RasterVRTEngine(Engine):
                 nodata = band.GetNoDataValue()
                 
                 src_srs = ds.GetSpatialRef()
+                epsg_code = None
+                raw_wkt = None
+
                 if src_srs:
                     src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-                
-                bin_id = src_srs.GetAuthorityCode(None) if src_srs else None
-                if not bin_id and src_srs:
+                    raw_wkt = src_srs.ExportToWkt()
                     try:
-                        srs_json = json.loads(src_srs.ExportToPROJJSON())
-                        components = srs_json.get('components', [{}])
-                        comp_name = components[0].get('name', '')
-                        horizontal_name = " ".join(comp_name.split(' + ')[0].split()).lower().strip()
-                        match = [cr.code for cr in self.all_crs if " ".join(cr.name.split()).lower().strip() == horizontal_name]
-                        if match:
-                            bin_id = match[0]
-                    except:
+                        src_srs.AutoIdentifyEPSG()
+                        auth_code = (
+                            src_srs.GetAuthorityCode("PROJCS") or 
+                            src_srs.GetAuthorityCode("GEOGCS") or 
+                            src_srs.GetAuthorityCode(None)
+                        )
+                        if auth_code and auth_code.isdigit():
+                            epsg_code = int(auth_code)
+                    except Exception:
                         pass
-
-                if not bin_id and src_srs:
-                    fallback_name = src_srs.GetName() or ""
-                    clean_fallback = " ".join(fallback_name.split()).lower().strip().replace(" ", "_")
-                    bin_id = src_srs.GetAuthorityCode('DATUM') or clean_fallback
-                elif not bin_id:
-                    bin_id = "unknown_provider"
 
                 parts = geotiff_path.parts
                 try:
@@ -102,51 +124,92 @@ class RasterVRTEngine(Engine):
                 except (ValueError, IndexError):
                     provider = parts[-4] if len(parts) >= 4 else "UnknownProvider"
                     
-                if provider not in output_geotiffs:
-                    output_geotiffs[provider] = {
-                        'tiles': [], 
-                        'nodata_val': nodata,
-                        'wkt': src_srs.ExportToWkt() if src_srs else None
-                    }
-                output_geotiffs[provider]['tiles'].append(str(geotiff_path))
-                
+                provider_bins[provider].append({
+                    'path': str(geotiff_path),
+                    'epsg': epsg_code,
+                    'wkt': raw_wkt,
+                    'nodata': nodata
+                })
+
+                if provider_nodata[provider] is None and nodata is not None:
+                    provider_nodata[provider] = nodata
+
             except Exception as e:
                 print(f" - Error obtaining metadata for {geotiff_path}: {e}")
             finally:
                 ds = None
                 
+        output_geotiffs = {}
+        for provider, tile_list in provider_bins.items():
+            if not tile_list:
+                continue
+
+            epsg_counts = defaultdict(int)
+            for t in tile_list:
+                key = t['epsg'] if t['epsg'] is not None else 'UNKNOWN_WKT'
+                epsg_counts[key] += 1
+            
+            primary_key = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
+            primary_crs = f"EPSG:{primary_key}" if isinstance(primary_key, int) else "CUSTOM_WKT"
+            
+            output_geotiffs[provider] = {
+                'tiles': [t['path'] for t in tile_list],
+                'nodata_val': provider_nodata[provider],
+                'primary_crs': primary_crs
+            }
+
         return output_geotiffs
 
     def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict, data_type: str) -> None:
-        """Create Master VRT files directly referencing native source files."""
+        """Create Master VRT files with companion overview pyramids locally."""
 
         for bin_key, info in output_geotiffs.items():
             tifs = [str(t) for t in info['tiles']]
-            vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
-            
-            if data_type == 'DigitalCoast':
-                options = gdal.BuildVRTOptions(
-                    resampleAlg='bilinear',
-                    resolution='highest',
-                    srcNodata=info.get('nodata_val'),
-                    VRTNodata=info.get('nodata_val'),
-                    addAlpha=True,
-                    allowProjectionDifference=True,
-                    outputSRS=info.get('wkt')
-                )
-                gdal.BuildVRT(str(vrt_filename), tifs, options=options)
-            else:
-                # Warp the source GeoTIFF paths directly into a single EPSG:4326 VRT
-                warp_options = gdal.WarpOptions(
-                    format='VRT',
-                    dstSRS='EPSG:4326',
-                    resampleAlg=gdal.GRA_Bilinear,
-                    srcNodata=-9999.0,
-                    dstNodata=-9999.0
-                )
-                gdal.Warp(str(vrt_filename), tifs, options=warp_options)
+            if not tifs:
+                continue
 
-            print(f'- Finished Master VRT: {vrt_filename.name}')
+            vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
+            nodata = info.get('nodata_val', -9999.0)
+            if nodata is None:
+                nodata = -9999.0
+
+            if data_type == 'BlueTopo':
+                # Build native UTM VRT strictly within matched CRS group
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=False,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+
+            elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='near',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+
+            else:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+
+            if vrt_filename.exists():
+                print(f' - Building local VRT Overviews for {vrt_filename.name}...')
+                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_Update)
+                if vrt_ds is not None:
+                    # Creates local .vrt.ovr sidecar file
+                    vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
+                    vrt_ds = None
+
+            print(f'- Finished Master VRT & Overviews: {vrt_filename.name}')
 
     def run(self, output_folder: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="", data_folder: str="", manual_downloads: bool=False) -> None:
         """Main method for running VRT Engine locally"""
@@ -158,13 +221,15 @@ class RasterVRTEngine(Engine):
         else:
             outputs = pathlib.Path(output_folder) / ecoregion / sub / (data_folder if data_folder else data_type)
 
+        outputs.mkdir(parents=True, exist_ok=True)
+
         if data_type == 'BlueTopo':
             raw_geotiffs = list(outputs.rglob(self.glob_lookup[file_type]))
             
             if file_type == 'elevation':
                 geotiffs = [
                     g for g in raw_geotiffs 
-                    if not any(x in g.name.lower() for x in ['_unc', '_slope', '_rugosity', 'decay', 'iss'])
+                    if not any(x in g.name.lower() for x in ['_unc', '_slope', 'decay', 'iss'])
                 ]
             else:
                 geotiffs = raw_geotiffs

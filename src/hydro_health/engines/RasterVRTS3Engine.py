@@ -14,18 +14,21 @@ from hydro_health.engines.Engine import Engine
 
 
 def _set_gdal_s3_options() -> None:
-    """Configure GDAL /vsis3/ driver to resolve AWS IAM Role credentials from EC2 IMDS."""
+    """Configure GDAL /vsis3/ driver for low-latency S3 streaming."""
+    
     gdal.SetConfigOption('AWS_NO_SIGN_REQUEST', 'NO')
     gdal.SetConfigOption('AWS_EC2_METADATA_DISABLED', 'FALSE')
     gdal.SetConfigOption('AWS_REGION', 'us-east-2')
     gdal.SetConfigOption('GDAL_DISABLE_READDIR_ON_OPEN', 'EMPTY_DIR')
-    gdal.SetConfigOption('VSI_CACHE', 'FALSE')  # Prevents stale VSI 404 cache hits
+    gdal.SetConfigOption('VSI_CACHE', 'TRUE')  # Enable byte-range caching
+    gdal.SetConfigOption('VSI_CACHE_SIZE', '25000000')  # 25 MB RAM cache pool per thread
     gdal.SetConfigOption('GDAL_HTTP_MERGE_CONSECUTIVE_RANGES', 'YES')
     gdal.SetConfigOption('GDAL_HTTP_MULTIPLEX', 'YES')
 
 
 def _read_geotiff_metadata(raw_prefix: str) -> dict:
-    """Read CRS metadata without dropping tiles when AutoIdentifyEPSG throws SRS errors."""
+    """Read native CRS metadata over /vsis3/ via Dask workers."""
+
     _set_gdal_s3_options()
 
     s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
@@ -70,7 +73,7 @@ def _read_geotiff_metadata(raw_prefix: str) -> dict:
             if not epsg_code:
                 raw_code = (
                     src_srs.GetAuthorityCode("PROJCS") or 
-                    src_srs.GetAuthorityCode("GEOGCS") or
+                    src_srs.GetAuthorityCode("GEOGCS") or 
                     src_srs.GetAuthorityCode(None)
                 )
                 if raw_code and raw_code.isdigit():
@@ -94,7 +97,7 @@ def _read_geotiff_metadata(raw_prefix: str) -> dict:
             'wkt': raw_wkt
         }
     except Exception as e:
-        print(f" - Error obtaining metadata: {relative_s3_key}: {e}")
+        print(f" - Error obtaining metadata for {relative_s3_key}: {e}")
         return None
     finally:
         ds = None
@@ -109,38 +112,40 @@ class RasterVRTS3Engine(Engine):
         self.glob_lookup = {
             'elevation': '*[0-9].tiff',
             'uncertainty': '*_unc.tiff',
+            'survey_end_date': '*survey_end_date.tiff',
             'slope': '*_slope.tiff',
-            'rugosity': '*_rugosity.tiff',
+            'catzoc_decay_all': '*ISS_all*.tiff',
+            'catzoc_decay_latest': '*ISS_latest*.tiff',
             'NCMP': '*.tif'
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
 
     def build_output_vrts(self, s3_output_path: str, file_type: str, output_geotiffs: dict, temp_output_path: pathlib.Path, data_type: str) -> None:
-        """Master VRT Builder: Constructs a unified VRT referencing raw S3 GeoTIFFs."""
+        """Master VRT Builder: Constructs native VRTs per CRS group and computes S3 Overviews."""
 
+        _set_gdal_s3_options()
         s3_client = boto3.client('s3')
         bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
-        for provider, info in output_geotiffs.items():
+        for group_key, info in output_geotiffs.items():
             tifs = info['tiles'] 
             if not tifs:
                 continue
 
-            vrt_filename = temp_output_path / f'mosaic_{file_type}_{provider}.vrt'
+            vrt_filename = temp_output_path / f'mosaic_{file_type}_{group_key}.vrt'
             nodata = info.get('nodata_val', -9999.0)
             if nodata is None:
                 nodata = -9999.0
 
             if data_type == 'BlueTopo':
-                # Directly reproject and unify multi-UTM BlueTopo tiles into a single EPSG:4326 VRT
-                warp_options = gdal.WarpOptions(
-                    format='VRT',
-                    dstSRS='EPSG:4326',
-                    resampleAlg=gdal.GRA_Bilinear,
+                # Build native UTM VRT strictly within matched CRS group (No projection difference allowed)
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=False,
                     srcNodata=nodata,
-                    dstNodata=nodata
+                    VRTNodata=nodata
                 )
-                gdal.Warp(str(vrt_filename), tifs, options=warp_options)
+                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
 
             elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
                 vrt_options = gdal.BuildVRTOptions(
@@ -160,34 +165,54 @@ class RasterVRTS3Engine(Engine):
                 )
                 gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
 
+            # --- BUILD OVERVIEWS FOR LIGHTNING FAST GIS DISPLAY ---
             if vrt_filename.exists():
+                print(f' - Building VRT Overviews for {vrt_filename.name}...')
+                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_Update)
+                if vrt_ds is not None:
+                    # Creates external .vrt.ovr sidecar pyramid for instant zooming
+                    vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
+                    vrt_ds = None
+
+                # Upload Master VRT
                 s3_key = f'{s3_output_path}/{vrt_filename.name}'
-                print(f' - Uploading Master VRT to: s3://{bucket_name}/{s3_key}')
+                print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
                 s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
 
+                # Upload companion .vrt.ovr overview file
+                ovr_filename = pathlib.Path(f"{vrt_filename}.ovr")
+                if ovr_filename.exists():
+                    ovr_s3_key = f'{s3_output_path}/{ovr_filename.name}'
+                    print(f' - Uploading VRT Overview Pyramid: s3://{bucket_name}/{ovr_s3_key}')
+                    s3_client.upload_file(str(ovr_filename), bucket_name, ovr_s3_key)
+
     def get_bluetopo_tifs(self, geotiffs: list) -> dict:
-        """Formats native BlueTopo S3 GeoTIFF paths for unified single-VRT construction."""
-        vsi_paths = []
-        s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        """Bins BlueTopo tiles strictly by native EPSG UTM CRS using Dask parallel reads."""
 
-        for gt in geotiffs:
-            clean_path = gt.replace('s3://', '').lstrip('/')
-            parts = clean_path.split('/')
-            if parts[0] == s3_bucket:
-                parts = parts[1:]
-            relative_key = '/'.join(parts)
-            vsi_paths.append(f'/vsis3/{s3_bucket}/{relative_key}')
+        _set_gdal_s3_options()
+        
+        print(f" - Distributing {len(geotiffs)} BlueTopo metadata reads across Dask workers...")
+        results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, geotiffs)) if r is not None]
 
-        # Return all tiles under a single 'master' key to ensure one unified VRT output
-        return {
-            'all_tiles': {
-                'tiles': vsi_paths,
+        utm_bins = defaultdict(list)
+        for res in results:
+            epsg_code = res['epsg']
+            crs_key = f"EPSG_{epsg_code}" if epsg_code else "UNKNOWN_CRS"
+            utm_bins[crs_key].append(res['vsi_path'])
+
+        output_dict = {}
+        for crs_key, tile_paths in utm_bins.items():
+            print(f" -> BlueTopo Bin [{crs_key}]: {len(tile_paths)} tiles")
+            output_dict[crs_key] = {
+                'tiles': tile_paths,
                 'nodata_val': -9999.0
             }
-        }
+
+        return output_dict
 
     def get_digitalcoast_geotiffs(self, geotiffs: list, temp_dir: pathlib.Path, outputs: str) -> dict:
         """Bins tiles by provider, selects majority CRS, and reprojects ONLY non-matching tiles."""
+
         _set_gdal_s3_options()
         s3_client = boto3.client('s3')
         s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
@@ -322,14 +347,13 @@ class RasterVRTS3Engine(Engine):
         if data_type == 'BlueTopo':
             raw_geotiffs = s3_files.glob(f"{base_s3}/**/{self.glob_lookup[file_type]}")
             
-            # Strict file filter to exclude non-elevation analytical rasters
+            # Case-insensitive exclusion filter for non-elevation rasters
             if file_type == 'elevation':
                 geotiffs = [
                     gt for gt in raw_geotiffs 
-                    if not any(pattern in gt for pattern in [
+                    if not any(pattern in gt.lower() for pattern in [
                         '_unc', 
                         '_slope', 
-                        '_rugosity', 
                         '_iss', 
                         '_survey_end_date', 
                         'decay'])
@@ -339,7 +363,7 @@ class RasterVRTS3Engine(Engine):
 
             if geotiffs:
                 output_geotiffs = self.get_bluetopo_tifs(geotiffs)
-                with tempfile.TemporaryDirectory() as td:
+                with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
                     self.build_output_vrts(s3_output_path, file_type, output_geotiffs, pathlib.Path(td), data_type)
         else:
             providers_to_process = [(folder, data_type, s3_output_path) for folder in s3_files.glob(f"{base_s3}/*")]

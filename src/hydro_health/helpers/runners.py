@@ -194,7 +194,7 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
     # TODO move this logic into each run()
     for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
         # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
-        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
+        for dataset in ['elevation', 'slope', 'uncertainty']:
             print(f'Starting {engine.__class__.__name__} for {ecoregion} - {dataset}')
             engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix=output_prefix)
         print(f'Starting {engine.__class__.__name__} for {ecoregion}')
