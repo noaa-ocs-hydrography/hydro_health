@@ -17,7 +17,9 @@ import rasterio.features  # Explicitly imported to resolve AttributeError
 from rasterio.enums import Resampling
 from rasterio.transform import Affine
 from rasterio.transform import from_bounds
-from rasterio.warp import reproject
+from rasterio.warp import reproject, transform_bounds
+from rasterio.windows import Window, from_bounds as window_from_bounds
+from rasterio.windows import transform as window_transform
 from shapely.geometry import GeometryCollection
 from shapely.geometry import LineString
 from shapely.geometry import Point, Polygon
@@ -68,6 +70,9 @@ class CreateHurricaneLayerEngine(Engine):
 
         cumulative_raster_path = get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH')
         self.cumulative_raster_path = UPath(f'{s3_dir_base}/{cumulative_raster_path}') if self.is_aws else UPath(self.outputs_dir / cumulative_raster_path)
+
+        prediction_mask_path = get_config_item('MASK', 'MASK_PRED_PATH')
+        self.mask_pred_path = UPath(f'{s3_dir_base}/{prediction_mask_path}') if self.is_aws else UPath(self.outputs_dir / prediction_mask_path)
 
         master_grids_path = str(get_config_item('SHARED', 'MASTER_GRIDS'))
         self.coast_boundary_path = UPath(master_grids_path) if '://' in master_grids_path else UPath(INPUTS / master_grids_path)
@@ -191,9 +196,39 @@ class CreateHurricaneLayerEngine(Engine):
                 count_array[valid] += 1
         average_array = np.full(raster_shape, np.nan, dtype=np.float32)
         np.divide(sum_array, count_array, out=average_array, where=count_array > 0)
+        average_array, transform = self._clip_to_prediction_bounds(average_array, transform, crs)
         self.year_pair_raster_path.mkdir(parents=True, exist_ok=True)
-        self.save_raster(average_array, output_path, *raster_shape, transform, crs)
+        self.save_raster(average_array, output_path, *average_array.shape, transform, crs)
         self.write_message(f"Saved mean raster to: {output_path}", OUTPUTS)
+
+    def _prediction_bounds(self, crs: rasterio.crs.CRS | str) -> tuple[float, float, float, float]:
+        """Read prediction mask bounds in the output raster's CRS."""
+        with rasterio.open(self._get_gdal_path(self.mask_pred_path)) as mask:
+            if mask.crs is None or crs is None:
+                raise ValueError('The prediction mask and output raster must both have a CRS')
+            bounds = tuple(mask.bounds)
+            if mask.crs != rasterio.crs.CRS.from_user_input(crs):
+                bounds = transform_bounds(mask.crs, crs, *bounds, densify_pts=21)
+        if not np.all(np.isfinite(bounds)):
+            raise ValueError(f'Invalid prediction mask bounding box: {bounds}')
+        return bounds
+
+    def _clip_to_prediction_bounds(self, data: np.ndarray, transform: Affine, crs: rasterio.crs.CRS | str) -> tuple[np.ndarray, Affine]:
+        """Crop to the prediction TIFF's bounding box on the existing pixel grid."""
+        bounds = self._prediction_bounds(crs)
+        window = window_from_bounds(*bounds, transform=transform)
+        # Include intersecting edge pixels while avoiding floating-point off-by-one errors.
+        col_start = max(0, int(np.floor(window.col_off + 1e-8)))
+        row_start = max(0, int(np.floor(window.row_off + 1e-8)))
+        col_end = min(data.shape[1], int(np.ceil(window.col_off + window.width - 1e-8)))
+        row_end = min(data.shape[0], int(np.ceil(window.row_off + window.height - 1e-8)))
+        if col_start >= col_end or row_start >= row_end:
+            raise ValueError(f'Prediction mask bounding box does not overlap the output raster: {self.mask_pred_path}')
+        crop_window = Window(col_start, row_start, col_end - col_start, row_end - row_start)
+        clipped = data[row_start:row_end, col_start:col_end]
+        clipped_transform = window_transform(crop_window, transform)
+        self.write_message(f'Cropped raster to prediction mask bounds: {self.mask_pred_path}; shape={clipped.shape}', OUTPUTS)
+        return clipped, clipped_transform
 
     def clip_polygons(self) -> None:
         """Subtract higher wind radii from lower wind radii to create distinct rings."""
@@ -566,8 +601,9 @@ class CreateHurricaneLayerEngine(Engine):
 
             output_raster[~mask_valid] = np.nan
 
+            output_raster, output_transform = self._clip_to_prediction_bounds(output_raster, mask_transform, mask_crs)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            self.save_raster(output_raster, output_path, mask_height, mask_width, mask_transform, mask_crs)
+            self.save_raster(output_raster, output_path, *output_raster.shape, output_transform, mask_crs)
             self.write_message(f"Cumulative raster for year {year_folder} saved to {output_path}.", OUTPUTS)
 
         self.write_message(f"Cumulative raster generation complete for {value}.", OUTPUTS)
@@ -605,6 +641,7 @@ class CreateHurricaneLayerEngine(Engine):
         self.write_message(f"Reading EcoRegions from {self.coast_boundary_path} to constrain raster bounding boxes...", OUTPUTS)
         eco_gdf = self._read_ecoregion()
         eco_minx, eco_miny, eco_maxx, eco_maxy = eco_gdf.total_bounds
+        pred_minx, pred_miny, pred_maxx, pred_maxy = self._prediction_bounds(gdf.crs)
 
         # Group by 'area_date' ensures unique files per storm.
         grouped = gdf.groupby('area_date')
@@ -636,6 +673,10 @@ class CreateHurricaneLayerEngine(Engine):
                 self.write_message(f"Warning: Storm {name} - {year} is completely outside the target EcoRegions bounding box. Skipping rasterization.", OUTPUTS)
                 continue
 
+            if max(minx, pred_minx) >= min(maxx, pred_maxx) or max(miny, pred_miny) >= min(maxy, pred_maxy):
+                self.write_message(f'Skipping storm {name} - {year}: outside prediction mask bounds.', OUTPUTS)
+                continue
+
             width = int(np.ceil((maxx - minx) / resolution))
             height = int(np.ceil((maxy - miny) / resolution))
 
@@ -654,7 +695,8 @@ class CreateHurricaneLayerEngine(Engine):
                     transform=transform,
                 )
 
-            self.save_raster(raster_data, raster_file, height, width, transform, gdf.crs)
+            raster_data, transform = self._clip_to_prediction_bounds(raster_data, transform, gdf.crs)
+            self.save_raster(raster_data, raster_file, *raster_data.shape, transform, gdf.crs)
 
             self.write_message(f"Raster for {name} - {year} saved to {raster_file}.", OUTPUTS)
 
