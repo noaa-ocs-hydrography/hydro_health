@@ -174,15 +174,12 @@ class RasterVRTEngine(Engine):
                 nodata = -9999.0
 
             if data_type == 'BlueTopo':
-                # Build native UTM VRT strictly within matched CRS group
                 vrt_options = gdal.BuildVRTOptions(
                     resampleAlg='bilinear',
                     allowProjectionDifference=False,
                     srcNodata=nodata,
                     VRTNodata=nodata
                 )
-                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
-
             elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
                 vrt_options = gdal.BuildVRTOptions(
                     resampleAlg='near',
@@ -190,8 +187,6 @@ class RasterVRTEngine(Engine):
                     srcNodata=nodata,
                     VRTNodata=nodata
                 )
-                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
-
             else:
                 vrt_options = gdal.BuildVRTOptions(
                     resampleAlg='bilinear',
@@ -199,13 +194,20 @@ class RasterVRTEngine(Engine):
                     srcNodata=nodata,
                     VRTNodata=nodata
                 )
-                gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+
+            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
 
             if vrt_filename.exists():
                 print(f' - Building local VRT Overviews for {vrt_filename.name}...')
-                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_Update)
+
+                # Allow Overview files to write to an external sidecar file
+                gdal.SetConfigOption('USE_R2', 'NO')
+                # Allow use of files > 4GB
+                gdal.SetConfigOption('USE_BIGTIFF', 'IF_NEEDED')
+                
+                # Write external overviews
+                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_ReadOnly)
                 if vrt_ds is not None:
-                    # Creates local .vrt.ovr sidecar file
                     vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
                     vrt_ds = None
 

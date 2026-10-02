@@ -21,6 +21,7 @@ from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecas
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
+from hydro_health.engines.DistanceToShoreEngine import DistanceToShoreEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
@@ -181,7 +182,13 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
     processor.run()
     profiler.disable()
     stats = pstats.Stats(profiler)
-    stats.strip_dirs().sort_stats('cumulative').print_stats(10)        
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)
+
+def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the distance to shore raster creator"""
+
+    engine = DistanceToShoreEngine(param_lookup)
+    engine.run()
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
