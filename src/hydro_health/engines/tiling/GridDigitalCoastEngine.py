@@ -352,6 +352,7 @@ class GridDigitalCoastEngine(Engine):
     def run(self, output_prefix: str, manual_downloads=False) -> None:
         """Main execution method routing control using structural parameters"""
 
+        print('Starting GridDigitalCoastEngine')
         outputs = self.param_lookup['output_directory'].valueAsText
 
         self.setup_dask(self.param_lookup['env'])
@@ -363,8 +364,10 @@ class GridDigitalCoastEngine(Engine):
         [blue_topo_gdf_future] = self.client.scatter([blue_topo_gdf], broadcast=True)
 
         if self.param_lookup['env'] in ['local', 'remote']:
+            print('- Beginning local VRT gridding')
             self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, output_prefix)
         else:
+            print('- Beginning local VRT gridding')
             self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_downloads, output_prefix)
 
         self.close_dask()

@@ -38,7 +38,6 @@ class Engine:
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
         self.cluster = None
         self.client = None
-        self.target_crs = "EPSG:32617"
         self.target_res = 8
         self.year_ranges = [
             (1998, 2001),
@@ -96,10 +95,21 @@ class Engine:
                 self.write_message(f"Failed to wipe master local temp directory: {e}", output_folder)
 
     def close_dask(self) -> None:
-        """Shut down Dask objects"""
+        """Shut down Dask objects safely without blocking indefinitely."""
 
-        self.client.close()
-        self.cluster.close()
+        if self.client:
+            try:
+                # Force pending tasks to cancel rather than hanging cluster shutdown
+                self.client.cancel(self.client.futures, force=True)
+                self.client.close(timeout=10)
+            except Exception as e:
+                print(f"- Warning during client close: {e}", flush=True)
+
+        if self.cluster:
+            try:
+                self.cluster.close(timeout=10)
+            except Exception as e:
+                print(f"- Warning during cluster close: {e}", flush=True)
     
     def get_available_datasets(self, geometry_coords: str, digital_coast_folder: str) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -219,7 +229,6 @@ class Engine:
     def resample_and_reproject(self, tiff_path: pathlib.Path, target_res: int) -> None:
         """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""
 
-        print(f"  - Resampling and reprojecting base tile...")
         output_folder = self.param_lookup['output_directory'].valueAsText
         msg = f"Resampling {tiff_path.name} to {target_res}m and explicitly locking into {target_res}..."
         self.write_message(msg, output_folder)
@@ -241,31 +250,25 @@ class Engine:
             warped_band_path = tiff_path.parent / f"band_{band_idx}_warped.tiff"
 
             # Extract single band from source
-            ds_ext = gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
-            ds_ext = None  # Flush and release lock
+            gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
             temp_files_to_clean.append(raw_band_path)
 
             # Choose correct resampling algorithm
             # Bands 1 (Bathy) and 2 (Uncertainty) get Bilinear interpolation
             # Bands 3+ (Contributor IDs/Metadata indices) must get Nearest Neighbor to avoid float corruption
-            if band_idx in (1, 2):
-                resample_alg = gdal.GRA_Bilinear
-            else:
-                resample_alg = gdal.GRA_NearestNeighbour
+            resample_alg = gdal.GRA_Bilinear if band_idx in (1, 2) else gdal.GRA_NearestNeighbour
 
             # Warp single band to output parameters
-            ds_warp = gdal.Warp(
+            gdal.Warp(
                 str(warped_band_path),
                 str(raw_band_path),
                 xRes=target_res,
                 yRes=target_res,
                 targetAlignedPixels=True,
-                dstSRS=self.target_crs,
                 resampleAlg=resample_alg,
                 dstNodata=-9999,
                 creationOptions=["COMPRESS=DEFLATE"]
             )
-            ds_warp = None  # Flush and release lock
             warped_bands.append(str(warped_band_path))
             temp_files_to_clean.append(warped_band_path)
 
@@ -273,17 +276,13 @@ class Engine:
         temp_tiff = tiff_path.parent / f"warped_{tiff_path.name}"
         vrt_path = tiff_path.parent / f"warped_multiband.vrt"
 
-        vrt_ds = gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
-        vrt_ds = None  # Flush and release lock
+        gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
 
-        # Explicitly apply the self.target_crs here to strictly guarantee the finalized TIFF doesn't inherit a corrupted VRT CRS
-        ds_trans = gdal.Translate(
+        gdal.Translate(
             str(temp_tiff),
             str(vrt_path),
-            outputSRS=self.target_crs,
             creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
         )
-        ds_trans = None  # Flush and release lock
 
         # Clean up temporary intermediate files securely
         if vrt_path.exists():
@@ -299,14 +298,14 @@ class Engine:
     def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
-        print(f"Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
+        print(f"- Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
         
         if env == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
         self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
         self.client = Client(self.cluster)
-        print(self.client.dashboard_link)
+        # print(self.client.dashboard_link)
 
     def set_proj_path(self):
         """Load proj.db path to resolve mismatch"""
@@ -330,7 +329,7 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')        
 
-    def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
+    def write_run_manifest(self, subfolder: pathlib.Path, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""
 
         end_time = time.time()
@@ -344,16 +343,18 @@ class Engine:
         }
         if extra_info:
             manifest.update(extra_info)
-
+        
+        manfest_path = subfolder / f"_manifest_{self.__class__.__name__}.json"
+        print(f'- Writing run manifest: {manfest_path}')
         if self.param_lookup['env'] == 'aws':
             s3 = boto3.client('s3')
             s3.put_object(
                 Bucket=get_config_item('SHARED', 'OUTPUT_BUCKET'),
-                Key=f"{subfolder}/_manifest_{self.__class__.__name__}.json",
+                Key=str(manfest_path),
                 Body=json.dumps(manifest, indent=4)
             )
         else:
-            manifest_path = OUTPUTS / subfolder / f'_manifest_{self.__class__.__name__}.json'
+            manifest_path = OUTPUTS / manfest_path
             manifest_path.parent.mkdir(parents=True, exist_ok=True)
             with open(manifest_path, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))

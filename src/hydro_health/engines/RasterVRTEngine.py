@@ -1,60 +1,10 @@
 import pathlib
-import json
-import tempfile
+from collections import defaultdict
 from pyproj.database import query_crs_info
 from pyproj.enums import PJType
 from osgeo import gdal, osr
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
-
-
-def _clean(s: str) -> str:
-    """Helper to normalize strings for comparison (removes non-breaking spaces, etc.)"""
-
-    if not s: 
-        return ""
-    return " ".join(s.split()).lower().strip()
-
-
-def _local_process_single_bluetopo(geotiff_path: pathlib.Path, output_dir: pathlib.Path) -> tuple[str, str, str]:
-    """
-    Local equivalent of the S3 BlueTopo logic.
-    Creates an individual warped VRT (EPSG:4326) on the local disk.
-    """
-
-    gdal.UseExceptions()
-    
-    geotiff_stem = geotiff_path.stem
-    # Save the intermediate warped VRT inside the provided temp directory
-    warped_vrt_path = output_dir / f"{geotiff_stem}_warped.vrt"
-    
-    src_ds = None
-    try:
-        src_ds = gdal.Open(str(geotiff_path))
-        if src_ds is None:
-            raise FileNotFoundError(f"GDAL could not open {geotiff_path}")
-            
-        warp_options = {
-            'format': 'VRT',
-            'dstSRS': 'EPSG:4326',
-            'resampleAlg': gdal.GRA_Bilinear,
-            'srcNodata': -999999,
-            'dstNodata': -999999,  # Ensures "empty" reprojected space is transparent
-            'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE']
-        }
-
-        warped_vrt_ds = gdal.Warp(str(warped_vrt_path), src_ds, **warp_options)
-        projection_wkt = warped_vrt_ds.GetProjection()
-        spatial_ref = osr.SpatialReference(wkt=projection_wkt)
-        datum_code = spatial_ref.GetAuthorityCode('DATUM')
-        warped_vrt_ds = None 
-
-        return str(datum_code), str(warped_vrt_path), projection_wkt
-
-    except Exception as e:
-        raise RuntimeError(f'_local_process_single_bluetopo failed: {geotiff_path} - {str(e)}')
-    finally:
-        src_ds = None
 
 
 class RasterVRTEngine(Engine):
@@ -66,67 +16,74 @@ class RasterVRTEngine(Engine):
         self.glob_lookup = {
             'elevation': '*[0-9].tiff',
             'uncertainty': '*_unc.tiff',
+            'survey_end_date': '*survey_end_date.tiff',
             'slope': '*_slope.tiff',
-            'rugosity': '*_rugosity.tiff',
-            'catzoc_decay_all': '*decay_all.tiff',
-            'catzoc_decay_latest': '*decay_latest.tiff',
+            'catzoc_decay_all': '*ISS_all*.tiff',
+            'catzoc_decay_latest': '*ISS_latest*.tiff',
             'NCMP': '*.tif'
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
 
-    def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict, data_type: str) -> None:
-        """Create Master VRT files matching the original S3 options architecture"""
+    def get_local_bluetopo_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
+        """Groups BlueTopo tiles strictly by their native EPSG UTM CRS code."""
 
-        for bin_key, info in output_geotiffs.items():
-            tifs = [str(t) for t in info['tiles']]
-            vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
-            
-            if data_type == 'DigitalCoast':
-                options = gdal.BuildVRTOptions(
-                    resampleAlg='near', 
-                    srcNodata=info.get('nodata_val'),
-                    VRTNodata=info.get('nodata_val'),
-                    addAlpha=True,
-                    allowProjectionDifference=True,
-                    outputSRS=info.get('wkt')
-                )
-            else:
-                options = gdal.BuildVRTOptions(
-                    resampleAlg='bilinear',
-                    allowProjectionDifference=True
-                )
+        utm_bins = defaultdict(list)
 
-            gdal.BuildVRT(str(vrt_filename), tifs, options=options)
-            print(f'- Finished Master VRT: {vrt_filename}')
+        for geotiff_path in geotiffs:
+            ds = gdal.Open(str(geotiff_path))
+            if ds is None:
+                continue
 
-    def get_local_bluetopo_tifs(self, geotiffs: list[pathlib.Path], base_output_path: pathlib.Path) -> dict:
-        """Processes BlueTopo files locally by warping them to 4326 first"""
-
-        output_geotiffs = {}
-        
-        for gtif in geotiffs:
+            epsg_code = None
             try:
-                crs_code, local_vrt_path, wkt = _local_process_single_bluetopo(gtif, base_output_path)
-                clean_key = _clean(str(crs_code)).replace('/', '').replace(' ', '_')
-                
-                if clean_key not in output_geotiffs:
-                    output_geotiffs[clean_key] = {
-                        'crs': osr.SpatialReference(wkt=wkt), 
-                        'tiles': [],
-                        'nodata_val': -999999,
-                        'wkt': wkt
-                    }
-                output_geotiffs[clean_key]['tiles'].append(local_vrt_path)
+                src_srs = ds.GetSpatialRef()
+                if src_srs:
+                    src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    try:
+                        src_srs.AutoIdentifyEPSG()
+                        auth_code = (
+                            src_srs.GetAuthorityCode("PROJCS") or 
+                            src_srs.GetAuthorityCode("GEOGCS") or 
+                            src_srs.GetAuthorityCode(None)
+                        )
+                        if auth_code and auth_code.isdigit():
+                            epsg_code = int(auth_code)
+                    except Exception:
+                        pass
+
+                    if not epsg_code:
+                        raw_code = (
+                            src_srs.GetAuthorityCode("PROJCS") or 
+                            src_srs.GetAuthorityCode("GEOGCS") or 
+                            src_srs.GetAuthorityCode(None)
+                        )
+                        if raw_code and raw_code.isdigit():
+                            epsg_code = int(raw_code)
+
+                crs_key = f"EPSG_{epsg_code}" if epsg_code else "UNKNOWN_CRS"
+                utm_bins[crs_key].append(str(geotiff_path))
+
             except Exception as e:
-                print(f" - Error processing BlueTopo file {gtif}: {e}")
-                
-        return output_geotiffs
+                print(f" - Error obtaining SRS for {geotiff_path}: {e}")
+            finally:
+                ds = None
+
+        output_dict = {}
+        for crs_key, tile_paths in utm_bins.items():
+            print(f" -> BlueTopo Local Bin [{crs_key}]: {len(tile_paths)} tiles")
+            output_dict[crs_key] = {
+                'tiles': tile_paths,
+                'nodata_val': -9999.0
+            }
+
+        return output_dict
 
     def get_local_digitalcoast_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
-        """Reads metadata from local files to build DigitalCoast bins"""
+        """Reads metadata from local files to build DigitalCoast provider bins."""
 
-        output_geotiffs = {}
-        
+        provider_bins = defaultdict(list)
+        provider_nodata = defaultdict(lambda: None)
+
         for geotiff_path in geotiffs:
             ds = gdal.Open(str(geotiff_path))
             if ds is None: 
@@ -137,25 +94,24 @@ class RasterVRTEngine(Engine):
                 nodata = band.GetNoDataValue()
                 
                 src_srs = ds.GetSpatialRef()
-                src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-                
-                bin_id = src_srs.GetAuthorityCode(None)
-                if not bin_id:
+                epsg_code = None
+                raw_wkt = None
+
+                if src_srs:
+                    src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    raw_wkt = src_srs.ExportToWkt()
                     try:
-                        srs_json = json.loads(src_srs.ExportToPROJJSON())
-                        components = srs_json.get('components', [{}])
-                        comp_name = components[0].get('name', '')
-                        horizontal_name = _clean(comp_name.split(' + ')[0])
-                        match = [cr.code for cr in self.all_crs if _clean(cr.name) == horizontal_name]
-                        if match:
-                            bin_id = match[0]
-                    except:
+                        src_srs.AutoIdentifyEPSG()
+                        auth_code = (
+                            src_srs.GetAuthorityCode("PROJCS") or 
+                            src_srs.GetAuthorityCode("GEOGCS") or 
+                            src_srs.GetAuthorityCode(None)
+                        )
+                        if auth_code and auth_code.isdigit():
+                            epsg_code = int(auth_code)
+                    except Exception:
                         pass
 
-                if not bin_id:
-                    fallback_name = src_srs.GetName()
-                    bin_id = src_srs.GetAuthorityCode('DATUM') or _clean(fallback_name).replace(" ", "_")
-                    
                 parts = geotiff_path.parts
                 try:
                     if 'Digital_Coast_Manual_Downloads' in parts:
@@ -168,23 +124,97 @@ class RasterVRTEngine(Engine):
                 except (ValueError, IndexError):
                     provider = parts[-4] if len(parts) >= 4 else "UnknownProvider"
                     
-                if provider not in output_geotiffs:
-                    output_geotiffs[provider] = {
-                        'tiles': [], 
-                        'nodata_val': nodata,
-                        'wkt': src_srs.ExportToWkt()
-                    }
-                output_geotiffs[provider]['tiles'].append(str(geotiff_path))
-                
+                provider_bins[provider].append({
+                    'path': str(geotiff_path),
+                    'epsg': epsg_code,
+                    'wkt': raw_wkt,
+                    'nodata': nodata
+                })
+
+                if provider_nodata[provider] is None and nodata is not None:
+                    provider_nodata[provider] = nodata
+
             except Exception as e:
                 print(f" - Error obtaining metadata for {geotiff_path}: {e}")
             finally:
                 ds = None
                 
+        output_geotiffs = {}
+        for provider, tile_list in provider_bins.items():
+            if not tile_list:
+                continue
+
+            epsg_counts = defaultdict(int)
+            for t in tile_list:
+                key = t['epsg'] if t['epsg'] is not None else 'UNKNOWN_WKT'
+                epsg_counts[key] += 1
+            
+            primary_key = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
+            primary_crs = f"EPSG:{primary_key}" if isinstance(primary_key, int) else "CUSTOM_WKT"
+            
+            output_geotiffs[provider] = {
+                'tiles': [t['path'] for t in tile_list],
+                'nodata_val': provider_nodata[provider],
+                'primary_crs': primary_crs
+            }
+
         return output_geotiffs
-    
+
+    def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict, data_type: str) -> None:
+        """Create Master VRT files with companion overview pyramids locally."""
+
+        for bin_key, info in output_geotiffs.items():
+            tifs = [str(t) for t in info['tiles']]
+            if not tifs:
+                continue
+
+            vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
+            nodata = info.get('nodata_val', -9999.0)
+            if nodata is None:
+                nodata = -9999.0
+
+            if data_type == 'BlueTopo':
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=False,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+            elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='near',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+            else:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+
+            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+
+            if vrt_filename.exists():
+                print(f' - Building local VRT Overviews for {vrt_filename.name}...')
+
+                # Allow Overview files to write to an external sidecar file
+                gdal.SetConfigOption('USE_R2', 'NO')
+                # Allow use of files > 4GB
+                gdal.SetConfigOption('USE_BIGTIFF', 'IF_NEEDED')
+                
+                # Write external overviews
+                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_ReadOnly)
+                if vrt_ds is not None:
+                    vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
+                    vrt_ds = None
+
+            print(f'- Finished Master VRT & Overviews: {vrt_filename.name}')
+
     def run(self, output_folder: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str="", data_folder: str="", manual_downloads: bool=False) -> None:
-        """Main execution method mimicking the S3 engine's control routing entirely local"""
+        """Main method for running VRT Engine locally"""
         
         sub = get_config_item(data_type.upper(), 'SUBFOLDER')
         
@@ -193,14 +223,22 @@ class RasterVRTEngine(Engine):
         else:
             outputs = pathlib.Path(output_folder) / ecoregion / sub / (data_folder if data_folder else data_type)
 
+        outputs.mkdir(parents=True, exist_ok=True)
+
         if data_type == 'BlueTopo':
-            geotiffs = list(outputs.rglob(self.glob_lookup[file_type]))
+            raw_geotiffs = list(outputs.rglob(self.glob_lookup[file_type]))
+            
+            if file_type == 'elevation':
+                geotiffs = [
+                    g for g in raw_geotiffs 
+                    if not any(x in g.name.lower() for x in ['_unc', '_slope', 'decay', 'iss'])
+                ]
+            else:
+                geotiffs = raw_geotiffs
+
             if geotiffs:
-                # Isolate the temporary single-tile VRTs inside a Context Manager
-                with tempfile.TemporaryDirectory() as temp_dir:
-                    temp_vrt_path = pathlib.Path(temp_dir)
-                    output_geotiffs = self.get_local_bluetopo_tifs(geotiffs, temp_vrt_path)
-                    self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
+                output_geotiffs = self.get_local_bluetopo_geotiffs(geotiffs)
+                self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
         else:
             provider_folders = [f for f in outputs.glob('*') if f.is_dir() and 'unused_providers' not in f.name]
             for provider_path in provider_folders:
