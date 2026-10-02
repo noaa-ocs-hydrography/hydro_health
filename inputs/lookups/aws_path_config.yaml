@@ -45,6 +45,7 @@ PREPROCESSED:
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
+  GPKG_PATH: original_data_files/sediment_data/sediment_data.gpkg
   RASTER_PATH: model_variables/Prediction/pre_processed/sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp

@@ -16,6 +16,7 @@ from collections import deque
 from collections.abc import Iterator
 
 from ftplib import FTP
+from upath import UPath
 from osgeo import gdal, osr
 
 from hydro_health.engines.Engine import Engine
@@ -63,6 +64,7 @@ class CreateTSMLayerEngine(Engine):
     def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
         super().__init__()
         self.param_lookup = param_lookup
+        self.is_aws = param_lookup.get('env', 'local') in ['remote', 'aws']
         self.output_prefix = output_prefix
 
         creds = HydroHealthConfig()
@@ -82,33 +84,35 @@ class CreateTSMLayerEngine(Engine):
         self.chunk_size = 512
         
     def _resolve_paths(self, region: str) -> None:
-        """Configure storage and paths for the selected eco region."""
+        """Resolve paths dynamically for aws or local environments and the given eco region."""
 
-        self.is_aws = self.param_lookup['env'] in ('remote', 'aws')
-        tsm_data_path = str(get_config_item('TSM', 'DATA_PATH')).strip('/')
-        subfolder = str(get_config_item('TSM', 'SUBFOLDER')).strip('/')
-        mask_path = str(get_config_item('MASK', 'MASK_PRED_PATH')).strip('/')
-        prefix = str(self.output_prefix).strip('/') if self.output_prefix else ''
-        self.output_folder = OUTPUTS / prefix if prefix else OUTPUTS
-        self.outputs_dir = self.output_folder / region
+        self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
+        self.write_message(f"CreateTSMLayerEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
+
+        bucket = str(get_config_item('SHARED', 'OUTPUT_BUCKET'))
+        s3_dir_base = f"s3://{bucket}/{region}"
+
+        # Shared NetCDF downloads and local download log
+        self.output_folder = OUTPUTS / self.output_prefix if self.output_prefix else OUTPUTS
         self.download_log_path = self.output_folder / 'downloaded_files.txt'
+        tsm_data_path = get_config_item('TSM', 'DATA_PATH')
+        self.nc_files_path = UPath(f"s3://{bucket}/{tsm_data_path}") if self.is_aws else UPath(self.output_folder / tsm_data_path)
 
-        if self.is_aws:
-            bucket = str(get_config_item('SHARED', 'OUTPUT_BUCKET'))
-            bucket = bucket.removeprefix('s3://').strip('/')
-            shared_base = f's3://{bucket}/{prefix}' if prefix else f's3://{bucket}'
-            base_raster = f'{shared_base}/{region}/{subfolder}'
-            self.prediction_mask_path = f'{shared_base}/{region}/{mask_path}'
-            self.nc_files_path = f'{shared_base}/{tsm_data_path}'
-            self.filesystem = s3fs.S3FileSystem()
-        else:
-            base_raster = self.outputs_dir / subfolder
-            self.prediction_mask_path = self.outputs_dir / mask_path
-            self.nc_files_path = self.output_folder / tsm_data_path
-            self.filesystem = fsspec.filesystem('file', auto_mkdir=True)
+        # Region-specific TSM raster directories
+        subfolder = get_config_item('TSM', 'SUBFOLDER')
+        self.raster_path = UPath(f"{s3_dir_base}/{subfolder}/mean_rasters") if self.is_aws else UPath(self.outputs_dir / subfolder / 'mean_rasters')
+        self.year_pair_path = UPath(f"{s3_dir_base}/{subfolder}/TSM_year_pair_rasters") if self.is_aws else UPath(self.outputs_dir / subfolder / 'TSM_year_pair_rasters')
 
-        self.raster_path = f'{base_raster}/mean_rasters'
-        self.year_pair_path = f'{base_raster}/TSM_year_pair_rasters'
+        # Prediction mask
+        mask_path = get_config_item('MASK', 'MASK_PRED_PATH')
+        self.prediction_mask_path = UPath(f"{s3_dir_base}/{mask_path}") if self.is_aws else UPath(self.outputs_dir / mask_path)
+
+        self.filesystem = s3fs.S3FileSystem() if self.is_aws else fsspec.filesystem('file', auto_mkdir=True)
+
+        if not self.is_aws:
+            self.nc_files_path.mkdir(parents=True, exist_ok=True)
+            self.raster_path.mkdir(parents=True, exist_ok=True)
+            self.year_pair_path.mkdir(parents=True, exist_ok=True)
 
     def _open_raster(self, path: str | pathlib.Path) -> gdal.Dataset:
         """Open local or S3 rasters with GDAL."""
@@ -324,7 +328,6 @@ class CreateTSMLayerEngine(Engine):
             ftp.voidcmd('TYPE I')
             expected_size = ftp.size(remote_path)
             size_label = f'{expected_size / 1024**2:.1f} MiB' if expected_size is not None else 'size unknown'
-            self.write_message(f'  Downloading {remote_path} ({size_label})', OUTPUTS)
             received = 0
             last_report = time.monotonic()
             with local_path.open('wb') as writer:
@@ -337,7 +340,6 @@ class CreateTSMLayerEngine(Engine):
                         progress = f'{received / 1024**2:.1f} MiB'
                         if expected_size:
                             progress += f' / {expected_size / 1024**2:.1f} MiB ({100 * received / expected_size:.0f}%)'
-                        self.write_message(f'    Downloaded {progress}', OUTPUTS)
                         last_report = now
                 ftp.retrbinary(f'RETR {remote_path}', write_block, blocksize=256 * 1024)
             self.write_message(f'  Download complete: {received / 1024**2:.1f} MiB', OUTPUTS)
@@ -469,11 +471,11 @@ class CreateTSMLayerEngine(Engine):
             if not self.overwrite_existing and self.filesystem.exists(destination):
                 self.write_message(f'Annual raster already exists: {destination}. Skipping.', OUTPUTS)
                 continue
-            self.write_message(f'Processing year: {year}', OUTPUTS)
             nc_files = [
                 path for path in self._list_files(self.nc_files_path, '.nc')
                 if f"L3m_{year}" in pathlib.PurePosixPath(str(path)).name
             ]
+            self.write_message(f'Processing year: {year} ({len(nc_files)} NetCDF files found)', OUTPUTS)
 
             if not nc_files:
                 self.write_message(f'  No NetCDF files found for {year}', OUTPUTS)
@@ -589,6 +591,7 @@ class CreateTSMLayerEngine(Engine):
     
         for eco_region in self.param_lookup['eco_regions'].value:
             self._resolve_paths(eco_region)
+            self.download_tsm_data()
             self._prepare_region_mask()
             self.create_mean_year_rasters()
             for start_year, end_year in self.year_ranges:
