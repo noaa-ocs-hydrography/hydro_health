@@ -6,6 +6,7 @@ import shutil
 import psutil
 import pathlib
 import tempfile
+import logging
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -20,6 +21,8 @@ from upath import UPath
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
+
+logger = logging.getLogger(__name__)
 
 INPUTS = pathlib.Path(__file__).resolve().parents[4] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).resolve().parents[4] / 'outputs'
