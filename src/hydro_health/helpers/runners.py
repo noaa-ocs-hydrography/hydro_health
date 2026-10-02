@@ -188,7 +188,7 @@ def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bo
     """Entry point for running the distance to shore raster creator"""
 
     engine = DistanceToShoreEngine(param_lookup)
-    engine.run()
+    engine.run(output_prefix)
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""

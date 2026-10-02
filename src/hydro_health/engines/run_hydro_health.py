@@ -90,6 +90,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_raster_vrt_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
                 runners.run_raster_mask_engine(param_lookup, output_prefix, pilot_mode)
+            elif step["tool"] == "run_distance_to_shore_engine" and step["run"]:
+                runners.run_distance_to_shore_engine(param_lookup, output_prefix)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 runners.run_grid_digital_coast(param_lookup, output_prefix)
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:

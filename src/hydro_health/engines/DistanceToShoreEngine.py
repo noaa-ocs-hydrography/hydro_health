@@ -45,6 +45,7 @@ class DistanceToShoreEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
+
     def _resolve_vector_inputs(self, base_outputs: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path | None]:
         """Locates the required shoreline and boundary shapefiles within the outputs directory."""
 
@@ -63,16 +64,11 @@ class DistanceToShoreEngine(Engine):
 
         return shoreline_path, prediction_boundary_path
 
-    def _get_local_bluetopo_files(self, outputs: str, ecoregion: str = "*") -> list[pathlib.Path]:
-        """
-        Sniffs out local BlueTopo files inside:
-        OUTPUTS/{ecoregion}/model_variables/pre_processed/BlueTopo/{tile_folder}
-        Looks for VRTs or GeoTIFFs (*.vrt, *.tif, *.tiff).
-        """
-        base_path = pathlib.Path(outputs)
+    def get_local_bluetopo_files(self, ecoregion: str = "*") -> list[pathlib.Path]:
+        """Search for local BlueTopo geotiffs"""
         
         # Constructs the precise target search path
-        target_dir = base_path / ecoregion / "model_variables" / "pre_processed" / "BlueTopo"
+        target_dir = OUTPUTS / ecoregion / "model_variables" / "pre_processed" / "BlueTopo"
         
         # Recursively search tile_folder subdirectories for BlueTopo raster files
         raster_files = []
@@ -82,12 +78,9 @@ class DistanceToShoreEngine(Engine):
         print(f"*Grins* Discovered {len(raster_files)} local BlueTopo file(s) under: {target_dir}")
         return raster_files
 
-    def _get_s3_bluetopo_files(self, outputs: str, ecoregion: str = "*") -> list[str]:
-        """
-        Discovers S3 BlueTopo files in:
-        s3://{bucket}/{ecoregion}/model_variables/pre_processed/BlueTopo/{tile_folder}
-        Formats them into GDAL's favorite snack: /vsis3/ paths!
-        """
+    def get_s3_bluetopo_files(self, ecoregion: str = "*") -> list[str]:
+        """Search for all BlueTopo geotiffs for current ecoregion"""
+
         _set_gdal_s3_options()
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
@@ -103,7 +96,7 @@ class DistanceToShoreEngine(Engine):
             if p.lower().endswith(('.vrt', '.tif', '.tiff'))
         ]
 
-        print(f"*Cackles* Discovered {len(vsi_bluetopo_paths)} S3 BlueTopo file(s) matching: s3://{s3_search_pattern}")
+        print(f"- Discovered {len(vsi_bluetopo_paths)} S3 BlueTopo file(s) matching: s3://{s3_search_pattern}")
         return vsi_bluetopo_paths
 
     def build_water_mask(
@@ -332,33 +325,25 @@ class DistanceToShoreEngine(Engine):
         print(f"Distance stats: {distance['statistics']}")
         return distance
 
-    def run(self, boundary_clip_buffer_m: float = 100.0) -> None:
+    def run(self, output_prefix: str='', boundary_clip_buffer_m: float = 100.0) -> None:
         """Main function for processing Distance-to-Shore across local or S3 environments."""
 
-        outputs = self.param_lookup['output_directory'].valueAsText
-        base_outputs = pathlib.Path(outputs)
-        
-        output_dir = base_outputs / "Helpers"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
         print(f"Starting Distance To Shore workflow (Environment: {self.param_lookup['env']})...")
-
         ecoregions = self.param_lookup['eco_regions'].value
         for ecoregion in ecoregions:
             if self.param_lookup['env'] == 'aws':
-                bluetopo_files = self._get_s3_bluetopo_files(outputs, ecoregion=ecoregion)
+                bluetopo_files = self.get_s3_bluetopo_files(ecoregion=ecoregion)
             else:
-                bluetopo_files = self._get_local_bluetopo_files(outputs, ecoregion=ecoregion)
+                bluetopo_files = self.get_local_bluetopo_files(ecoregion=ecoregion)
 
             if not bluetopo_files:
                 print(" - No BlueTopo tiles found")
                 return
 
-            shoreline_path, prediction_boundary_path = self._resolve_vector_inputs(base_outputs)
+            shoreline_path, prediction_boundary_path = self._resolve_vector_inputs()
 
             water_masks = self.build_water_mask(
-                bluetopo_paths=bluetopo_files,
-                output_dir=output_dir,
+                bluetopo_paths=bluetopo_files, 
                 prediction_boundary_path=prediction_boundary_path,
             )
 
@@ -367,7 +352,6 @@ class DistanceToShoreEngine(Engine):
                     mask_info=mask_info,
                     shoreline_path=shoreline_path,
                     prediction_boundary_path=prediction_boundary_path,
-                    output_dir=output_dir,
                     boundary_clip_buffer_m=boundary_clip_buffer_m,
                 )
 
