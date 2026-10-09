@@ -63,7 +63,7 @@ def _process_tile(param_inputs: list) -> str:
         if mb_tiff_file.exists():
             mb_tiff_file.unlink()
 
-        engine.set_ground_to_nodata(tiff_file_path)
+        # engine.set_ground_to_nodata(tiff_file_path)  # Need positive values for DistanceToShoreEngine
         engine.finalize_cog(tiff_file_path)
 
         if param_lookup['env'] == 'aws':

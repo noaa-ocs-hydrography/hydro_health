@@ -167,12 +167,12 @@ class RasterVRTS3Engine(Engine):
 
             # --- BUILD OVERVIEWS FOR LIGHTNING FAST GIS DISPLAY ---
             if vrt_filename.exists():
-                print(f' - Building VRT Overviews for {vrt_filename.name}...')
-                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_Update)
-                if vrt_ds is not None:
-                    # Creates external .vrt.ovr sidecar pyramid for instant zooming
-                    vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
-                    vrt_ds = None
+                # print(f' - Building VRT Overviews for {vrt_filename.name}...')
+                # vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_Update)
+                # if vrt_ds is not None:
+                #     # Creates external .vrt.ovr sidecar pyramid for instant zooming
+                #     vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
+                #     vrt_ds = None
 
                 # Upload Master VRT
                 s3_key = f'{s3_output_path}/{vrt_filename.name}'
@@ -180,11 +180,11 @@ class RasterVRTS3Engine(Engine):
                 s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
 
                 # Upload companion .vrt.ovr overview file
-                ovr_filename = pathlib.Path(f"{vrt_filename}.ovr")
-                if ovr_filename.exists():
-                    ovr_s3_key = f'{s3_output_path}/{ovr_filename.name}'
-                    print(f' - Uploading VRT Overview Pyramid: s3://{bucket_name}/{ovr_s3_key}')
-                    s3_client.upload_file(str(ovr_filename), bucket_name, ovr_s3_key)
+                # ovr_filename = pathlib.Path(f"{vrt_filename}.ovr")
+                # if ovr_filename.exists():
+                #     ovr_s3_key = f'{s3_output_path}/{ovr_filename.name}'
+                #     print(f' - Uploading VRT Overview Pyramid: s3://{bucket_name}/{ovr_s3_key}')
+                #     s3_client.upload_file(str(ovr_filename), bucket_name, ovr_s3_key)
 
     def get_bluetopo_tifs(self, geotiffs: list) -> dict:
         """Bins BlueTopo tiles strictly by native EPSG UTM CRS using Dask parallel reads."""

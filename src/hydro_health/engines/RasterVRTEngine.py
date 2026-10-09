@@ -201,15 +201,15 @@ class RasterVRTEngine(Engine):
                 print(f' - Building local VRT Overviews for {vrt_filename.name}...')
 
                 # Allow Overview files to write to an external sidecar file
-                gdal.SetConfigOption('USE_R2', 'NO')
-                # Allow use of files > 4GB
-                gdal.SetConfigOption('USE_BIGTIFF', 'IF_NEEDED')
+                # gdal.SetConfigOption('USE_R2', 'NO')
+                # # Allow use of files > 4GB
+                # gdal.SetConfigOption('USE_BIGTIFF', 'IF_NEEDED')
                 
                 # Write external overviews
-                vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_ReadOnly)
-                if vrt_ds is not None:
-                    vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
-                    vrt_ds = None
+                # vrt_ds = gdal.Open(str(vrt_filename), gdal.GA_ReadOnly)
+                # if vrt_ds is not None:
+                #     vrt_ds.BuildOverviews('NEAREST', [2, 4, 8, 16, 32, 64])
+                #     vrt_ds = None
 
             print(f'- Finished Master VRT & Overviews: {vrt_filename.name}')
 
