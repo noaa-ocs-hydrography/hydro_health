@@ -172,8 +172,9 @@ class DistanceToShoreEngine(Engine):
 
         with rasterio.open(str(water_mask)) as water_src:
             water_data = water_src.read(1)
-            profile = water_src.profile.copy()
+            crs = water_src.crs
             transform = water_src.transform
+            height, width = water_src.height, water_src.width
 
         # Initialize the output array fully with NoData
         dist_in_meters = np.full(water_data.shape, -9999.0, dtype=np.float32)
@@ -198,7 +199,7 @@ class DistanceToShoreEngine(Engine):
                 water_points = np.column_stack((xs, ys)).astype(np.float32)
 
                 # Query Euclidean distances for row chunk
-                distances, _ = tree.query(water_points, workers=1)
+                distances, _ = tree.query(water_points)
                 dist_in_meters[actual_rows, sub_cols] = distances.astype(np.float32)
 
                 del sub_water, sub_rows, sub_cols, actual_rows, xs, ys, water_points, distances
@@ -209,17 +210,23 @@ class DistanceToShoreEngine(Engine):
         del water_data
         gc.collect()
 
-        profile.update(
-            driver="GTiff",
-            dtype=rasterio.float32,
-            count=1,
-            nodata=-9999.0,
-            compress="deflate",
-            predictor=3,
-            tiled=True,
-        )
+        # Clean profile dictionary to avoid carrying over incompatible GDAL tags
+        profile = {
+            "driver": "GTiff",
+            "height": height,
+            "width": width,
+            "count": 1,
+            "dtype": "float32",
+            "crs": crs,
+            "transform": transform,
+            "nodata": -9999.0,
+            "compress": "deflate",
+            "tiled": True
+        }
 
         distance_raster_path = tile_folder / f"{bluetopo_filename}_distance_from_shore.tif"
+        distance_raster_path.parent.mkdir(parents=True, exist_ok=True)
+        
         self.write_message(f'- writing distance raster to: {distance_raster_path}', str(OUTPUTS))
         with rasterio.open(distance_raster_path, "w", **profile) as dst:
             dst.write(dist_in_meters, 1)
