@@ -32,8 +32,8 @@ MODEL:
   TRAINING_TILES_DIR: model_variables/Training/training_tiles
   SUBGRIDS: model_subgrids/model_subgrids.gpkg
   SUBGRIDS_LAYER: final_model_subgrids
-  PREDICTION_SUB_GRIDS: model_subgrids/prediction_intersecting_subgrids.gpkg
-  TRAINING_SUB_GRIDS: model_subgrids/training_intersecting_subgrids.gpkg
+  PREDICTION_SUB_GRIDS_LAYER: prediction_intersecting_subgrids
+  TRAINING_SUB_GRIDS_LAYER: training_intersecting_subgrids
   TRAINING_OUTPUT_DIR: model_variables/Training/processed
   TILED_LIDAR_DIR: model_variables/Prediction/pre_processed/tiled
   TILED_LIDAR_PROC: model_variables/Prediction/pre_processed/tiled_processed
@@ -54,7 +54,6 @@ SHARED:
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
-  MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads
 TERRAIN:
   COMBINED_LIDAR_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
   DICTIONARIES_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/dictionaries
