@@ -607,6 +607,7 @@ class RasterMaskS3Engine(Engine):
     def run(self, outputs: str, output_prefix: str, manual_downloads=False) -> None:
         """Main run script for RasterMaskS3Engine"""
 
+        print('Starting RasterMaskS3Engine')
         s3_files = s3fs.S3FileSystem()
         existing_ers = [f.split('/')[-1] for f in s3_files.glob(f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/ER*")]
 

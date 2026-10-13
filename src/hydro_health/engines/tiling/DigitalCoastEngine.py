@@ -221,7 +221,7 @@ class DigitalCoastEngine(Engine):
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool) -> None:
         """Main entry point for downloading Digital Coast data"""
 
-        print('Downloading Digital Coast Datasets')
+        print('Starting DigitalCoastEngine')
         outputs = self.param_lookup['output_directory'].valueAsText
         self.setup_dask(self.param_lookup['env'])
         ecoregions = list(tile_gdf['EcoRegion'].unique())

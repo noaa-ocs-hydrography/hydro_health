@@ -231,7 +231,7 @@ class DigitalCoastS3Engine(Engine):
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str) -> None:
         """Main entry point for downloading Digital Coast data"""
 
-        print('Downloading Digital Coast Datasets')
+        print('Starting DigitalCoastS3Engine')
         outputs = self.param_lookup['output_directory'].valueAsText
         provider_log = pathlib.Path(outputs) / "processed_providers.log"
         provider_log.touch(exist_ok=True)

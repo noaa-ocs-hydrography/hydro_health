@@ -41,13 +41,6 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
-    elif env == 'remote':
-        param_lookup = {
-            'input_directory': Param(''),
-            'output_directory': Param(get_config_item('SHARED', 'OUTPUT_FOLDER')),
-            'eco_regions': Param(''),
-            'env': env
-        }
     else:
         param_lookup = {
             'input_directory': Param(''),
@@ -86,6 +79,8 @@ def run_hydro_health(config_name: str) -> None:
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix, resolution=resolution)
+            elif step["tool"] == "run_distance_to_shore_engine" and step["run"]:
+                runners.run_distance_to_shore_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup, output_prefix)
             # TODO Removed laz download until HH 2.0
