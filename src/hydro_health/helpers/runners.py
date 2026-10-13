@@ -23,7 +23,6 @@ from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEn
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
 from hydro_health.engines.DistanceToShoreEngine import DistanceToShoreEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
-from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
 from hydro_health.engines.tiling.TerrainProductsEngine import TerrainProductsEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
@@ -193,17 +192,14 @@ def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bo
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
     
-    if param_lookup['env'] in ['local', 'remote']:
-        engine = RasterVRTEngine(param_lookup)
-    else:
-        engine = RasterVRTS3Engine(param_lookup)
+    engine = RasterVRTEngine(param_lookup)
 
     # TODO move this logic into each run()
     for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
-        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
-        for dataset in ['elevation', 'slope', 'uncertainty']:
-            print(f'Starting {engine.__class__.__name__} for {ecoregion} - {dataset}')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix=output_prefix)
+        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'shore', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
+        for file_type in ['elevation', 'slope', 'uncertainty', 'shore']:
+            print(f'Starting {engine.__class__.__name__} for {ecoregion} - {file_type}')
+            engine.run(param_lookup['output_directory'].valueAsText, file_type, ecoregion, 'BlueTopo', output_prefix=output_prefix)
         print(f'Starting {engine.__class__.__name__} for {ecoregion}')
         engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
