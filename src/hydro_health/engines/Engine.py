@@ -303,8 +303,7 @@ class Engine:
         if env == 'aws':
             dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
             self.set_proj_path()
-        self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, 
-                                    memory_limit=memory_limit, dashboard_address='8788') # new port for SSL
+        self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit) # new port for SSL
         self.client = Client(self.cluster)
         # print(self.client.dashboard_link)
 
