@@ -302,7 +302,12 @@ class Engine:
         print(f"Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
         
         if env == 'aws':
-            dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
+            # Dask config for SSL and multiprocess
+            dask.config.set({
+                "distributed.worker.multiprocessing-method": "fork",
+                "distributed.scheduler.dashboard.tls.cert": "/etc/dask/tls/dashboard4096.cer",
+                "distributed.scheduler.dashboard.tls.key": "/etc/dask/tls/dashboard4096.key",
+            })
             self.set_proj_path()
         self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
         self.client = Client(self.cluster)
