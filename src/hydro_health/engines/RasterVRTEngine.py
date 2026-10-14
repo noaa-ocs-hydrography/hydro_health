@@ -272,7 +272,7 @@ class RasterVRTEngine(Engine):
 
         _set_gdal_s3_options()
 
-        print(f" - Distributing {len(geotiffs)} BlueTopo metadata reads across Dask workers...")
+        print(f" - Distributing {len(geotiffs)} BlueTopo files across Dask workers...")
         results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, geotiffs)) if r is not None]
 
         utm_bins = defaultdict(list)
@@ -411,12 +411,9 @@ class RasterVRTEngine(Engine):
     def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict, data_type: str, s3_output_path: str = "") -> None:
         """Create Master VRT files with companion overview pyramids locally or in S3."""
 
-        is_aws = str(self.param_lookup.get('env', '')).lower() == 'aws'
-        if is_aws:
-            _set_gdal_s3_options()
-            s3_client = boto3.client('s3')
-            bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-
+        _set_gdal_s3_options()
+        s3_client = boto3.client('s3')
+        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
         for bin_key, info in output_geotiffs.items():
             tifs = [str(t) for t in info['tiles']]
             if not tifs:
@@ -451,6 +448,10 @@ class RasterVRTEngine(Engine):
                 )
 
             gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+            if self.param_lookup['env'] == 'aws' and vrt_filename.exists():
+                s3_key = f'{s3_output_path}/{vrt_filename.name}'
+                print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
+                s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
 
             print(f'- Finished Master VRT: {vrt_filename.name}')
 
