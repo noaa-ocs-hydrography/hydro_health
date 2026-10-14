@@ -301,11 +301,14 @@ class Engine:
         print(f"- Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
         
         if env == 'aws':
-            # Dask config for SSL and multiprocess
+            # Dynamically find cert and key
+            tls_dir = pathlib.Path("/etc/dask/tls")
+            certs = list(tls_dir.glob("*.cer")) + list(tls_dir.glob("*.crt"))
+            keys = list(tls_dir.glob("*.key"))
             dask.config.set({
                 "distributed.worker.multiprocessing-method": "fork",
-                "distributed.scheduler.dashboard.tls.cert": "/etc/dask/tls/dashboard4096.cer",
-                "distributed.scheduler.dashboard.tls.key": "/etc/dask/tls/dashboard4096.key",
+                "distributed.scheduler.dashboard.tls.cert": str(certs[0]),
+                "distributed.scheduler.dashboard.tls.key": str(keys[0]),
             })
             self.set_proj_path()
         self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit) # new port for SSL
