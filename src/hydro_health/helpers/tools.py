@@ -54,12 +54,10 @@ def get_environment() -> str:
     hostname = gethostname()
     if 'L' in hostname:
         return  'local'
-    elif 'VS' in hostname:
-        return 'remote'
     elif 'hydrohealth' in hostname or 'ip' in hostname: # issue with aws instance hostnames not being consistent
         return 'aws'
     else:
-        return 'remote'
+        return 'local'
 
 
 def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode: bool=False) -> str:

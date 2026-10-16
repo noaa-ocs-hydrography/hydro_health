@@ -4,7 +4,6 @@ import cProfile
 import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
-from hydro_health.engines.BlueTopoS3Engine import BlueTopoS3Engine
 from hydro_health.engines.tiling.BatchTilingEngine import BatchTilingEngine
 from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
@@ -22,8 +21,8 @@ from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecas
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
+from hydro_health.engines.DistanceToShoreEngine import DistanceToShoreEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
-from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
 
 from hydro_health.engines.tiling.TerrainProductsEngine import TerrainProductsEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
@@ -36,23 +35,7 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 def  run_bluetopo_tile_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
     """Entry point for parallel processing of BlueTopo tiles"""
 
-    if param_lookup['env'] in ['local', 'remote']:
-        run_bluetopo_tile_engine_local(tiles, param_lookup, output_prefix, resolution)
-    else:
-        run_bluetopo_tile_engine_s3(tiles, param_lookup, output_prefix, resolution)
-
-
-def run_bluetopo_tile_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
-    """Entry point for parallel processing of BlueTopo tiles"""
-
     engine = BlueTopoEngine(param_lookup)
-    engine.run(tiles, output_prefix, resolution)
-
-
-def run_bluetopo_tile_engine_s3(tiles: gpd.GeoDataFrame,  param_lookup: dict[dict], output_prefix: str, resolution: list[int]) -> None:
-    """Entry point for parallel processing of BlueTopo tiles on AWS VM"""
-
-    engine = BlueTopoS3Engine(param_lookup)
     engine.run(tiles, output_prefix, resolution)
 
 
@@ -112,9 +95,9 @@ def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], outpu
     """Entry point for parallel processing of provider metadata"""
 
     if param_lookup['env'] in ['local', 'remote']:
-        engine = MetadataEngine()
+        engine = MetadataEngine(param_lookup)
     else:
-        engine = MetadataS3Engine()
+        engine = MetadataS3Engine(param_lookup)
     outputs = param_lookup['output_directory'].valueAsText
     engine.run(tiles, output_prefix, outputs)
 
@@ -198,23 +181,26 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
     processor.run()
     profiler.disable()
     stats = pstats.Stats(profiler)
-    stats.strip_dirs().sort_stats('cumulative').print_stats(10)        
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)
+
+def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the distance to shore raster creator"""
+
+    engine = DistanceToShoreEngine(param_lookup)
+    engine.run(output_prefix)
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
     
-    if param_lookup['env'] in ['local', 'remote']:
-        engine = RasterVRTEngine(param_lookup)
-    else:
-        engine = RasterVRTS3Engine(param_lookup)
+    engine = RasterVRTEngine(param_lookup)
 
     # TODO move this logic into each run()
     for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
-        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
-        for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty']:
-            print(f'Building {ecoregion} - {dataset} VRT file')
-            engine.run(param_lookup['output_directory'].valueAsText, dataset, ecoregion, 'BlueTopo', output_prefix=output_prefix)
-        print(f'Building {ecoregion} - DigitalCoast VRT files')
+        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'shore', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
+        for file_type in ['elevation', 'slope', 'uncertainty', 'shore']:
+            print(f'Starting {engine.__class__.__name__} for {ecoregion} - {file_type}')
+            engine.run(param_lookup['output_directory'].valueAsText, file_type, ecoregion, 'BlueTopo', output_prefix=output_prefix)
+        print(f'Starting {engine.__class__.__name__} for {ecoregion}')
         engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
 

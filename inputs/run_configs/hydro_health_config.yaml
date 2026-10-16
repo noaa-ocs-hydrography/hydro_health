@@ -6,6 +6,8 @@ pilot_mode: false
 steps:
 - tool: run_bluetopo_tile_engine
   run: false
+- tool: run_distance_to_shore_engine
+  run: false
 - tool: run_digital_coast_engine
   run: false
 # - tool: run_laz_conversion_engine
@@ -13,7 +15,7 @@ steps:
 - tool: run_metadata_engine
   run: false
 - tool: run_vrt_creation
-  run: false
+  run: true
 - tool: run_raster_mask_engine
   run: false
 - tool: grid_digital_coast_files
