@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
+import calendar 
 import datetime
 import subprocess
+import os
 import re
+import sys
 from email.message import EmailMessage
 
 """
@@ -15,6 +18,7 @@ SETUP
 7. sudo systemctl enable --now crond  # enable and start the crontab
 8. sudo journalctl -u crond -b --no-pager  # see what cron has run some last boot
 9. sudo journalctl -u crond -b | grep -i check_monthly_aws_cost  - grep if cron ran the task
+10. --force  # flag to run script for testing
 
 - crontab contents with required blank space after:
 PATH=/usr/local/bin:/usr/bin:/bin
@@ -33,6 +37,9 @@ EBS_GP3_PER_GB_MONTH = 0.08      # ~$0.08/GB-month for general purpose SSD
 S3_PRICE_PER_GB = 0.023          # us-east-2 standard tier ($/GB-month)
 
 S3_BUCKET = "ocs-dev-csdl-hydrohealth"
+
+# State file to track execution once per calendar week
+TRACK_FILE = "/home/stephen.patterson.lx/.last_cost_report_week"
 
 # Define instances with their attached fixed infrastructure:
 INSTANCES = {
@@ -55,6 +62,43 @@ SENDER_EMAIL = "stephen.patterson.lx@localhost"
 RECIPIENT_EMAILS = ["stephen.patterson@noaa.gov", "aubrey.mccutchan@noaa.gov", "stephanie.watson@noaa.gov"]
 # RECIPIENT_EMAILS = ["stephen.patterson@noaa.gov"]
 
+
+def should_run_this_week():
+    """Returns True if the script has not yet run during this ISO calendar week."""
+    # Allow manual override via command line: python script.py --force
+    if "--force" in sys.argv:
+        return True
+
+    today = datetime.date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+    current_week_str = f"{iso_year}-W{iso_week:02d}"
+
+    if os.path.exists(TRACK_FILE):
+        try:
+            with open(TRACK_FILE, "r") as f:
+                recorded_week = f.read().strip()
+            if recorded_week == current_week_str:
+                print(f"Report already dispatched for week {current_week_str}. Exiting.")
+                return False
+        except Exception as e:
+            print(f"Warning: Could not read week tracking file: {e}")
+
+    return True
+
+
+def mark_week_as_completed():
+    """Writes the current ISO week to the tracker file."""
+    today = datetime.date.today()
+    iso_year, iso_week, _ = today.isocalendar()
+    current_week_str = f"{iso_year}-W{iso_week:02d}"
+
+    try:
+        with open(TRACK_FILE, "w") as f:
+            f.write(current_week_str)
+        # Ensure both root and stephen.patterson.lx can overwrite the file
+        os.chmod(TRACK_FILE, 0o666)
+    except Exception as e:
+        print(f"Warning: Could not save week tracking file: {e}")
 
 def get_s3_bucket_size_gb(bucket_name):
     """Uses local AWS CLI to check bucket size."""
@@ -93,6 +137,9 @@ def send_local_system_email(report_text, subject_line):
 
 
 def main():
+    if not should_run_this_week():
+        return
+
     today = datetime.date.today()
     days_in_current_month = today.day
     
@@ -100,9 +147,8 @@ def main():
     last_day_prev_month = first_of_this_month - datetime.timedelta(days=1)
     days_in_prev_month = last_day_prev_month.day
 
-    # Ratio of current month elapsed (used for monthly-rated items like EBS and S3)
-    # Assumes an average 30-day month for baseline normalization
-    mtd_fraction = days_in_current_month / 30.0
+    _, total_days_in_current_month = calendar.monthrange(today.year, today.month)
+    mtd_fraction = days_in_current_month / total_days_in_current_month
 
     # 1. Compute & IP Costs (Hourly)
     hourly_compute_total = sum(i['compute_hourly'] for i in INSTANCES.values())
@@ -123,7 +169,6 @@ def main():
     print("Scanning S3 bucket size...")
     bucket_size_gb = get_s3_bucket_size_gb(S3_BUCKET)
     
-    # Storage rates apply per GB-month
     prev_s3_cost = bucket_size_gb * S3_PRICE_PER_GB
     curr_s3_cost = bucket_size_gb * S3_PRICE_PER_GB * mtd_fraction
 
@@ -153,8 +198,10 @@ def main():
     report_text = "\n".join(report)
     print(report_text)
     
-    subject = f"AWS Cost Estimate: {today.strftime('%B %Y')} MTD Update"
+    # 5. Hand over to sendmail and record successful run
+    subject = f"AWS Cost Estimate: {today.strftime('%B %Y')} Weekly Update"
     send_local_system_email(report_text, subject)
+    mark_week_as_completed()
 
 
 if __name__ == "__main__":
