@@ -75,6 +75,7 @@ class CreateHurricaneLayerEngine(Engine):
         self.mask_pred_path = UPath(f'{s3_dir_base}/{prediction_mask_path}') if self.is_aws else UPath(self.outputs_dir / prediction_mask_path)
 
         master_grids_path = str(get_config_item('SHARED', 'MASTER_GRIDS'))
+        
         self.coast_boundary_path = UPath(master_grids_path) if '://' in master_grids_path else UPath(INPUTS / master_grids_path)
         if not self.is_aws:
             self.hurricane_data_path.parent.mkdir(parents=True, exist_ok=True)
@@ -86,7 +87,7 @@ class CreateHurricaneLayerEngine(Engine):
 
     def _read_ecoregion(self) -> gpd.GeoDataFrame:
         """Read the selected region using its identifier column in the master grids."""
-        eco_gdf = self._read_gpkg_layer('Enhanced_EcoRegions', self.coast_boundary_path)
+        eco_gdf = self._read_gpkg_layer(str(get_config_item('SHARED', 'ENHANCED_ECOREGIONS')), self.coast_boundary_path)
         region_column = self.param_lookup.get('eco_region_column')
         if region_column is None:
             identifier_names = {'ecoregion', 'ecoregionid', 'ecoregioncode', 'er', 'ercode'}
