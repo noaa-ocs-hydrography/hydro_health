@@ -1,6 +1,6 @@
 import os
-import sys
-import shutil
+import cProfile
+import pstats
 import tempfile
 import fiona
 import boto3
@@ -452,3 +452,14 @@ class CreateDraftUKCEngine(Engine):
             self.merge_regional_ukc(res, suffix, regional_ukc_keys)
 
         print("Engine run completed successfully.")
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateDraftUKCEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10) 

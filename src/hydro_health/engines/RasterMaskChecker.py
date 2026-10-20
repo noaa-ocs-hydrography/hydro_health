@@ -226,3 +226,7 @@ class RasterMaskChecker:
         
         m.save(output_file)
         print(f"Interactive map created: {output_file}")
+
+if __name__ == "__main__":
+    mapper = RasterMaskChecker()
+    mapper.create_interactive_map()

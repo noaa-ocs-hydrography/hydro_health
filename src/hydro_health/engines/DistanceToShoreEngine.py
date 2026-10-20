@@ -383,7 +383,7 @@ class DistanceToShoreEngine(Engine):
         print(f"  - Uploading {tile_id} to s3://{s3_path}")
         s3.put(str(distance_raster_path), s3_path, recursive=True)
 
-    def run(self, output_prefix: str='', **kwargs) -> None:
+    def run(self, output_prefix: str='') -> None:
         """Main function for processing Distance-to-Shore across local or S3 environments using Dask."""
 
         print(f"Starting Distance To Shore engine")
@@ -428,6 +428,9 @@ class DistanceToShoreEngine(Engine):
             
             success_count = sum(1 for r in results if r.get('status') == 'success')
             print(f" - Completed {success_count}/{len(results)} tiles successfully for {ecoregion}.")
+            beginning_prefix = f"{output_prefix}/{ecoregion}" if output_prefix else ecoregion
+            manifest_path = pathlib.Path(beginning_prefix) / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
+            self.write_run_manifest(manifest_path, {'tiles': len(param_inputs)})
 
         self.close_dask()
 

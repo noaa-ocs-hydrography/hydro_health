@@ -1,5 +1,7 @@
 import fiona
 import sys
+import cProfile
+import pstats
 import pathlib
 import requests
 import rasterio
@@ -332,3 +334,14 @@ class CreateSedimentLayerEngine(Engine):
         self.convert_polys_to_raster('sed_type')
         self.convert_polys_to_raster('sed_size')
         self.convert_polys_to_raster('sand_mud_mask')
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateSedimentLayerEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10) 
