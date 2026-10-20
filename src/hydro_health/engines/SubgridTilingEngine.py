@@ -24,8 +24,8 @@ from upath import UPath
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs' 
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs' 
 
 TERRAIN_PRODUCT_ALIASES = {
     "bathy": "bathy",
@@ -94,11 +94,13 @@ TRAINING_TERRAIN_VARIABLES = [
     "terrain_classification",
 ]
 
+
 def _paired_static_variables(
     year_pairs: list[tuple[int, int]], prefix: str
 ) -> list[str]:
     """Build static raster column names for the configured year pairs."""
     return [f"{prefix}_{start}_{end}" for start, end in year_pairs]
+
 
 def _extract_year_pair(name: str) -> tuple[int, int] | None:
     """Return the trailing YYYY_YYYY pair from a standardized column name."""
@@ -106,6 +108,7 @@ def _extract_year_pair(name: str) -> tuple[int, int] | None:
     if not match:
         return None
     return int(match.group(1)), int(match.group(2))
+
 
 def _available_training_bathy_years(df: pd.DataFrame) -> list[int]:
     """Return sorted training bathymetry years containing at least one value."""
@@ -118,6 +121,7 @@ def _available_training_bathy_years(df: pd.DataFrame) -> list[int]:
         if match and df[column].notna().any():
             years.add(int(match.group(1)))
     return sorted(years)
+
 
 def _available_training_year_pairs(
     bathy_years: list[int], year_ranges: list[tuple[int, int]]
@@ -138,6 +142,7 @@ def _available_training_year_pairs(
             available_pairs.append(pair)
 
     return available_pairs
+
 
 def _standardize_bluetopo_col_name(
     col_name: str, original_tile: str = ""
@@ -167,6 +172,7 @@ def _standardize_bluetopo_col_name(
 
     # The un-suffixed BlueTopo surface is bathymetry.
     return "bt.bathy"
+
 
 def _standardize_combined_col_name(
     col_name: str, original_tile: str = ""
@@ -221,6 +227,7 @@ def _standardize_combined_col_name(
 
     return lower_name
 
+
 def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
     """Cleans raster filenames into consistent column names, standardizing years and prefixes."""
 
@@ -272,6 +279,7 @@ def _standardize_col_name(col_name: str, original_tile: str = "") -> str:
 
     return final_name
 
+
 def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
     """Calculates NaN stats for a tile."""
 
@@ -285,6 +293,7 @@ def _create_nan_stats_csv(df: pd.DataFrame, tile_id: str) -> pd.DataFrame:
         new_row[f"{year_pair}_nan_percent"] = round(df[col].isna().mean() * 100, 2)
 
     return pd.DataFrame([new_row])
+
 
 def _read_existing_nan_stats(path: UPath, tile_id: str, is_aws: bool) -> pd.DataFrame:
     """Read only delta columns from an existing Parquet output."""
@@ -307,6 +316,7 @@ def _read_existing_nan_stats(path: UPath, tile_id: str, is_aws: bool) -> pd.Data
         with fs.open(str(path), "rb") as src:
             return _read_from_parquet_file(pq.ParquetFile(src))
     return _read_from_parquet_file(pq.ParquetFile(str(path)))
+
 
 def _prepare_geotiff_dataframe(parquet_path: str, is_aws: bool) -> tuple | None:
     """Read the Parquet and select numeric bands with finite coordinates."""
@@ -551,12 +561,14 @@ def _create_multiband_geotiff_from_parquet(
             del df
         gc.collect()
 
+
 def _to_rasterio_path(file: str, is_aws: bool) -> str:
     """Return a path Rasterio/GDAL can open directly."""
     open_path = str(file)
     if is_aws:
         return open_path.replace("s3://", "/vsis3/", 1)
     return open_path
+
 
 def _bounds_in_crs(bounds: tuple, source_crs, destination_crs) -> tuple:
     """Transform bounds only when both CRSs exist and differ."""
@@ -568,12 +580,14 @@ def _bounds_in_crs(bounds: tuple, source_crs, destination_crs) -> tuple:
         return bounds
     return transform_bounds(source_crs, destination_crs, *bounds, densify_pts=21)
 
+
 def _requested_window(src, bounds: tuple):
     """Return the full pixel-aligned window requested by geographic bounds."""
     requested = src.window(*bounds).round_offsets().round_lengths()
     if requested.width <= 0 or requested.height <= 0:
         return None
     return requested
+
 
 def _clipped_window(src, bounds: tuple):
     """Return a pixel-aligned window clipped to a raster, or None when disjoint."""
@@ -594,6 +608,7 @@ def _clipped_window(src, bounds: tuple):
         return None
     return clipped
 
+
 def _valid_mask(data: np.ndarray, nodata) -> np.ndarray:
     """Build a validity mask that handles numeric, NaN, and absent NoData values."""
     if np.issubdtype(data.dtype, np.floating):
@@ -609,6 +624,7 @@ def _valid_mask(data: np.ndarray, nodata) -> np.ndarray:
         except TypeError:
             valid &= data != nodata
     return valid
+
 
 def _crs_equivalent(left_crs, right_crs) -> bool:
     """Compare CRSs by full equality, then by canonical EPSG identifier."""
@@ -628,6 +644,7 @@ def _crs_equivalent(left_crs, right_crs) -> bool:
         and right_epsg is not None
         and left_epsg == right_epsg
     )
+
 
 def _transform_alignment_details(
     current_transform, reference_transform
@@ -661,6 +678,7 @@ def _transform_alignment_details(
     used_subpixel_tolerance = matches and max_difference > strict_tolerance
     return matches, max_difference, tolerance, used_subpixel_tolerance
 
+
 def _build_spatial_catalog(raster_files: list, is_aws: bool) -> list:
     """Read raster metadata once so every tile does not reopen every S3 file."""
     catalog = []
@@ -680,6 +698,7 @@ def _build_spatial_catalog(raster_files: list, is_aws: bool) -> list:
             )
     return catalog
 
+
 def _files_intersecting_tile(
     tile_bounds: tuple, subgrid_crs, raster_catalog: list
 ) -> list:
@@ -695,6 +714,7 @@ def _files_intersecting_tile(
                 f"WARNING: Could not compare tile bounds with {file}: {e}", OUTPUTS
             )
     return intersecting
+
 
 def _read_aligned_gridded_raster(
     src,
@@ -735,6 +755,7 @@ def _read_aligned_gridded_raster(
         valid = np.isfinite(values)
 
     return values, valid
+
 
 def _subtile_process_gridded(
     sub_grid: pd.Series,
@@ -839,6 +860,7 @@ def _subtile_process_gridded(
     del flattened_arrays, master_valid, mask_2d
     return combined_data, common_crs
 
+
 def _sample_ungridded_raster(
     src,
     tile_extent: tuple,
@@ -892,6 +914,7 @@ def _sample_ungridded_raster(
         vals[in_window] = extracted
 
     return vals
+
 
 def _subtile_process_ungridded(
     sub_grid: pd.Series,
@@ -966,6 +989,7 @@ def _subtile_process_ungridded(
             )
 
     return combined_df
+
 
 def _conform_output_schema(
     combined_df: pd.DataFrame,
@@ -1079,6 +1103,7 @@ def _conform_output_schema(
 
     return combined_df.loc[:, expected_columns].copy()
 
+
 def _add_training_deltas(
     combined_df: pd.DataFrame,
     training_year_pairs: list[tuple[int, int]],
@@ -1118,6 +1143,7 @@ def _add_training_deltas(
 
     return sorted_years
 
+
 def _prepare_combined_output(
     combined_df: pd.DataFrame,
     data_type: str,
@@ -1156,6 +1182,7 @@ def _prepare_combined_output(
     return combined_df[
         leading_columns + variable_columns + trailing_columns
     ]
+
 
 def _save_combined_data(
     combined_df: pd.DataFrame,
@@ -1222,6 +1249,7 @@ def _save_combined_data(
 
     return stats_df
 
+
 def _has_required_tile_input(
     gridded_files: list,
     data_type: str,
@@ -1258,6 +1286,7 @@ def _has_required_tile_input(
 
     return True
 
+
 def _training_year_pairs_for_tile(
     gridded_df: pd.DataFrame,
     data_type: str,
@@ -1290,6 +1319,7 @@ def _training_year_pairs_for_tile(
             OUTPUTS,
         )
     return valid_training_year_pairs
+
 
 def _process_tile(
     sub_grid: pd.Series,
@@ -1400,6 +1430,7 @@ def _process_tile(
         return pd.DataFrame()
     finally:
         gc.collect()
+
 
 class SubgridTilingEngine(Engine):
     """Process complete raster tiles as memory-isolated Dask tasks."""

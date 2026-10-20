@@ -43,8 +43,8 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 # Global Base Paths
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 DEFAULT_DASK_CHUNK_SIZE = 1024
 MAX_BPI_OUTER_CELLS = 512
@@ -71,6 +71,7 @@ def _silence_aws_credential_discovery_logs() -> None:
 
 
 _silence_aws_credential_discovery_logs()
+
 
 def _configure_whitebox_headless_windows(whitebox_tools_class) -> None:
     """Prevent Whitebox executable console windows from flashing on Windows."""
@@ -104,12 +105,14 @@ def _configure_whitebox_headless_windows(whitebox_tools_class) -> None:
     whitebox_module.Popen = hidden_popen
     whitebox_module._hydro_health_hidden_popen = True
 
+
 def _is_s3_path(path: str | UPath) -> bool:
     """Return True for S3 UPaths across upath/fsspec versions."""
     protocol = UPath(path).protocol
     if isinstance(protocol, (tuple, list)):
         return "s3" in protocol
     return protocol == "s3"
+
 
 def _validate_raster(
     path: str | UPath,
@@ -146,6 +149,7 @@ def _validate_raster(
     except Exception as exc:
         return False, str(exc)
 
+
 def _validate_product_raster(
     path: str | UPath,
     suffix: str,
@@ -179,6 +183,7 @@ def _validate_product_raster(
     except Exception as exc:
         return False, str(exc)
 
+
 def _publish_local_raster(local_path: str, out_path: str) -> None:
     """Validate locally, then publish through a temporary destination name."""
     # Read every encoded block locally so a damaged LZW tile is caught before
@@ -209,6 +214,7 @@ def _publish_local_raster(local_path: str, out_path: str) -> None:
             except OSError:
                 pass
 
+
 def _materialize_raster(source_path: str | UPath, local_path: str) -> str:
     """Copy a local or remote raster to a fresh local file for reliable reads."""
     with UPath(source_path).open("rb") as source, open(local_path, "wb") as target:
@@ -217,6 +223,7 @@ def _materialize_raster(source_path: str | UPath, local_path: str) -> str:
     if not valid:
         raise RuntimeError(f"Invalid materialized raster {UPath(source_path).name}: {reason}")
     return local_path
+
 
 def _metric_cell_size(src: rasterio.io.DatasetReader) -> float:
     """Return square pixel size in metres, rejecting incompatible grids."""
@@ -240,6 +247,7 @@ def _metric_cell_size(src: rasterio.io.DatasetReader) -> float:
     if not np.isclose(x_size, y_size, rtol=1e-4, atol=1e-9):
         raise ValueError(f"BPI and slope require square pixels; got {src.res}.")
     return x_size
+
 
 def _save_memmap_to_raster(
     mmap_array: np.ndarray,
@@ -270,6 +278,7 @@ def _save_memmap_to_raster(
         if os.path.exists(local_tmp_path):
             try: os.remove(local_tmp_path)
             except OSError: pass
+
 
 def _save_dask_to_raster(
     d_array: da.Array,
@@ -309,6 +318,7 @@ def _save_dask_to_raster(
         if os.path.exists(mmap_path):
             try: os.remove(mmap_path)
             except OSError: pass
+
 
 def _calculate_bpi_dask(d_bathy: da.Array, cell_size: float, inner_radius: float, outer_radius: float) -> da.Array:
     """Return a lazy, NoData-aware annular BPI array."""
@@ -370,6 +380,7 @@ def _calculate_bpi_dask(d_bathy: da.Array, cell_size: float, inner_radius: float
     )
     return d_bathy - mean_annulus.astype(np.float32)
 
+
 def _calculate_bpi(bathy_array: np.ndarray, cell_size: float, inner_radius: float, outer_radius: float) -> np.ndarray:
     """Wrapper for dictionary creation worker which operates on small sampled numpy arrays."""
     d_bathy = da.from_array(
@@ -380,6 +391,7 @@ def _calculate_bpi(bathy_array: np.ndarray, cell_size: float, inner_radius: floa
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=RuntimeWarning)
         return bpi_lazy.compute(scheduler='single-threaded')
+
 
 def _calculate_slope(bathy_array: np.ndarray, cell_size: float) -> np.ndarray:
     """Core slope calculation (degrees). Optimized for small arrays or Dask chunks."""
@@ -407,6 +419,7 @@ def _calculate_slope(bathy_array: np.ndarray, cell_size: float) -> np.ndarray:
         
     return slope_deg
 
+
 def _calculate_slope_dask(d_bathy: da.Array, cell_size: float) -> da.Array:
     """Dask wrapper to stream slope calculation natively across blocks without RAM accumulation."""
     return d_bathy.map_overlap(
@@ -415,6 +428,7 @@ def _calculate_slope_dask(d_bathy: da.Array, cell_size: float) -> da.Array:
         boundary=np.nan,
         dtype=np.float32,
     )
+
 
 def _calculate_tci(bathy_array: np.ndarray) -> np.ndarray:
     """Core Terrain Complexity Index (TCI)."""
@@ -447,9 +461,11 @@ def _calculate_tci(bathy_array: np.ndarray) -> np.ndarray:
         variance = (sum_sq_diff / valid_count) - (mean_diff ** 2)
         return np.where(valid_count > 1, np.sqrt(np.maximum(variance, 0.0)), np.nan)
 
+
 def _calculate_tci_dask(d_bathy: da.Array) -> da.Array:
     """Dask wrapper to stream TCI natively across blocks."""
     return d_bathy.map_overlap(_calculate_tci, depth=1, boundary=np.nan, dtype=np.float32)
+
 
 def _create_classification_dictionary(bpi_broad_sample: np.ndarray, bpi_fine_sample: np.ndarray, slope_sample: np.ndarray) -> pd.DataFrame:
     """Creates a data-driven classification dictionary from sample arrays."""
@@ -479,6 +495,7 @@ def _create_classification_dictionary(bpi_broad_sample: np.ndarray, bpi_fine_sam
                'FineBPI_Lower': -9999, 'FineBPI_Upper': 9999,
                'Slope_Lower': -9999, 'Slope_Upper': 9999}, inplace=True)
     return df
+
 
 def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_dir: str, best_radii: Dict[str, Tuple[int, int]], local_tmp_dir: str, prediction_output_dir: str = "") -> Tuple[bool, str]:
     """Module-level worker to sample valid pixels and generate regional class limits."""
@@ -598,6 +615,7 @@ def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_d
     finally:
         gc.collect()
 
+
 def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, prediction_output_dir: str) -> bool:
     """Return True when any required output is missing or unreadable."""
     try:
@@ -636,6 +654,7 @@ def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, predict
         # Default to processing if the check fails for any reason
         return True
 
+
 def _generate_whitebox_products(missing_wbt, wbt, local_bathy, local_slope, local_plan, base_name, product_errors):
     for out_s3, wbt_func, local_out, product_suffix in missing_wbt:
         try:
@@ -663,6 +682,7 @@ def _generate_whitebox_products(missing_wbt, wbt, local_bathy, local_slope, loca
             message = f"WBT error for {os.path.basename(local_out)}: {e}"
             product_errors.append(message)
             Engine.write_message_dask(f"[ERROR] {base_name}: {message}", OUTPUTS)
+
 
 def _generate_shear_proxy(missing_shear, out_shear, out_slope_deg, out_plan, local_slope, local_plan, local_tmp_dir, base_name, product_errors):
     if missing_shear:
@@ -716,6 +736,7 @@ def _generate_shear_proxy(missing_shear, out_shear, out_slope_deg, out_plan, loc
             product_errors.append(message)
             Engine.write_message_dask(f"[ERROR] {base_name}: {message}", OUTPUTS)
 
+
 def _load_classification_dictionary(missing, is_bluetopo, base_name, dictionary_dir):
     if not missing:
         return None, None
@@ -731,6 +752,7 @@ def _load_classification_dictionary(missing, is_bluetopo, base_name, dictionary_
         return None, f"Dictionary missing for {year}"
     with dict_path.open('r') as fh:
         return pd.read_csv(fh), None
+
 
 def _load_bathy_memmap(local_bathy, tmpdir):
     with rasterio.open(local_bathy) as src:
@@ -749,6 +771,7 @@ def _load_bathy_memmap(local_bathy, tmpdir):
             raise
     return bathy_array, profile, cell_size, shape_2d
 
+
 def _bluetopo_slope_path(bathy_path, base_name, prediction_output_dir):
     ext = UPath(bathy_path).suffix
     match = re.search(r'(BlueTopo_[A-Za-z0-9_]+_\d{8})', base_name, re.IGNORECASE)
@@ -758,9 +781,11 @@ def _bluetopo_slope_path(bathy_path, base_name, prediction_output_dir):
         slope_path = str(UPath(prediction_output_dir) / f"{base_name}_slope{ext}")
     return slope_path
 
+
 def _float_product_profile(profile):
     profile.update(dtype='float32', nodata=np.nan, count=1, compress='LZW', tiled=True, blockxsize=256, blockysize=256)
     return profile
+
 
 def _close_memmap(arr):
     if arr is None:
@@ -772,6 +797,7 @@ def _close_memmap(arr):
             arr.base.close()
     except Exception:
         pass
+
 
 def _mask_bluetopo_bathy(bathy_array, shape_2d, source_crs, source_transform, bathy_path, base_name, prediction_output_dir, make_gradmag, tmpdir, profile, out_gradmag, local_tmp_dir, progress_str):
     bluetopo_slope_path = _bluetopo_slope_path(bathy_path, base_name, prediction_output_dir)
@@ -831,6 +857,7 @@ def _mask_bluetopo_bathy(bathy_array, shape_2d, source_crs, source_transform, ba
     finally:
         _close_memmap(gradmag_mmap)
 
+
 def _generate_tci_and_slope(missing_numpy_dict, d_bathy, cell_size, profile, out_tci, out_slope, local_tmp_dir, progress_str):
     if missing_numpy_dict["_tci.tif"]: 
         tci_lazy = _calculate_tci_dask(d_bathy)
@@ -843,6 +870,7 @@ def _generate_tci_and_slope(missing_numpy_dict, d_bathy, cell_size, profile, out
         _float_product_profile(profile)
         _save_dask_to_raster(slope_lazy, out_slope, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_slope.tif")
         del slope_lazy; gc.collect()
+
 
 def _ensure_validated_slope(missing_numpy_dict, is_bluetopo, tmpdir, out_slope, base_name, d_bathy, cell_size, profile, local_tmp_dir, progress_str):
     local_validated_slope = None
@@ -884,6 +912,7 @@ def _ensure_validated_slope(missing_numpy_dict, is_bluetopo, tmpdir, out_slope, 
             _materialize_raster(out_slope, local_validated_slope)
     return local_validated_slope
 
+
 def _generate_gradmag_from_slope(local_validated_slope, tmpdir, shape_2d, profile, out_gradmag, local_tmp_dir, progress_str):
     # Leverage block iteration against the newly generated or existing slope TIF to save recalculating slope and save RAM
     gradmag_mmap = None
@@ -902,6 +931,7 @@ def _generate_gradmag_from_slope(local_validated_slope, tmpdir, shape_2d, profil
     finally:
         _close_memmap(gradmag_mmap)
 
+
 def _generate_bpi_products(missing_numpy_dict, d_bathy, cell_size, best_radii, profile, out_fine, out_broad, local_tmp_dir, progress_str):
     if missing_numpy_dict["_bpi_fine.tif"]:
         bpi_fine_lazy = _calculate_bpi_dask(d_bathy, cell_size, best_radii['fine'][0], best_radii['fine'][1])
@@ -914,6 +944,7 @@ def _generate_bpi_products(missing_numpy_dict, d_bathy, cell_size, best_radii, p
         _float_product_profile(profile)
         _save_dask_to_raster(bpi_broad_lazy, out_broad, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_bpi_broad.tif")
         del bpi_broad_lazy; gc.collect()
+
 
 def _materialize_or_rebuild_bpi(
     output_path: str,
@@ -955,6 +986,7 @@ def _materialize_or_rebuild_bpi(
         del bpi_lazy
         gc.collect()
         return _materialize_raster(output_path, local_path)
+
 
 def _classify_terrain(is_bluetopo, bathy_path, base_name, prediction_output_dir, local_validated_slope, out_slope, tmpdir, shape_2d, out_broad, out_fine, d_bathy, cell_size, best_radii, profile, local_tmp_dir, progress_str, source_crs, source_transform, unique_dictionary, out_class):
     slope_src_path = local_validated_slope or out_slope
@@ -1042,6 +1074,7 @@ def _classify_terrain(is_bluetopo, bathy_path, base_name, prediction_output_dir,
     finally:
         _close_memmap(classified_array)
 
+
 def _generate_numpy_products(missing_numpy_dict, is_bluetopo, base_name, bathy_path, prediction_output_dir, dictionary_dir, local_bathy, tmpdir, source_crs, source_transform, out_gradmag, out_tci, out_slope, out_fine, out_broad, out_class, best_radii, local_tmp_dir, progress_str):
     unique_dictionary, error = _load_classification_dictionary(
         missing_numpy_dict["_terrain_classification.tif"], is_bluetopo, base_name, dictionary_dir
@@ -1066,6 +1099,7 @@ def _generate_numpy_products(missing_numpy_dict, is_bluetopo, base_name, bathy_p
     finally:
         _close_memmap(bathy_array)
 
+
 def _terrain_output_paths(terrain_outputs_dir, base_name):
     out_dir = UPath(terrain_outputs_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1075,6 +1109,7 @@ def _terrain_output_paths(terrain_outputs_dir, base_name):
         "_tci.tif", "_rugosity.tif", "_slope.tif", "_bpi_fine.tif",
         "_bpi_broad.tif", "_terrain_classification.tif",
     )}
+
 
 def _configure_terrain_whitebox():
     from whitebox import WhiteboxTools
@@ -1090,11 +1125,13 @@ def _configure_terrain_whitebox():
         return None, "Failed to configure Whitebox maximum processors."
     return wbt, None
 
+
 def _terrain_local_paths(tmpdir):
     return {name: os.path.join(tmpdir, name + ".tif") for name in (
         "bathy_raw", "bathy", "slope_deg", "flowdir", "prof", "plan", "total",
         "flowacc", "rugosity",
     )}
+
 
 def _missing_terrain_products(outputs, local, wbt, is_bluetopo):
     commands = (
@@ -1119,6 +1156,7 @@ def _missing_terrain_products(outputs, local, wbt, is_bluetopo):
         missing_numpy["_bpi_fine.tif"] = True
         missing_numpy["_bpi_broad.tif"] = True
     return missing_wbt, missing_shear, missing_numpy
+
 
 def _prepare_terrain_bathy(bathy_path, local, base_name):
     with UPath(bathy_path).open('rb') as f_in, open(local["bathy_raw"], 'wb') as f_out:
@@ -1148,6 +1186,7 @@ def _prepare_terrain_bathy(bathy_path, local, base_name):
     gc.collect()
     return source_grid
 
+
 def _validate_terrain_outputs(outputs, is_bluetopo, source_grid, product_errors):
     source_shape, source_crs, source_transform = source_grid
     required = [suffix for suffix in outputs if not (is_bluetopo and suffix == "_slope.tif")]
@@ -1158,6 +1197,7 @@ def _validate_terrain_outputs(outputs, is_bluetopo, source_grid, product_errors)
         )
         if not valid:
             product_errors.append(f"Invalid required output {UPath(outputs[suffix]).name}: {reason}")
+
 
 def _process_terrain_raster_worker(bathy_path: str, current_index: int, total_count: int, best_radii: Dict[str, Tuple[int, int]], terrain_outputs_dir: str, prediction_output_dir: str, dictionary_dir: str, local_tmp_dir: str) -> Tuple[bool, str]:
     """Generate missing terrain products for one bathymetry raster."""
@@ -1217,6 +1257,8 @@ def _process_terrain_raster_worker(bathy_path: str, current_index: int, total_co
         return False, f"Fatal Crash: {base_name} - {exc}"
     finally:
         gc.collect()
+
+
 class TerrainProductsEngine(Engine):
     """Class for parallel generation of seabed terrain layers, highly optimized for memory management."""
 

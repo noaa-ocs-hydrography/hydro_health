@@ -1,7 +1,5 @@
-import os
 import sys
 import pathlib
-import tempfile
 import numpy as np
 import geopandas as gpd
 import rasterio

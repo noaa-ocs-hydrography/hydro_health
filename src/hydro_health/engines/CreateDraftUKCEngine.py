@@ -15,7 +15,6 @@ from rasterio.features import rasterize
 from rasterio.enums import MergeAlg, Resampling
 from rasterio.transform import from_bounds
 from rasterio.warp import transform_bounds, reproject
-from rasterio.io import MemoryFile
 from rasterio.vrt import WarpedVRT
 from rasterio.merge import merge
 from shapely.geometry import box
@@ -28,10 +27,12 @@ from hydro_health.helpers.tools import get_config_item, get_environment
 # PARALLEL WORKER FUNCTIONS (Top-level for multiprocessing pickling)
 # ==============================================================================
 
+
 def get_wkt(crs):
     """Safely converts a CRS object to its WKT or string representation."""
     if crs is None: return None
     return crs.to_wkt() if hasattr(crs, 'to_wkt') else str(crs)
+
 
 def _worker_draft(layer, input_gdb, orig_bounds, orig_crs_wkt, final_crs_wkt, temp_dir, out_meta, height, width, transform, block_size):
     """Worker process for reading, filtering, and rasterizing a single month's max draft data."""
@@ -452,6 +453,7 @@ class CreateDraftUKCEngine(Engine):
             self.merge_regional_ukc(res, suffix, regional_ukc_keys)
 
         print("Engine run completed successfully.")
+
 
 if __name__ == '__main__':
     profiler = cProfile.Profile()

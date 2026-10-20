@@ -14,6 +14,7 @@ from hydro_health.helpers.tools import get_config_item, get_approved_providers
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
+
 class RasterMaskChecker:
     def __init__(self):
         self.s3 = boto3.client('s3')
@@ -226,6 +227,7 @@ class RasterMaskChecker:
         
         m.save(output_file)
         print(f"Interactive map created: {output_file}")
+
 
 if __name__ == "__main__":
     mapper = RasterMaskChecker()
