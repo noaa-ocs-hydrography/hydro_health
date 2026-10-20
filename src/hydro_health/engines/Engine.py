@@ -38,20 +38,19 @@ class Engine:
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
         self.cluster = None
         self.client = None
-        self.target_crs = "EPSG:32617"
         self.target_res = 8
         self.year_ranges = [
-                    (1998, 2001),
-                    (2004, 2006),
-                    (2006, 2010),
-                    (2010, 2015),
-                    (2016, 2017),
-                    (2017, 2018),
-                    (2018, 2019),
-                    (2019, 2020),
-                    (2019, 2022),
-                    (2022, 2024)
-                ]
+            (1998, 2001),
+            (2004, 2006),
+            (2006, 2010),
+            (2010, 2015),
+            (2016, 2017),
+            (2017, 2018),
+            (2018, 2019),
+            (2019, 2020),
+            (2019, 2022),
+            (2022, 2024)
+        ]
 
     # def __init__(self):
     #     # set up logging
@@ -70,7 +69,9 @@ class Engine:
 
         provider_list_text = ['USACE', 'NCMP', 'NGS', 'USGS']  # CUDEM: NOAA NCEI, NGS not used by BlueTopo
         for text in provider_list_text:
-            if text in feature_json['attributes']['provider_results_name']:
+            # 9/8/2026 DigitalCoast API changed from feature_json['attributes']['provider_results_name']
+            provider_names = [provider['abbreviated_name'] for provider in feature_json['attributes']['providers']]
+            if any(text in provider_name for provider_name in provider_names):
                 return True
         return False
 
@@ -94,10 +95,21 @@ class Engine:
                 self.write_message(f"Failed to wipe master local temp directory: {e}", output_folder)
 
     def close_dask(self) -> None:
-        """Shut down Dask objects"""
+        """Shut down Dask objects safely without blocking indefinitely."""
 
-        self.client.close()
-        self.cluster.close()
+        if self.client:
+            try:
+                # Force pending tasks to cancel rather than hanging cluster shutdown
+                self.client.cancel(self.client.futures, force=True)
+                self.client.close(timeout=10)
+            except Exception as e:
+                print(f"- Warning during client close: {e}", flush=True)
+
+        if self.cluster:
+            try:
+                self.cluster.close(timeout=10)
+            except Exception as e:
+                print(f"- Warning during cluster close: {e}", flush=True)
     
     def get_available_datasets(self, geometry_coords: str, digital_coast_folder: str) -> None:
         """Query NOWCoast REST API for available datasets"""
@@ -115,29 +127,31 @@ class Engine:
             raise Exception(f"Digital Coast Error: {response.reason}")
 
         tile_index_links = []
-        for feature in datasets_json['features']:
+        for feature in datasets_json['data']['datasets']:
             # print(feature['attributes']['DataType'], feature['attributes']['Year'], feature['attributes']['provider_results_name'])
             if not self.approved_dataset(feature):
                 continue
             attrs = feature['attributes']
-            metalink = attrs.get('Metalink') or ''
+            metalink = [link['uri'] for link in attrs['links'] if link['linkTypeName'] == 'Metadata'][0]
             inport_number = metalink.rstrip('/').split('/')[-1]
             inport_suffix = inport_number if inport_number else 'No_InPort'
-            cleaned_provider = self.remove_special_chars(attrs.get('provider_details', 'No_Provider'))
-            folder_name = f"{attrs.get('Year', 'No_year')}_{attrs.get('DataType', 'No_DataType')}_{cleaned_provider}_{inport_suffix}"
-            output_folder_path = digital_coast_folder / folder_name
+            # TODO providers list may have more than 1 provider
+            provider_abbr = [provider['abbreviated_name'] for provider in attrs['providers']][0]
+            cleaned_provider = self.remove_special_chars(provider_abbr)
+            provider_folder = f"{attrs['year']}_{attrs['dataType'].upper()}_{cleaned_provider}_{inport_suffix}"
+            output_folder_path = digital_coast_folder / provider_folder
             output_folder_path.mkdir(parents=True, exist_ok=True)
 
             # Write out JSON
             output_json = output_folder_path / 'feature.json'
-            external_provider_links = json.loads(feature['attributes']['ExternalProviderLink'])['links']
-            feature['attributes']['ExternalProviderLink'] = external_provider_links
+            # 9/4/2026 DigitalCoast API updated from feature['attributes']['ExternalProviderLink']
+            feature['attributes']['ExternalProviderLink'] = feature['attributes']['links']
             with open(output_json, 'w') as writer:
                 writer.write(json.dumps(feature['attributes'], indent=4))
 
-            for external_data in external_provider_links:
-                if external_data['label'] == 'Bulk Download':
-                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['DataType'], 'link': external_data['link'], 'provider_path': output_folder_path})
+            for external_data in feature['attributes']['links']:
+                if external_data['title'] == 'Bulk Download':
+                    tile_index_links.append({'label': 'Bulk Download', 'data_type': feature['attributes']['dataType'], 'link': external_data['uri'], 'provider_path': output_folder_path})
         return tile_index_links
 
     def get_ecoregion_geometry_strings(self, tile_gdf: gpd.GeoDataFrame, ecoregion: str) -> str:
@@ -215,7 +229,6 @@ class Engine:
     def resample_and_reproject(self, tiff_path: pathlib.Path, target_res: int) -> None:
         """Warp the downloaded raster to target resolution and CRS, treating categorical bands appropriately."""
 
-        print(f"  - Resampling and reprojecting base tile...")
         output_folder = self.param_lookup['output_directory'].valueAsText
         msg = f"Resampling {tiff_path.name} to {target_res}m and explicitly locking into {target_res}..."
         self.write_message(msg, output_folder)
@@ -237,31 +250,25 @@ class Engine:
             warped_band_path = tiff_path.parent / f"band_{band_idx}_warped.tiff"
 
             # Extract single band from source
-            ds_ext = gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
-            ds_ext = None  # Flush and release lock
+            gdal.Translate(str(raw_band_path), str(tiff_path), bandList=[band_idx])
             temp_files_to_clean.append(raw_band_path)
 
             # Choose correct resampling algorithm
             # Bands 1 (Bathy) and 2 (Uncertainty) get Bilinear interpolation
             # Bands 3+ (Contributor IDs/Metadata indices) must get Nearest Neighbor to avoid float corruption
-            if band_idx in (1, 2):
-                resample_alg = gdal.GRA_Bilinear
-            else:
-                resample_alg = gdal.GRA_NearestNeighbour
+            resample_alg = gdal.GRA_Bilinear if band_idx in (1, 2) else gdal.GRA_NearestNeighbour
 
             # Warp single band to output parameters
-            ds_warp = gdal.Warp(
+            gdal.Warp(
                 str(warped_band_path),
                 str(raw_band_path),
                 xRes=target_res,
                 yRes=target_res,
                 targetAlignedPixels=True,
-                dstSRS=self.target_crs,
                 resampleAlg=resample_alg,
                 dstNodata=-9999,
                 creationOptions=["COMPRESS=DEFLATE"]
             )
-            ds_warp = None  # Flush and release lock
             warped_bands.append(str(warped_band_path))
             temp_files_to_clean.append(warped_band_path)
 
@@ -269,17 +276,13 @@ class Engine:
         temp_tiff = tiff_path.parent / f"warped_{tiff_path.name}"
         vrt_path = tiff_path.parent / f"warped_multiband.vrt"
 
-        vrt_ds = gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
-        vrt_ds = None  # Flush and release lock
+        gdal.BuildVRT(str(vrt_path), warped_bands, separate=True)
 
-        # Explicitly apply the self.target_crs here to strictly guarantee the finalized TIFF doesn't inherit a corrupted VRT CRS
-        ds_trans = gdal.Translate(
+        gdal.Translate(
             str(temp_tiff),
             str(vrt_path),
-            outputSRS=self.target_crs,
             creationOptions=["COMPRESS=DEFLATE", "TILED=YES", "BIGTIFF=YES"]
         )
-        ds_trans = None  # Flush and release lock
 
         # Clean up temporary intermediate files securely
         if vrt_path.exists():
@@ -295,14 +298,22 @@ class Engine:
     def setup_dask(self, env, processes=True, n_workers=4, threads_per_worker=2, memory_limit="8GB") -> None:
         """Create Dask objects outside of init"""
 
-        print(f"Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
+        print(f"- Dask parameters: env={env}, processes={processes}, n_workers={n_workers}, threads_per_worker={threads_per_worker}, memory_limit={memory_limit}")
         
         if env == 'aws':
-            dask.config.set({"distributed.worker.multiprocessing-method": "fork"})
+            # Dynamically find cert and key
+            tls_dir = pathlib.Path("/etc/dask/tls")
+            certs = list(tls_dir.glob("*.cer")) + list(tls_dir.glob("*.crt"))
+            keys = list(tls_dir.glob("*.key"))
+            dask.config.set({
+                "distributed.worker.multiprocessing-method": "fork",
+                "distributed.scheduler.dashboard.tls.cert": str(certs[0]),
+                "distributed.scheduler.dashboard.tls.key": str(keys[0]),
+            })
             self.set_proj_path()
-        self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit)
+        self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit) # new port for SSL
         self.client = Client(self.cluster)
-        print(self.client.dashboard_link)
+        # print(self.client.dashboard_link)
 
     def set_proj_path(self):
         """Load proj.db path to resolve mismatch"""
@@ -326,7 +337,7 @@ class Engine:
         with open(pathlib.Path(output_folder) / 'log_prints.txt', 'a') as writer:
             writer.write(message + '\n')        
 
-    def write_run_manifest(self, subfolder: str, extra_info: dict|bool=False):
+    def write_run_manifest(self, subfolder: pathlib.Path, extra_info: dict|bool=False):
         """Writes a single manifest for the entire Engine execution."""
 
         end_time = time.time()
@@ -340,18 +351,20 @@ class Engine:
         }
         if extra_info:
             manifest.update(extra_info)
-
+        
+        manfest_path = subfolder / f"_manifest_{self.__class__.__name__}.json"
+        print(f'- Writing run manifest: {manfest_path}')
         if self.param_lookup['env'] == 'aws':
             s3 = boto3.client('s3')
             s3.put_object(
                 Bucket=get_config_item('SHARED', 'OUTPUT_BUCKET'),
-                Key=f"{subfolder}/_manifest.json",
+                Key=str(manfest_path),
                 Body=json.dumps(manifest, indent=4)
             )
         else:
-            manifest_prefix = OUTPUTS / subfolder / '_manifest.json'
-            manifest_prefix.parent.mkdir(parents=True, exist_ok=True)
-            with open(manifest_prefix, 'w') as manifest_writer:
+            manifest_path = OUTPUTS / manfest_path
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(manifest_path, 'w') as manifest_writer:
                 manifest_writer.write(json.dumps(manifest, indent=4))
 
     def parse_survey_date(self, date_str: str) -> date | None:

@@ -149,7 +149,7 @@ def s3_fs():
 @pytest.fixture(scope="module")
 def s3_prefix():
     """Dynamically reads the S3 bucket name from config."""
-    bucket = get_config_item('S3', 'BUCKET_NAME', pilot_mode=False)
+    bucket = get_config_item('SHARED', 'OUTPUT_BUCKET', pilot_mode=False)
     return f"s3://{bucket}/"
 
 @pytest.fixture(scope="module")
