@@ -277,7 +277,6 @@ class PredictionRastersEngine(Engine):
             else:
                 self.param_lookup[k] = v
                 
-        self.target_crs = 'EPSG:32617'
         self.target_res = 8.0
         self.output_prefix = output_prefix
         

@@ -15,7 +15,7 @@ steps:
 - tool: run_metadata_engine
   run: false
 - tool: run_vrt_creation
-  run: true
+  run: false
 - tool: run_raster_mask_engine
   run: false
 - tool: grid_digital_coast_files
@@ -33,8 +33,8 @@ steps:
 - tool: run_training_rasters_engine
   run: false
 - tool: run_subgrid_tiling_engine
-  run: true  
-- tool: run_data_prep_engine
   run: false
 - tool: run_batch_tiling_engine
   run: false
+- tool: run_data_prep_engine
+  run: true
