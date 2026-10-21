@@ -20,8 +20,9 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 # Global Base Paths
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 def focal_fill_block(block: np.ndarray, w=3) -> np.ndarray:
     """
@@ -248,6 +249,7 @@ def _process_combine_group(params: list) -> tuple:
         return False, f"Failed combining datasets: {e}"
     finally:
         gc.collect()
+
 
 class LidarGapFillEngine(Engine):
     """

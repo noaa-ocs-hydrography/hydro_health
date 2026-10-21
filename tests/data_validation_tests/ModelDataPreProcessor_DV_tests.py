@@ -10,7 +10,6 @@ import geopandas as gpd
 from pathlib import Path
 import re
 import numpy as np
-import warnings
 import random
 import io
 import matplotlib
@@ -28,6 +27,7 @@ from hydro_health.helpers.tools import get_config_item
 # --- GLOBAL REPORT TRACKER ---
 REPORT_DATA = {}
 REPORT_S3_DIR = "s3://ocs-dev-csdl-hydrohealth/ER_3"
+
 
 # --- PDF REPORT GENERATOR ---
 def generate_pdf_report(data, filename="S3_Validation_Report"):
@@ -112,6 +112,7 @@ def generate_pdf_report(data, filename="S3_Validation_Report"):
         # Upload to S3
         s3.put(md_path, f"{REPORT_S3_DIR}/{md_path}")
 
+
 def fail_with_errors(errors, test_name="Test", description=""):
     """Helper to fail tests cleanly and record all full paths for the PDF."""
     REPORT_DATA[test_name] = {"errors": errors, "description": description}
@@ -123,28 +124,32 @@ def fail_with_errors(errors, test_name="Test", description=""):
             error_msg += f"\n...and {len(errors) - 50} more errors omitted from console. See generated PDF report."
         pytest.fail(error_msg)
 
+
 def skip_test(reason, test_name="Test", description=""):
     """Helper to skip tests and record the skip reason for the PDF."""
     REPORT_DATA[test_name] = {"errors": [f"SKIPPED: {reason}"], "description": description}
     generate_pdf_report(REPORT_DATA)  # Write to PDF immediately
     pytest.skip(reason)
 
+
 def log_error(errors_list, msg):
     """Helper to instantly print out a failure to the console and track it."""
     print(f"\n[FAIL] {msg}")
     errors_list.append(msg)
+
 
 def is_excluded(filepath, excluded_list):
     """Helper to check if a file path falls under any excluded directories."""
     clean_path = str(filepath).replace("s3://", "")
     return any(clean_path.startswith(excl) for excl in excluded_list)
 
-# --- CONFIGURATION & FIXTURES ---
 
+# --- CONFIGURATION & FIXTURES ---
 @pytest.fixture(scope="module")
 def s3_fs():
     """Returns an authenticated s3fs file system instance."""
     return s3fs.S3FileSystem(anon=False)
+
 
 @pytest.fixture(scope="module")
 def s3_prefix():
@@ -152,25 +157,30 @@ def s3_prefix():
     bucket = get_config_item('SHARED', 'OUTPUT_BUCKET', pilot_mode=False)
     return f"s3://{bucket}/"
 
+
 @pytest.fixture(scope="module")
 def engine_instance():
     """Provides an instance of the Engine to read base configuration."""
     return Engine()
+
 
 @pytest.fixture(scope="module")
 def year_pairs(engine_instance):
     """The expected year ranges read dynamically from the Engine."""
     return engine_instance.year_ranges
 
+
 @pytest.fixture(scope="module")
 def target_crs(engine_instance):
     """The target CRS read dynamically from the Engine."""
     return engine_instance.target_crs
 
+
 @pytest.fixture(scope="module")
 def target_res(engine_instance):
     """The target resolution read dynamically from the Engine."""
     return engine_instance.target_res
+
 
 @pytest.fixture(scope="module")
 def raster_directories(s3_prefix):
@@ -190,6 +200,7 @@ def raster_directories(s3_prefix):
         }
     ]
 
+
 @pytest.fixture(scope="module")
 def excluded_prefixes(s3_prefix):
     """Directories to exclude from recursive searches (like intermediate terrain/filled)."""
@@ -203,13 +214,16 @@ def excluded_prefixes(s3_prefix):
         
     return excludes
 
+
 @pytest.fixture(scope="module")
 def prediction_tiles_dir(s3_prefix):
     return str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'PREDICTION_TILES_DIR', pilot_mode=False)}"))
 
+
 @pytest.fixture(scope="module")
 def training_tiles_dir(s3_prefix):
     return str(UPath(f"{s3_prefix}{get_config_item('MODEL', 'TRAINING_TILES_DIR', pilot_mode=False)}"))
+
 
 @pytest.fixture(scope="module")
 def tile_directories(prediction_tiles_dir, training_tiles_dir):
@@ -218,7 +232,6 @@ def tile_directories(prediction_tiles_dir, training_tiles_dir):
 
 
 # --- 0. VISUAL OUTPUT TESTS ---
-
 def test_visual_terrain_stages_comparison(s3_fs, s3_prefix):
     """
     Picks a random tile and compares its Tiled, Filled, and Combined/Training stages visually.
@@ -406,7 +419,6 @@ def test_visual_all_variables_single_tile(s3_fs, training_tiles_dir):
 
 
 # --- 1. DIRECTORY AND FILE PRESENCE TESTS ---
-
 def test_output_directories_exist(s3_fs, raster_directories, tile_directories):
     """Test that all expected output directories were created on S3."""
     desc = "Verifies that all expected S3 directories for model outputs and parquet tiles were successfully created."
@@ -424,6 +436,7 @@ def test_output_directories_exist(s3_fs, raster_directories, tile_directories):
             log_error(errors, f"Error checking directory {d}: {str(e)}")
             
     fail_with_errors(errors, "Output Directories", desc)
+
 
 def test_csv_stats_generated(s3_fs, training_tiles_dir, prediction_tiles_dir):
     """Test that the summary NaN stats CSVs were generated in the parent dirs."""
@@ -447,7 +460,6 @@ def test_csv_stats_generated(s3_fs, training_tiles_dir, prediction_tiles_dir):
 
 
 # --- 2. RASTER PROPERTY TESTS ---
-
 def test_raster_crs_and_resolution(s3_fs, raster_directories, target_crs, target_res, excluded_prefixes):
     """
     Test all rasters from each directory to ensure:
@@ -526,6 +538,7 @@ def test_raster_crs_and_resolution(s3_fs, raster_directories, target_crs, target
     print("\nFinished checking CRS and resolution.")
     fail_with_errors(errors, "Raster CRS and Resolution", desc)
 
+
 def test_raster_approximate_location(s3_fs, s3_prefix, excluded_prefixes):
     """
     Test that all prediction rasters fall within an approximate valid bounding box for all US Coasts.
@@ -576,7 +589,6 @@ def test_raster_approximate_location(s3_fs, s3_prefix, excluded_prefixes):
 
 
 # --- 3. PARQUET DERIVATIVE & TILE TESTS ---
-
 def test_derivative_counts_per_tile(s3_fs, tile_directories, year_pairs):
     """
     Test that exactly 13 long-format files are generated for EVERY tile processed.
@@ -1265,7 +1277,6 @@ def test_parquet_prediction_training_parity(s3_fs, prediction_tiles_dir, trainin
 
 
 # --- 4. GEOMETRY / MASK TESTS ---
-
 def test_mask_and_subgrid_crs(s3_fs, target_crs, s3_prefix):
     """
     Test that the training mask and subgrids were saved with the correct CRS.
@@ -1293,7 +1304,6 @@ def test_mask_and_subgrid_crs(s3_fs, target_crs, s3_prefix):
 
 
 # --- 5. DATA VALIDITY & INTEGRITY TESTS ---
-
 def test_training_tiffs_are_masked(s3_fs, s3_prefix, target_crs, excluded_prefixes):
     """
     Test that training TIFFs truly no longer have data where training masks should be masking data.
@@ -1379,6 +1389,7 @@ def test_training_tiffs_are_masked(s3_fs, s3_prefix, target_crs, excluded_prefix
                 
     print("\nFinished checking training tiff masking.")
     fail_with_errors(errors, "Training TIFF Masking", desc)
+
 
 def test_training_and_prediction_values_match(s3_fs, s3_prefix, excluded_prefixes):
     """
@@ -1473,6 +1484,7 @@ def test_training_and_prediction_values_match(s3_fs, s3_prefix, excluded_prefixe
     print("\nFinished checking train vs prediction values.")
     fail_with_errors(errors, "Training/Prediction Values Match", desc)
 
+
 def test_year_range_tiffs_exist(s3_fs, s3_prefix, year_pairs, excluded_prefixes):
     """
     Test that files for each year range (like hurr_count_cumulative, tsm_mean, etc.)
@@ -1506,7 +1518,6 @@ def test_year_range_tiffs_exist(s3_fs, s3_prefix, year_pairs, excluded_prefixes)
 
 # --- CUSTOM TEST RUNNER ---
 # Run via `python test_s3_outputs.py` to use this block!
-
 if __name__ == "__main__":
     import sys
 

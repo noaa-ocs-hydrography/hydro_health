@@ -13,10 +13,10 @@ HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[4] / 'src'
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 from hydro_health.helpers.tools import Param
-from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine, _download_tile_index
+from hydro_health.engines.DigitalCoastS3Engine import DigitalCoastS3Engine, _download_tile_index
 
 
-TILING_PATH = 'hydro_health.engines.tiling.DigitalCoastS3Engine'
+TILING_PATH = 'hydro_health.engines.DigitalCoastS3Engine'
 
 
 @pytest.fixture

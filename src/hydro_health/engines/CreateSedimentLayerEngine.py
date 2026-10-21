@@ -1,5 +1,7 @@
 import fiona
 import sys
+import cProfile
+import pstats
 import pathlib
 import requests
 import rasterio
@@ -10,7 +12,6 @@ import os
 import boto3
 import pandas as pd
 import geopandas as gpd
-import numpy as np
 
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
@@ -22,6 +23,7 @@ from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
 
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 class CreateSedimentLayerEngine(Engine):
     """Class to hold the logic for processing the Sediment layer"""
@@ -332,3 +334,15 @@ class CreateSedimentLayerEngine(Engine):
         self.convert_polys_to_raster('sed_type')
         self.convert_polys_to_raster('sed_size')
         self.convert_polys_to_raster('sand_mud_mask')
+
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateSedimentLayerEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10) 

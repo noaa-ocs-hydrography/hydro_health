@@ -11,11 +11,11 @@ import sys
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 from hydro_health.helpers.tools import Param
-from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
+from hydro_health.engines.RasterMaskS3Engine import RasterMaskS3Engine
 
 
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
-TILING_PATH = 'hydro_health.engines.tiling.RasterMaskS3Engine'
+TILING_PATH = 'hydro_health.engines.RasterMaskS3Engine'
 
 
 @pytest.fixture
@@ -61,11 +61,11 @@ def test_create_prediction_mask(victim):
         mock_s3.upload_file.assert_called_once()
 
 
-@patch('hydro_health.engines.tiling.RasterMaskS3Engine._set_gdal_s3_options')
+@patch('hydro_health.engines.RasterMaskS3Engine._set_gdal_s3_options')
 def test_create_training_mask(mock_gdal_opts, victim):
     """Tests the multiprocessing orchestration and tile-based merging."""
 
-    TILING_PATH = 'hydro_health.engines.tiling.RasterMaskS3Engine'
+    TILING_PATH = 'hydro_health.engines.RasterMaskS3Engine'
     ecoregion = "ER1"
     vrt_paths = ["s3://path/v1.vrt"]
     
@@ -117,7 +117,7 @@ def test_find_provider_vrts(victim):
     """Tests S3 path globbing logic."""
 
     with patch('s3fs.S3FileSystem') as mock_s3, \
-         patch('hydro_health.engines.tiling.RasterMaskS3Engine.get_config_item') as mock_cfg:
+         patch('hydro_health.engines.RasterMaskS3Engine.get_config_item') as mock_cfg:
         
         # Setup mocks
         mock_cfg.side_effect = lambda section, key: "bucket" if key == "OUTPUT_BUCKET" else "dc"
@@ -143,9 +143,9 @@ def test_remerge_training_mask_error_handling(victim):
         assert "base_pred.tif not found" in result
 
 
-@patch('hydro_health.engines.tiling.RasterMaskS3Engine.RasterMaskS3Engine.create_prediction_mask')
-@patch('hydro_health.engines.tiling.RasterMaskS3Engine.RasterMaskS3Engine.create_training_mask')
-@patch('hydro_health.engines.tiling.RasterMaskS3Engine.RasterMaskS3Engine.find_provider_vrts')
+@patch('hydro_health.engines.RasterMaskS3Engine.RasterMaskS3Engine.create_prediction_mask')
+@patch('hydro_health.engines.RasterMaskS3Engine.RasterMaskS3Engine.create_training_mask')
+@patch('hydro_health.engines.RasterMaskS3Engine.RasterMaskS3Engine.find_provider_vrts')
 @patch('geopandas.read_file')
 def test_run(mock_gpd, mock_find, mock_train, mock_pred, victim):
     """Tests the main loop logic over the GeoDataFrame."""
@@ -158,7 +158,7 @@ def test_run(mock_gpd, mock_find, mock_train, mock_pred, victim):
     
     mock_find.return_value = ["s3://some.vrt"]
     
-    with patch('hydro_health.engines.tiling.RasterMaskS3Engine.get_config_item') as mock_cfg, \
+    with patch('hydro_health.engines.RasterMaskS3Engine.get_config_item') as mock_cfg, \
          patch('s3fs.S3FileSystem') as mock_s3:
         
         mock_cfg.return_value = "bucket"

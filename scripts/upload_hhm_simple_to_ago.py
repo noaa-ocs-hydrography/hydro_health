@@ -8,6 +8,7 @@ import time
 import gc
 from arcgis.gis import GIS
 
+
 # --- CONFIGURATION ---
 BASE_FOLDER = r"C:\Users\aubrey.mccutchan\Documents\AGO_uploads"
 OFFSHORE_DIR = pathlib.Path(BASE_FOLDER) / "Offshore_100m"
@@ -28,6 +29,7 @@ LAYER_NAME_KEY = {
     "decay_coefficient": "Decay Coefficient"
 }
 
+
 def zip_shapefile(shp_path):
     """Zips a shapefile and all its associated component files."""
     shp_path = str(shp_path)
@@ -41,6 +43,7 @@ def zip_shapefile(shp_path):
                 zipf.write(file_to_zip, arcname=os.path.basename(file_to_zip))
                 
     return zip_path
+
 
 def cleanup_shapefile(shp_path):
     """Deletes a shapefile, its components, and its zip file from the local drive."""
@@ -62,6 +65,7 @@ def cleanup_shapefile(shp_path):
                     else:
                         time.sleep(1) # Wait a second and try again
 
+
 def delete_existing_ago_items(gis, title):
     """Searches for and deletes existing items on AGO with the exact same title."""
     print(f"  Checking AGO for existing items named '{title}'...")
@@ -79,6 +83,7 @@ def delete_existing_ago_items(gis, title):
             
     if deleted_count == 0:
         print("    -> No existing items found. Proceeding with fresh upload.")
+
 
 def add_layer_to_webmap(gis, webmap_title, feature_layer_item):
     """Adds a published Feature Layer to a specific Web Map, replacing older versions if present."""
@@ -136,6 +141,7 @@ def add_layer_to_webmap(gis, webmap_title, feature_layer_item):
             print(f"                 To fix this, the owner must put the map in a 'Shared Update' group.")
         else:
             print(f"    -> [Error] Failed to add layer to Web Map: {e}")
+
 
 def upload_and_publish(gis, zip_path, title, tags, folder_name):
     """Uploads a zipped shapefile to AGO and publishes it."""
@@ -266,6 +272,7 @@ def upload_and_publish(gis, zip_path, title, tags, folder_name):
             
         gc.collect()
 
+
 def convert_raster_to_polygon_safe(tif_path, out_shp):
     """Safely converts floating-point rasters to polygons by scaling."""
     # Multiply by 10,000 to preserve 4 decimal places, convert to Int
@@ -290,6 +297,7 @@ def convert_raster_to_polygon_safe(tif_path, out_shp):
         arcpy.management.DeleteField(out_shp, ["Id", "gridcode"])
     except:
         pass
+
 
 def process_offshore(gis):
     """Processes the 100m offshore TIFFs individually."""
@@ -327,6 +335,7 @@ def process_offshore(gis):
             
         except Exception as e:
             print(f"  [Error] Processing failed for {base_name}: {e}")
+
 
 def process_inshore(gis):
     """Groups the 20m inshore TIFFs by variable, merges them, and uploads."""
@@ -398,6 +407,7 @@ def process_inshore(gis):
                 cleanup_shapefile(shp)
             if 'merged_shp' in locals():
                 cleanup_shapefile(merged_shp)
+
 
 if __name__ == "__main__":
     print("Connecting via ArcGIS Pro active session...")

@@ -32,8 +32,8 @@ from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
 gdal.UseExceptions()
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 def _set_gdal_s3_options():

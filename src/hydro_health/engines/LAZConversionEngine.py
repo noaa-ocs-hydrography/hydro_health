@@ -15,8 +15,8 @@ from hydro_health.helpers.tools import get_config_item
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-HELPERS = pathlib.Path(__file__).parents[2] / 'helpers'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+HELPERS = pathlib.Path(__file__).parents[1] / 'helpers'
 
 
 def _download_single_laz(param_inputs) -> None:
