@@ -6,7 +6,6 @@ import pstats
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BatchTilingEngine import BatchTilingEngine
 from hydro_health.engines.DigitalCoastEngine import DigitalCoastEngine
-from hydro_health.engines.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine
@@ -52,24 +51,8 @@ def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str, pilot_mo
 
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of Digital Coast data"""
-
-    if param_lookup['env'] in ['local', 'remote']:
-        run_digital_coast_engine_local(tiles, param_lookup, output_prefix)
-    else:
-        run_digital_coast_engine_s3(tiles, param_lookup, output_prefix)
-
-
-def run_digital_coast_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
-    """Entry point for parallel proccessing of Digital Coast data"""
     
     engine = DigitalCoastEngine(param_lookup)
-    engine.run(tiles, output_prefix)
-
-
-def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
-    """Entry point for parallel proccessing of Digital Coast data on AWS VM"""
-    
-    engine = DigitalCoastS3Engine(param_lookup)
     engine.run(tiles, output_prefix)
 
 
