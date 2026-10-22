@@ -127,6 +127,7 @@ def select_predictors_boruta_py(output_dir_train, year_pairs, max_runs=100):
     # TODO this will need adjusted some to account for multiple year pairs
     create_boruta_summary_report(output_dir_train, tile_ids)
 
+
 def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
     """Helper worker function for running Boruta on a single tile."""
     try:
@@ -222,6 +223,7 @@ def _worker_boruta_tile(tile_id, output_dir_train, pair, max_runs)-> None:
 
     except Exception as e:
         logging.error(f"ERROR in Boruta selection for Tile: {tile_id} | Pair: {pair} | {e}")
+
 
 def create_boruta_summary_report(output_dir_train, tile_ids, overall_report_filename="boruta_summary_report.png", by_year_report_filename="boruta_importance_by_year.png", top_n=10):
     """
@@ -407,6 +409,7 @@ def generate_cv_diagnostic_plot(sf_data, block_geom, max_k, tile_id, pair, outpu
         # when running in a multi-process environment like Dask.
         plt.close('all')
 
+
 def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train, year_pairs, block_size_m, n_boot=20, n_folds=5):
     """
     This script contains a complete, refactored set of functions to train
@@ -467,6 +470,7 @@ def model_train_full_spatial_cv_py(training_sub_grids_utm_path, output_dir_train
                     print(f"Could not read or remove worker log {worker_log_path}: {e}")
 
     print(f"\n✅ Model Training Complete! Check `{master_log_file}` for details.\n")
+
 
 def _worker_train_tile(tile_id, output_dir_train, pair, block_size_m, n_boot, n_folds, grid_crs):
     """
@@ -806,6 +810,7 @@ def diagnose_xgb_run(output_dir_train, tile_id, year_pair):
     print("\n--- Diagnosis Complete ---\n")
     return final_report
 
+
 def create_xgboost_performance_report(output_dir_train, tile_ids=None, cv_report_filename="xgboost_cv_summary_report.png", perf_report_filename="xgboost_performance_summary_report.png"):
     """Creates visual reports for XGBoost model performance."""
     print("📊 Starting XGBoost performance report generation...")
@@ -870,6 +875,7 @@ def create_xgboost_performance_report(output_dir_train, tile_ids=None, cv_report
                 plt.close()
                 print(f"Saved performance report to: {perf_report_filename}")
 
+
 def create_pdp_report_normalized(output_dir, year_pairs, tile_id=None, exclude_predictors=None, plot_output_dir=None, n_bins=50):
     """Creates a PDP magnitude plot with a fixed y-axis across facets."""
     print("📊 Starting PDP Magnitude report generation...")
@@ -900,6 +906,7 @@ def create_pdp_report_normalized(output_dir, year_pairs, tile_id=None, exclude_p
         plt.savefig(os.path.join(plot_output_dir, f"Overall_PDP_Magnitude_Report_{pair}.png"), dpi=150)
         plt.close()
         print(f"Saved magnitude plot for {pair}")
+
 
 def create_pdp_report(output_dir, year_pairs, tile_id=None, plot_output_dir=None, n_bins=50):
     """Creates a PDP shape plot with a free y-axis for each facet."""
@@ -953,6 +960,7 @@ def main_workflow():
     # diagnose_xgb_run(output_dir_train, "BH4QJ58D_2", "2006_2010")
     # create_pdp_report_normalized(output_dir_train, year_pairs)
     create_pdp_report(output_dir_train, year_pairs)
+
 
 if __name__ == "__main__":
     profiler = cProfile.Profile()

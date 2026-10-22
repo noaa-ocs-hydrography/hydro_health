@@ -43,7 +43,7 @@ def get_approved_providers(ecoregion: str) -> bool:
         approved_providers = []
         for provider, data in ecoregion_providers.items():
             if data['use']:
-                provider_id = '_'.join(provider.split('_')[2:])
+                provider_id = '_'.join(provider.split('_')[3:])  # No year, ex: DEM_USDA_NRCS_USGS_59010
                 approved_providers.append(provider_id)
     return approved_providers
 
@@ -54,12 +54,10 @@ def get_environment() -> str:
     hostname = gethostname()
     if 'L' in hostname:
         return  'local'
-    elif 'VS' in hostname:
-        return 'remote'
     elif 'hydrohealth' in hostname or 'ip' in hostname: # issue with aws instance hostnames not being consistent
         return 'aws'
     else:
-        return 'remote'
+        return 'local'
 
 
 def get_config_item(parent: str, child: str=False, env_string: str=False, pilot_mode: bool=False) -> str:

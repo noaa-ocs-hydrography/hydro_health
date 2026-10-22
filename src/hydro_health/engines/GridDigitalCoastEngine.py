@@ -10,7 +10,7 @@ from osgeo import gdal
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 
 
 def _is_raster_empty(ds, nodata_val=-9999) -> bool:
@@ -272,7 +272,7 @@ class GridDigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_download: bool, output_prefix: str) -> None:
+    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_downloads: bool, output_prefix: str) -> None:
         """Processor for gridding S3 VRT files with dask (Approved providers only)"""
 
         s3_files = s3fs.S3FileSystem()
@@ -292,7 +292,7 @@ class GridDigitalCoastEngine(Engine):
             bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
             
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_download else 'DigitalCoast'
+            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_downloads else 'DigitalCoast'
             vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
             
             if vrt_files:
@@ -301,11 +301,11 @@ class GridDigitalCoastEngine(Engine):
                 
                 for vrt in vrt_files:
                     vrt_stem = pathlib.Path(vrt).stem
-                    vrt_provider = '_'.join(vrt_stem.split('_')[2:])
+                    vrt_provider = '_'.join(vrt_stem.split('_')[3:])  # Start after year
                     if vrt_provider.lower() in approved_providers:
                         approved_vrt_files.append(vrt)
                     else:
-                        print(f" - Skipping unapproved S3 provider: {vrt_provider}")
+                        self.write_message(f" - Skipping unapproved {digital_coast_folder} S3 provider: {vrt_provider}", outputs)
 
                 if approved_vrt_files:
                     params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in approved_vrt_files]
@@ -349,9 +349,10 @@ class GridDigitalCoastEngine(Engine):
             else:
                 print(f" - No VRTs found for {ecoregion.stem} locally.")
 
-    def run(self, output_prefix: str, manual_download=False) -> None:
+    def run(self, output_prefix: str, manual_downloads=False) -> None:
         """Main execution method routing control using structural parameters"""
 
+        print('Starting GridDigitalCoastEngine')
         outputs = self.param_lookup['output_directory'].valueAsText
 
         self.setup_dask(self.param_lookup['env'])
@@ -363,8 +364,10 @@ class GridDigitalCoastEngine(Engine):
         [blue_topo_gdf_future] = self.client.scatter([blue_topo_gdf], broadcast=True)
 
         if self.param_lookup['env'] in ['local', 'remote']:
+            print('- Beginning local VRT gridding')
             self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, output_prefix)
         else:
-            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_download, output_prefix)
+            print('- Beginning local VRT gridding')
+            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_downloads, output_prefix)
 
         self.close_dask()
