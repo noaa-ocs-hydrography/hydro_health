@@ -3,10 +3,7 @@ import time
 import pathlib
 import boto3
 import xarray as xr  # pip install cfgrib required for cfgrib engine
-import geopandas as gpd
 import s3fs  # require conda install h5netcdf
-import shapely
-import numpy as np
 
 from datetime import datetime
 from botocore.client import Config
@@ -14,7 +11,7 @@ from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 
 
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 class SurgeTideForecastEngine:

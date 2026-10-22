@@ -5,6 +5,7 @@ import yaml
 
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs' / 'lookups'
 
+
 def generate_ecoregion_yaml(ecoregion_number, base_path, output_filename) -> None:
     """Generates a YAML configuration file for a specific ecoregion.
         param int ecoregion_number: The number of the EcoRegion (e.g., 3).
@@ -60,6 +61,7 @@ def generate_ecoregion_yaml(ecoregion_number, base_path, output_filename) -> Non
         print(f"Successfully generated YAML configuration file: '{output_filename}'")
     except IOError as e:
         print(f"Error: Could not write to file '{output_filename}'. Reason: {e}")
+
 
 if __name__ == '__main__':
     ECOREGION_ID = 3

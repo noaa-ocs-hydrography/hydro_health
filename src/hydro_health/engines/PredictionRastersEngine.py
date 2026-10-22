@@ -24,8 +24,8 @@ from hydro_health.engines.Engine import Engine
 
 logger = logging.getLogger(__name__)
 
-INPUTS = pathlib.Path(__file__).resolve().parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).resolve().parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).resolve().parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).resolve().parents[3] / 'outputs'
 
 
 def _apply_tsm_smoothing(gdal_dst_str: str, src_str: str, warp_opts: dict) -> None:

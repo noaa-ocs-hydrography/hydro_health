@@ -6,9 +6,7 @@ import numpy as np
 import geopandas as gpd
 import rasterio
 import fiona
-import pyarrow.parquet as pq
 
-from shapely import wkb
 from pyproj import Transformer
 from pathlib import Path
 from shapely import union_all
@@ -23,8 +21,8 @@ os.environ["OMP_NUM_THREADS"] = "1"
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_approved_providers
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 def _create_prediction_mask(param_inputs: list) -> None:

@@ -11,11 +11,10 @@ import sys
 HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[1]
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
-from hydro_health.helpers.tools import Param
-from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine, _grid_single_vrt_s3
+from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine, _grid_single_vrt_s3
 
 
-ENGINE_PATH = 'hydro_health.engines.tiling.GridDigitalCoastEngine'
+ENGINE_PATH = 'hydro_health.engines.GridDigitalCoastEngine'
 
 
 @pytest.fixture

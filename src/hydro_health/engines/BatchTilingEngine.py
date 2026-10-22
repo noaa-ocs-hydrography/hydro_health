@@ -23,8 +23,8 @@ from hydro_health.engines.Engine import Engine
 logger = logging.getLogger(__name__)
 
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 @lru_cache(maxsize=1)
@@ -493,6 +493,7 @@ def _transform_tile_task(params: list) -> str:
         Engine.write_message_dask(message, OUTPUTS)
         logger.exception(message)
         return f"Failed: {os.path.basename(f_path)} - {type(e).__name__}: {e}"
+
 class BatchTilingEngine(Engine):
     """Class for transforming wide parquet files in batch/long format"""
 

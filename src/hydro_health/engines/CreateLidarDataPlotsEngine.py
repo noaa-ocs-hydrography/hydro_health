@@ -1,6 +1,8 @@
 import os
 import re
 import math
+import cProfile
+import pstats
 import warnings
 import datetime
 import logging
@@ -24,10 +26,7 @@ from rasterio.transform import from_bounds
 from rasterio.features import shapes
 from rasterio.warp import calculate_default_transform, reproject
 
-import dask
-from dask.distributed import Client
-
-from osgeo import gdal, osr
+from osgeo import gdal
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item, get_environment
@@ -1628,3 +1627,15 @@ class CreateLidarDataPlotsEngine(Engine):
         
         ax.set_xticklabels([f'{val/1000:.1f}' for val in xticks], fontsize=4)
         ax.set_yticklabels([f'{val/1000:.1f}' for val in yticks], fontsize=4)
+
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateLidarDataPlotsEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  

@@ -17,8 +17,9 @@ from upath import UPath
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 def _check_intersection(src_pred: rasterio.DatasetReader, mask_bounds: tuple, raster_name: str, progress_str: str) -> bool:
     """Check if the raster bounds intersect with the mask bounds."""
@@ -30,6 +31,7 @@ def _check_intersection(src_pred: rasterio.DatasetReader, mask_bounds: tuple, ra
         Engine.write_message_dask(f"- [SKIP]{progress_str} Bounding box does not intersect raster {raster_name}. Skipping.", str(OUTPUTS))
         return False
     return True
+
 
 def _prepare_metadata(src_pred: rasterio.DatasetReader) -> tuple:
     """Prepare the metadata for the output raster."""
@@ -43,6 +45,7 @@ def _prepare_metadata(src_pred: rasterio.DatasetReader) -> tuple:
         'tiled': True
     })
     return meta, src_nodata
+
 
 def _pre_check_valid_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, meta: dict) -> bool:
     """Fast pre-check to avoid expensive LZW writing if there's no valid data."""
@@ -67,6 +70,7 @@ def _pre_check_valid_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT,
                     return True
     return False
 
+
 def _write_masked_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, tmp_dst_path: str, meta: dict) -> None:
     """Write the masked data to the temporary destination path."""
     nodata_val = meta['nodata']
@@ -83,6 +87,7 @@ def _write_masked_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, tm
 
                 masked_data = np.where(mask_arr == 2, pred_arr, meta['nodata'])
                 dest.write(masked_data, 1, window=window)
+
 
 def _process_training_raster(params: list) -> None:
     """Process a training raster by extracting array blocks and masking them mathematically.
