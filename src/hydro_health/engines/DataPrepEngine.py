@@ -21,8 +21,8 @@ from upath import UPath
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 DYNAMIC_BASES = ('hurr_strength_mean', 'tsm_mean')
 NON_PREDICTORS = {
@@ -540,8 +540,20 @@ class DataPrepEngine(Engine):
         prediction_files = {}
         if self.prediction_tiles_dir.is_dir():
             for path in self.prediction_tiles_dir.rglob('*_prediction_batch.parquet'):
-                if path.name in prediction_files:
-                    raise ValueError(f'Duplicate prediction batch filename: {path.name}')
+                existing = prediction_files.get(path.name)
+
+                if existing is not None:
+                    # Ignore the same path if the listing returns it again.
+                    if str(existing) == str(path):
+                        continue
+
+                    raise ValueError(
+                        f'Multiple prediction batches found for {path.name}:\n'
+                        f'  {existing}\n'
+                        f'  {path}\n'
+                        'Check PREDICTION_TILES_DIR for overlapping batch folders.'
+                    )
+
                 prediction_files[path.name] = path
         params, seen = [], set()
         for training_path in training_files:
