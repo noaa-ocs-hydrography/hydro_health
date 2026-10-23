@@ -570,8 +570,8 @@ class BatchTilingEngine(Engine):
         params_list = []
         total_files = len(files_to_process)
         for i, fp in enumerate(files_to_process):
-            filename = fp.name
-            tile_name = filename.split(f"_{mode}")[0]
+            # Preserve the full tile ID, including the subtile number.
+            tile_name = fp.parent.name
             
             output_folder = str(fp.parent)
             
