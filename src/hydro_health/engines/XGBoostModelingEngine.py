@@ -16,30 +16,30 @@ import hashlib
 import shutil
 import pathlib
 import re
+import copy
+
 from functools import lru_cache
 from pathlib import Path
 
 # TEMPORARY REPOSITORY TEST: reinstate cloud imports/config lookup before production merge.
 # import s3fs
-# from hydro_health.helpers.tools import get_config_item
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 import geopandas as gpd
 from upath import UPath
 from hydro_health.engines.Engine import Engine
+from hydro_health.helpers.tools import get_config_item
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
-INPUTS = REPOSITORY_ROOT / 'inputs'
-OUTPUTS = REPOSITORY_ROOT / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs' 
 
 NON_PREDICTORS = {
     "X", "Y", "FID", "tile_id", "source", "dataset_role",
-    "year_t", "year_t1", "year_ti", "interval_years", "pair_id",
-    "bathy_t", "bathy_t1", "bathy_ti", "delta_bathy", "delta_rate",
+    "year_t", "year_t1", "interval_years", "pair_id",
+    "bathy_t", "bathy_t1", "delta_bathy", "delta_rate",
     "survey_end_date", "geometry", "prediction_row_usable", "sample_weight",
 }
-
 
 # @lru_cache(maxsize=1)
 # def _get_s3_filesystem() -> s3fs.S3FileSystem:
@@ -49,6 +49,7 @@ NON_PREDICTORS = {
 
 def _stable_seed(global_seed: int, *parts: object) -> int:
     """Helper to generate a stable, reproducible random seed based on inputs."""
+
     import hashlib
     key = "|".join(map(str, parts)).encode("utf-8")
     digest = hashlib.blake2b(key, digest_size=8).digest()
@@ -56,6 +57,7 @@ def _stable_seed(global_seed: int, *parts: object) -> int:
 
 def _xgb_params(model_cfg: dict, nthread: int = 1) -> dict:
     """Returns standardized XGBoost hyperparameters."""
+
     return {
         "objective": "reg:squarederror",
         "eval_metric": ["rmse", "mae"],
@@ -78,6 +80,7 @@ def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed:
     Neighbouring blocks may be in different folds; no buffer or minimum separation
     is imposed. This retains the tested Python scheme, not R blockCV assignment.
     """
+
     if block_size_m <= 0:
         raise ValueError("block_size_m must be greater than zero")
     if n_folds < 1:
@@ -97,6 +100,7 @@ def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed:
 
 def _model_metrics(observed, predicted, baseline, interval) -> dict:
     """Compute unweighted state/change/rate metrics; apparent fitting metrics are not held-out accuracy."""
+
     obs = np.asarray(observed, dtype=float); pred = np.asarray(predicted, dtype=float)
     baseline = np.asarray(baseline, dtype=float); interval = np.asarray(interval, dtype=float)
     result = {}
@@ -118,7 +122,6 @@ def _model_metrics(observed, predicted, baseline, interval) -> dict:
             result["sign_accuracy_change"] = float(np.mean(np.sign(a) == np.sign(b))) if len(a) else None
     return result
 
-
 def _choose_rounds_spatial_cv(
     coordinates: pd.DataFrame, features: pd.DataFrame, labels: np.ndarray,
     weights: np.ndarray, model_cfg: dict, seed: int, audit: dict | None = None,
@@ -128,6 +131,7 @@ def _choose_rounds_spatial_cv(
     The supplied Python grid-fold scheme is retained. It is not R blockCV's
     optimized assignment, so its selected rounds need not equal the R run.
     """
+
     audit = audit if audit is not None else {}
     mode = model_cfg.get("round_selection_mode", "cv_with_floor")
     if mode not in ("fixed", "cv_with_floor", "cv_only"):
@@ -178,7 +182,6 @@ def _choose_rounds_spatial_cv(
     audit.update(status="cv_success", raw_cv_selected_rounds=selected, fold_best_rounds=best_iters)
     return max(floor if mode == "cv_with_floor" else 50, selected)
 
-
 def _translate_predictions(
     predicted_bathy: np.ndarray,
     baseline_bathy: np.ndarray,
@@ -186,6 +189,7 @@ def _translate_predictions(
     horizon: float,
 ) -> dict:
     """Derive later-minus-earlier change, annualized rate and standardized horizon values."""
+
     delta = predicted_bathy - baseline_bathy
     rate = delta / interval_years
     standard_delta = rate * horizon
@@ -196,7 +200,6 @@ def _translate_predictions(
         "mean_predicted_standard_change": standard_delta,
         "mean_predicted_standard_bathy": baseline_bathy + standard_delta,
     }
-
 
 def _prepare_model_data(
     train_df: pd.DataFrame,
@@ -210,6 +213,7 @@ def _prepare_model_data(
     The prepared training table is already fitting-eligible, so invalid essential
     fields cause an error rather than silently changing the verified row set.
     """
+
     if not locked_predictors or "bathy_t" not in locked_predictors:
         raise ValueError("Supply DataPrep's locked_predictors; bathy_t must be included")
     predictors = list(locked_predictors)
@@ -256,7 +260,6 @@ def _prepare_model_data(
             raise ValueError("Usable prediction rows contain infinite predictors")
     return train_df, pred_df, train_features, pred_features, predictors, []
 
-
 def _update_running_stats(
     mean: np.ndarray,
     squared_difference: np.ndarray,
@@ -264,12 +267,14 @@ def _update_running_stats(
     count: int,
 ) -> None:
     """Update per-row statistics without storing every bootstrap result."""
+
     delta = values - mean
     mean += delta / count
     squared_difference += delta * (values - mean)
 
 def _save_parquet(df: pd.DataFrame, final_save_path: str, local_tmp_dir: str, filename: str, is_aws: bool) -> None:
     """Stage a diagnostic table and copy it locally; retain the disabled S3 upload hook."""
+
     tmp_path = str(Path(local_tmp_dir) / filename)
     try:
         df.to_parquet(tmp_path, index=False, engine="pyarrow", compression="zstd")
@@ -285,6 +290,7 @@ def _save_parquet(df: pd.DataFrame, final_save_path: str, local_tmp_dir: str, fi
 
 def _save_json(payload: dict, final_save_path: str, local_tmp_dir: str, filename: str, is_aws: bool) -> None:
     """Stage auditable model metadata and publish it through the temporary local path."""
+
     tmp_path = str(Path(local_tmp_dir) / filename)
     try:
         with open(tmp_path, "wt", encoding="utf-8") as stream:
@@ -301,11 +307,11 @@ def _save_json(payload: dict, final_save_path: str, local_tmp_dir: str, filename
 
 def _save_geoparquet(df: pd.DataFrame, path: str, crs: str) -> None:
     """Save a companion spatial summary without discarding rows with invalid coordinates."""
+
     valid = np.isfinite(df.X) & np.isfinite(df.Y)
     geometry = gpd.points_from_xy(df.X.fillna(0), df.Y.fillna(0), crs=crs)
     geometry[~valid] = None
     gpd.GeoDataFrame(df.copy(), geometry=geometry, crs=crs).to_parquet(path, index=False, compression="zstd", schema_version="1.0.0")
-
 
 def _train_local_tile_task(params: list) -> dict:
     """Core worker task for training local XGBoost models on a tile. Picklable for Dask."""
@@ -559,9 +565,9 @@ def _train_local_tile_task(params: list) -> dict:
     finally:
         gc.collect()
 
-
 def _validate_settings(cfg):
     """Reject invalid model controls without changing scientific settings silently."""
+
     mc = cfg["model_config"]
     if mc["round_selection_mode"] not in ("cv_with_floor", "cv_only", "fixed"):
         raise ValueError("Invalid round_selection_mode")
@@ -597,18 +603,14 @@ def _validate_settings(cfg):
     if cfg["crs"] != "EPSG:32617":
         raise ValueError("Repository modeling test requires EPSG:32617")
 
-
 def _file_hash(path: str) -> str:
     """Fingerprint immutable DataPrep inputs to detect stale validation or mid-run changes."""
+
     digest = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
-
-
-
-
 class XGBoostModelingEngine(Engine):
     """Production-shaped model engine with explicit temporary repository-local IO."""
 
@@ -621,8 +623,6 @@ class XGBoostModelingEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup or {}
         self.output_prefix = output_prefix
-        self.repository_root = Path(self.param_lookup.get("repository_root", REPOSITORY_ROOT)).resolve()
-        # --- perhaps move to config file? ---
         self.settings = {
             "tile_id": "BH4S556X_3",
             "pair": "2004_2006",
@@ -663,7 +663,6 @@ class XGBoostModelingEngine(Engine):
             "smoke_output_subfolder": "xgb_smoke",
         }
         # --- end perhaps move to config file? ---
-        import copy
         overrides = copy.deepcopy(self.param_lookup.get("modeling_settings", {}))
         for key in ("model_config", "r_references", "r_comparison_tolerances", "smoke_model_overrides"):
             self.settings[key].update(overrides.pop(key, {}))
@@ -677,6 +676,7 @@ class XGBoostModelingEngine(Engine):
 
     def _repository_path(self, value: str) -> str:
         """Anchor configured tile/pair paths to the checkout rather than the terminal cwd."""
+
         if value.startswith("s3://"):
             raise ValueError("Only local repository paths are enabled in this integration stage")
         path = Path(value.format(tile_id=self.settings["tile_id"], pair=self.settings["pair"]))
@@ -688,7 +688,7 @@ class XGBoostModelingEngine(Engine):
         Smoke changes only explicit round/bootstrap/SHAP controls and output
         locations; it retains the complete input row sets and locked schema.
         """
-        import copy
+
         cfg = copy.deepcopy(self.settings)
         for key in ("training_geoparquet", "prediction_geoparquet", "locked_predictors_parquet",
                     "data_prep_report", "training_output_dir", "prediction_output_dir"):
@@ -806,23 +806,6 @@ class XGBoostModelingEngine(Engine):
         paths += [train_out / f"LOCAL_test_run_manifest_{pair}.json"]
         return paths
 
-    def close_dask(self) -> None:
-        """Retire allocated workers before scheduler shutdown and tolerate partial setup.
-
-        This retains the tested local cleanup improvement without changing the
-        shared base Engine. Review a common base fix with the other engines.
-        """
-        try:
-            if self.client is not None and self.client.status != "closed":
-                try:
-                    workers = list(self.client.scheduler_info().get("workers", {}))
-                    if workers:
-                        self.client.retire_workers(workers=workers, close_workers=True)
-                finally:
-                    self.client.close()
-        finally:
-            if self.cluster is not None:
-                self.cluster.close()
 
     def run(self, overwrite: bool = False, execution: str = "dask", profile: str = "full") -> list[dict]:
         """Validate, execute one model task through Dask and bind outputs to input hashes.
