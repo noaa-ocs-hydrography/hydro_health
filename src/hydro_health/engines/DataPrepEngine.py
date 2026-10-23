@@ -180,12 +180,18 @@ def _read_input_table(uri: str, crs: str, tile_id: str, pair: str, input_crs: st
             raise ValueError(f'GeoParquet CRS conflicts with configured input_crs: {uri}')
         out = pd.DataFrame(spatial.drop(columns=spatial.geometry.name))
     else:
-        if input_crs is None:
-            raise ValueError(f'Plain Parquet requires an explicit input_crs setting: {uri}')
-        actual_crs = CRS.from_user_input(input_crs)
+        # Plain Parquet batches use the target CRS inherited from Engine
+        # unless an input CRS is explicitly configured.
+        actual_crs = (
+            CRS.from_user_input(input_crs)
+            if input_crs is not None
+            else target
+        )
         out = pd.read_parquet(uri)
         if 'geometry' in out:
-            raise ValueError(f'Geometry without GeoParquet CRS metadata is unsupported: {uri}')
+            raise ValueError(
+                f'Geometry without GeoParquet CRS metadata is unsupported: {uri}'
+            )
     if actual_crs != target:
         raise ValueError(f'Input CRS {actual_crs.to_string()} does not match {target.to_string()}: {uri}')
     missing = {'X', 'Y'} - set(out.columns)
