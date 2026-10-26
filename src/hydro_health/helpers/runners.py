@@ -5,6 +5,7 @@ import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BatchTilingEngine import BatchTilingEngine
+from hydro_health.engines.DataPrepEngine import DataPrepEngine
 from hydro_health.engines.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.DigitalCoastS3Engine import DigitalCoastS3Engine
 from hydro_health.engines.MetadataEngine import MetadataEngine
@@ -115,6 +116,7 @@ def run_prediction_rasters_engine(param_lookup: dict[dict], output_prefix: str|b
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
     
 
+
 def run_lidar_gap_fill_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
@@ -127,6 +129,7 @@ def run_lidar_gap_fill_engine(param_lookup: dict[dict], output_prefix: str|bool)
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+    
 
 
 def run_terrain_products_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
@@ -156,6 +159,7 @@ def run_training_rasters_engine(param_lookup: dict[dict], output_prefix: str|boo
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)    
 
+
 def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
@@ -168,6 +172,21 @@ def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool)
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
+
+def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = DataPrepEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+
 
 def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""

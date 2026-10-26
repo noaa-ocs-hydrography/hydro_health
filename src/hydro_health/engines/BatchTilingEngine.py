@@ -97,7 +97,7 @@ def _deduplicate_pixels(df: pd.DataFrame) -> None:
 def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.DataFrame:
     """Decode only columns the batch transformation can actually use."""
     requested_years = {str(year) for pair in year_ranges for year in pair} if year_ranges else set()
-    end_years = {str(y1) for _, y1 in year_ranges} if year_ranges else set()
+    start_years = {str(y0) for y0, _ in year_ranges} if year_ranges else set()
     pair_names = {f"{y0}_{y1}" for y0, y1 in year_ranges} if year_ranges else set()
     feature_tokens = (
         "bpi_broad", "bpi_fine", "curv_plan", "curv_profile",
@@ -129,7 +129,7 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
                     bathy_match and bathy_match.group(1) in requested_years
                 )
                 include = include or (
-                    any(lower.endswith(f"_{year}") for year in end_years)
+                    any(lower.endswith(f"_{year}") for year in start_years)
                     and any(token in lower for token in feature_tokens)
                 )
                 include = include or any(token in lower for token in shared_tokens)
@@ -220,17 +220,17 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         if 'FID' in wide_gdf.columns: pair_df['FID'] = wide_gdf['FID']
         if 'tile_id' in wide_gdf.columns: pair_df['tile_id'] = wide_gdf['tile_id']
         
-        pair_df['year_t'] = y1
-        pair_df['year_ti'] = y0
+        pair_df['year_t'] = y0
+        pair_df['year_t1'] = y1
         
         b_y0 = get_bathy_col(y0_str)
         b_y1 = get_bathy_col(y1_str)
-        if b_y0: pair_df['bathy_ti'] = wide_gdf[b_y0]
-        if b_y1: pair_df['bathy_t'] = wide_gdf[b_y1]
+        if b_y0: pair_df['bathy_t'] = wide_gdf[b_y0]
+        if b_y1: pair_df['bathy_t1'] = wide_gdf[b_y1]
         
         for c in wide_gdf.columns:
-            if c.endswith(f"_{y1_str}") and c != b_y1:
-                base = c.replace(f"_{y1_str}", "").lower()
+            if c.endswith(f"_{y0_str}") and c != b_y0:
+                base = c.removesuffix(f"_{y0_str}").lower()
                 if "bpi_broad" in base: pair_df['bpi_broad_t'] = wide_gdf[c]
                 elif "bpi_fine" in base: pair_df['bpi_fine_t'] = wide_gdf[c]
                 elif "curv_plan" in base: pair_df['curv_plan_t'] = wide_gdf[c]
@@ -268,8 +268,8 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
         if survey_cols: pair_df['survey_end_date'] = wide_gdf[survey_cols[0]]
 
         ordered_cols = [
-            'X', 'Y', 'FID', 'tile_id', 'year_t', 'year_ti', 
-            'bathy_ti', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
+            'X', 'Y', 'FID', 'tile_id', 'year_t', 'year_t1', 
+            'bathy_t1', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
             'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
             'flowdir_cos_t', 'flowdir_sin_t', 'gradmag_t', 'rugosity_t', 
             'shearproxy_t', 'slope_t', 'slope_deg_t', 'tci_t', 
@@ -400,12 +400,12 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
             continue
 
         batch_df = pair_df.copy()
-        batch_df['year_t'] = y1
-        batch_df['year_ti'] = y0
+        batch_df['year_t'] = y0
+        batch_df['year_t1'] = y1
         batch_df[hurr_col] = wide_gdf[hurr_col]
         batch_df[tsm_col] = wide_gdf[tsm_col]
 
-        pair_cols = ordered_cols[:4] + ['year_t', 'year_ti'] + ordered_cols[4:-3] + [
+        pair_cols = ordered_cols[:4] + ['year_t', 'year_t1'] + ordered_cols[4:-3] + [
             hurr_col, tsm_col
         ] + ordered_cols[-3:]
         missing_cols = [c for c in pair_cols if c not in batch_df.columns]
@@ -570,8 +570,8 @@ class BatchTilingEngine(Engine):
         params_list = []
         total_files = len(files_to_process)
         for i, fp in enumerate(files_to_process):
-            filename = fp.name
-            tile_name = filename.split(f"_{mode}")[0]
+            # Preserve the full tile ID, including the subtile number.
+            tile_name = fp.parent.name
             
             output_folder = str(fp.parent)
             

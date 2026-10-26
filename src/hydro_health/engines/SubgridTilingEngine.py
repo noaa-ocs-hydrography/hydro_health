@@ -1455,8 +1455,6 @@ class SubgridTilingEngine(Engine):
         self.is_aws = param_lookup.get('env', 'local') in ['remote', 'aws']
         self.static_patterns = ['sed', 'tsm', 'hurr', 'grain', 'survey']
 
-        self.inputs_dir = INPUTS
-
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths dynamically for aws or local environments and the given eco region."""
 
