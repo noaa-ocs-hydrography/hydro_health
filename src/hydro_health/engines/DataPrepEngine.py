@@ -424,7 +424,8 @@ class DataPrepEngine(Engine):
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
         self.is_aws = param_lookup['env'] in ['remote', 'aws']
-        self.local_tmp_dir = None
+        self.local_tmp_dir = pathlib.Path(str(Path.home() / "hydro_health_local_tmp"))
+
         self.results = []
         self.settings = {
             'master_predictors': None,
@@ -602,7 +603,6 @@ class DataPrepEngine(Engine):
         
         self.results = []
         try:
-            self.local_tmp_dir = Path(tempfile.mkdtemp(prefix='hhm_data_prep_'))
             self.setup_dask(self.param_lookup['env'], n_workers=2, threads_per_worker=1, memory_limit='12GB')
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)
