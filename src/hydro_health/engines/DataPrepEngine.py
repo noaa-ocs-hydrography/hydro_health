@@ -27,8 +27,8 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 DYNAMIC_BASES = ('hurr_strength_mean', 'tsm_mean')
 NON_PREDICTORS = {
     'X', 'Y', 'FID', 'tile_id', 'source', 'dataset_role',
-    'year_t', 'year_t1', 'year_ti', 'interval_years', 'pair_id',
-    'bathy_t1', 'bathy_ti', 'delta_bathy', 'delta_rate', 'survey_end_date',
+    'year_t', 'year_t1', 'year_t1', 'interval_years', 'pair_id',
+    'bathy_t1', 'bathy_t1', 'delta_bathy', 'delta_rate', 'survey_end_date',
     'geometry', 'prediction_row_usable', 'sample_weight',
 }
 
