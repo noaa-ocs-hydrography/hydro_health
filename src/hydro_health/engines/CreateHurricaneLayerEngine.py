@@ -9,6 +9,8 @@ os.environ["CHECK_DISK_FREE_SPACE"] = "FALSE"
 import logging
 import sys
 import requests
+import cProfile
+import pstats
 import tempfile
 import shutil
 import pathlib
@@ -896,3 +898,15 @@ class CreateHurricaneLayerEngine(Engine):
                     shutil.copyfileobj(f_in, f_out)
             else:
                 shutil.copy(local_raster, path_obj)
+
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateHurricaneLayerEngine(overwrite=True)
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  

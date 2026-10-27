@@ -8,7 +8,7 @@ from rasterio.transform import from_origin
 from shapely.geometry import Point, box
 from unittest.mock import patch, MagicMock
 
-from hydro_health.engines.tiling.ModelDataPreProcessor import ModelDataPreProcessor
+from hydro_health.engines.ModelDataPreProcessor import ModelDataPreProcessor
 
 # ==========================================
 # FIXTURES
@@ -20,10 +20,10 @@ def mock_dependencies():
     This fixture mocks out all the external dependencies that reach out to the 
     network, database, or config files so we can test the class logic in isolation.
     """
-    with patch('hydro_health.engines.tiling.ModelDataPreProcessor.get_environment') as mock_get_env, \
-         patch('hydro_health.engines.tiling.ModelDataPreProcessor.get_config_item') as mock_get_config, \
-         patch('hydro_health.engines.tiling.ModelDataPreProcessor.s3fs.S3FileSystem') as mock_s3fs, \
-         patch('hydro_health.engines.tiling.ModelDataPreProcessor.ModelDataPreProcessor._load_exclusion_config', return_value=set()):
+    with patch('hydro_health.engines.ModelDataPreProcessor.get_environment') as mock_get_env, \
+         patch('hydro_health.engines.ModelDataPreProcessor.get_config_item') as mock_get_config, \
+         patch('hydro_health.engines.ModelDataPreProcessor.s3fs.S3FileSystem') as mock_s3fs, \
+         patch('hydro_health.engines.ModelDataPreProcessor.ModelDataPreProcessor._load_exclusion_config', return_value=set()):
         
         # Default mock returns
         mock_get_env.return_value = 'local'
@@ -115,7 +115,7 @@ def test_create_file_paths(mock_dependencies, env_name, expected_prefix):
     
     # If we are in AWS mode, we need get_config_item to return a bucket name
     def custom_config(section, key):
-        if key == 'BUCKET_NAME': return 'mock_bucket_name'
+        if key == 'OUTPUT_BUCKET': return 'mock_bucket_name'
         return f"mock_{key.lower()}"
     
     mock_dependencies['get_config'].side_effect = custom_config
@@ -343,8 +343,8 @@ def test_save_combined_data(mock_dependencies, tmp_path):
     assert stats_df['tile_id'].iloc[0] == "tile_001"
     assert stats_df['2010_2015_nan_percent'].iloc[0] == 50.0
 
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.rasterio.open')
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.shapes')
+@patch('hydro_health.engines.ModelDataPreProcessor.rasterio.open')
+@patch('hydro_health.engines.ModelDataPreProcessor.shapes')
 def test_raster_to_spatial_df(mock_shapes, mock_rio_open, mock_dependencies, tmp_path):
     """Test converting a mask raster to a GeoDataFrame using mocked rasterio shapes."""
     processor = ModelDataPreProcessor()
@@ -386,13 +386,13 @@ def test_raster_to_spatial_df(mock_shapes, mock_rio_open, mock_dependencies, tmp
 def test_load_exclusion_config_missing_file():
     """Test loading the exclusion config when the file doesn't exist."""
     # We bypass the mock_dependencies fixture here because it actively mocks out _load_exclusion_config
-    with patch('hydro_health.engines.tiling.ModelDataPreProcessor.pathlib.Path.exists', return_value=False):
-        with patch('hydro_health.engines.tiling.ModelDataPreProcessor.s3fs.S3FileSystem'), patch('hydro_health.engines.tiling.ModelDataPreProcessor.get_environment', return_value='local'):
+    with patch('hydro_health.engines.ModelDataPreProcessor.pathlib.Path.exists', return_value=False):
+        with patch('hydro_health.engines.ModelDataPreProcessor.s3fs.S3FileSystem'), patch('hydro_health.engines.ModelDataPreProcessor.get_environment', return_value='local'):
             processor = ModelDataPreProcessor()
             # Should gracefully return an empty set if yaml is missing
             assert processor.excluded_keys == set()
 
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.yaml.safe_load')
+@patch('hydro_health.engines.ModelDataPreProcessor.yaml.safe_load')
 def test_load_exclusion_config_with_data(mock_yaml_load):
     """Test loading the exclusion config with valid YAML data."""
     mock_yaml_load.return_value = {
@@ -403,10 +403,10 @@ def test_load_exclusion_config_with_data(mock_yaml_load):
         }
     }
     
-    with patch('hydro_health.engines.tiling.ModelDataPreProcessor.pathlib.Path.exists', return_value=True), \
+    with patch('hydro_health.engines.ModelDataPreProcessor.pathlib.Path.exists', return_value=True), \
          patch('builtins.open', new_callable=MagicMock), \
-         patch('hydro_health.engines.tiling.ModelDataPreProcessor.s3fs.S3FileSystem'), \
-         patch('hydro_health.engines.tiling.ModelDataPreProcessor.get_environment', return_value='local'):
+         patch('hydro_health.engines.ModelDataPreProcessor.s3fs.S3FileSystem'), \
+         patch('hydro_health.engines.ModelDataPreProcessor.get_environment', return_value='local'):
         
         processor = ModelDataPreProcessor()
         
@@ -430,8 +430,8 @@ def test_process_training_raster_intersection(mock_dependencies, dummy_raster):
         assert 'dst_nodata' in kwargs
         assert np.isnan(kwargs['dst_nodata'])
 
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.gdal.Warp')
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.gpd.GeoDataFrame.to_file')
+@patch('hydro_health.engines.ModelDataPreProcessor.gdal.Warp')
+@patch('hydro_health.engines.ModelDataPreProcessor.gpd.GeoDataFrame.to_file')
 def test_warp_to_cutline(mock_to_file, mock_warp, mock_dependencies):
     """Test that gdal.Warp is configured and called correctly."""
     processor = ModelDataPreProcessor()
@@ -483,7 +483,7 @@ def test_subtile_process_gridded(mock_extract, mock_dependencies):
     ]
     
     # Mock UPath rglob to return our two dummy rasters
-    with patch('hydro_health.engines.tiling.ModelDataPreProcessor.UPath.rglob') as mock_rglob:
+    with patch('hydro_health.engines.ModelDataPreProcessor.UPath.rglob') as mock_rglob:
         mock_f1 = MagicMock(); mock_f1.suffix = '.tif'; mock_f1.name = 'tile_A_bathy.tif'
         mock_f2 = MagicMock(); mock_f2.suffix = '.tif'; mock_f2.name = 'tile_A_tsm.tif'
         mock_rglob.return_value = [mock_f1, mock_f2]
@@ -498,9 +498,9 @@ def test_subtile_process_gridded(mock_extract, mock_dependencies):
         assert result_gdf['bathy_filled'].iloc[0] == 10.5
         assert result_gdf['tsm_mean'].iloc[0] == 0.1
 
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.gpd.sjoin')
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.gpd.read_file')
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.gpd.read_parquet')
+@patch('hydro_health.engines.ModelDataPreProcessor.gpd.sjoin')
+@patch('hydro_health.engines.ModelDataPreProcessor.gpd.read_file')
+@patch('hydro_health.engines.ModelDataPreProcessor.gpd.read_parquet')
 def test_create_subgrids(mock_read_parquet, mock_read_file, mock_sjoin, mock_dependencies):
     """Test generating a spatial join between the grid and a unioned mask."""
     processor = ModelDataPreProcessor()
@@ -544,7 +544,7 @@ def test_subtile_process_ungridded(mock_extract, mock_dependencies):
         pd.DataFrame({'X': [1, 2], 'Y': [1, 2], 'Value': [5, 6], 'Raster': 'hurr_raster'})
     ]
     
-    with patch('hydro_health.engines.tiling.ModelDataPreProcessor.UPath.rglob') as mock_rglob:
+    with patch('hydro_health.engines.ModelDataPreProcessor.UPath.rglob') as mock_rglob:
         # rglob is called once per pattern in the loop, so we return lists of fake files accordingly
         mock_rglob.side_effect = [
             [MagicMock(suffix='.tif', name='tsm_mean_raster.tif')],
@@ -560,7 +560,7 @@ def test_subtile_process_ungridded(mock_extract, mock_dependencies):
         assert result_df['tsm_mean_raster'].iloc[0] == 0.5
         assert result_df['hurr_raster'].iloc[0] == 5.0
 
-@patch('hydro_health.engines.tiling.ModelDataPreProcessor.gpd.read_parquet')
+@patch('hydro_health.engines.ModelDataPreProcessor.gpd.read_parquet')
 @patch.object(ModelDataPreProcessor, '_process_and_save_training_tile')
 @patch.object(ModelDataPreProcessor, '_process_and_save_prediction_tile')
 def test_transform_tile_task_routing(mock_pred, mock_train, mock_read_pq, mock_dependencies):

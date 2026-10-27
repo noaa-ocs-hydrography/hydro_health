@@ -1,30 +1,29 @@
 """Class for obtaining all available files"""
 
-import boto3
 import json
 import os
-import re
-import zipfile
 import requests
-import shutil
 import sys
 import geopandas as gpd
 import pathlib
 
 from bs4 import BeautifulSoup
-from botocore.client import Config
-from botocore import UNSIGNED
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import set_executable
 
 from hydro_health.helpers.tools import get_config_item
+from hydro_health.engines.Engine import Engine
 
 
 set_executable(os.path.join(sys.exec_prefix, 'pythonw.exe'))
 
 
-class MetadataEngine:
+class MetadataEngine(Engine):
     """Class for parallel processing metadata for a region"""
+
+    def __init__(self, param_lookup: dict[dict]) -> None:
+        super().__init__()
+        self.param_lookup = param_lookup
 
     def download_metadata(self, param_inputs: list[list]) -> None:
         """Parallel process and download metadata dates"""
@@ -64,22 +63,18 @@ class MetadataEngine:
     def read_json_files(self, digital_coast_folder: pathlib.Path, outputs: str) -> None:
         """Read JSON files to download metadata information"""
 
-        print('- Reading DigitalCoast JSON files')
+        print(' - Reading DigitalCoast JSON files')
         feature_json_files = [feature_json for feature_json in digital_coast_folder.rglob('feature.json') if 'unused_providers' not in str(feature_json)]
         metadata_params = []
         for feature_json in feature_json_files:
             provider_folder = feature_json.parents[0]
             with open(feature_json, 'r') as json_file:
                 feature = json.load(json_file)
-            external_provider_links = feature['ExternalProviderLink']
-            for external_data in external_provider_links:
-                json_label = external_data['label'] if external_data['label'] else external_data['altlabel']  # Some labels are empty
-                if json_label in ['Metadata', 'ISO metadata']:
-                    if 'iso' in external_data['link']:
-                        label = 'ISO metadata'
-                    else:
-                        label = 'Metadata'
-                    metadata_params.append([label, feature['Metalink'], provider_folder, outputs])
+            provider_links = feature['links']
+            for provider_link in provider_links:
+                if provider_link['linkTypeName'] == 'Metadata':
+                    label = 'Metadata'
+                    metadata_params.append([label, provider_link['uri'], provider_folder, outputs])
                     break
             
         with ThreadPoolExecutor(int(os.cpu_count() - 2)) as meta_pool:
@@ -104,15 +99,18 @@ class MetadataEngine:
     def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str|bool, outputs: str) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
-        print('Downloading Metadata Datasets')
+        print('Starting MetadataEngine')
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
-            print('Starting:', ecoregion)
+            print('- Starting:', ecoregion)
+            digital_coast_subfolder = pathlib.Path(ecoregion) / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
             if output_prefix:
-                digital_coast_folder = pathlib.Path(outputs) / output_prefix / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                digital_coast_subfolder = pathlib.Path(output_prefix) / digital_coast_subfolder
             else:
-                digital_coast_folder = pathlib.Path(outputs) / ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
+                digital_coast_folder = pathlib.Path(outputs) / digital_coast_subfolder
             self.read_json_files(digital_coast_folder, outputs)
+            found_metadata = list(digital_coast_folder.rglob('metadata.txt'))
+            self.write_run_manifest(digital_coast_subfolder, {'metadata': len(found_metadata)})
 
     def write_message(self, message: str, output_folder: str) -> None:
         """Write a message to the main logfile in the output folder"""

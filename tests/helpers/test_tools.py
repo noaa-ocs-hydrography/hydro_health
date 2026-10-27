@@ -22,6 +22,12 @@ def param_lookup():
     return {"eco_regions": tools.Param('ER_1-Texas;'), "output_directory": tools.Param(OUTPUTS), "drawn_polygon": tools.Param('')}
 
 
+def test_get_approved_providers(victim):
+    result = victim.get_approved_providers('ER_3')
+    assert '2001_Lidar_USGS_50098' in result
+    assert '1885_DEM_USGS_67613' not in result
+
+
 def test_create_raster_vrts(victim):
     ...
 

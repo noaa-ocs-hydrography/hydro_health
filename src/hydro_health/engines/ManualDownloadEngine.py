@@ -8,9 +8,9 @@ sys.path.append(str(HH_MODEL))
 
 from hydro_health.helpers.tools import Param
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
-from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
-from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
-from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
+from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
+from hydro_health.engines.RasterMaskS3Engine import RasterMaskS3Engine
+from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -24,17 +24,20 @@ class ManualDownloadEngine:
     def __init__(self, param_lookup) -> None:
         self.param_lookup = param_lookup
 
-    def process_grid_tiles(self) -> None:
+    def process_grid_tiles(self, output_prefix) -> None:
         """Tile manually downloaded VRT files to BlueTopo"""
 
         engine = GridDigitalCoastEngine(self.param_lookup)
-        engine.run(manual_download=True)
+        engine.run(output_prefix=output_prefix, manual_downloads=False)
 
-    def process_masks(self) -> None:
+        engine = GridDigitalCoastEngine(self.param_lookup)
+        engine.run(output_prefix=output_prefix, manual_downloads=True)
+
+    def process_masks(self, output_prefix) -> None:
         """Create masks with manual download additions"""
 
-        engine = RasterMaskS3Engine(self.param_lookup)
-        engine.run(str(OUTPUTS), manual_downloads=True)
+        engine = RasterMaskS3Engine(self.param_lookup, pilot_mode=False)
+        engine.run(str(OUTPUTS), output_prefix, manual_downloads=True)
 
     def process_metadata(self) -> None:
         """Build metdata text file for manually downloaded DEMs"""
@@ -46,9 +49,9 @@ class ManualDownloadEngine:
     def process_vrt(self, output_prefix) -> None:
         """Create VRT files for each manually downloaded provider"""
         
-        engine = RasterVRTS3Engine(self.param_lookup)
+        engine = RasterVRTEngine(self.param_lookup)
         engine.setup_dask('aws')
-        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', data_folder='Digital_Coast_Manual_Downloads', skip_existing=False)
+        engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', manual_downloads=True)
         engine.close_dask()
 
     def rebuild_training_mask(self) -> None:
@@ -64,19 +67,20 @@ class ManualDownloadEngine:
         # TODO need to add output_prefix to calls
         output_prefix = False
 
-        # TODO this process creates missing Manual Download VRTs
-        # Need to run normal VRT process before
+        # TODO VRT process runs both normal and manual downloads if using manual_downloads param
         self.process_vrt(output_prefix)
         self.process_masks(output_prefix)  # mask process runs DigitalCoast and Digital_Coast_Manual_Downoads
         # self.rebuild_training_mask()
-        # TODO this grid tiling process only does the manual downloads
+        # TODO this grid tiling process calls the regular and manual downloads processes
         # Need to run both folders separately or fix code
-        self.process_grid_tiles(output_prefix)
+        # self.process_grid_tiles(output_prefix)
         print('Done')
+
 
 if __name__ == '__main__':
     param_lookup = {
         'output_directory': Param(str(OUTPUTS)),
+        'eco_regions': Param(['ER_3']),
         'env': 'aws'
     }
     engine = ManualDownloadEngine(param_lookup)

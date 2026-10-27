@@ -60,7 +60,6 @@ logger.info(f"Writing logs to: {log_file}")
 # =====================================================================
 # 1. PLACEHOLDERS: Fill these in with your S3 paths and expected values
 # =====================================================================
-
 # Directories for prediction and training TIFFs
 S3_PREDICTION_DIR = "s3://ocs-dev-csdl-hydrohealth/ER_3/pilot/model_variables/Prediction/processed"
 S3_TRAINING_DIR = "s3://ocs-dev-csdl-hydrohealth/ER_3/pilot/model_variables/Training/processed"
@@ -76,10 +75,10 @@ S3_TRAINING_MASK_PATH = "s3://ocs-dev-csdl-hydrohealth/ER_3/pilot/masks/training
 EXPECTED_CRS = "EPSG:32617"     # Expected Coordinate Reference System (e.g., EPSG:4326, EPSG:32630)
 EXPECTED_RESOLUTION = (8, 8)    # Expected pixel resolution (x, y) in map units, this should be meters
 
+
 # =====================================================================
 # 2. FIXTURES: Load data once per test session to save time and network
 # =====================================================================
-
 @pytest.fixture(scope="module")
 def tiff_inventories():
     """
@@ -99,6 +98,7 @@ def tiff_inventories():
     
     return pred_dict, train_dict
 
+
 @pytest.fixture(scope="module")
 def parquet_inventories():
     """
@@ -116,20 +116,22 @@ def parquet_inventories():
     
     return pred_dict, train_dict
 
+
 @pytest.fixture(scope="module")
 def pred_mask_gdf():
     """Reads the single Prediction GeoParquet mask file from S3."""
     return gpd.read_parquet(S3_PREDICTION_MASK_PATH)
+
 
 @pytest.fixture(scope="module")
 def train_mask_gdf():
     """Reads the single Training GeoParquet mask file from S3."""
     return gpd.read_parquet(S3_TRAINING_MASK_PATH)
 
+
 # =====================================================================
 # 3. THE TESTS
 # =====================================================================
-
 def test_tiff_metadata(tiff_inventories):
     """Checks if all TIFFs have the exact CRS, resolution, and data type (float32) expected."""
     pred_dict, train_dict = tiff_inventories
@@ -309,6 +311,7 @@ def test_matching_tiffs_have_same_dimensions_and_extents(tiff_inventories):
         "\n".join(mismatches)
     )
 
+
 def test_matching_parquets_have_same_dimensions_and_extents(parquet_inventories):
     """
     Looks at matching named GeoParquets in both directories and ensures they have the 
@@ -359,6 +362,7 @@ def test_matching_parquets_have_same_dimensions_and_extents(parquet_inventories)
         f"Found {len(mismatches)} GeoParquet files with mismatched dimensions or bounds:\n" + 
         "\n".join(mismatches)
     )
+
 
 if __name__ == "__main__":
     # This block allows you to run the script directly with standard Python.

@@ -20,8 +20,9 @@ from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
 
 # Global Base Paths
-INPUTS = pathlib.Path(__file__).parents[4] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[4] / 'outputs'
+INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 def focal_fill_block(block: np.ndarray, w=3) -> np.ndarray:
     """
@@ -249,6 +250,7 @@ def _process_combine_group(params: list) -> tuple:
     finally:
         gc.collect()
 
+
 class LidarGapFillEngine(Engine):
     """
     Engine dedicated solely to iteratively filling gaps (NoData holes) 
@@ -269,42 +271,12 @@ class LidarGapFillEngine(Engine):
         
         self.inputs_dir = INPUTS
 
-    def log_system_metrics(self) -> str:
-        """Helper to collect and format EC2 system metrics (RAM, Disk Space, Temp Size)."""
-        try:
-            total, used, free = shutil.disk_usage(self.local_tmp_dir)
-            free_gb = free / (1024**3)
-            total_gb = total / (1024**3)
-            
-            tmp_size_bytes = sum(f.stat().st_size for f in self.local_tmp_dir.rglob('*') if f.is_file()) if self.local_tmp_dir.exists() else 0
-            tmp_mb = tmp_size_bytes / (1024**2)
-            
-            ram_info = "Unknown"
-            try:
-                import psutil
-                vm = psutil.virtual_memory()
-                ram_info = f"Free: {vm.available / (1024**3):.1f}GB / {vm.total / (1024**3):.1f}GB (Used: {vm.percent}%)"
-            except ImportError:
-                if os.path.exists('/proc/meminfo'):
-                    with open('/proc/meminfo', 'r') as f:
-                        meminfo = f.read()
-                    mem_avail = re.search(r'MemAvailable:\s+(\d+)\s+kB', meminfo)
-                    mem_total = re.search(r'MemTotal:\s+(\d+)\s+kB', meminfo)
-                    if mem_avail and mem_total:
-                        avail_gb = int(mem_avail.group(1)) / (1024**2)
-                        tot_gb = int(mem_total.group(1)) / (1024**2)
-                        ram_info = f"Free: {avail_gb:.1f}GB / {tot_gb:.1f}GB (Used: {100 - (avail_gb / tot_gb * 100):.1f}%)"
-            
-            return f"   [SysMetrics] RAM | {ram_info} || Disk Free | {free_gb:.1f}GB / {total_gb:.1f}GB || Tmp Dir Size | {tmp_mb:.1f}MB"
-        except Exception as e:
-            return f"   [SysMetrics] Error collecting system metrics: {e}"
-
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths dynamically for aws or local environments and the given eco region."""
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.write_message(f"LidarGapFillEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
 
-        bucket = get_config_item('S3', 'BUCKET_NAME')
+        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
         s3_dir_base = f"s3://{bucket}/{region}"
 
         # Setup standard data directories
@@ -424,7 +396,7 @@ class LidarGapFillEngine(Engine):
         env = self.param_lookup.get('env', 'local')
         
         try:
-            self.setup_dask(env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
+            self.setup_dask(env, n_workers=3, threads_per_worker=1, memory_limit="10GB") 
             
             for eco_region in self.param_lookup['eco_regions'].value:
                 self._resolve_paths(eco_region)

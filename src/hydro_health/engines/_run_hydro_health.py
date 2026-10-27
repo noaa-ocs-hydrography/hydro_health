@@ -10,11 +10,11 @@ from datetime import datetime
 import logging
 
 # Add this near the top of run_hydro_health.py
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    force=True # Overrides any other hidden logging settings
-)
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s - %(levelname)s - %(message)s',
+#     force=True # Overrides any other hidden logging settings
+# )
 
 
 os.environ['PROJ_NETWORK'] = 'OFF'
@@ -41,13 +41,6 @@ def get_env_param_lookup(env: str) -> dict[str]:
             'drawn_polygon': Param(str(INPUTS / 'drawn_polygons.geojson')),
             'env': env
         }
-    elif env == 'remote':
-        param_lookup = {
-            'input_directory': Param(''),
-            'output_directory': Param(get_config_item('SHARED', 'OUTPUT_FOLDER')),
-            'eco_regions': Param(''),
-            'env': env
-        }
     else:
         param_lookup = {
             'input_directory': Param(''),
@@ -66,15 +59,16 @@ def run_hydro_health(config_name: str) -> None:
 
     output_directory = pathlib.Path(param_lookup['output_directory'].valueAsText)
     if os.path.exists(output_directory / 'log_prints.txt'):
-        now = time.time()
-        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{now}.txt')
+        now = datetime.now()
+        date_time_str = now.strftime("%Y-%m-%d_%H-%M-%S")
+        os.rename(output_directory / 'log_prints.txt', output_directory / f'log_prints_{date_time_str}.txt')
     print('Output folder:', output_directory)
 
     config_path = INPUTS / "run_configs" / config_name
     with open(config_path, "r") as lookup:
-        config = yaml.safe_load(lookup)
+        config = yaml.safe_load(lookup) 
 
-        pilot_mode = config['pilot_mode']
+        pilot_mode = config.get('pilot_mode', False)
         output_prefix = config.get('output_prefix', False)
         resolution = config.get('resolution', [8])
 
@@ -85,6 +79,8 @@ def run_hydro_health(config_name: str) -> None:
         for step in config["steps"]:
             if step["tool"] == "run_bluetopo_tile_engine" and step["run"]:
                 runners.run_bluetopo_tile_engine(tiles, param_lookup, output_prefix, resolution=resolution)
+            elif step["tool"] == "run_distance_to_shore_engine" and step["run"]:
+                runners.run_distance_to_shore_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_digital_coast_engine" and step["run"]:
                 runners.run_digital_coast_engine(tiles, param_lookup, output_prefix)
             # TODO Removed laz download until HH 2.0
@@ -95,7 +91,7 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_vrt_creation" and step["run"]:
                 runners.run_raster_vrt_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_raster_mask_engine" and step["run"]:
-                runners.run_raster_mask_engine(param_lookup, output_prefix)
+                runners.run_raster_mask_engine(param_lookup, output_prefix, pilot_mode)
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 runners.run_grid_digital_coast(param_lookup, output_prefix)
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
@@ -114,12 +110,17 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
                 runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
+<<<<<<< HEAD:src/hydro_health/engines/run_hydro_health.py
             elif step["tool"] == "run_data_prep_engine" and step["run"]:
                 runners.run_data_prep_engine(param_lookup, output_prefix)    
             elif step["tool"] == "run_xgboost_modeling_engine" and step["run"]:
                 runners.run_xgboost_modeling_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_ml_raster_export_engine" and step["run"]:
                 runners.run_ml_raster_export_engine(param_lookup, output_prefix)        
+=======
+            elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
+                runners.run_batch_tiling_engine(param_lookup, output_prefix)    
+>>>>>>> 2f76e3c8e236f5d0adedcb21ea108291b6f8e3ab:src/hydro_health/engines/_run_hydro_health.py
 
     write_config_log(config_path, config, env)
     end = time.time()
