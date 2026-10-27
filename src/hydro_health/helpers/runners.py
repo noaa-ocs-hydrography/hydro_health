@@ -25,6 +25,7 @@ from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayer
 from hydro_health.engines.DistanceToShoreEngine import DistanceToShoreEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.TerrainProductsEngine import TerrainProductsEngine
+from hydro_health.engines.XGBoostModelingEngine import XGBoostModelingEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
 
 
@@ -188,6 +189,20 @@ def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> N
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
 
 
+def run_xgboost_modeling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the XGBoost modeling engine"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = XGBoostModelingEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)         
+
+
 def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
@@ -201,11 +216,13 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
 
+
 def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the distance to shore raster creator"""
 
     engine = DistanceToShoreEngine(param_lookup)
     engine.run(output_prefix)
+
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
