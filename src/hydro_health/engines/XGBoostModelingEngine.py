@@ -25,6 +25,68 @@ NON_PREDICTORS = {
     "survey_end_date", "geometry", "prediction_row_usable", "sample_weight",
 }
 
+def _compact_numeric_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    """Use at most 32-bit numeric columns and reject out-of-range values."""
+
+    for column in frame.columns:
+        series = frame[column]
+        if pd.api.types.is_bool_dtype(series.dtype):
+            continue
+        if pd.api.types.is_integer_dtype(series.dtype):
+            present = series.dropna()
+            if not present.empty and (
+                present.min() < np.iinfo(np.int32).min
+                or present.max() > np.iinfo(np.int32).max
+            ):
+                raise ValueError(f"{column} exceeds the int32 range")
+            dtype = "Int32" if isinstance(series.dtype, pd.api.extensions.ExtensionDtype) else np.int32
+            frame[column] = series.astype(dtype)
+        elif pd.api.types.is_float_dtype(series.dtype):
+            present = series.dropna()
+            if column == "FID":
+                if not present.empty and (
+                    not np.isfinite(present).all()
+                    or (present != np.floor(present)).any()
+                    or present.min() < np.iinfo(np.int32).min
+                    or present.max() > np.iinfo(np.int32).max
+                ):
+                    raise ValueError("FID must contain integer values within the int32 range")
+                frame[column] = series.astype("Int32" if series.isna().any() else np.int32)
+            else:
+                if (present.abs() > np.finfo(np.float32).max).any():
+                    raise ValueError(f"{column} exceeds the finite float32 range")
+                frame[column] = series.astype(np.float32)
+    return frame
+
+def _validate_training_changes(frame: pd.DataFrame) -> None:
+    """Allow float32 rounding while checking prepared change and rate signs."""
+
+    baseline = frame.bathy_t.to_numpy(dtype=np.float32)
+    observed = frame.bathy_t1.to_numpy(dtype=np.float32)
+    delta = frame.delta_bathy.to_numpy(dtype=np.float32)
+    rate = frame.delta_rate.to_numpy(dtype=np.float32)
+    interval = frame.interval_years.to_numpy(dtype=np.float32)
+    tolerance = 4 * np.finfo(np.float32).eps
+    change_atol = tolerance * np.maximum(np.abs(baseline) + np.abs(observed), 1.0)
+    if not np.isclose(delta, observed - baseline, rtol=tolerance, atol=change_atol).all():
+        raise ValueError("Prepared delta_bathy does not match bathy_t1 minus bathy_t")
+    if not np.isclose(
+        rate, delta / interval, rtol=tolerance, atol=change_atol / interval
+    ).all():
+        raise ValueError("Prepared delta_rate does not match delta_bathy / interval_years")
+
+def _write_task_progress(cfg: dict, message: str, verbose_only: bool = False) -> None:
+    """Include region and task identity in worker progress messages."""
+
+    if verbose_only and not cfg["model_config"]["verbose_logging"]:
+        return
+    number, total = cfg.get("task_number", 1), cfg.get("task_total", 1)
+    region, tile_id, pair = cfg["region"], cfg["tile_id"], cfg["pair"]
+    Engine.write_message_dask(
+        f"[{region} task {number}/{total}: {tile_id}, {pair}] {message}",
+        Path(cfg["log_dir"]),
+    )
+
 def _stable_seed(global_seed: int, *parts: object) -> int:
     """Helper to generate a stable, reproducible random seed based on inputs."""
 
@@ -40,7 +102,8 @@ def _xgb_params(model_cfg: dict) -> dict:
         "max_depth": model_cfg["max_depth"], "eta": model_cfg["eta"],
         "gamma": model_cfg["gamma"], "lambda": model_cfg["reg_lambda"],
         "alpha": model_cfg["reg_alpha"], "subsample": model_cfg["subsample"],
-        "colsample_bytree": model_cfg["colsample_bytree"], "nthread": 1,
+        "colsample_bytree": model_cfg["colsample_bytree"],
+        "nthread": 1,
         "tree_method": model_cfg["tree_method"], "max_bin": model_cfg["max_bin"],
         "seed": int(model_cfg.get("xgb_seed", 0)),
     }
@@ -54,12 +117,17 @@ def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed:
 
     if block_size_m <= 0:
         raise ValueError("block_size_m must be greater than zero")
-    if n_folds < 1:
-        raise ValueError("n_folds must be at least 1")
-    x = df["X"].to_numpy(dtype=float)
-    y = df["Y"].to_numpy(dtype=float)
-    gx = np.floor((x - np.nanmin(x)) / block_size_m).astype(np.int64)
-    gy = np.floor((y - np.nanmin(y)) / block_size_m).astype(np.int64)
+    if not 1 <= n_folds <= np.iinfo(np.int32).max:
+        raise ValueError("n_folds must be within the positive int32 range")
+    x = df["X"].to_numpy(dtype=np.float32)
+    y = df["Y"].to_numpy(dtype=np.float32)
+    gx = np.floor((x - np.nanmin(x)) / block_size_m)
+    gy = np.floor((y - np.nanmin(y)) / block_size_m)
+    for grid in (gx, gy):
+        if not np.isfinite(grid).all() or (np.abs(grid) > np.iinfo(np.int32).max).any():
+            raise ValueError("Spatial block indices exceed the int32 range or are nonfinite")
+    gx = gx.astype(np.int32)
+    gy = gy.astype(np.int32)
     block = pd.Series(gx).astype(str).str.cat(pd.Series(gy).astype(str), sep=":")
 
     unique_blocks = block.drop_duplicates().to_numpy(
@@ -69,15 +137,42 @@ def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed:
     rng.shuffle(unique_blocks)
 
     mapping = {b: i % min(n_folds, len(unique_blocks)) for i, b in enumerate(unique_blocks)}
-    return block.map(mapping).to_numpy(dtype=int)
+    return block.map(mapping).to_numpy(dtype=np.int32)
+
+def _safe_correlation(observed: np.ndarray, predicted: np.ndarray) -> float | None:
+    """Compute Pearson correlation in float32, returning None when undefined."""
+
+    a = np.asarray(observed, dtype=np.float32)
+    b = np.asarray(predicted, dtype=np.float32)
+    valid = np.isfinite(a) & np.isfinite(b)
+    a, b = a[valid], b[valid]
+    if len(a) < 2 or np.all(a == a[0]) or np.all(b == b[0]):
+        return None
+    # Scale before centering to avoid overflow for large finite inputs.
+    a = a / np.max(np.abs(a))
+    b = b / np.max(np.abs(b))
+    a = a - np.mean(a, dtype=np.float32)
+    b = b - np.mean(b, dtype=np.float32)
+    a_scale, b_scale = np.max(np.abs(a)), np.max(np.abs(b))
+    if a_scale == 0 or b_scale == 0:
+        return None
+    # Scale again so tiny variations cannot underflow when squared.
+    a /= a_scale
+    b /= b_scale
+    a_norm = np.sqrt(np.sum(a * a, dtype=np.float32))
+    b_norm = np.sqrt(np.sum(b * b, dtype=np.float32))
+    if a_norm == 0 or b_norm == 0:
+        return None
+    correlation = np.sum((a / a_norm) * (b / b_norm), dtype=np.float32)
+    return float(np.clip(correlation, -1.0, 1.0)) if np.isfinite(correlation) else None
 
 def _model_metrics(observed: pd.Series | np.ndarray, predicted: np.ndarray, baseline: pd.Series | np.ndarray, interval: pd.Series | np.ndarray) -> dict:
     """Compute unweighted state/change/rate metrics; apparent fitting metrics are not held-out accuracy."""
 
-    obs = np.asarray(observed, dtype=float)
-    pred = np.asarray(predicted, dtype=float)
-    baseline = np.asarray(baseline, dtype=float)
-    interval = np.asarray(interval, dtype=float)
+    obs = np.asarray(observed, dtype=np.float32)
+    pred = np.asarray(predicted, dtype=np.float32)
+    baseline = np.asarray(baseline, dtype=np.float32)
+    interval = np.asarray(interval, dtype=np.float32)
     result = {}
     for name, left, right in (
         ("bathy_t1", obs, pred),
@@ -96,11 +191,7 @@ def _model_metrics(observed: pd.Series | np.ndarray, predicted: np.ndarray, base
         result[f"r2_predictive_{name}"] = (
             float(1 - np.sum(error**2) / denominator) if denominator > 0 else None
         )
-        result[f"correlation_{name}"] = (
-            float(np.corrcoef(a, b)[0, 1])
-            if len(a) > 1 and np.std(a) > 0 and np.std(b) > 0
-            else None
-        )
+        result[f"correlation_{name}"] = _safe_correlation(a, b)
         if name == "change":
             result["sign_accuracy_change"] = (
                 float(np.mean(np.sign(a) == np.sign(b))) if len(a) else None
@@ -119,27 +210,27 @@ def _fit_cv_fold(fold: int, folds: np.ndarray, features: pd.DataFrame, labels: n
     values = features.to_numpy(dtype=np.float32, copy=False)
     names = features.columns.tolist()
     dtrain = xgb.DMatrix(values[train], label=labels[train], weight=weights[train],
-                        feature_names=names, missing=np.nan)
-    dtest = xgb.DMatrix(values[test], label=labels[test], feature_names=names, missing=np.nan)
+                        nthread=1, feature_names=names, missing=np.nan)
+    dtest = xgb.DMatrix(values[test], label=labels[test], feature_names=names, missing=np.nan, nthread=1)
     model_seed = _stable_seed(seed, "cv_model", int(fold))
     model = xgb.train(
         _xgb_params(dict(model_cfg, xgb_seed=model_seed)), dtrain,
         num_boost_round=model_cfg["cv_nrounds"], evals=[(dtrain, "train"), (dtest, "test")],
         early_stopping_rounds=model_cfg["early_stopping_rounds"], verbose_eval=False)
     rounds = int(model.best_iteration) + 1
-    prediction = model.predict(dtest, iteration_range=(0, rounds)).astype(float)
+    prediction = model.predict(dtest, iteration_range=(0, rounds)).astype(np.float32, copy=False)
     error = prediction - labels[test]
     row.update(status="ok", best_nrounds=rounds, xgb_seed=model_seed,
                rmse_bathy_t1=float(np.sqrt(np.mean(error**2))),
                mae_bathy_t1=float(np.mean(np.abs(error))))
     predictions = pd.DataFrame({
-        "row_index": np.flatnonzero(test), "fold": int(fold),
+        "row_index": np.flatnonzero(test).astype(np.int32), "fold": int(fold),
         "observed_bathy_t1": labels[test], "predicted_bathy_t1": prediction,
         "best_nrounds": rounds,
     })
     return row, predictions
 
-def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame, labels: np.ndarray, weights: np.ndarray, model_cfg: dict, seed: int, audit: dict) -> int:
+def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame, labels: np.ndarray, weights: np.ndarray, model_cfg: dict, seed: int, audit: dict, progress_cfg: dict | None = None) -> int:
     """Select boosting rounds with the existing randomized spatial-block CV."""
 
     mode = model_cfg["round_selection_mode"]
@@ -157,7 +248,7 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
         return int(model_cfg["fixed_nrounds"])
     folds = _spatial_fold_ids(coordinates, model_cfg["block_size_m"], model_cfg["n_folds"], seed)
     audit["folds"] = pd.DataFrame({
-        "row_index": np.arange(len(folds)), "fold": folds,
+        "row_index": np.arange(len(folds), dtype=np.int32), "fold": folds,
         "X": coordinates.X.to_numpy(), "Y": coordinates.Y.to_numpy(),
     })
     fallback, floor = int(model_cfg["cv_fallback_nrounds"]), int(model_cfg["minimum_nrounds"])
@@ -166,7 +257,12 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
         audit["status"] = "fewer_than_two_folds_using_fallback"
         return max(floor, fallback) if mode == "cv_with_floor" else fallback
     best_iters, rows, oof = [], [], []
-    for fold in unique_folds:
+    for fold_number, fold in enumerate(unique_folds, start=1):
+        if progress_cfg is not None:
+            _write_task_progress(
+                progress_cfg, f"Training spatial CV fold {fold_number}/{len(unique_folds)}.",
+                verbose_only=True,
+            )
         row, predictions = _fit_cv_fold(fold, folds, features, labels, weights, model_cfg, seed)
         rows.append(row)
         if predictions is not None:
@@ -186,7 +282,7 @@ def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarr
 
     delta = predicted_bathy - baseline_bathy
     rate = delta / interval_years
-    standard_delta = rate * horizon
+    standard_delta = rate * np.float32(horizon)
     return {
         "mean_predicted_bathy_next": predicted_bathy,
         "mean_predicted_change": delta,
@@ -206,6 +302,9 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
 
     if not locked_predictors or "bathy_t" not in locked_predictors:
         raise ValueError("Supply DataPrep's locked_predictors; bathy_t must be included")
+    for frame in (train_df, pred_df):
+        if frame is not None and len(frame) > np.iinfo(np.int32).max:
+            raise ValueError("A tile cannot exceed the int32 row-index range")
     predictors = list(locked_predictors)
     if len(predictors) != len(set(predictors)):
         raise ValueError("Duplicate names in locked predictor schema")
@@ -229,17 +328,18 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
     for column in required_train | set(predictors):
         train_df[column] = pd.to_numeric(train_df[column], errors="coerce")
     essential = np.isfinite(
-        train_df[["X", "Y", "bathy_t", "bathy_t1", "interval_years"]].to_numpy(dtype=float)
+        train_df[["X", "Y", "bathy_t", "bathy_t1", "interval_years"]].to_numpy(dtype=np.float32)
     ).all(axis=1)
-    essential &= train_df["interval_years"].to_numpy(dtype=float) > 0
+    essential &= train_df["interval_years"].to_numpy(dtype=np.float32) > 0
     if not essential.all():
         raise ValueError(
             "ML-ready training has invalid essential fields; rerun DataPrep instead of dropping rows"
         )
-    weights = train_df.sample_weight.to_numpy(dtype=float)
+    weights = train_df.sample_weight.to_numpy(dtype=np.float32)
     if not np.isfinite(weights).all() or (weights <= 0).any():
         raise ValueError("Prepared sample weights must be finite and positive")
-    train_df = train_df.reset_index(drop=True)
+    train_df = _compact_numeric_columns(train_df.reset_index(drop=True))
+    _validate_training_changes(train_df)
     train_features = train_df[predictors].astype(np.float32)
     # NA is native missing data; infinity is not supported by XGBoost.
     if np.isinf(train_features.to_numpy()).any():
@@ -255,24 +355,25 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
         for column in required_pred | set(predictors):
             pred_df[column] = pd.to_numeric(pred_df[column], errors="coerce")
         usable = np.isfinite(
-            pred_df[["X", "Y", "bathy_t", "interval_years"]].to_numpy(dtype=float)
+            pred_df[["X", "Y", "bathy_t", "interval_years"]].to_numpy(dtype=np.float32)
         ).all(axis=1)
-        usable &= pred_df.interval_years.to_numpy(dtype=float) > 0
+        usable &= pred_df.interval_years.to_numpy(dtype=np.float32) > 0
         if "prediction_row_usable" in pred_df:
             if not pred_df.prediction_row_usable.isin([True, False]).all():
                 raise ValueError("prediction_row_usable must contain only boolean values")
             usable &= pred_df.prediction_row_usable.to_numpy(dtype=bool)
         pred_df["prediction_row_usable"] = usable
+        pred_df = _compact_numeric_columns(pred_df)
         pred_features = pred_df[predictors].astype(np.float32)
         if np.isinf(pred_features.loc[usable].to_numpy()).any():
             raise ValueError("Usable prediction rows contain infinite predictors")
     return train_df, pred_df, train_features, pred_features, predictors
 
 def _update_running_stats(mean: np.ndarray, squared_difference: np.ndarray, values: np.ndarray, count: int) -> None:
-    """Update per-row statistics without storing every bootstrap result."""
+    """Update float32 Welford statistics without storing all bootstrap results."""
 
     delta = values - mean
-    mean += delta / count
+    mean += delta / np.float32(count)
     squared_difference += delta * (values - mean)
 
 def _publish_file(local_path: str, destination: str) -> None:
@@ -288,7 +389,7 @@ def _save_parquet(df: pd.DataFrame, final_save_path: str, local_tmp_dir: str) ->
 
     tmp_path = Path(local_tmp_dir) / UPath(final_save_path).name
     try:
-        df.to_parquet(tmp_path, index=False, engine="pyarrow", compression="zstd")
+        _compact_numeric_columns(df).to_parquet(tmp_path, index=False, engine="pyarrow", compression="zstd")
         _publish_file(str(tmp_path), final_save_path)
     finally:
         tmp_path.unlink(missing_ok=True)
@@ -313,7 +414,7 @@ def _save_geoparquet(df: pd.DataFrame, path: str, crs: str, local_tmp_dir: str) 
     geometry[~valid] = None
     tmp_path = Path(local_tmp_dir) / UPath(path).name
     try:
-        gpd.GeoDataFrame(df.copy(), geometry=geometry, crs=crs).to_parquet(
+        gpd.GeoDataFrame(_compact_numeric_columns(df.copy()), geometry=geometry, crs=crs).to_parquet(
             tmp_path, index=False, compression="zstd", schema_version="1.0.0"
         )
         _publish_file(str(tmp_path), path)
@@ -350,8 +451,8 @@ def _bootstrap_diagnostics(model: xgb.Booster, x_fit: np.ndarray, predictors: li
     shap_n = min(model_cfg["shap_sample_rows"], len(x_fit))
     if shap_n > 0:
         shap_rng = np.random.default_rng(_stable_seed(seed, "shap", bootstrap_index))
-        shap_idx = shap_rng.choice(len(x_fit), size=shap_n, replace=False)
-        dshap = xgb.DMatrix(x_fit[shap_idx], feature_names=predictors, missing=np.nan)
+        shap_idx = shap_rng.choice(len(x_fit), size=shap_n, replace=False).astype(np.int32)
+        dshap = xgb.DMatrix(x_fit[shap_idx], feature_names=predictors, missing=np.nan, nthread=1)
         contributions = model.predict(dshap, pred_contribs=True)[:, :-1]
         shap_rows.extend(
             {
@@ -372,21 +473,23 @@ def _fit_bootstrap_model(inputs: ModelInputs, cfg: dict, seed: int, bootstrap_in
     train_df, predictors = inputs.train, inputs.predictors
     x_fit = inputs.train_features.to_numpy(dtype=np.float32, copy=False)
     labels = train_df.bathy_t1.to_numpy(dtype=np.float32)
-    weights = train_df.sample_weight.to_numpy(dtype=float, copy=False)
+    weights = train_df.sample_weight.to_numpy(dtype=np.float32, copy=False)
     bootstrap_seed = _stable_seed(seed, "bootstrap", bootstrap_index)
     model_seed = _stable_seed(seed, "xgb_model", bootstrap_index)
     rng = np.random.default_rng(bootstrap_seed)
-    indices = rng.choice(len(train_df), size=len(train_df), replace=True)
-    if model_cfg["verbose_logging"]:
-        Engine.write_message_dask(
-            f"Bootstrap {bootstrap_index}/{model_cfg['n_boot']}: {best_rounds} rounds, {len(train_df)} fitting rows",
-            Path(cfg["log_dir"]),
-        )
+    indices = rng.integers(0, len(train_df), size=len(train_df), dtype=np.int32)
+    n_boot = model_cfg["n_boot"]
+    _write_task_progress(
+        cfg,
+        f"Training bootstrap {bootstrap_index}/{n_boot}: {best_rounds} rounds, "
+        f"{len(train_df):,} training rows.",
+        verbose_only=True,
+    )
     dtrain = xgb.DMatrix(
         x_fit[indices],
         label=labels[indices],
         weight=weights[indices],
-        feature_names=predictors,
+        nthread=1, feature_names=predictors,
         missing=np.nan,
     )
     model = xgb.train(
@@ -425,20 +528,20 @@ def _fit_bootstrap_ensemble(inputs: ModelInputs, cfg: dict, best_rounds: int, se
         raise ValueError("n_boot must be at least 1")
 
     x_fit = train_features.to_numpy(dtype=np.float32, copy=False)
-    d_full = xgb.DMatrix(x_fit, feature_names=predictors, missing=np.nan)
+    d_full = xgb.DMatrix(x_fit, feature_names=predictors, missing=np.nan, nthread=1)
     d_pred = None
     pred_usable = pred_df.prediction_row_usable.to_numpy(dtype=bool)
     if pred_usable.any():
         d_pred = xgb.DMatrix(
             pred_features.loc[pred_usable].to_numpy(dtype=np.float32, copy=False),
-            feature_names=predictors,
+            nthread=1, feature_names=predictors,
             missing=np.nan,
         )
 
-    train_mean = np.zeros(len(train_df), dtype=np.float64)
-    train_m2 = np.zeros(len(train_df), dtype=np.float64)
-    pred_mean = np.where(pred_usable, 0.0, np.nan)
-    pred_m2 = np.where(pred_usable, 0.0, np.nan)
+    train_mean = np.zeros(len(train_df), dtype=np.float32)
+    train_m2 = np.zeros(len(train_df), dtype=np.float32)
+    pred_mean = np.where(pred_usable, np.float32(0.0), np.float32(np.nan))
+    pred_m2 = np.where(pred_usable, np.float32(0.0), np.float32(np.nan))
 
     # Bootstrap and SHAP use separate streams so diagnostics cannot change the fitted ensemble.
     bootstrap_audit = []
@@ -451,13 +554,25 @@ def _fit_bootstrap_ensemble(inputs: ModelInputs, cfg: dict, best_rounds: int, se
             inputs, cfg, seed, bootstrap_index, best_rounds, local_tmp_dir
         )
         bootstrap_audit.append(audit)
-        train_prediction = model.predict(d_full).astype(np.float64, copy=False)
+        _write_task_progress(
+            cfg, f"Predicting training rows: bootstrap {bootstrap_index}/{n_boot}, "
+            f"{len(train_df):,} rows.", verbose_only=True,
+        )
+        train_prediction = model.predict(d_full).astype(np.float32, copy=False)
         _update_running_stats(train_mean, train_m2, train_prediction, bootstrap_index)
         if d_pred is not None:
-            prediction = np.full(len(pred_df), np.nan)
-            prediction[pred_usable] = model.predict(d_pred).astype(np.float64, copy=False)
+            _write_task_progress(
+                cfg, f"Predicting deployment rows: bootstrap {bootstrap_index}/{n_boot}, "
+                f"{int(pred_usable.sum()):,}/{len(pred_df):,} usable rows.", verbose_only=True,
+            )
+            prediction = np.full(len(pred_df), np.nan, dtype=np.float32)
+            prediction[pred_usable] = model.predict(d_pred).astype(np.float32, copy=False)
             _update_running_stats(pred_mean, pred_m2, prediction, bootstrap_index)
 
+        _write_task_progress(
+            cfg, f"Computing diagnostics: bootstrap {bootstrap_index}/{n_boot}.",
+            verbose_only=True,
+        )
         importance, shap = _bootstrap_diagnostics(
             model, x_fit, predictors, model_cfg, seed, bootstrap_index
         )
@@ -483,14 +598,14 @@ def _prediction_summary(frame: pd.DataFrame, mean: np.ndarray, m2: np.ndarray, m
     summary = frame.copy()
     n_boot = model_cfg["n_boot"]
     sd = (
-        np.sqrt(np.maximum(m2, 0) / (n_boot - 1))
+        np.sqrt(np.maximum(m2, np.float32(0)) / np.float32(n_boot - 1))
         if n_boot > 1
-        else np.where(np.isfinite(mean), 0.0, np.nan)
+        else np.where(np.isfinite(mean), np.float32(0.0), np.float32(np.nan))
     )
     for column, values in _translate_predictions(
         mean,
-        summary.bathy_t.to_numpy(dtype=float),
-        summary.interval_years.to_numpy(dtype=float),
+        summary.bathy_t.to_numpy(dtype=np.float32),
+        summary.interval_years.to_numpy(dtype=np.float32),
         model_cfg["standard_horizon_years"],
     ).items():
         summary[column] = values
@@ -498,17 +613,18 @@ def _prediction_summary(frame: pd.DataFrame, mean: np.ndarray, m2: np.ndarray, m
     summary["mean_predicted_bathy_t1"] = mean
     summary["uncertainty_sd_bathy_t1"] = sd
     summary["uncertainty_sd_change"] = sd
-    summary["uncertainty_sd_rate"] = sd / summary.interval_years
+    summary["uncertainty_sd_rate"] = sd / summary.interval_years.to_numpy(dtype=np.float32)
     if training:
         summary["delta_residual"] = summary.delta_bathy - summary.mean_predicted_change
         summary["prediction_residual"] = summary.bathy_t1 - summary.mean_predicted_bathy_next
-    return summary
+    return _compact_numeric_columns(summary)
 
 def _model_metadata(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rounds: int, cv_audit: dict) -> dict:
     """Describe the fitted ensemble, predictors and actual random seeds."""
 
     model_cfg = cfg["model_config"]
     return {
+        "data_dtype": "float32", "coordinate_dtype": "float32",
         "tile_id": cfg["tile_id"], "pair": cfg["pair"], "target": "bathy_t1",
         "training_baseline_source": "bathy_t", "prediction_baseline_source": "bathy_t",
         "model_baseline_feature": "bathy_t", "predictors": inputs.predictors,
@@ -539,7 +655,7 @@ def _save_model_outputs(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rou
             model_cfg,
             training=role == "training",
         )
-        _save_parquet(summary, paths[f"{role}_summary"], tmp_dir)
+        _write_task_progress(cfg, f"Saving {role} GeoParquet summary: {len(summary):,} rows.")
         _save_geoparquet(summary, paths[f"{role}_summary_geo"], cfg["crs"], tmp_dir)
         if role == "training":
             metrics = _model_metrics(
@@ -551,20 +667,33 @@ def _save_model_outputs(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rou
     for name in ("folds", "metrics", "oof"):
         table = cv_audit[name]
         if "row_index" in table:
-            table["FID"] = inputs.train.FID.to_numpy()[table.row_index.to_numpy(dtype=int)]
+            table["FID"] = inputs.train.FID.to_numpy()[table.row_index.to_numpy(dtype=np.int32)]
         _save_parquet(table, paths[f"spatial_cv_{name}"], tmp_dir)
     _save_json(_model_metadata(inputs, ensemble, cfg, best_rounds, cv_audit), paths["model_metadata"])
 
-def _load_model_inputs(cfg: dict) -> ModelInputs:
-    """Load prepared tables and their locked feature order on the worker."""
+def _load_model_inputs(cfg: dict) -> ModelInputs | None:
+    """Load prepared inputs, or report a missing prediction file for skipping."""
 
+    prediction_path = cfg["prediction_geoparquet"]
+    if not UPath(prediction_path).exists():
+        _write_task_progress(cfg, f"Missing prediction input: {prediction_path}")
+        return None
     with UPath(cfg["locked_predictors_parquet"]).open("rb") as stream:
         schema = pd.read_parquet(stream)
     if "predictor" not in schema:
         raise ValueError("Locked predictor schema needs a predictor column")
     frames = {}
     for role in ("training", "prediction"):
-        spatial = _read_geoparquet(cfg[f"{role}_geoparquet"])
+        _write_task_progress(cfg, f"Loading {role} input.")
+        try:
+            spatial = _read_geoparquet(cfg[f"{role}_geoparquet"])
+        except FileNotFoundError:
+            # The prediction file may disappear between the existence check and read.
+            if role != "prediction":
+                raise
+            _write_task_progress(cfg, f"Missing prediction input: {prediction_path}")
+            return None
+        _write_task_progress(cfg, f"Loaded {role} input: {len(spatial):,} rows.")
         if spatial.crs is None or spatial.crs != cfg["crs"]:
             raise ValueError(f"{role} CRS must already be {cfg['crs']}")
         frame = pd.DataFrame(spatial.drop(columns=spatial.geometry.name))
@@ -580,23 +709,23 @@ def _load_model_inputs(cfg: dict) -> ModelInputs:
         frames["training"], frames["prediction"], schema.predictor.tolist()))
     if len(inputs.train) < cfg["model_config"]["minimum_training_rows"]:
         raise ValueError("Fewer eligible fitting rows than the configured minimum")
-    if not inputs.prediction.prediction_row_usable.any():
-        raise ValueError("No usable prediction rows in this tile")
-    train = inputs.train
-    np.testing.assert_allclose(train.delta_bathy, train.bathy_t1 - train.bathy_t, atol=1e-8, rtol=0)
-    np.testing.assert_allclose(train.delta_rate, train.delta_bathy / train.interval_years, atol=1e-8, rtol=0)
     return inputs
 
-def _prepare_outputs(cfg: dict) -> None:
-    """Check overwrite behavior and create this task's output folders."""
+def _prepare_outputs(cfg: dict) -> bool:
+    """Skip existing outputs when overwrite is disabled; otherwise prepare folders."""
 
     existing = [UPath(path) for path in cfg["owned_outputs"] if UPath(path).exists()]
     if existing and not cfg["overwrite"]:
-        raise FileExistsError(f"Model outputs exist for {cfg['tile_id']}, {cfg['pair']}")
+        _write_task_progress(
+            cfg, f"SKIPPING tile/year pair: {len(existing)} output file(s) already exist "
+            "and overwrite=False.",
+        )
+        return False
     for path in existing:
         path.unlink()
     for role in ("training", "prediction"):
         UPath(cfg[f"{role}_output_dir"]).mkdir(parents=True, exist_ok=True)
+    return True
 
 def _train_tile_task(cfg: dict) -> dict:
     """Load, fit and save one tile/year pair through a Dask worker."""
@@ -604,21 +733,56 @@ def _train_tile_task(cfg: dict) -> dict:
     log_dir = Path(cfg["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
+        _write_task_progress(cfg, "Starting training/prediction task.")
+        if not cfg["overwrite"] and not _prepare_outputs(cfg):
+            return {
+                "ok": True, "skipped": True, "reason": "outputs_exist",
+                "region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
+            }
         inputs = _load_model_inputs(cfg)
-        _prepare_outputs(cfg)
+        if inputs is None:
+            _write_task_progress(
+                cfg, "SKIPPING tile/year pair: ML-ready prediction input does not exist.",
+            )
+            return {
+                "ok": True, "skipped": True, "reason": "missing_prediction_input",
+                "region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
+                "missing_path": cfg["prediction_geoparquet"],
+            }
+        usable_count = int(inputs.prediction.prediction_row_usable.sum())
+        _write_task_progress(
+            cfg, f"Prediction eligibility: {usable_count:,}/{len(inputs.prediction):,} usable rows.",
+        )
+        if usable_count == 0:
+            _write_task_progress(
+                cfg, "SKIPPING tile/year pair: no usable prediction rows after validating "
+                "coordinates, baseline bathymetry, positive intervals and prediction_row_usable.",
+            )
+            return {
+                "ok": True, "skipped": True, "reason": "no_usable_prediction_rows",
+                "region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
+                "n_fit": len(inputs.train), "n_prediction_rows": len(inputs.prediction),
+                "n_prediction_usable": 0,
+            }
+        if cfg["overwrite"]:
+            _prepare_outputs(cfg)
         seed = _stable_seed(cfg["model_config"]["global_seed"], "local", cfg["tile_id"], cfg["pair"])
         audit = {}
+        _write_task_progress(cfg, "Selecting boosting rounds.")
         best_rounds = _choose_rounds_spatial_cv(
             inputs.train[["X", "Y"]], inputs.train_features,
             inputs.train.bathy_t1.to_numpy(dtype=np.float32),
-            inputs.train.sample_weight.to_numpy(dtype=float),
-            cfg["model_config"], _stable_seed(seed, "cv"), audit)
+            inputs.train.sample_weight.to_numpy(dtype=np.float32),
+            cfg["model_config"], _stable_seed(seed, "cv"), audit, progress_cfg=cfg)
+        _write_task_progress(cfg, f"Selected {best_rounds} boosting rounds; starting ensemble.")
         with tempfile.TemporaryDirectory(prefix="hhm_xgb_") as tmp_dir:
             ensemble = _fit_bootstrap_ensemble(inputs, cfg, best_rounds, seed, tmp_dir)
             _save_model_outputs(inputs, ensemble, cfg, best_rounds, audit, tmp_dir)
-        return {"ok": True, "region": cfg["region"], "tile_id": cfg["tile_id"],
+        _write_task_progress(cfg, "Completed training, prediction and output saving.")
+        return {"ok": True, "skipped": False, "region": cfg["region"], "tile_id": cfg["tile_id"],
                 "pair": cfg["pair"], "n_fit": len(inputs.train), "best_iteration": best_rounds}
     except Exception:
+        _write_task_progress(cfg, "FAILED training/prediction task; traceback follows.")
         Engine.write_message_dask(traceback.format_exc(), log_dir)
         raise
     finally:
@@ -649,11 +813,12 @@ class XGBoostModelingEngine(Engine):
             "cv_fallback_nrounds": 1000, "n_folds": 5, "block_size_m": 200.0,
             "n_boot": 5, "standard_horizon_years": 2.0, "minimum_training_rows": 100,
             "global_seed": 12345, "shap_sample_rows": 1000,
-            "xgb_workers": 1, "xgb_memory_limit": "4GB",
+            "xgb_workers": 16, "xgb_memory_limit": "4GB",
+            "xgb_threads_per_worker": 1, "xgb_tasks_per_batch": 16,
             "xgb_processes": True, "verbose_logging": True,
         }
         self.model_config.update(overrides.get("model_config", {}))
-        for key in ("n_boot", "xgb_workers"):
+        for key in ("n_boot", "xgb_workers", "xgb_threads_per_worker", "xgb_tasks_per_batch"):
             value = self.model_config[key]
             if isinstance(value, bool) or int(value) != value or value < 1:
                 raise ValueError(f"{key} must be a positive integer")
@@ -703,7 +868,6 @@ class XGBoostModelingEngine(Engine):
             train_out, pred_out = self.xgb_out_dir / tile_id / "Training", self.xgb_out_dir / tile_id / "Prediction"
             paths = {}
             for role, folder in (("training", train_out), ("prediction", pred_out)):
-                paths[f"{role}_summary"] = str(folder / f"LOCAL_{role}_summary_{pair}.parquet")
                 paths[f"{role}_summary_geo"] = str(folder / f"LOCAL_{role}_summary_{pair}.geoparquet")
             for stem in ("importance", "shap_summary", "spatial_cv_folds", "spatial_cv_metrics", "spatial_cv_oof"):
                 paths[stem] = str(train_out / f"LOCAL_{stem}_{pair}.parquet")
@@ -724,15 +888,29 @@ class XGBoostModelingEngine(Engine):
             })
 
     def execute_tasks(self, overwrite: bool = False) -> list[dict]:
-        """Submit bounded batches so configured Dask workers can fit tiles in parallel."""
+        """Submit configurable batches across the available Dask worker threads."""
 
         results = []
-        batch_size = self.model_config["xgb_workers"]
+        batch_size = self.model_config["xgb_tasks_per_batch"]
+        total = len(self.task_configs)
         for start in range(0, len(self.task_configs), batch_size):
-            jobs = [dict(cfg, overwrite=overwrite) for cfg in self.task_configs[start:start + batch_size]]
+            jobs = [
+                dict(cfg, overwrite=overwrite, task_number=start + offset + 1, task_total=total)
+                for offset, cfg in enumerate(self.task_configs[start:start + batch_size])
+            ]
+            region = jobs[0]["region"]
+            self.write_message(
+                f"{region}: submitting training/prediction tasks {start + 1}-{start + len(jobs)}/{total}.",
+                OUTPUTS,
+            )
             futures = self.client.map(_train_tile_task, jobs, pure=False)
             try:
                 results.extend(self.client.gather(futures))
+                skipped = sum(bool(result.get("skipped", False)) for result in results)
+                self.write_message(
+                    f"{region}: processed {len(results)}/{total} training/prediction tasks "
+                    f"({len(results) - skipped} completed, {skipped} skipped).", OUTPUTS,
+                )
             except Exception:
                 self.client.cancel(futures)
                 raise
@@ -748,7 +926,7 @@ class XGBoostModelingEngine(Engine):
         try:
             cfg = self.model_config
             self.setup_dask(self.param_lookup["env"], processes=cfg["xgb_processes"],
-                            n_workers=cfg["xgb_workers"], threads_per_worker=1,
+                            n_workers=cfg["xgb_workers"], threads_per_worker=cfg["xgb_threads_per_worker"],
                             memory_limit=cfg["xgb_memory_limit"])
             for eco_region in self.param_lookup["eco_regions"].value:
                 self._resolve_paths(eco_region)
