@@ -52,6 +52,7 @@ SHARED:
   MASTER_GRIDS: Master_Grid_Reference_Layers.gpkg
   TILES: BlueTopo_Tile_Scheme_20260626_132625
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
+  ECOREGION_COLUMN: EcoRegion
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 TERRAIN:

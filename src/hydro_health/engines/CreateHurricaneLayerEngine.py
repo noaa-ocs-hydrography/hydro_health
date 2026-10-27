@@ -87,18 +87,9 @@ class CreateHurricaneLayerEngine(Engine):
 
     def _read_ecoregion(self) -> gpd.GeoDataFrame:
         """Read the selected region using its identifier column in the master grids."""
-        eco_gdf = self._read_gpkg_layer(str(get_config_item('SHARED', 'ENHANCED_ECOREGIONS')), self.coast_boundary_path)
-        region_column = self.param_lookup.get('eco_region_column')
-        if region_column is None:
-            identifier_names = {'ecoregion', 'ecoregionid', 'ecoregioncode', 'er', 'ercode'}
-            candidates = [column for column in eco_gdf.columns
-                          if column != eco_gdf.geometry.name
-                          and str(column).lower().replace('_', '').replace(' ', '') in identifier_names]
-            if len(candidates) != 1:
-                raise ValueError("Set param_lookup['eco_region_column'] to the master grids' ecoregion identifier column")
-            region_column = candidates[0]
-        if region_column not in eco_gdf.columns:
-            raise ValueError(f"Ecoregion column {region_column!r} was not found in Enhanced_EcoRegions")
+
+        eco_gdf = self._read_gpkg_layer(get_config_item('SHARED', 'ENHANCED_ECOREGIONS'), self.coast_boundary_path)
+        region_column = get_config_item('SHARED', 'ECOREGION_COLUMN')
         eco_gdf = eco_gdf.loc[eco_gdf[region_column].astype(str).str.strip().eq(self.region)].copy()
         if eco_gdf.empty:
             raise ValueError(f"Ecoregion {self.region!r} was not found in Enhanced_EcoRegions")
