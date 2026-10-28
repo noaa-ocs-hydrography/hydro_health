@@ -18,8 +18,7 @@ import numpy as np
 import pandas as pd
 import rasterio
 from dask.distributed import as_completed
-from hydro_health.engines.Engine import Engine
-from hydro_health.helpers.tools import get_config_item
+
 from matplotlib.axes import Axes
 from matplotlib.colors import BoundaryNorm, Normalize, TwoSlopeNorm
 from matplotlib.patches import Patch
@@ -29,10 +28,15 @@ from rasterio.shutil import copy as raster_copy
 from rasterio.windows import Window, from_bounds
 from rasterio.windows import transform as window_transform
 from shapely import wkb
+from shapely.errors import ShapelyError
+from shapely.validation import explain_validity
 from shapely.geometry import mapping
 from upath import UPath
-
 matplotlib.use("Agg")
+
+from hydro_health.engines.Engine import Engine
+from hydro_health.helpers.tools import get_config_item
+
 
 OUTPUTS = Path(__file__).parents[3] / "outputs"
 
@@ -104,7 +108,7 @@ class LocalizedFile:
         if self.tempdir is not None:
             self.tempdir.cleanup()
 
-def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict, tile_geom_wkb: bytes, crs: str, nodata: float = -9999.0, max_grid_cells: int = 25000000) -> tuple[np.ndarray, dict]:
+def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict, tile_geom_wkb: bytes, crs: str, nodata: float = -9999.0, max_grid_cells: int = 25000000, diagnostics: dict | None = None) -> tuple[np.ndarray, dict]:
     """Mean finite point values in each cell, snap outward, and mask cell centres.
 
     The official polygon determines extent, never the surviving data rows.
@@ -113,7 +117,19 @@ def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict
     Survey classes use the modal class per cell (ties favour newer classes).
     """
 
+    diagnostics = diagnostics if diagnostics is not None else {}
+    diagnostics.clear()
+    diagnostics.update(input_rows=len(df), value_column=value_col, target_crs=str(crs),
+                       dataframe_geometry_crs=str(getattr(df, "crs", None)),
+                       template_crs=str(template_metadata["crs"]), template_uri=template_metadata.get("source_uri"),
+                       template_shape=[template_metadata["height"], template_metadata["width"]],
+                       template_transform=list(template_metadata["transform"]), nodata=nodata)
+    missing = [column for column in ("X", "Y", value_col) if column not in df]
+    if missing:
+        diagnostics["missing_columns"] = missing
+        raise ValueError(f"Missing raster input columns: {missing}")
     geom = wkb.loads(tile_geom_wkb)
+    diagnostics["polygon_bounds"] = list(geom.bounds)
     if not geom.is_valid or geom.is_empty or geom.geom_type not in ("Polygon", "MultiPolygon"):
         raise ValueError("Tile geometry must be a valid nonempty polygon")
     if rasterio.crs.CRS.from_user_input(template_metadata["crs"]) != rasterio.crs.CRS.from_user_input(crs):
@@ -131,13 +147,23 @@ def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict
     if height <= 0 or width <= 0 or height * width > max_grid_cells:
         raise ValueError("Invalid or oversized tile grid; check template/tile or max_grid_cells")
     transform = window_transform(Window(c0, r0, width, height), t)
+    diagnostics.update(tile_grid_shape=[height, width], pixel_size=[t.a, abs(t.e)],
+                       tile_grid_bounds=list(rasterio.transform.array_bounds(height, width, transform)))
     arrays = [pd.to_numeric(df[c], errors="coerce").to_numpy(dtype=float) for c in ("X", "Y", value_col)]
     xs, ys, values = arrays
     keep = np.isfinite(xs) & np.isfinite(ys) & np.isfinite(values)
+    for column, array in zip(("X", "Y", value_col), arrays):
+        finite = np.isfinite(array)
+        diagnostics[f"{column}_nonfinite_or_nonnumeric_rows"] = int((~finite).sum())
+        diagnostics[f"{column}_finite_range"] = [float(array[finite].min()), float(array[finite].max())] if finite.any() else None
+    diagnostics["finite_xy_value_rows"] = int(keep.sum())
+    diagnostics["source_nodata_rows"] = int((keep & (values == nodata)).sum())
     rows, cols = rasterio.transform.rowcol(transform, xs[keep], ys[keep])
     rows, cols = np.asarray(rows, dtype=int), np.asarray(cols, dtype=int)
     inside = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
     rows, cols, vals = rows[inside], cols[inside], values[keep][inside]
+    diagnostics["rows_inside_tile_grid"] = len(vals)
+    diagnostics["rows_outside_tile_grid"] = int(keep.sum()) - len(vals)
     grid = np.full((height, width), nodata, dtype="float32")
     if value_col == "survey_year_bin_code" and len(vals):
         votes = pd.DataFrame({"r": rows, "c": cols, "v": vals}).groupby(["r", "c", "v"]).size().reset_index(name="n")
@@ -152,7 +178,12 @@ def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict
         grid[populated] = (accum[populated] / counts[populated]).astype("float32")
     valid_polygon = geometry_mask([mapping(geom)], out_shape=grid.shape,
                                   transform=transform, invert=True, all_touched=False)
+    diagnostics["polygon_center_cells"] = int(valid_polygon.sum())
+    diagnostics["populated_cells_before_polygon_mask"] = int(np.count_nonzero(grid != nodata))
+    diagnostics["input_rows_in_polygon_center_cells"] = int(valid_polygon[rows, cols].sum())
     grid[~valid_polygon] = nodata
+    diagnostics["populated_cells_after_polygon_mask"] = int(np.count_nonzero(grid != nodata))
+    diagnostics["nonfinite_output_cells"] = int(np.count_nonzero(~np.isfinite(grid)))
     if np.any(grid[valid_polygon] == nodata) and np.any(vals == nodata):
         raise ValueError("A finite source value equals the configured NoData sentinel")
     profile = dict(driver="GTiff", count=1, width=width, height=height,
@@ -222,6 +253,10 @@ def add_extrapolation_flags(training: pd.DataFrame, prediction: pd.DataFrame, pr
     out["predictor_extrapolation_any"] = count > 0
     return out, ranges
 
+class RasterExportDiagnostic(ValueError):
+    """Report a tile diagnostic to the worker without failing the export queue."""
+
+
 def _export_cog_products(df: pd.DataFrame, role: str, cfg: dict) -> dict:
     """Rasterize one role into a private staging directory at full resolution."""
 
@@ -234,12 +269,32 @@ def _export_cog_products(df: pd.DataFrame, role: str, cfg: dict) -> dict:
                 if column in OPTIONAL:
                     skipped.append({"column": column, "reason": "not supplied by model summary"})
                     continue
-                raise ValueError(f"Required {role} output column is absent: {column}")
-            grid, profile = _dataframe_to_grid(
-                df, column, cfg["template_metadata"], cfg["geometry"], cfg["crs"],
-                cfg["raster_config"]["nodata"], cfg["raster_config"]["max_grid_cells"])
+                raise RasterExportDiagnostic(f"Required {role} output column is absent: {column}")
+            diagnostics = {"region": cfg["region"], "tile_id": cfg["tile_id"], "pair": pair,
+                           "role": role, "column": column, "summary_path": cfg[f"{role}_summary"]}
+            grid_diagnostics = {}
+            try:
+                grid, profile = _dataframe_to_grid(
+                    df, column, cfg["template_metadata"], cfg["geometry"], cfg["crs"],
+                    cfg["raster_config"]["nodata"], cfg["raster_config"]["max_grid_cells"], grid_diagnostics)
+            except (ValueError, KeyError, ShapelyError) as exc:
+                diagnostics.update(grid_diagnostics)
+                raise RasterExportDiagnostic(f"Rasterization failed for {role}/{column} on {cfg['tile_id']}: {exc}\nDiagnostics: {json.dumps(diagnostics, indent=2, default=str)}") from exc
+            diagnostics.update(grid_diagnostics)
             if column not in OPTIONAL and not np.any(grid != profile["nodata"]):
-                raise ValueError(f"No populated {role}/{column} cells for {cfg['tile_id']}")
+                if not diagnostics["input_rows"]:
+                    reason = "The summary contains no rows."
+                elif not diagnostics["finite_xy_value_rows"]:
+                    reason = "No row has finite numeric X, Y and value together; inspect the per-column invalid counts."
+                elif not diagnostics["rows_inside_tile_grid"]:
+                    reason = "All usable coordinates fall outside the tile grid; compare coordinate ranges, polygon bounds and CRS. The geometry CRS does not verify the X/Y columns."
+                elif not diagnostics["polygon_center_cells"]:
+                    reason = "No template cell centers fall inside the polygon; inspect pixel size and grid alignment."
+                elif not diagnostics["input_rows_in_polygon_center_cells"]:
+                    reason = "All usable points map to cells removed by the polygon center mask; inspect point/tile overlap and grid alignment."
+                else:
+                    reason = "Points reach retained cells, but every aggregated output equals NoData; inspect source_nodata_rows and the value range."
+                raise RasterExportDiagnostic(f"No populated {role}/{column} cells for {cfg['tile_id']}: {reason}\nDiagnostics: {json.dumps(diagnostics, indent=2, default=str)}")
             raw = Path(tmp) / "raw.tif"
             cog = Path(cfg["raster_paths"][role][column])
             raster_cfg = dict(cfg["raster_config"])
@@ -565,8 +620,13 @@ def _export_tile_task(cfg: dict) -> dict:
             published = dict(files)
             for result in results.values():
                 result["outputs"] = {key: published[path] for key, path in result["outputs"].items()}
+            Engine.write_message_dask(f"Successfully exported {cfg['region']}/{cfg['tile_id']} | {cfg['pair']}", cfg["log_dir"])
             return {"region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
                     "results": results, "visual_outputs": [published[path] for path in visuals]}
+    except RasterExportDiagnostic as exc:
+        Engine.write_message_dask(f"Skipping raster export for {cfg['region']}/{cfg['tile_id']} | {cfg['pair']}: {exc}", cfg["log_dir"])
+        return {"region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
+                "skipped": True, "reason": str(exc), "results": {}, "visual_outputs": []}
     finally:
         gc.collect()
 
@@ -583,10 +643,10 @@ class MLRasterExportEngine(Engine):
             raise ValueError("env must be local or aws")
         self.is_aws = param_lookup["env"] == "aws"
         self.settings = {
-            "tile_id": None, "pair": None, "tile_grid_layer": None, "tile_id_column": "tile_id",
+            "tile_id": None, "pair": None, "tile_id_column": "tile_id",
             "legacy_survey_year_offset": True,
-            "raster_workers": 16 if self.is_aws else min(4, os.cpu_count() or 1),
-            "memory_limit": "3.5GB", "raster_processes": True,
+            "raster_workers": 8,
+            "memory_limit": "5GB", "raster_processes": True,
             "plot_max_dimension": 1000, "plot_max_points": 50000,
             "raster_config": {
                 "nodata": -9999.0, "compress": "DEFLATE", "blocksize": 512,
@@ -626,10 +686,10 @@ class MLRasterExportEngine(Engine):
         raster_dir = get_config_item("MODEL", "RASTER_OUTPUT_DIR")
         self.raster_out_dir = UPath(f"{s3_dir_base}/{raster_dir}") if self.is_aws else UPath(self.outputs_dir / raster_dir)
 
-        template = get_config_item("MODEL", "TEMPLATE_RASTER_URI")
+        template = get_config_item("MASK", "MASK_PRED_PATH")
         self.template_path = UPath(f"{s3_dir_base}/{template}") if self.is_aws else UPath(self.outputs_dir / template)
 
-        tile_grid = get_config_item("MODEL", "PREDICTION_SUB_GRIDS")
+        tile_grid = get_config_item("MODEL", "SUBGRIDS")
         self.tile_grid_path = UPath(f"{s3_dir_base}/{tile_grid}") if self.is_aws else UPath(self.outputs_dir / tile_grid)
 
     def load_template_metadata(self) -> dict:
@@ -640,12 +700,48 @@ class MLRasterExportEngine(Engine):
             if template.crs != rasterio.crs.CRS.from_user_input(self.target_crs):
                 raise ValueError("Template CRS must match the target CRS")
             return {"transform": template.transform, "width": template.width,
-                    "height": template.height, "crs": str(template.crs)}
+                    "height": template.height, "crs": str(template.crs), "source_uri": str(self.template_path)}
 
     def collect_training_files(self) -> list[UPath]:
         """Find spatial model summaries under the resolved modeling directory."""
 
         return sorted(self.model_out_dir.rglob("LOCAL_training_summary_*.geoparquet"), key=str)
+
+    def _tile_mask_skip_reason(self, tile_geom_wkb: bytes) -> str | None:
+        """Skip tiles without usable prediction-mask cells under the center rule.
+
+        Valid prediction-mask pixels are unmasked, finite and nonzero.
+        This eligibility check does not change the exported polygon mask.
+        """
+
+        geom = wkb.loads(tile_geom_wkb)
+        metadata = self.template_metadata
+        t = metadata["transform"]
+        if t.b != 0 or t.d != 0 or t.a <= 0 or t.e >= 0:
+            raise ValueError("Use a north-up, unrotated prediction mask")
+        raw = from_bounds(*geom.bounds, transform=t)
+        c0 = max(0, math.floor(raw.col_off + 1e-8))
+        r0 = max(0, math.floor(raw.row_off + 1e-8))
+        c1 = min(metadata["width"], math.ceil(raw.col_off + raw.width - 1e-8))
+        r1 = min(metadata["height"], math.ceil(raw.row_off + raw.height - 1e-8))
+        height, width = r1 - r0, c1 - c0
+        if height <= 0 or width <= 0:
+            return "tile lies outside the prediction-mask raster extent"
+        if height * width > self.settings["raster_config"]["max_grid_cells"]:
+            raise ValueError(f"Prediction-mask overlap window is oversized ({height} x {width}); check tile bounds and max_grid_cells")
+        window = Window(c0, r0, width, height)
+        transform = window_transform(window, t)
+        polygon_cells = geometry_mask([mapping(geom)], out_shape=(height, width),
+                                      transform=transform, invert=True, all_touched=False)
+        if not polygon_cells.any():
+            return "no prediction-mask cell centers fall inside the tile polygon"
+        path = str(self.template_path).replace("s3://", "/vsis3/", 1)
+        with rasterio.open(path) as mask_raster:
+            data = mask_raster.read(1, window=window, masked=True)
+        valid = ~np.ma.getmaskarray(data) & np.isfinite(data.data) & (data.data != 0)
+        if not np.any(polygon_cells & valid):
+            return "tile contains no valid prediction-mask cells (valid = unmasked, finite and nonzero)"
+        return None
 
     def load_tile_grid(self) -> gpd.GeoDataFrame:
         """Read the official tile polygons once per region in the target CRS."""
@@ -655,7 +751,8 @@ class MLRasterExportEngine(Engine):
             with self.tile_grid_path.open("rb") as stream:
                 grid = gpd.read_parquet(stream)
         else:
-            options = {"layer": self.settings["tile_grid_layer"]} if self.settings["tile_grid_layer"] else {}
+            layer = get_config_item("MODEL", "PREDICTION_SUB_GRIDS_LAYER")
+            options = {"layer": layer} if layer else {}
             with LocalizedFile(uri) as local:
                 grid = gpd.read_file(local, **options)
         if grid.crs is None or self.settings["tile_id_column"] not in grid:
@@ -667,6 +764,7 @@ class MLRasterExportEngine(Engine):
 
         self.task_configs = []
         seen = set()
+        mask_skip_reasons = {}
         for training_file in self.collect_training_files():
             match = re.fullmatch(r"LOCAL_training_summary_(\d{4}_\d{4})\.geoparquet", training_file.name)
             if match is None:
@@ -682,9 +780,25 @@ class MLRasterExportEngine(Engine):
             selected = grid.loc[grid[self.settings["tile_id_column"]].astype(str) == tile_id]
             if len(selected) != 1:
                 raise ValueError(f"Expected one official polygon for {tile_id}; found {len(selected)}")
-            geom = selected.geometry.iloc[0]
-            if geom is None or geom.is_empty or not geom.is_valid or geom.geom_type not in ("Polygon", "MultiPolygon"):
-                raise ValueError(f"Invalid official tile polygon: {tile_id}")
+            try:
+                geom = selected.geometry.iloc[0]
+                if geom is None:
+                    raise ValueError("Missing geometry")
+                if geom.is_empty:
+                    raise ValueError("Empty geometry")
+                if geom.geom_type not in ("Polygon", "MultiPolygon"):
+                    raise ValueError(f"Expected Polygon or MultiPolygon; got {geom.geom_type}")
+                if not geom.is_valid:
+                    raise ValueError(explain_validity(geom))
+            except (ValueError, ShapelyError) as exc:
+                self.write_message(f"Skipping raster export for {region}/{tile_id}, pair {pair}: invalid official tile polygon ({exc}).", OUTPUTS)
+                continue
+            if tile_id not in mask_skip_reasons:
+                mask_skip_reasons[tile_id] = self._tile_mask_skip_reason(geom.wkb)
+            skip_reason = mask_skip_reasons[tile_id]
+            if skip_reason is not None:
+                self.write_message(f"Skipping raster export for {region}/{tile_id}, pair {pair}: {skip_reason}.", OUTPUTS)
+                continue
             model_train = training_file.parent
             model_pred = self.model_out_dir / tile_id / "Prediction"
             train_out = self.raster_out_dir / tile_id / "Training"
@@ -754,7 +868,8 @@ class MLRasterExportEngine(Engine):
                 grid = self.load_tile_grid()
                 self.prepare_tasks(eco_region, grid)
                 self.write_message(f"Queuing {len(self.task_configs)} raster exports for {eco_region}.", OUTPUTS)
-                records.extend(self.execute_tasks(overwrite))
+                if self.task_configs:
+                    records.extend(self.execute_tasks(overwrite))
             return records
         finally:
             self.cleanup_resources(OUTPUTS)

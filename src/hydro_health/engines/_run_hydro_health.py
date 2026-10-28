@@ -110,17 +110,14 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
                 runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
-<<<<<<< HEAD:src/hydro_health/engines/run_hydro_health.py
             elif step["tool"] == "run_data_prep_engine" and step["run"]:
                 runners.run_data_prep_engine(param_lookup, output_prefix)    
             elif step["tool"] == "run_xgboost_modeling_engine" and step["run"]:
                 runners.run_xgboost_modeling_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_ml_raster_export_engine" and step["run"]:
                 runners.run_ml_raster_export_engine(param_lookup, output_prefix)        
-=======
             elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
                 runners.run_batch_tiling_engine(param_lookup, output_prefix)    
->>>>>>> 2f76e3c8e236f5d0adedcb21ea108291b6f8e3ab:src/hydro_health/engines/_run_hydro_health.py
 
     write_config_log(config_path, config, env)
     end = time.time()
