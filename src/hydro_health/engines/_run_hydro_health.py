@@ -111,7 +111,11 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
                 runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
-                runners.run_batch_tiling_engine(param_lookup, output_prefix)    
+                runners.run_batch_tiling_engine(param_lookup, output_prefix)  
+            elif step["tool"] == "run_data_prep_engine" and step["run"]:
+                runners.run_data_prep_engine(param_lookup, output_prefix)      
+            elif step["tool"] == "run_xgboost_modeling_engine" and step["run"]:
+                runners.run_xgboost_modeling_engine(param_lookup, output_prefix)    
 
     write_config_log(config_path, config, env)
     end = time.time()

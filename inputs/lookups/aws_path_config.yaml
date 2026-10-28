@@ -25,6 +25,9 @@ MASK:
   PREDICTION_MASK_PQ: masks/prediction_mask.parquet
   TRAINING_MASK_PQ: masks/training_mask.parquet
 MODEL:
+  ML_PREP_TRAIN_DIR: model_variables/Training/training_tiles_cleaned
+  ML_PREP_PRED_DIR: model_variables/Prediction/prediction_tiles_cleaned
+  MASTER_PREDICTORS_PATH: boruta_master_predictor_list_new.txt
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables/Prediction/pre_processed
   PREDICTION_OUTPUT_DIR: model_variables/Prediction/processed
@@ -37,6 +40,7 @@ MODEL:
   TRAINING_OUTPUT_DIR: model_variables/Training/processed
   TILED_LIDAR_DIR: model_variables/Prediction/pre_processed/tiled
   TILED_LIDAR_PROC: model_variables/Prediction/pre_processed/tiled_processed
+  XGB_OUTPUT_DIR: model_outputs/xgboost_results
 PREPROCESSED:
   BLUETOPO: model_variables/Prediction/pre_processed/BlueTopo
   HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
