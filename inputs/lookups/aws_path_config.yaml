@@ -30,13 +30,16 @@ MODEL:
   PREDICTION_OUTPUT_DIR: model_variables/Prediction/processed
   PREDICTION_TILES_DIR: model_variables/Prediction/prediction_tiles
   TRAINING_TILES_DIR: model_variables/Training/training_tiles
+  RASTER_OUTPUT_DIR: model_outputs/model_rasters
   SUBGRIDS: model_subgrids/model_subgrids.gpkg
   SUBGRIDS_LAYER: final_model_subgrids
   PREDICTION_SUB_GRIDS_LAYER: prediction_intersecting_subgrids
+  TEMPLATE_RASTER_URI: model_outputs/model_raster_template
   TRAINING_SUB_GRIDS_LAYER: training_intersecting_subgrids
   TRAINING_OUTPUT_DIR: model_variables/Training/processed
   TILED_LIDAR_DIR: model_variables/Prediction/pre_processed/tiled
   TILED_LIDAR_PROC: model_variables/Prediction/pre_processed/tiled_processed
+  XGB_OUTPUT_DIR: model_outputs/xgboost_results
 PREPROCESSED:
   BLUETOPO: model_variables/Prediction/pre_processed/BlueTopo
   HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
