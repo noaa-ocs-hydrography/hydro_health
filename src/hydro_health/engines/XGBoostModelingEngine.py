@@ -13,6 +13,7 @@ import pandas as pd
 import xgboost as xgb
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
+from pyproj import CRS
 from upath import UPath
 
 OUTPUTS = Path(__file__).parents[3] / "outputs"
@@ -94,38 +95,68 @@ def _stable_seed(global_seed: int, *parts: object) -> int:
     digest = hashlib.blake2b(key, digest_size=8).digest()
     return int((global_seed + int.from_bytes(digest, "little")) % (2**31 - 1))
 
-def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed: int) -> np.ndarray:
-    """Assign occupied square blocks to folds so a block never spans
-    train/test.
+def _hex_block_ids(df: pd.DataFrame, block_size_m: float) -> np.ndarray:
+    """Pointy-top hexagons; opposite-edge width=block_size_m; centered origin."""
+    xy = df[["X", "Y"]].to_numpy(dtype=np.float64)
+    if len(xy) == 0 or not np.isfinite(xy).all():
+        raise ValueError("Hexagonal folds require nonempty finite coordinates")
+    size = float(block_size_m)
+    if not np.isfinite(size) or size <= 0:
+        raise ValueError("block_size_m must be finite and positive")
+    origin = xy.min(axis=0) + (xy.max(axis=0) - xy.min(axis=0)) / 2
+    x, y = (xy - origin).T
+    radius = size / np.sqrt(3.0)
+    # Fractional axial coordinates, then cube-coordinate rounding.
+    q = (np.sqrt(3.0) / 3.0 * x - y / 3.0) / radius
+    r = (2.0 / 3.0 * y) / radius
+    cube = np.column_stack((q, -q - r, r))
+    if not np.isfinite(cube).all() or (np.abs(cube) >= np.iinfo(np.int32).max - 2).any():
+        raise ValueError("Hexagon indices exceed supported range")
+    rounded = np.rint(cube)
+    largest_error = np.argmax(np.abs(rounded - cube), axis=1)
+    for axis in range(3):
+        use = largest_error == axis
+        other = [index for index in range(3) if index != axis]
+        rounded[use, axis] = -rounded[use][:, other].sum(axis=1)
+    return rounded[:, [0, 2]].astype(np.int32)
 
-    Neighbouring blocks may be in different folds; no buffer or minimum
-    separation is imposed. This retains the tested Python scheme, not R blockCV
-    assignment.
-    """
-
-    if block_size_m <= 0:
-        raise ValueError("block_size_m must be greater than zero")
-    if not 1 <= n_folds <= np.iinfo(np.int32).max:
-        raise ValueError("n_folds must be within the positive int32 range")
-    x = df["X"].to_numpy()
-    y = df["Y"].to_numpy()
-    gx = np.floor((x - np.nanmin(x)) / block_size_m)
-    gy = np.floor((y - np.nanmin(y)) / block_size_m)
-    for grid in (gx, gy):
-        if not np.isfinite(grid).all() or (np.abs(grid) > np.iinfo(np.int32).max).any():
-            raise ValueError("Spatial block indices exceed the int32 range or are nonfinite")
-    gx = gx.astype(np.int32)
-    gy = gy.astype(np.int32)
-    block = pd.Series(gx).astype(str).str.cat(pd.Series(gy).astype(str), sep=":")
-
-    unique_blocks = block.drop_duplicates().to_numpy(
-        copy=True
-    )  # Own writable storage for pandas 3 Copy-on-Write.
+def _balanced_block_folds(block_ids: np.ndarray, n_folds: int, seed: int, iterations: int) -> np.ndarray:
+    """Keep blocks intact; search random assignments for balanced row counts."""
+    for name, value in (("n_folds", n_folds), ("iterations", iterations)):
+        if isinstance(value, (bool, np.bool_)) or int(value) != value or value < 1:
+            raise ValueError(f"{name} must be a positive integer")
+    _, inverse, counts = np.unique(
+        block_ids, axis=0, return_inverse=True, return_counts=True
+    )
+    if len(counts) == 0:
+        raise ValueError("No occupied spatial blocks")
+    k = min(int(n_folds), len(counts))
     rng = np.random.default_rng(seed)
-    rng.shuffle(unique_blocks)
+    best, best_score = None, np.inf
+    for _ in range(int(iterations)):
+        order = rng.permutation(len(counts))
+        allocation = np.empty(len(counts), dtype=np.int32)
+        allocation[order] = np.arange(len(counts)) % k
+        records = np.bincount(allocation, weights=counts, minlength=k)
+        score = float(np.std(records))
+        if score < best_score:
+            best_score, best = score, allocation.copy()
+    return best[inverse]
 
-    mapping = {b: i % min(n_folds, len(unique_blocks)) for i, b in enumerate(unique_blocks)}
-    return block.map(mapping).to_numpy(dtype=np.int32)
+def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed: int, crs: str, iterations: int = 200) -> tuple[np.ndarray, np.ndarray]:
+    """Native hexagonal blocked CV; returns row folds and axial block IDs.
+
+    Aligns the blockCV design, not its exact grid or random memberships.
+    Float64 grid arithmetic avoids introducing further coordinate rounding.
+    """
+    reference = CRS.from_user_input(crs)
+    if not reference.is_projected or len(reference.axis_info) < 2:
+        raise ValueError("Spatial CV requires a projected CRS in metres")
+    if not all(np.isclose(axis.unit_conversion_factor, 1.0) for axis in reference.axis_info[:2]):
+        raise ValueError("Spatial CV coordinates must use metres")
+    blocks = _hex_block_ids(df, block_size_m)
+    folds = _balanced_block_folds(blocks, n_folds, seed, iterations)
+    return folds, blocks
 
 def _safe_correlation(observed: np.ndarray, predicted: np.ndarray) -> float | None:
     """Compute Pearson correlation in float64; return None when undefined."""
@@ -204,15 +235,28 @@ def _fit_cv_fold(fold: int, folds: np.ndarray, features: pd.DataFrame, labels: n
         nthread=1,
     )
     model_seed = _stable_seed(seed, "cv_model", int(fold))
+    evaluations = {}
     model = xgb.train(
         _xgb_params(model_cfg, model_seed),
         dtrain,
         num_boost_round=model_cfg["cv_nrounds"],
         evals=[(dtrain, "train"), (dtest, "test")],
         early_stopping_rounds=model_cfg["early_stopping_rounds"],
+        evals_result=evaluations,
         verbose_eval=False,
     )
-    rounds = int(model.best_iteration) + 1
+    try:
+        best = float(model.best_iteration)
+    except (AttributeError, TypeError, ValueError):
+        best = float("nan")
+    if np.isfinite(best) and best >= 0 and best == np.floor(best):
+        rounds = int(best) + 1
+    else:
+        # Match the R script's exceptional test_rmse recovery branch.
+        history = np.asarray(evaluations.get("test", {}).get("rmse", []), dtype=float)
+        if not np.isfinite(history).any():
+            raise ValueError("CV produced no usable best iteration or RMSE history")
+        rounds = int(np.argmin(np.where(np.isfinite(history), history, np.inf))) + 1
     prediction = model.predict(dtest, iteration_range=(0, rounds))
     error = prediction - labels[test]
     row.update(
@@ -233,8 +277,8 @@ def _fit_cv_fold(fold: int, folds: np.ndarray, features: pd.DataFrame, labels: n
     )
     return row, predictions
 
-def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame, labels: np.ndarray, weights: np.ndarray, model_cfg: dict, seed: int, audit: dict, progress_cfg: dict | None = None) -> int:
-    """Select boosting rounds with the existing randomized spatial-block CV."""
+def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame, labels: np.ndarray, weights: np.ndarray, model_cfg: dict, seed: int, audit: dict, progress_cfg: dict | None = None, *, crs: str) -> int:
+    """Select boosting rounds with native balanced hexagonal spatial CV."""
 
     mode = model_cfg["round_selection_mode"]
     if mode not in ("fixed", "cv_with_floor", "cv_only"):
@@ -249,7 +293,7 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
     audit.update(
         status="fixed" if mode == "fixed" else "not_run",
         mode=mode,
-        folds=pd.DataFrame(columns=["row_index", "fold", "X", "Y"]),
+        folds=pd.DataFrame(columns=["row_index", "fold", "X", "Y", "block_q", "block_r"]),
         metrics=pd.DataFrame(
             columns=[
                 "fold",
@@ -260,17 +304,33 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
                 "xgb_seed",
                 "rmse_bathy_t1",
                 "mae_bathy_t1",
+                "error",
             ]
         ),
         oof=pd.DataFrame(columns=oof_columns),
     )
     if mode == "fixed":
         return int(model_cfg["fixed_nrounds"])
-    folds = _spatial_fold_ids(coordinates, model_cfg["block_size_m"], model_cfg["n_folds"], seed)
+    folds, block_ids = _spatial_fold_ids(
+        coordinates,
+        model_cfg["block_size_m"],
+        model_cfg["n_folds"],
+        seed,
+        crs,
+        iterations=model_cfg["cv_assignment_iterations"],
+    )
+    audit["fold_method"] = "hexagonal_random_balanced_native"
+    audit["grid_origin"] = (
+        coordinates[["X", "Y"]].min().to_numpy(dtype=float)
+        + (coordinates[["X", "Y"]].max().to_numpy(dtype=float)
+           - coordinates[["X", "Y"]].min().to_numpy(dtype=float)) / 2
+    ).tolist()
     audit["folds"] = pd.DataFrame(
         {
             "row_index": np.arange(len(folds), dtype=np.int32),
             "fold": folds,
+            "block_q": block_ids[:, 0],
+            "block_r": block_ids[:, 1],
             "X": coordinates.X.to_numpy(),
             "Y": coordinates.Y.to_numpy(),
         }
@@ -290,14 +350,26 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
                 f"Training spatial CV fold {fold_number}/{len(unique_folds)}.",
                 verbose_only=True,
             )
-        row, predictions = _fit_cv_fold(fold, folds, features, labels, weights, model_cfg, seed)
+        try:
+            row, predictions = _fit_cv_fold(
+                fold, folds, features, labels, weights, model_cfg, seed
+            )
+        except (xgb.core.XGBoostError, ValueError) as exc:
+            row = {
+                "fold": int(fold),
+                "status": "fit_failed",
+                "n_train": int(np.sum(folds != fold)),
+                "n_test": int(np.sum(folds == fold)),
+                "error": str(exc),
+            }
+            predictions = None
         rows.append(row)
         
         if predictions is not None:
             oof.append(predictions)
             best_iters.append(row["best_nrounds"])
 
-    audit["metrics"] = pd.DataFrame(rows)
+    audit["metrics"] = pd.DataFrame(rows).reindex(columns=audit["metrics"].columns)
     audit["oof"] = pd.concat(oof, ignore_index=True) if oof else pd.DataFrame(columns=oof_columns)
     
     if not best_iters:
@@ -309,7 +381,7 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
         raw_cv_selected_rounds=selected,
         fold_best_rounds=best_iters,
     )
-    return max(floor, selected) if mode == "cv_with_floor" else selected
+    return max(floor, selected) if mode == "cv_with_floor" else max(50, selected)
 
 def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarray, interval_years: np.ndarray, horizon: float) -> dict:
     """Derive later-minus-earlier change, annualized rate and standardized horizon values. """
@@ -324,6 +396,48 @@ def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarr
         "mean_predicted_standard_change": standard_delta,
         "mean_predicted_standard_bathy": baseline_bathy + standard_delta,
     }
+
+def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndarray:
+    """R local weights: calculate once, then subset without renormalizing."""
+    if not isinstance(model_cfg["use_weighted_loss"], (bool, np.bool_)):
+        raise ValueError("use_weighted_loss must be boolean")
+    x = np.abs(np.asarray(change_vec, dtype=np.float64))
+    if x.ndim != 1 or not np.isfinite(x).all():
+        raise ValueError("Weight calculation needs finite, one-dimensional changes")
+    if not model_cfg["use_weighted_loss"]:
+        return np.ones(len(x), dtype=np.float64)
+    if len(x) == 0:
+        return np.ones(0, dtype=np.float64)
+    alpha = float(model_cfg["weight_alpha"])
+    if not np.isfinite(alpha) or alpha <= 0:
+        raise ValueError("weight_alpha must be finite and positive")
+    method = model_cfg["weight_method"]
+    if method == "power":
+        epsilon = float(model_cfg["weight_epsilon"])
+        if not np.isfinite(epsilon) or epsilon <= 0:
+            raise ValueError("weight_epsilon must be finite and positive")
+        w = (x + epsilon) ** alpha
+        total = w.sum(dtype=np.float64)
+        # Same fallback as the R power helper.
+        if not np.isfinite(total) or total <= 0:
+            return np.ones(len(x), dtype=np.float64)
+        w = w / total * len(x)
+    elif method == "capped_linear":
+        quantile = float(model_cfg["weight_cap_quantile"])
+        maximum = float(model_cfg["max_weight"])
+        if not np.isfinite(quantile) or not 0 <= quantile <= 1:
+            raise ValueError("weight_cap_quantile must lie in [0, 1]")
+        if not np.isfinite(maximum) or maximum < 1:
+            raise ValueError("max_weight must be finite and at least 1")
+        cap = float(np.quantile(x, quantile, method="linear"))
+        if not np.isfinite(cap) or cap <= 0:
+            return np.ones(len(x), dtype=np.float64)
+        w = 1.0 + (maximum - 1.0) * (np.minimum(x, cap) / cap) ** alpha
+    else:
+        raise ValueError(f"Unknown weight_method: {method}")
+    if not np.isfinite(w).all() or (w <= 0).any():
+        raise ValueError("Calculated weights must be finite and positive")
+    return w
 
 def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_predictors: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
     """Use DataPrep's ordered schema: bathy_t plus drivers predicts bathy_t1.
@@ -353,7 +467,6 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_pr
         "bathy_t1",
         "bathy_t",
         "interval_years",
-        "sample_weight",
         "delta_bathy",
         "delta_rate",
     }
@@ -367,9 +480,6 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_pr
         raise ValueError(
             'ML-ready training has invalid essential fields; rerun DataPrep instead of dropping rows'
         )
-    weights = train_df.sample_weight.to_numpy()
-    if not np.isfinite(weights).all() or (weights <= 0).any():
-        raise ValueError("Prepared sample weights must be finite and positive")
     train_df = train_df.reset_index(drop=True)
     _validate_training_changes(train_df)
     train_features = train_df[predictors]
@@ -506,7 +616,7 @@ def _bootstrap_diagnostics(model: xgb.Booster, x_fit: np.ndarray, predictors: li
     return importance_rows, shap_rows
 
 def _fit_bootstrap_model(inputs: ModelInputs, cfg: dict, seed: int, bootstrap_index: int, best_rounds: int, local_tmp_dir: str) -> tuple[xgb.Booster, dict]:
-    """Sample rows uniformly, fit with prepared weights, and save the model."""
+    """Sample rows uniformly, fit with validated model weights, and save the model."""
 
     model_cfg, paths = cfg["model_config"], cfg["output_paths"]
     tile_id, pair = cfg["tile_id"], cfg["pair"]
@@ -670,6 +780,8 @@ def _model_metadata(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rounds:
     return {
         "data_dtype": "float32",
         "coordinate_dtype": "float32",
+        "cv_grid_arithmetic_dtype": "float64",
+        "weight_dtype": "float64",
         "tile_id": cfg["tile_id"],
         "pair": cfg["pair"],
         "target": "bathy_t1",
@@ -690,6 +802,21 @@ def _model_metadata(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rounds:
         "cv_status": cv_audit["status"],
         "cv_fold_best_rounds": cv_audit.get("fold_best_rounds", []),
         "cv_raw_selected_rounds": cv_audit.get("raw_cv_selected_rounds"),
+        "weight_source": "model_engine",
+        "weight_summary": {
+            "minimum": float(inputs.train.sample_weight.min()),
+            "mean": float(inputs.train.sample_weight.mean()),
+            "median": float(inputs.train.sample_weight.median()),
+            "q95": float(inputs.train.sample_weight.quantile(0.95)),
+            "maximum": float(inputs.train.sample_weight.max()),
+        },
+        "cv_fold_method": cv_audit.get("fold_method", "not_run"),
+        "cv_grid_origin": cv_audit.get("grid_origin"),
+        "cv_assignment_iterations": model_cfg["cv_assignment_iterations"],
+        "cv_failed_folds": int(cv_audit["metrics"].status.eq("fit_failed").sum()),
+        "pre_xgb_data_mode": "native_missing",
+        "predictor_resolution_mode": "locked_training_first",
+        "invalid_training_row_policy": "error_after_dataprep",
         "early_stopping_metric": "mae",
         "model_config": model_cfg,
         "xgboost_version": xgb.__version__,
@@ -770,6 +897,9 @@ def _load_model_inputs(cfg: dict) -> ModelInputs | None:
         frames[role] = frame
     inputs = ModelInputs(
         *_prepare_model_data(frames["training"], frames["prediction"], schema.predictor.tolist())
+    )
+    inputs.train["sample_weight"] = _calculate_model_weights(
+        inputs.train.delta_bathy.to_numpy(), cfg["model_config"]
     )
     if len(inputs.train) < cfg["model_config"]["minimum_training_rows"]:
         raise ValueError("Fewer eligible fitting rows than the configured minimum")
@@ -874,6 +1004,7 @@ def _train_tile_task(cfg: dict) -> dict:
             _stable_seed(seed, "cv"),
             audit,
             progress_cfg=cfg,
+            crs=cfg["crs"],
         )
         _write_task_progress(cfg, f"Selected {best_rounds} boosting rounds; starting ensemble.")
         with tempfile.TemporaryDirectory(prefix="hhm_xgb_") as tmp_dir:
@@ -926,6 +1057,13 @@ class XGBoostModelingEngine(Engine):
             "early_stopping_rounds": 15,
             "cv_fallback_nrounds": 1000,
             "n_folds": 5,
+            "cv_assignment_iterations": 200,
+            "use_weighted_loss": True,
+            "weight_method": "power",
+            "weight_alpha": 0.5,
+            "weight_cap_quantile": 0.95,
+            "max_weight": 2.0,
+            "weight_epsilon": 1e-6,
             "block_size_m": 200.0,
             "n_boot": 5,
             "standard_horizon_years": 2.0,
@@ -942,14 +1080,38 @@ class XGBoostModelingEngine(Engine):
         self.model_config.update(settings.get("model_config", {}))
         for key in (
             "n_boot",
+            "max_depth",
+            "max_bin",
+            "minimum_nrounds",
+            "fixed_nrounds",
+            "cv_nrounds",
+            "early_stopping_rounds",
+            "cv_fallback_nrounds",
+            "n_folds",
+            "minimum_training_rows",
+            "cv_assignment_iterations",
             "xgb_workers",
             "xgb_threads_per_worker",
             "xgb_tasks_per_batch",
         ):
             value = self.model_config[key]
-            if isinstance(value, bool) or int(value) != value or value < 1:
+            if isinstance(value, (bool, np.bool_)) or not np.isfinite(value) or int(value) != value or value < 1:
                 raise ValueError(f"{key} must be a positive integer")
             self.model_config[key] = int(value)
+        if self.model_config["round_selection_mode"] not in {"fixed", "cv_with_floor", "cv_only"}:
+            raise ValueError("Invalid round_selection_mode")
+        for key in ("eta", "subsample", "colsample_bytree"):
+            value = float(self.model_config[key])
+            if not np.isfinite(value) or not 0 < value <= 1:
+                raise ValueError(f"{key} must lie in (0, 1]")
+        for key in ("gamma", "reg_lambda", "reg_alpha"):
+            value = float(self.model_config[key])
+            if not np.isfinite(value) or value < 0:
+                raise ValueError(f"{key} must be finite and nonnegative")
+        if not np.isfinite(self.model_config["block_size_m"]) or self.model_config["block_size_m"] <= 0:
+            raise ValueError("block_size_m must be finite and positive")
+        if self.model_config["tree_method"] != "hist":
+            raise ValueError("This parity configuration expects tree_method='hist'")
 
     def _resolve_paths(self, region: str) -> None:
         """Resolve paths for the environment and the given ecoregion."""
