@@ -45,6 +45,8 @@ PREPROCESSED:
   HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
   SEDIMENT: model_variables/Prediction/pre_processed/sediment_rasters
   TSM: original_data_files/tsm_data/TSM_year_pair_rasters/
+REPORTS:
+  SUBFOLDER: reports
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv

@@ -1,9 +1,21 @@
+"""Prepare all training and prediction tile/year pairs independently.
+
+Prediction export is skipped when any expected predictor is at least 20%
+missing (prediction_max_missing_fraction). Skipped roles produce no cleaned
+or auxiliary files; stale outputs are removed. Training with too few eligible
+rows is also skipped. Each cleaned parquet is written before its auxiliaries.
+Dask defaults: 16 workers, 2 threads per worker, 6GB per worker.
+"""
+
 import gc
 import json
 import os
 import pathlib
 import re
 import shutil
+import sys
+import uuid
+from datetime import datetime, timezone
 import tempfile
 import warnings
 from configparser import Error as ConfigError
@@ -15,14 +27,14 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from pyproj import CRS
-from shapely.geometry import Point
 from upath import UPath
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
-INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
-OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+REPOSITORY_ROOT = next((parent for parent in pathlib.Path(__file__).resolve().parents if (parent / 'src' / 'hydro_health').is_dir()), pathlib.Path(__file__).resolve().parents[3])
+INPUTS = REPOSITORY_ROOT / 'inputs'
+OUTPUTS = REPOSITORY_ROOT / 'outputs'
 
 DYNAMIC_BASES = ('hurr_strength_mean', 'tsm_mean')
 NON_PREDICTORS = {
@@ -131,13 +143,7 @@ def _build_pair_specific_predictors(master_predictors: Sequence[str], pair: str)
     return [f'{name}_{pair}' if name in DYNAMIC_BASES else name
             for name in _normalize_master_predictors(master_predictors)]
 
-def _resolve_predictors(
-    pair: str,
-    master_predictors: Sequence[str],
-    train_columns: Sequence[str],
-    prediction_columns: Sequence[str] | None,
-    missing_policy: str = 'fill_nan',
-) -> tuple[list[str], list[str], list[str]]:
+def _resolve_predictors( pair: str, master_predictors: Sequence[str], train_columns: Sequence[str], prediction_columns: Sequence[str] | None, missing_policy: str = 'fill_nan', ) -> tuple[list[str], list[str], list[str]]:
     """Choose one ordered schema for training and prediction; bathy_t is required."""
 
     if missing_policy not in {'fill_nan', 'error', 'drop'}:
@@ -215,10 +221,7 @@ def _read_input_table(uri: str, crs: str, tile_id: str, pair: str, input_crs: st
     out['pair_id'] = pair
     return out
 
-def _calculate_sample_weights(
-    change: np.ndarray, alpha: float, method: str, cap_quantile: float,
-    max_weight: float, epsilon: float = 1e-6,
-) -> np.ndarray:
+def _calculate_sample_weights( change: np.ndarray, alpha: float, method: str, cap_quantile: float, max_weight: float, epsilon: float = 1e-6, ) -> np.ndarray:
     """Weight absolute elevation change; normalize power weights to mean one."""
 
     magnitude = np.abs(change.astype(float))
@@ -263,187 +266,202 @@ def _predictor_range_table(df: pd.DataFrame, predictors: Sequence[str]) -> pd.Da
 
 
 def _save_geoparquet(df: pd.DataFrame, path: Path, crs: str) -> None:
-    """Write a staged table, retaining rows with invalid XY as null geometry."""
-
-    valid_xy = np.isfinite(df['X']) & np.isfinite(df['Y'])
-    geometry = gpd.GeoSeries(
-        [Point(float(x), float(y)) if valid else None
-         for x, y, valid in zip(df['X'], df['Y'], valid_xy)], index=df.index, crs=crs,
-    )
-    gpd.GeoDataFrame(df.copy(), geometry=geometry, crs=crs).to_parquet(
-        path, index=False, compression='zstd'
-    )
+    """Build point geometry vectorially while retaining invalid XY as nulls."""
+    valid = np.isfinite(df['X']) & np.isfinite(df['Y'])
+    geometry = gpd.points_from_xy(df['X'].where(valid, 0), df['Y'].where(valid, 0), crs=crs)
+    geometry[~valid.to_numpy()] = None
+    gpd.GeoDataFrame(df, geometry=geometry, crs=crs).to_parquet(path, index=False, compression='zstd')
 
 
-def _output_paths(train_dir: str, pred_dir: str, pair: str, has_prediction: bool) -> dict[str, UPath]:
-    """Construct output paths for training and prediction files."""
-
-    train, pred = UPath(train_dir), UPath(pred_dir)
-    paths = {
-        'schema': train / f'locked_predictors_{pair}.parquet',
-        'training_missingness': train / f'predictor_missingness_training_{pair}.parquet',
-        'ranges': train / f'predictor_ranges_training_{pair}.parquet',
-        'training': train / f'ML_ready_training_{pair}.geoparquet',
-    }
-    if has_prediction:
-        paths.update({
-            'prediction_missingness': pred / f'predictor_missingness_prediction_{pair}.parquet',
-            'prediction': pred / f'ML_ready_prediction_{pair}.geoparquet',
-        })
+def _role_paths(directory: str, pair: str, role: str) -> dict:
+    base = UPath(directory)
+    paths = {'schema': base / f'locked_predictors_{pair}.parquet',
+             'missingness': base / f'predictor_missingness_{role}_{pair}.parquet',
+             'ready': base / f'ML_ready_{role}_{pair}.geoparquet'}
+    if role == 'training':
+        paths['ranges'] = base / f'predictor_ranges_training_{pair}.parquet'
     return paths
 
 
-def _outputs_complete(marker: UPath, paths: dict[str, UPath]) -> bool:
-    """A success marker and all expected files permit a skip."""
-
-    if not marker.is_file():
-        return False
-    try:
-        record = json.loads(marker.read_text())
-        return (
-            isinstance(record, dict)
-            and record['status'] == 'success'
-            and set(record['outputs']) == {str(path) for path in paths.values()}
-            and all(path.is_file() for path in paths.values())
-        )
-    except (KeyError, TypeError, ValueError, OSError):
-        return False
-
-
 def _publish_file(staged: Path, destination: UPath, is_aws: bool) -> None:
-    """Replace one local file atomically; stream remote files before the marker."""
-
     destination.parent.mkdir(parents=True, exist_ok=True)
     if is_aws:
         with staged.open('rb') as source, destination.open('wb') as target:
-            shutil.copyfileobj(source, target)
+            shutil.copyfileobj(source, target, length=1024 * 1024)
+        if destination.stat().st_size != staged.stat().st_size:
+            raise OSError(f'Upload size mismatch: {destination}')
     else:
-        with tempfile.NamedTemporaryFile(dir=str(destination.parent), delete=False) as temporary:
-            temporary_path = Path(temporary.name)
+        with tempfile.NamedTemporaryFile(dir=str(destination.parent), delete=False) as handle:
+            temporary = Path(handle.name)
         try:
-            shutil.copyfile(staged, temporary_path)
-            os.replace(temporary_path, str(destination))
+            shutil.copyfile(staged, temporary)
+            os.replace(temporary, str(destination))
         finally:
-            temporary_path.unlink(missing_ok=True)
+            temporary.unlink(missing_ok=True)
 
 
-def _prep_tile_task(params: list) -> dict:
-    """Validate, prepare, stage all outputs, then publish the completion marker last."""
+def _write_json(value: dict, destination: UPath, is_aws: bool) -> None:
+    with tempfile.TemporaryDirectory(prefix='hhm_prep_json_') as temporary:
+        staged = Path(temporary) / 'record.json'
+        staged.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False), encoding='utf-8')
+        _publish_file(staged, destination, is_aws)
 
-    (tile_id, pair, raw_train_uri, raw_pred_uri, master_predictors, cfg, crs, is_aws,
-     out_train_dir, out_pred_dir, local_tmp_dir, index, total, verbose, overwrite) = params
-    result = {'tile_id': tile_id, 'pair': pair}
-    marker = UPath(out_train_dir) / f'prep_complete_{pair}.json'
+
+def _remove_role_outputs(task: dict, role: str, keep: set | None = None) -> None:
+    paths = _role_paths(task['directories'][role], task['pair'], role)
+    keep = keep or set()
+    for key, path in paths.items():
+        if key not in keep and path.exists():
+            path.unlink()
+
+
+def _quality(table: pd.DataFrame, predictors: Sequence[str]) -> dict:
+    counts = {name: int(np.isfinite(table[name]).sum()) for name in predictors}
+    empty = [name for name, count in counts.items() if count == 0]
+    return {'n_rows': len(table), 'finite_predictor_values': counts,
+            'all_missing_predictors': empty,
+            'missing_fraction': {name: ((len(table) - count) / len(table)) if len(table) else None for name, count in counts.items()}}
+
+
+def _prepare_role(task: dict, role: str) -> dict:
+    """Prepare one role completely, releasing its tables before the other role."""
+    cfg, pair, tile = task['cfg'], task['pair'], task['tile_id']
+    uri = task['sources'].get(role)
+    result = {'role': role, 'source': uri, 'status': 'absent', 'reason': 'no_raw_batch'}
+    if not uri and role not in task.get('input_errors', {}):
+        return result
+    base = UPath(task['directories'][role])
+    paths = _role_paths(str(base), pair, role)
+    published = False
     try:
-        _pair_duration_years(pair)
-        paths = _output_paths(out_train_dir, out_pred_dir, pair, raw_pred_uri is not None)
-        if not overwrite and _outputs_complete(marker, paths):
-            return {**result, 'ok': True, 'status': 'skipped', 'reason': 'already_complete'}
-        # Old files without a matching marker are incomplete and can be replaced.
-        if marker.exists():
-            marker.unlink()
-        if verbose:
-            Engine.write_message_dask(f'Preparing tile {tile_id}, pair {pair} ({index}/{total})...', OUTPUTS)
-        training = _ensure_training_targets(
-            _read_input_table(raw_train_uri, crs, tile_id, pair, cfg.get('input_crs')), pair
-        )
-        prediction = None
-        if raw_pred_uri is not None:
-            prediction = _read_input_table(raw_pred_uri, crs, tile_id, pair, cfg.get('input_crs'))
-            prediction = _ensure_pair_dates(prediction, pair)
-        predictors, missing_train, missing_pred = _resolve_predictors(
-            pair, master_predictors, training.columns,
-            prediction.columns if prediction is not None else None,
-            cfg['missing_predictor_policy'],
-        )
-        training = _align_predictors(training, predictors)
-        if prediction is not None:
-            prediction = _align_predictors(prediction, predictors)
-        essential_fields = ['X', 'Y', 'bathy_t', 'bathy_t1', 'delta_bathy', 'delta_rate', 'interval_years']
-        keep = np.isfinite(training[essential_fields].to_numpy(dtype=float)).all(axis=1)
-        keep &= training['interval_years'].to_numpy() > 0
-        if cfg['pre_xgb_data_mode'] == 'legacy_complete':
-            keep &= np.isfinite(training[predictors].to_numpy(dtype=float)).all(axis=1)
-        fitting = training.loc[keep].copy().reset_index(drop=True)
-        if len(fitting) < cfg['minimum_training_rows']:
-            Engine.write_message_dask(f'[SKIP] {tile_id}, {pair}: only {len(fitting)} fitting rows.', OUTPUTS)
-            return {**result, 'ok': True, 'status': 'skipped', 'reason': 'insufficient_training_rows', 'n_fit': len(fitting)}
-        fitting['sample_weight'] = (_calculate_sample_weights(
-            fitting['delta_bathy'].to_numpy(dtype=float), cfg['weight_alpha'],
-            cfg['weight_method'], cfg['weight_cap_quantile'], cfg['max_weight'],
-        ) if cfg['use_weighted_loss'] else np.ones(len(fitting)))
-        diagnostics = {
-            'schema': pd.DataFrame({'predictor': predictors}),
-            'training_missingness': _summarize_missingness(training, predictors),
-            'ranges': _predictor_range_table(fitting, predictors),
-        }
-        if prediction is not None:
-            diagnostics['prediction_missingness'] = _summarize_missingness(prediction, predictors)
-            prediction = prediction.reset_index(drop=True)
-            usable = np.isfinite(prediction[['X', 'Y', 'bathy_t']].to_numpy(dtype=float)).all(axis=1)
+        if role in task.get('input_errors', {}):
+            raise ValueError(task['input_errors'][role])
+        table = _read_input_table(uri, task['crs'], tile, pair, cfg.get('input_crs'))
+        table = _ensure_training_targets(table, pair) if role == 'training' else _ensure_pair_dates(table, pair)
+        missing_columns = [name for name in task['predictors'] if name not in table]
+        if cfg['missing_predictor_policy'] == 'error' and missing_columns:
+            raise ValueError(f'Requested predictors missing: {missing_columns}')
+        table = _align_predictors(table, task['predictors'])
+        quality = _quality(table, task['predictors'])
+        result.update(n_input=len(table), quality=quality, missing_predictor_columns=missing_columns,
+                      tile_id=tile, pair=pair, role=role)
+        messages = []
+        if quality['all_missing_predictors']:
+            messages.append(f'Entirely missing predictors: {quality["all_missing_predictors"]}')
+        if missing_columns:
+            messages.append(f'Absent columns filled with NaN: {missing_columns}')
+        high = [name for name, fraction in quality['missing_fraction'].items() if fraction is not None and fraction >= cfg['missingness_warning_fraction'] and name not in quality['all_missing_predictors']]
+        if high:
+            messages.append(f'High missingness predictors: {high}')
+        result['warnings'] = messages
+        if role == 'training':
+            fields = ['X', 'Y', 'bathy_t', 'bathy_t1', 'delta_bathy', 'delta_rate', 'interval_years']
+            keep = np.isfinite(table[fields].to_numpy(dtype=float)).all(axis=1)
+            keep &= table['interval_years'].to_numpy() > 0
             if cfg['pre_xgb_data_mode'] == 'legacy_complete':
-                usable &= np.isfinite(prediction[predictors].to_numpy(dtype=float)).all(axis=1)
-            prediction['prediction_row_usable'] = usable
-        # Each worker gets its own staging directory, even for retries of the same task.
-        with tempfile.TemporaryDirectory(dir=local_tmp_dir) as task_tmp:
-            staged = {key: Path(task_tmp) / path.name for key, path in paths.items()}
-            for key, table in diagnostics.items():
-                table.to_parquet(staged[key], index=False, compression='zstd')
-            _save_geoparquet(fitting, staged['training'], crs)
-            if prediction is not None:
-                _save_geoparquet(prediction, staged['prediction'], crs)
-            for key, destination in paths.items():
-                _publish_file(staged[key], destination, is_aws)
-            # A training-only rerun must not leave obsolete ready prediction files.
-            if prediction is None:
-                for key, obsolete in _output_paths(out_train_dir, out_pred_dir, pair, True).items():
-                    if key not in paths and obsolete.exists():
-                        obsolete.unlink()
-            record = {
-                'status': 'success',
-                **result, 'n_fit': len(fitting),
-                'outputs': [str(path) for path in paths.values()],
-            }
-            staged_marker = Path(task_tmp) / marker.name
-            staged_marker.write_text(json.dumps(record, indent=2, allow_nan=False))
-            _publish_file(staged_marker, marker, is_aws)
-        return {**result, 'ok': True, 'status': 'success', 'n_fit': len(fitting),
-                'schema_locked': True, 'missing_training': missing_train, 'missing_prediction': missing_pred}
-    except Exception as error:
-        Engine.write_message_dask(f'ERROR preparing {tile_id}, {pair}: {type(error).__name__}: {error}', OUTPUTS)
-        return {**result, 'ok': False, 'status': 'failed', 'reason': f'{type(error).__name__}: {error}'}
+                keep &= np.isfinite(table[task['predictors']].to_numpy(dtype=float)).all(axis=1)
+            ready = table.loc[keep].copy().reset_index(drop=True)
+            result.update(n_fit=len(ready), n_dropped=int((~keep).sum()))
+            if len(ready) < cfg['minimum_training_rows']:
+                result.update(status='skipped', reason='insufficient_training_rows')
+            else:
+                ready['sample_weight'] = _calculate_sample_weights(ready['delta_bathy'].to_numpy(dtype=float), cfg['weight_alpha'], cfg['weight_method'], cfg['weight_cap_quantile'], cfg['max_weight']) if cfg['use_weighted_loss'] else np.ones(len(ready))
+                result.update(status='success', reason='prepared')
+        else:
+            ready = table.reset_index(drop=True)
+            usable = np.isfinite(ready[['X', 'Y', 'bathy_t']].to_numpy(dtype=float)).all(axis=1)
+            if cfg['pre_xgb_data_mode'] == 'legacy_complete':
+                usable &= np.isfinite(ready[task['predictors']].to_numpy(dtype=float)).all(axis=1)
+            ready['prediction_row_usable'] = usable
+            result.update(n_usable=int(usable.sum()), n_unusable=int((~usable).sum()))
+            if usable.any():
+                result.update(status='success', reason='prepared')
+            else:
+                result.update(status='failed', reason='zero_usable_prediction_rows')
+            if not usable.all():
+                result['warnings'].append(f'{int((~usable).sum())}/{len(ready)} prediction rows unusable')
+            limit = cfg['prediction_max_missing_fraction']
+            rejected = {name: fraction for name, fraction in quality['missing_fraction'].items() if fraction is not None and fraction > 0 and limit is not None and fraction >= limit}
+            if rejected:
+                result.update(status='skipped', reason='high_predictor_missingness',
+                              rejected_predictors=rejected, prediction_max_missing_fraction=limit)
+        write_ready = result['status'] == 'success' or (role == 'prediction' and result['status'] == 'failed' and cfg['write_unusable_prediction'])
+        if not write_ready:
+            _remove_role_outputs(task, role)
+            result['outputs'] = []
+            return result
+        if result['status'] == 'success' and not task['overwrite'] and all(path.is_file() for path in paths.values()):
+            result.update(reason='existing_outputs', outputs=[str(path) for path in paths.values()])
+            return result
+        temp_parent = cfg.get('worker_temp_dir')
+        if temp_parent:
+            Path(temp_parent).mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='hhm_prep_role_', dir=temp_parent) as temporary:
+            stage = Path(temporary)
+            # Write the cleaned table first; only then create its auxiliary files.
+            staged = {'ready': stage / paths['ready'].name}
+            _save_geoparquet(ready, staged['ready'], task['crs'])
+            _publish_file(staged['ready'], paths['ready'], task['is_aws'])
+            diagnostics = {'schema': pd.DataFrame({'predictor': task['predictors']}),
+                           'missingness': _summarize_missingness(table, task['predictors'])}
+            if role == 'training':
+                diagnostics['ranges'] = _predictor_range_table(ready, task['predictors'])
+            del table, ready
+            for key, diagnostic in diagnostics.items():
+                staged[key] = stage / paths[key].name
+                diagnostic.to_parquet(staged[key], index=False, compression='zstd')
+                _publish_file(staged[key], paths[key], task['is_aws'])
+            _remove_role_outputs(task, role, keep=set(staged))
+            result['outputs'] = [str(paths[key]) for key in staged]
+            published = True
+        return result
+    except Exception as exc:
+        result.update(status='failed', reason=f'{type(exc).__name__}: {exc}', error_type=type(exc).__name__)
+        try:
+            if not published:
+                _remove_role_outputs(task, role)
+        except Exception as cleanup_error:
+            result['cleanup_error'] = str(cleanup_error)
+        return result
     finally:
         gc.collect()
 
 
+def _prep_tile_task(task: dict) -> dict:
+    """Prepare both roles; a skipped or failed role does not block the other."""
+    roles = {role: _prepare_role(task, role) for role in ('training', 'prediction')}
+    failures = any(item['status'] == 'failed' for item in roles.values())
+    successes = any(item['status'] == 'success' for item in roles.values())
+    status = ('partial' if successes else 'failed') if failures else ('success' if successes else 'skipped')
+    return {'tile_id': task['tile_id'], 'pair': task['pair'], 'region': task['region'],
+            'status': status, 'ok': not failures, 'roles': roles}
+
+
 class DataPrepEngine(Engine):
-    """Use the same region/path/worker orchestration pattern as TrainingRastersEngine."""
+    """Prepare the union of raw training/prediction tiles, using independent roles."""
 
     def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
+        if output_prefix and (not isinstance(output_prefix, str) or output_prefix.startswith('/') or '://' in output_prefix or '..' in Path(output_prefix).parts):
+            raise ValueError('output_prefix must be a relative prefix or False')
         self.is_aws = param_lookup['env'] in ['remote', 'aws']
-        self.local_tmp_dir = pathlib.Path(str(Path.home() / "hydro_health_local_tmp"))
-
-        self.results = []
+        self.local_tmp_dir = None
+        self.results, self.discovery_issues = [], []
         self.settings = {
-            'master_predictors': None,
-            'master_predictors_path': None,
-            'input_crs': None,
-            'missing_predictor_policy': 'fill_nan',
-            'pre_xgb_data_mode': 'native_missing',
-            'require_prediction_batch': False,
-            'use_weighted_loss': True,
-            'weight_alpha': 0.5,
-            'weight_method': 'power',
-            'weight_cap_quantile': 0.95,
-            'max_weight': 2.0,
-            'minimum_training_rows': 100,
-            'verbose_logging': True,
+            'master_predictors': None, 'master_predictors_path': None, 'input_crs': None,
+            'missing_predictor_policy': 'fill_nan', 'pre_xgb_data_mode': 'native_missing',
+            'require_prediction_batch': False, 'use_weighted_loss': True,
+            'weight_alpha': 0.5, 'weight_method': 'power', 'weight_cap_quantile': 0.95,
+            'max_weight': 2.0, 'minimum_training_rows': 100, 'verbose_logging': True,
+            'write_unusable_prediction': True,
+            'missingness_warning_fraction': 0.20, 'worker_temp_dir': None,
+            'prediction_max_missing_fraction': 0.20,
+            'n_workers': 16, 'threads_per_worker': 2, 'memory_limit': '6GB',
+            'raise_on_failure': True,
         }
         overrides = {**param_lookup.get('data_prep_settings', {}), **param_lookup.get('model_config', {})}
-        # Retain explicit legacy policy choices; new configurations use one policy key.
         legacy_mode = overrides.pop('predictor_resolution_mode', None)
         legacy_strict = overrides.pop('strict_requested_predictors', None)
         if legacy_mode not in {None, 'og_training_first', 'deployment_intersection'}:
@@ -457,51 +475,50 @@ class DataPrepEngine(Engine):
         self._validate_settings()
 
     def _validate_settings(self) -> None:
-        """Check that all settings are valid and consistent."""
-
         cfg = self.settings
         if cfg['missing_predictor_policy'] not in {'fill_nan', 'drop', 'error'}:
             raise ValueError('missing_predictor_policy must be fill_nan, drop, or error')
         if cfg['pre_xgb_data_mode'] not in {'native_missing', 'legacy_complete'}:
             raise ValueError('pre_xgb_data_mode must be native_missing or legacy_complete')
-        if (isinstance(cfg['minimum_training_rows'], bool)
-                or not isinstance(cfg['minimum_training_rows'], int) or cfg['minimum_training_rows'] < 1):
-            raise ValueError('minimum_training_rows must be a positive integer')
+        for name in ('minimum_training_rows', 'n_workers', 'threads_per_worker'):
+            if isinstance(cfg[name], bool) or not isinstance(cfg[name], int) or cfg[name] < 1:
+                raise ValueError(f'{name} must be a positive integer')
         if cfg['weight_method'] not in {'power', 'capped_linear'}:
             raise ValueError('weight_method must be power or capped_linear')
-        for key in ('weight_alpha', 'weight_cap_quantile', 'max_weight'):
-            if not np.isfinite(cfg[key]):
-                raise ValueError(f'{key} must be finite')
+        for name in ('weight_alpha', 'weight_cap_quantile', 'max_weight', 'missingness_warning_fraction'):
+            if not np.isfinite(cfg[name]):
+                raise ValueError(f'{name} must be finite')
         if cfg['weight_alpha'] < 0 or not 0 < cfg['weight_cap_quantile'] <= 1 or cfg['max_weight'] < 1:
-            raise ValueError('Require alpha >= 0, 0 < cap quantile <= 1, and max_weight >= 1')
+            raise ValueError('Invalid weighting settings')
+        if not 0 <= cfg['missingness_warning_fraction'] <= 1:
+            raise ValueError('missingness_warning_fraction must be in [0, 1]')
+        limit = cfg['prediction_max_missing_fraction']
+        if limit is not None and (isinstance(limit, bool) or not np.isfinite(limit) or not 0 <= limit <= 1):
+            raise ValueError('prediction_max_missing_fraction must be in [0, 1], or None to disable the prediction quality gate')
+        for name in ('require_prediction_batch', 'use_weighted_loss', 'verbose_logging', 'write_unusable_prediction', 'raise_on_failure'):
+            if not isinstance(cfg[name], bool):
+                raise ValueError(f'{name} must be boolean')
         if cfg['input_crs'] is not None:
             cfg['input_crs'] = CRS.from_user_input(cfg['input_crs']).to_string()
 
     def _resolve_paths(self, region: str) -> None:
-        """Resolve configured local or S3 directories for the current ecoregion."""
-        
         self.region = region
         self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
         self.outputs_dir.mkdir(parents=True, exist_ok=True)
+        bucket = str(get_config_item('SHARED', 'OUTPUT_BUCKET')).strip('/').removeprefix('s3://')
+        self.s3_dir_base = f's3://{bucket}/{self.output_prefix}/{region}' if self.output_prefix else f's3://{bucket}/{region}'
+        for attribute, key in [('training_tiles_dir', 'TRAINING_TILES_DIR'), ('prediction_tiles_dir', 'PREDICTION_TILES_DIR'), ('ml_prep_train_dir', 'ML_PREP_TRAIN_DIR'), ('ml_prep_pred_dir', 'ML_PREP_PRED_DIR')]:
+            folder = str(get_config_item('MODEL', key)).strip('/')
+            if not folder or '://' in folder or '..' in Path(folder).parts:
+                raise ValueError(f'MODEL.{key} must be a relative subfolder')
+            setattr(self, attribute, UPath(f'{self.s3_dir_base}/{folder}') if self.is_aws else UPath(self.outputs_dir / folder))
+        reports = str(get_config_item('REPORTS', 'SUBFOLDER')).strip('/')
+        if not reports or '://' in reports or '..' in Path(reports).parts:
+            raise ValueError('REPORTS.SUBFOLDER must be relative')
+        self.reports_dir = UPath(f'{self.s3_dir_base}/{reports}') if self.is_aws else UPath(self.outputs_dir / reports)
         self.write_message(f'DataPrepEngine outputs for {region}: {self.outputs_dir}', OUTPUTS)
-        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        s3_dir_base = f's3://{bucket}/{self.output_prefix}/{region}' if self.output_prefix else f's3://{bucket}/{region}'
-
-        training_tiles_dir = get_config_item('MODEL', 'TRAINING_TILES_DIR')
-        self.training_tiles_dir = UPath(f'{s3_dir_base}/{training_tiles_dir}') if self.is_aws else UPath(self.outputs_dir / training_tiles_dir)
-
-        prediction_tiles_dir = get_config_item('MODEL', 'PREDICTION_TILES_DIR')
-        self.prediction_tiles_dir = UPath(f'{s3_dir_base}/{prediction_tiles_dir}') if self.is_aws else UPath(self.outputs_dir / prediction_tiles_dir)
-
-        ml_prep_train_dir = get_config_item('MODEL', 'ML_PREP_TRAIN_DIR')
-        self.ml_prep_train_dir = UPath(f'{s3_dir_base}/{ml_prep_train_dir}') if self.is_aws else UPath(self.outputs_dir / ml_prep_train_dir)
-
-        ml_prep_pred_dir = get_config_item('MODEL', 'ML_PREP_PRED_DIR')
-        self.ml_prep_pred_dir = UPath(f'{s3_dir_base}/{ml_prep_pred_dir}') if self.is_aws else UPath(self.outputs_dir / ml_prep_pred_dir)
 
     def _load_master_predictors(self) -> list[str]:
-        """Read an independent schema source, never a preparation output."""
-        
         predictors = self.settings['master_predictors']
         if predictors is not None:
             return _normalize_master_predictors(predictors)
@@ -520,102 +537,167 @@ class DataPrepEngine(Engine):
         if not path.is_file():
             raise FileNotFoundError(f'Master predictor list not found: {path}')
         if path.suffix.lower() == '.parquet':
-            table = pd.read_parquet(str(path))
-            if 'predictor' not in table:
-                raise ValueError('Master predictor Parquet must contain a predictor column')
-            predictors = table['predictor'].tolist()
+            with path.open('rb') as stream:
+                predictors = pd.read_parquet(stream)['predictor'].tolist()
         elif path.suffix.lower() == '.json':
             predictors = json.loads(path.read_text())
         else:
-            predictors = [line.strip() for line in path.read_text().splitlines()
-                          if line.strip() and not line.lstrip().startswith('#')]
+            predictors = [line.strip() for line in path.read_text().splitlines() if line.strip() and not line.lstrip().startswith('#')]
         return _normalize_master_predictors(predictors)
 
+    def _collect_batches(self, directory: UPath, role: str) -> list:
+        if not directory.is_dir():
+            self.write_message(f'No raw {role} directory: {directory}', OUTPUTS)
+            return []
+        return sorted(set(directory.rglob(f'*_{role}_batch.parquet')), key=str)
+
     def collect_training_files(self) -> list:
-        """Collect all training batch files for the current ecoregion, sorted by name."""
+        return self._collect_batches(self.training_tiles_dir, 'training')
 
-        if not self.training_tiles_dir.is_dir():
-            raise FileNotFoundError(f'Training batch directory not found: {self.training_tiles_dir}')
-        files = sorted(self.training_tiles_dir.rglob('*_training_batch.parquet'), key=str)
-        self.write_message(f'Found {len(files)} training batches.', OUTPUTS)
-        return files
+    def collect_prediction_files(self) -> list:
+        return self._collect_batches(self.prediction_tiles_dir, 'prediction')
 
-    def _build_task_params(self, training_files: list, overwrite: bool = False) -> list[list]:
-        """Match raw batches by tile/pair; workers determine whether outputs are complete."""
-        
-        predictors = self._load_master_predictors()
-        prediction_files = {}
-        if self.prediction_tiles_dir.is_dir():
-            for path in self.prediction_tiles_dir.rglob('*_prediction_batch.parquet'):
-                existing = prediction_files.get(path.name)
-
-                if existing is not None:
-                    # Ignore the same path if the listing returns it again.
-                    if str(existing) == str(path):
+    def _build_task_params(self, training_files: list | None = None, overwrite: bool = True) -> list[dict]:
+        master = self._load_master_predictors()
+        inventory = {'training': {}, 'prediction': {}}
+        for role, directory in [('training', self.training_tiles_dir), ('prediction', self.prediction_tiles_dir)]:
+            try:
+                files = training_files if role == 'training' and training_files is not None else self._collect_batches(directory, role)
+            except Exception as exc:
+                self.discovery_issues.append({'region': self.region, 'role': role, 'path': str(directory), 'reason': f'Discovery failed: {type(exc).__name__}: {exc}'})
+                files = []
+            for path in files:
+                match = re.fullmatch(r'(.+)_(\d{4}_\d{4})_' + role + r'_batch\.parquet', path.name)
+                if match is None:
+                    self.discovery_issues.append({'region': self.region, 'role': role, 'path': str(path), 'reason': 'Unexpected batch filename'})
+                    continue
+                tile, pair = match.groups()
+                if tile in {'.', '..'} or '/' in tile or '\\' in tile:
+                    self.discovery_issues.append({'region': self.region, 'role': role, 'path': str(path), 'reason': 'Unsafe tile identifier in batch filename'})
+                    continue
+                try:
+                    _pair_duration_years(pair)
+                except ValueError as exc:
+                    self.discovery_issues.append({'region': self.region, 'role': role, 'path': str(path), 'reason': str(exc)})
+                    continue
+                inventory[role].setdefault((tile, pair), []).append(str(path))
+        identities = sorted(set(inventory['training']) | set(inventory['prediction']))
+        if not identities:
+            self.discovery_issues.append({'region': self.region, 'reason': 'No valid raw training or prediction batches were found in the configured directories'})
+        schemas = {pair: _build_pair_specific_predictors(master, pair) for _, pair in identities}
+        header_errors = {}
+        if self.settings['missing_predictor_policy'] == 'drop':
+            # Only this explicit legacy policy needs a regional metadata preflight.
+            # Every tile for a pair receives the same ordered feature list.
+            for role, entries in inventory.items():
+                for identity, sources in entries.items():
+                    if len(sources) != 1:
                         continue
+                    try:
+                        with UPath(sources[0]).open('rb') as stream:
+                            columns = set(pq.read_schema(stream).names)
+                        pair = identity[1]
+                        schemas[pair] = [name for name in schemas[pair] if name == 'bathy_t' or name in columns]
+                    except Exception as exc:
+                        header_errors[(role, identity)] = f'Cannot inspect raw schema: {exc}'
+        tasks = []
+        for tile, pair in identities:
+            task = {'tile_id': tile, 'pair': pair, 'region': self.region, 'sources': {}, 'input_errors': {},
+                    'predictors': schemas[pair], 'cfg': self.settings, 'crs': str(self.target_crs),
+                    'is_aws': self.is_aws, 'overwrite': overwrite,
+                    'directories': {'training': str(self.ml_prep_train_dir / tile), 'prediction': str(self.ml_prep_pred_dir / tile)}}
+            for role in ('training', 'prediction'):
+                candidates = inventory[role].get((tile, pair), [])
+                task['sources'][role] = candidates[0] if len(candidates) == 1 else None
+                if len(candidates) > 1:
+                    task['input_errors'][role] = f'Ambiguous duplicate {role} batches: {candidates}'
+                if (role, (tile, pair)) in header_errors:
+                    task['input_errors'][role] = header_errors[(role, (tile, pair))]
+            if task['sources']['training'] and not task['sources']['prediction'] and self.settings['require_prediction_batch']:
+                task['input_errors'].setdefault('prediction', 'A prediction batch is required but none matched this training tile/year pair')
+            tasks.append(task)
+        return tasks
 
-                    raise ValueError(
-                        f'Multiple prediction batches found for {path.name}:\n'
-                        f'  {existing}\n'
-                        f'  {path}\n'
-                        'Check PREDICTION_TILES_DIR for overlapping batch folders.'
-                    )
+    def _write_run_summary(self, path: UPath, region: str, results: list, state: str) -> None:
+        role_counts = {role: {status: sum(row.get('roles', {}).get(role, {}).get('status') == status for row in results) for status in ('success', 'skipped', 'failed', 'absent')} for role in ('training', 'prediction')}
+        _write_json({'region': region, 'run_id': self.run_id, 'state': state,
+                     'updated_at': datetime.now(timezone.utc).isoformat(),
+                     'tasks_completed': len(results), 'role_counts': role_counts,
+                     'discovery_issues': [item for item in self.discovery_issues if item['region'] == region],
+                     'results': results}, path, self.is_aws)
 
-                prediction_files[path.name] = path
-        params, seen = [], set()
-        for training_path in training_files:
-            match = re.fullmatch(r'(.+)_(\d{4}_\d{4})_training_batch\.parquet', training_path.name)
-            if match is None:
-                raise ValueError(f'Unexpected training batch filename: {training_path.name}')
-            tile_id, pair = match.groups()
-            _pair_duration_years(pair)
-            if (tile_id, pair) in seen:
-                raise ValueError(f'Duplicate training batch for {tile_id}, {pair}')
-            seen.add((tile_id, pair))
-            prediction_path = prediction_files.get(f'{tile_id}_{pair}_prediction_batch.parquet')
-            if prediction_path is None:
-                if self.settings['require_prediction_batch']:
-                    raise FileNotFoundError(f'Missing prediction batch for {tile_id}, {pair}')
-                self.write_message(f'{tile_id}, {pair}: no prediction batch; preparing training only.', OUTPUTS)
-            params.append([
-                tile_id, pair, str(training_path), str(prediction_path) if prediction_path is not None else None,
-                predictors, self.settings, str(self.target_crs), self.is_aws,
-                str(self.ml_prep_train_dir / tile_id), str(self.ml_prep_pred_dir / tile_id),
-                str(self.local_tmp_dir), len(params) + 1, len(training_files),
-                self.settings['verbose_logging'], overwrite,
-            ])
-        return params
-
-    def execute_tasks(self, training_files: list, overwrite: bool = False) -> list[dict]:
-        """Submit all tile/pair tasks to Dask and gather results."""
-
-        params = self._build_task_params(training_files, overwrite)
-        self.write_message(f'Submitting {len(params)} ML preparation tasks...', OUTPUTS)
-        # These tasks write files; repeated submissions must not reuse cached results.
-        results = self.client.gather(self.client.map(_prep_tile_task, params, pure=False))
-        counts = {status: sum(row['status'] == status for row in results)
-                  for status in ('success', 'skipped', 'failed')}
-        self.write_message(f'ML preparation results: {counts}', OUTPUTS)
+    def execute_tasks(self, training_files: list | None = None, overwrite: bool = True) -> list[dict]:
+        from dask.distributed import as_completed
+        tasks = self._build_task_params(training_files, overwrite)
+        self.write_message(f'Submitting {len(tasks)} union training/prediction preparation tasks for {self.region}...', OUTPUTS)
+        results = []
+        futures = {future: task for future, task in zip(self.client.map(_prep_tile_task, tasks, pure=False), tasks)}
+        try:
+            for completed, future in enumerate(as_completed(futures), 1):
+                task = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = {'tile_id': task['tile_id'], 'pair': task['pair'], 'region': task['region'],
+                              'status': 'failed', 'ok': False, 'reason': f'Dask worker failure: {type(exc).__name__}: {exc}', 'roles': {}}
+                results.append(result)
+                self.results.append(result)
+                failures = [f'{role}: {item.get("reason")}' for role, item in result.get('roles', {}).items() if item.get('status') == 'failed']
+                label = 'FAIL' if not result.get('ok') else 'DONE'
+                self.write_message(f'[{label}] {self.region}/{task["tile_id"]}/{task["pair"]} ({completed}/{len(tasks)}): {result["status"]} {"; ".join(failures)}', OUTPUTS)
+                for role, item in result.get('roles', {}).items():
+                    if item.get('status') == 'skipped':
+                        rejected = ', '.join(f'{name}={100 * fraction:.1f}%' for name, fraction in item.get('rejected_predictors', {}).items())
+                        self.write_message(f'[SKIP] {self.region}/{task["tile_id"]}/{task["pair"]} {role}: {item.get("reason")}' + (f'; missingness: {rejected}' if rejected else ''), OUTPUTS)
+                    for message in item.get('warnings', []):
+                        self.write_message(f'[WARN] {self.region}/{task["tile_id"]}/{task["pair"]} {role}: {message}', OUTPUTS)
+        finally:
+            for future in futures:
+                future.release()
         return results
 
-    def run(self, overwrite: bool = False) -> list[dict]:
-        """Initialize Dask once, process ecoregions, and separate skips from failures."""
-        
-        self.results = []
+    def run(self, overwrite: bool = True) -> list[dict]:
+        self.results, self.discovery_issues = [], []
+        regions = self.param_lookup['eco_regions'].value
+        if regions is None or isinstance(regions, (str, bytes)):
+            raise ValueError("param_lookup['eco_regions'].value must contain selected region names")
+        regions = list(regions)
+        if not regions or any(not isinstance(region, str) or not region.strip() for region in regions):
+            raise ValueError("param_lookup['eco_regions'].value must contain selected region names")
+        self.run_id = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '_' + uuid.uuid4().hex[:8]
+        self.local_tmp_dir = Path(tempfile.mkdtemp(prefix='hydro_health_data_prep_'))
         try:
-            self.setup_dask(self.param_lookup['env'], n_workers=2, threads_per_worker=1, memory_limit='12GB')
-            for eco_region in self.param_lookup['eco_regions'].value:
-                self._resolve_paths(eco_region)
-                training_files = self.collect_training_files()
-                if training_files:
-                    self.write_message(f'Outputting ML tables for {eco_region} to: {self.ml_prep_train_dir}', OUTPUTS)
-                    self.results.extend({**row, 'region': eco_region}
-                                        for row in self.execute_tasks(training_files, overwrite))
-                else:
-                    self.write_message(f'No training batches to process for {eco_region}.', OUTPUTS)
-            failures = [row for row in self.results if row['status'] == 'failed']
-            if failures:
-                raise RuntimeError(f'{len(failures)} ML preparation tasks failed: {failures}')
+            self.setup_dask(self.param_lookup['env'], n_workers=self.settings['n_workers'], threads_per_worker=self.settings['threads_per_worker'], memory_limit=self.settings['memory_limit'])
+            for eco_region in regions:
+                summary_path = None
+                try:
+                    self._resolve_paths(eco_region)
+                    summary_path = self.reports_dir / f'data_prep_run_{self.run_id}.json'
+                    self._write_run_summary(summary_path, eco_region, [], 'running')
+                    self.execute_tasks(overwrite=overwrite)
+                except Exception as exc:
+                    self.discovery_issues.append({'region': eco_region, 'reason': f'{type(exc).__name__}: {exc}'})
+                    self.write_message(f'[FAIL] {eco_region}: {exc}', OUTPUTS)
+                finally:
+                    region_results = [row for row in self.results if row['region'] == eco_region]
+                    if summary_path is not None:
+                        state = 'completed_with_errors' if any(not row.get('ok') for row in region_results) or any(item['region'] == eco_region for item in self.discovery_issues) else 'completed'
+                        try:
+                            self._write_run_summary(summary_path, eco_region, region_results, state)
+                        except Exception as exc:
+                            self.discovery_issues.append({'region': eco_region, 'reason': f'Run summary write failed: {exc}'})
+            failed = [row for row in self.results if not row.get('ok')]
+            if self.settings['raise_on_failure'] and (failed or self.discovery_issues):
+                examples = [f'{row["region"]}/{row["tile_id"]}/{row["pair"]}: {row.get("reason", row["status"])}' for row in failed[:10]]
+                raise RuntimeError(f'{len(failed)} preparation tasks had failures; {len(self.discovery_issues)} discovery/report issues. Successful independent roles were retained. Examples: {examples}. See REPORTS summaries.')
             return self.results
         finally:
-            self.cleanup_resources(OUTPUTS)
+            active_error = sys.exc_info()[0] is not None
+            try:
+                self.cleanup_resources(OUTPUTS)
+            except Exception as exc:
+                if not active_error:
+                    raise
+                self.write_message(f'[WARN] Resource cleanup failed without replacing the original error: {exc}', OUTPUTS)
+            finally:
+                shutil.rmtree(self.local_tmp_dir, ignore_errors=True)
