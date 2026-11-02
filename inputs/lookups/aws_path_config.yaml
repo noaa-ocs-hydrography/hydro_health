@@ -58,6 +58,8 @@ SHARED:
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
+REPORTS:
+  SUBFOLDER: reports  
 TERRAIN:
   COMBINED_LIDAR_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
   DICTIONARIES_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/dictionaries

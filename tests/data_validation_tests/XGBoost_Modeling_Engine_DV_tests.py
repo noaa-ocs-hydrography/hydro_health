@@ -1,536 +1,801 @@
-"""Run and validate the repository model engine using the verified DataPrep outputs.
+"""Validate existing XGBoostModelingEngine outputs; never train or overwrite them.
 
-Full model execution/output-contract checks replay every saved Booster in chunks,
-check ensemble mean/SD independently and preserve all source rows and fields.
-This PASS is distinct from optional R model-output comparison. Settings live
-only in XGBoostModelingEngine.py; no conversion, support or JSON config is used.
-Synthetic --self-test never substitutes its tiny parameters in your normal run.
+Install in tests/data_validation_tests and run in the hydro_health environment:
+    python ~/Repos/hydro_health/tests/data_validation_tests/XGBoost_Modeling_Engine_DV_tests.py --regions ER_3
+
+Paths use SHARED.OUTPUT_BUCKET, MODEL.ML_PREP_TRAIN_DIR,
+MODEL.ML_PREP_PRED_DIR, MODEL.XGB_OUTPUT_DIR and REPORTS.SUBFOLDER.
+Default: AWS, 16 standard-library worker processes (no per-worker memory cap).
+Optional --execution dask uses 1 thread and --memory-limit 6GB per worker.
+Use --env local or --execution processes/serial as needed. All source pairs
+are inventoried before validation, including missing outputs and prediction-only
+pairs. Replay checks ALL usable rows in chunks, never a sample. CSV and readable
+text reports include every tile/pair and issue; no audit JSON is written.
+One combined PDF is retained locally and uploaded to the configured S3 reports
+folder, even with local inputs; --local-only explicitly disables S3 report writes.
+Use run_validation(param_lookup, output_prefix) from the project runner.
+PDF generation additionally requires reportlab.
+
+PASS means output-contract consistency, not demonstrated predictive skill.
+The engine's CV holdouts select rounds; they are not an untouched final test set.
+Bootstrap SD is ensemble spread, not a calibrated prediction interval.
+The attached legacy tests supplied useful replay/row/formula/CV checks, but
+legacy *_next names, plain parquet summaries, square blocks and saved draw
+indices are not requirements of the supplied current engine.
 """
+import os
+
+# Set before numerical imports, including in spawned workers.
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+
 import argparse
-import copy
-import importlib
+import csv
+import io
 import json
-import platform
+import multiprocessing
+import re
+import shutil
 import sys
-import tempfile
 import traceback
-import types
-import unittest
-from importlib.metadata import version
+from collections import Counter, defaultdict
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from datetime import datetime, timezone
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 import geopandas as gpd
 import numpy as np
 import pandas as pd
+import reportlab
 import xgboost as xgb
+from pyproj import CRS
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import LongTable, Paragraph, SimpleDocTemplate, Spacer, TableStyle
+from upath import UPath
 
-DERIVED = [
-    "mean_predicted_bathy_next", "mean_predicted_change", "mean_predicted_rate",
-    "mean_predicted_standard_change", "mean_predicted_standard_bathy",
-    "uncertainty_sd_bathy_next", "mean_predicted_bathy_t1", "uncertainty_sd_bathy_t1",
-    "uncertainty_sd_change", "uncertainty_sd_rate",
-]
+# Dask is optional when using the standard process pool or serial execution.
+try:
+    from dask.distributed import as_completed
+except ImportError:
+    as_completed = None
 
+# Make repository imports work when this file is run directly from tests/.
+_import_parser = argparse.ArgumentParser(add_help=False)
+_import_parser.add_argument('--repo-root', type=Path)
+_import_options, _ = _import_parser.parse_known_args()
+_import_root = _import_options.repo_root
+if _import_root is None:
+    _import_root = next((candidate for candidate in (*Path(__file__).resolve().parents, Path.cwd(), *Path.cwd().parents)
+                         if (candidate / 'src/hydro_health').is_dir()), None)
+if _import_root is not None:
+    sys.path.insert(0, str(_import_root.resolve() / 'src'))
 
-def find_repository_root(script_path: Path) -> Path:
-    """Find the ancestor containing src/hydro_health even if this test folder moves."""
-    for parent in script_path.resolve().parents:
-        if (parent / "src/hydro_health").is_dir():
-            return parent
-    raise FileNotFoundError("Cannot find repository src/hydro_health above the test script")
+from hydro_health.engines.Engine import Engine
+from hydro_health.helpers.tools import get_config_item
 
-
-def load_engine(repository_root: Path, self_test: bool = False):
-    """Import the production-path replacement and real base without a silent fallback.
-
-    Only an explicit synthetic test in a package without the project Engine.py
-    installs this script's isolated base test double. Normal runs always use
-    the actual repository base and surface missing dependencies/import failures.
-    """
-    sys.path.insert(0,str(repository_root / "src"))
-    if self_test and not (repository_root / "src/hydro_health/engines/Engine.py").is_file():
-        base = types.ModuleType("hydro_health.engines.Engine")
-
-        class Engine:
-            """Synthetic-test base double; not a production module or normal-run fallback."""
-            def __init__(self):
-                """Match the production resource handles without its provider dependencies."""
-                self.client = None
-                self.cluster = None
-
-            def setup_dask(self, env, **kwargs):
-                """Run actual local Dask with threads in the portable synthetic test."""
-                from dask.distributed import Client, LocalCluster
-                self.cluster = LocalCluster(**kwargs,dashboard_address=None)
-                self.client = Client(self.cluster)
-
-            @staticmethod
-            def write_message_dask(message, output_folder):
-                """Record task messages under the synthetic output directory."""
-                directory = Path(output_folder); directory.mkdir(parents=True,exist_ok=True)
-                with (directory / "log_prints.txt").open("a",encoding="utf-8") as stream:
-                    stream.write(str(message)+"\n")
-
-            write_message = write_message_dask
-
-            def cleanup_resources(self, output_folder):
-                """Mirror base cleanup and dispatch the subclass's safe close_dask override."""
-                import shutil
-                self.close_dask()
-                if hasattr(self,"local_tmp_dir"):
-                    shutil.rmtree(self.local_tmp_dir,ignore_errors=True)
-
-        base.Engine = Engine
-        sys.modules[base.__name__] = base
-    return importlib.import_module("hydro_health.engines.tiling.XGBoostModelingEngine")
+DERIVED = ['mean_predicted_bathy_t1', 'mean_predicted_change', 'mean_predicted_rate',
+           'mean_predicted_standard_change', 'mean_predicted_standard_bathy',
+           'uncertainty_sd_bathy_t1', 'uncertainty_sd_change', 'uncertainty_sd_rate']
+FORBIDDEN = {'X', 'Y', 'FID', 'tile_id', 'source', 'dataset_role', 'year_t', 'year_t1',
+             'interval_years', 'pair_id', 'bathy_t1', 'delta_bathy', 'delta_rate',
+             'survey_end_date', 'geometry', 'prediction_row_usable', 'sample_weight'}
 
 
-def verify_saved_outputs(cfg, train, pred, tx, px, predictors):
-    """Independently replay every saved Booster and verify output means/SDs by row chunks."""
-    pair = cfg["pair"]
-    base = Path(cfg["training_output_dir"])
-    metadata = json.loads((base / f"LOCAL_model_metadata_{pair}.json").read_text())
-    if metadata["target"] != "bathy_t1" or metadata["training_baseline_source"] != "bathy_t":
-        raise AssertionError("Incorrect saved model target or baseline")
-    if metadata["predictors"] != predictors or metadata["n_boot"] != cfg["model_config"]["n_boot"]:
-        raise AssertionError("Saved schema or bootstrap count differs from configuration")
-    n_boot = metadata["n_boot"]
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def close(actual, expected, label, rtol=2e-5, atol=2e-5):
+    """Float32-aware comparisons, with matching NaNs required."""
+    a, b = np.asarray(actual), np.asarray(expected)
+    require(a.shape == b.shape, f'{label}: shapes differ {a.shape} versus {b.shape}')
+    good = np.isclose(a, b, rtol=rtol, atol=atol, equal_nan=True)
+    require(good.all(), f'{label}: {int((~good).sum())} mismatched values')
+
+
+def read_table(path, spatial=False):
+    with UPath(path).open('rb') as stream:
+        if spatial:
+            return gpd.read_parquet(stream)
+        return pd.read_parquet(stream)
+
+
+def read_json(path):
+    with UPath(path).open('r') as stream:
+        return json.load(stream)
+
+
+def expected_hex_blocks(frame, width):
+    """Reconstruct axial blocks from source XY, rather than trust saved block IDs."""
+    xy = frame[['X', 'Y']].to_numpy(dtype=np.float64)
+    xy -= xy.min(axis=0) + (xy.max(axis=0)-xy.min(axis=0))/2
+    radius = width/np.sqrt(3)
+    q = (np.sqrt(3)/3*xy[:, 0]-xy[:, 1]/3)/radius
+    r = (2/3*xy[:, 1])/radius
+    cubes = np.column_stack([q, -q-r, r])
+    rounded = np.rint(cubes)
+    adjust = np.argmax(np.abs(cubes-rounded), axis=1)
+    for axis in range(3):
+        selected = adjust == axis
+        rounded[selected, axis] = -rounded[selected][:, [a for a in range(3) if a != axis]].sum(axis=1)
+    return rounded[:, [0, 2]].astype(np.int32)
+
+
+def paths_for(base, tile, pair):
+    training = base / tile / 'Training'
+    paths = {name: str(training / f'LOCAL_{name}_{pair}.{ext}') for name, ext in (
+        ('model_metadata', 'json'), ('apparent_training_metrics', 'json'),
+        ('importance', 'parquet'), ('shap_summary', 'parquet'),
+        ('spatial_cv_folds', 'parquet'), ('spatial_cv_metrics', 'parquet'), ('spatial_cv_oof', 'parquet'))}
+    for role in ('training', 'prediction'):
+        paths[role] = str(base / tile / role.title() / f'LOCAL_{role}_summary_{pair}.geoparquet')
+    return paths
+
+
+def inventory(train_dir, pred_dir, model_dir, args):
+    """Union inventory prevents successful outputs from defining the denominator."""
+    groups = {}
+    patterns = ((train_dir, 'ML_ready_training_*.geoparquet', 'training'),
+                (pred_dir, 'ML_ready_prediction_*.geoparquet', 'prediction'),
+                (model_dir, 'LOCAL_*', 'output'), (model_dir, 'model_boot_*.json', 'output'))
+    for root, pattern, role in patterns:
+        for path in root.rglob(pattern):
+            match = re.search(r'(\d{4}_\d{4})\.(?:geoparquet|parquet|json)$', path.name)
+            if not match:
+                continue
+            pair = match[1]
+            tile = path.parent.name if role != 'output' else path.parent.parent.name
+            if role == 'output' and path.parent.name == 'models':
+                tile = path.parent.parent.parent.name
+            if args.tiles and tile not in args.tiles or args.pairs and pair not in args.pairs:
+                continue
+            record = groups.setdefault((tile, pair), {'training': [], 'prediction': [], 'output': []})
+            record[role].append(str(path))
+    tasks = []
+    for (tile, pair), record in sorted(groups.items()):
+        tasks.append({'tile': tile, 'pair': pair, 'region': args.region,
+                      'sources': record, 'paths': paths_for(model_dir, tile, pair),
+                      'schema': str(train_dir / tile / f'locked_predictors_{pair}.parquet'),
+                      'model_dir': str(model_dir), 'chunk_rows': args.chunk_rows,
+                      'rtol': args.rtol, 'atol': args.atol, 'expected_bootstrap': args.expected_bootstrap})
+    return tasks
+
+
+def validate_task(task):
+    """Each check fails independently; return concrete issues instead of killing workers."""
+    result = {key: task[key] for key in ('region', 'tile', 'pair')}
+    result.update(status='PASS', checks_passed=0, issues=[], training_rows=0, prediction_rows=0,
+                  usable_prediction_rows=0, cv_rmse=None, baseline_cv_rmse=None)
+    issues = result['issues']
+
+    def issue(level, check, message):
+        issues.append({'level': level, 'check': check, 'message': str(message)})
+
+    def check(name, action):
+        try:
+            value = action()
+            result['checks_passed'] += 1
+            return value
+        except Exception as exc:
+            issue('FAIL', name, f'{type(exc).__name__}: {exc}')
+            return None
+
+    def same(a, b, label):
+        close(a, b, label, task['rtol'], task['atol'])
+
+    sources, paths = task['sources'], task['paths']
+    train = pred = meta = schema = None
+    start, end = map(int, task['pair'].split('_'))
+    if end <= start:
+        issue('FAIL', 'pair', 'Year pair must be increasing')
+    for role in ('training', 'prediction'):
+        if len(sources[role]) > 1:
+            issue('FAIL', 'inventory', f'Duplicate {role} inputs: {sources[role]}')
+    if not sources['training']:
+        if sources['output']:
+            issue('FAIL', 'coverage', 'Model output has no corresponding prepared training input')
+        else:
+            issue('WARN', 'coverage', 'Prediction-only pair: current engine schedules training inputs only; no model expected')
+    if sources['training'] and not sources['prediction']:
+        issue('FAIL', 'coverage', 'Missing prepared prediction input; engine skips this training pair')
+    expected = bool(sources['training']) or bool(sources['output'])
+    if expected:
+        for name, path in paths.items():
+            if not UPath(path).is_file():
+                issue('FAIL', 'bundle', f'Missing {name}: {path}')
+        meta = check('metadata readable', lambda: read_json(paths['model_metadata']))
+    if sources['training']:
+        train = check('training input readable', lambda: read_table(sources['training'][0], True))
+        schema_path = UPath(sources['training'][0]).parent / f"locked_predictors_{task['pair']}.parquet"
+        schema = check('locked schema readable', lambda: read_table(schema_path).predictor.tolist())
+    if sources['prediction']:
+        pred = check('prediction input readable', lambda: read_table(sources['prediction'][0], True))
+
+    def source_check(frame, role):
+        require(not frame.empty and frame.columns.is_unique, f'{role}: empty or duplicate columns')
+        require(frame.crs is not None, f'{role}: no CRS')
+        if task.get('target_crs'):
+            require(CRS(frame.crs) == CRS(task['target_crs']), f'{role}: CRS differs from project target CRS {task["target_crs"]}')
+        require(frame.FID.notna().all() and frame.FID.is_unique, f'{role}: null/duplicate FID')
+        for col, value in (('tile_id', task['tile']), ('pair_id', task['pair']),
+                           ('year_t', start), ('year_t1', end), ('interval_years', end-start)):
+            if col in frame:
+                require(frame[col].eq(value).all(), f'{role}: incorrect {col}, expected {value}')
+        required = ['X', 'Y', 'bathy_t', 'interval_years'] + (['bathy_t1', 'delta_bathy', 'delta_rate'] if role == 'training' else [])
+        require(set(required).issubset(frame), f'{role}: missing {sorted(set(required)-set(frame))}')
+        if role == 'training':
+            require(np.isfinite(frame[['X', 'Y', 'bathy_t', 'bathy_t1', 'interval_years']]).all().all(), 'Invalid essential training fields')
+            same(frame.delta_bathy, frame.bathy_t1-frame.bathy_t, 'Input delta sign')
+            same(frame.delta_rate, frame.delta_bathy/frame.interval_years, 'Input delta rate')
+        else:
+            usable = np.isfinite(frame[['X', 'Y', 'bathy_t', 'interval_years']]).all(axis=1) & frame.interval_years.gt(0)
+            if 'prediction_row_usable' in frame:
+                require(frame.prediction_row_usable.isin([True, False]).all(), 'Invalid prediction usability flags')
+                usable &= frame.prediction_row_usable.astype(bool)
+            result['usable_prediction_rows'] = int(usable.sum())
+            if not usable.any():
+                issue('WARN', 'prediction eligibility', 'No usable prediction rows; the current engine skips this pair')
+        result[f'{role}_rows'] = len(frame)
+
+    for role, frame in (('training', train), ('prediction', pred)):
+        if frame is not None:
+            check(f'{role} identity/inputs', lambda f=frame, r=role: source_check(f, r))
     models = []
-    for uri in metadata["model_uris"]:
-        model = xgb.Booster()
-        model.load_model(uri)
-        model.set_param({"nthread": 1})
-        if model.feature_names != predictors or model.num_boosted_rounds() != metadata["best_iteration"]:
-            raise AssertionError("Saved Booster schema/round count differs from metadata")
-        models.append(model)
-    if len(models) != n_boot:
-        raise AssertionError("Missing saved bootstrap models")
+    cfg = {}
+    if meta is not None and schema is not None:
+        cfg = meta.get('model_config', {})
+        result['predictors'] = schema
+
+        def metadata_check():
+            require(meta['tile_id'] == task['tile'] and meta['pair'] == task['pair'], 'Metadata belongs to different tile/pair')
+            require(meta['target'] == 'bathy_t1' and meta['model_baseline_feature'] == 'bathy_t', 'Incorrect target/baseline')
+            require(meta['training_baseline_source'] == 'bathy_t' and meta['prediction_baseline_source'] == 'bathy_t', 'Incorrect baseline sources')
+            require(schema and len(set(schema)) == len(schema) and 'bathy_t' in schema, 'Invalid locked schema')
+            require(not set(schema) & FORBIDDEN, f'Leaked target/metadata predictors: {set(schema) & FORBIDDEN}')
+            require(meta['predictors'] == schema, 'Metadata predictor order differs from locked schema')
+            n = meta['n_boot']
+            require(isinstance(n, int) and n > 0 and n == cfg['n_boot'], 'Invalid bootstrap count')
+            if task['expected_bootstrap'] is not None:
+                require(n == task['expected_bootstrap'], 'Unexpected bootstrap count')
+            for role, frame, count_key in (('training', train, 'n_fit'), ('prediction', pred, 'n_prediction_rows')):
+                if frame is not None:
+                    require(len(frame) == meta[count_key], f'{role}: metadata row count differs')
+                    require(CRS(frame.crs) == CRS(meta['crs']), f'{role}: CRS differs from metadata')
+            rounds = meta['best_iteration']
+            if train is not None:
+                require(len(train) >= cfg['minimum_training_rows'], 'Training count below configured minimum')
+            require(isinstance(rounds, int) and rounds > 0, 'Invalid selected round count')
+            if cfg['round_selection_mode'] == 'fixed':
+                require(rounds == cfg['fixed_nrounds'], 'Fixed rounds differ')
+            if cfg['round_selection_mode'] == 'cv_with_floor':
+                require(rounds >= cfg['minimum_nrounds'], 'Round floor violated')
+        check('metadata/schema', metadata_check)
+
+        def load_models():
+            n = meta['n_boot']
+            expected_paths = [str(UPath(task['model_dir']) / task['tile'] / 'Training' / 'models' / f"model_boot_{i:03d}_{task['pair']}.json") for i in range(1, n+1)]
+            require(meta['model_uris'] == expected_paths, 'Model URIs differ from expected tile/pair paths')
+            found = sorted(str(p) for p in UPath(expected_paths[0]).parent.glob(f"model_boot_*_{task['pair']}.json"))
+            require(set(found) == set(expected_paths), 'Missing or extra saved bootstrap models')
+            loaded = []
+            for path in expected_paths:
+                with UPath(path).open('rb') as stream:
+                    model = xgb.Booster()
+                    model.load_model(bytearray(stream.read()))
+                model.set_param({'nthread': 1})
+                require(model.feature_names == schema, f'Booster predictor order differs: {path}')
+                require(model.num_boosted_rounds() == meta['best_iteration'], f'Booster rounds differ: {path}')
+                loaded.append(model)
+            return loaded
+        models = check('saved models', load_models) or []
+        if meta.get('xgboost_version') != xgb.__version__:
+            issue('WARN', 'version', f"Saved XGBoost {meta.get('xgboost_version')}; validator {xgb.__version__}")
+        if 'fallback' in meta.get('cv_status', ''):
+            issue('WARN', 'CV', f"Round selection used fallback: {meta['cv_status']}")
+        if meta.get('n_boot') == 1:
+            issue('WARN', 'uncertainty', 'Single bootstrap: SD is undefined (NaN), as written by this engine')
+
     summaries = {}
-    for role, source, features in (("training", train, tx), ("prediction", pred, px)):
-        directory = Path(cfg[f"{role}_output_dir"])
-        spatial = gpd.read_parquet(directory / f"LOCAL_{role}_summary_{pair}.geoparquet")
-        summary = pd.DataFrame(spatial.drop(columns="geometry")).reset_index(drop=True)
-        ordinary = pd.read_parquet(directory / f"LOCAL_{role}_summary_{pair}.parquet")
-        pd.testing.assert_frame_equal(summary, ordinary, check_dtype=False, check_exact=True)
-        # Every original source field and row must survive the model step.
-        pd.testing.assert_frame_equal(summary[source.columns], source.reset_index(drop=True), check_dtype=False, check_exact=True)
-        if spatial.crs.to_epsg() != 32617:
-            raise AssertionError("Output CRS changed")
-        finite_xy = np.isfinite(summary.X) & np.isfinite(summary.Y)
-        if not spatial.geometry.isna().equals(~finite_xy):
-            raise AssertionError("Invalid-XY rows must have null geometry")
-        np.testing.assert_allclose(spatial.loc[finite_xy].geometry.x, summary.loc[finite_xy, "X"], rtol=0, atol=1e-8)
-        np.testing.assert_allclose(spatial.loc[finite_xy].geometry.y, summary.loc[finite_xy, "Y"], rtol=0, atol=1e-8)
-        usable = np.ones(len(source), dtype=bool) if role == "training" else source.prediction_row_usable.to_numpy(dtype=bool)
-        positions = np.flatnonzero(usable)
-        chunk_size = int(cfg["verification_chunk_rows"])
-        for start in range(0, len(positions), chunk_size):
-            rows = positions[start:start + chunk_size]
-            matrix = xgb.DMatrix(features.iloc[rows].to_numpy(dtype=np.float32), feature_names=predictors, missing=np.nan)
-            # Direct NumPy mean/std are independent of the worker's streaming Welford formula.
-            predictions = np.stack([model.predict(matrix).astype(np.float64) for model in models])
-            mean = predictions.mean(axis=0)
-            sd = predictions.std(axis=0, ddof=1) if n_boot > 1 else np.zeros(len(rows))
-            np.testing.assert_allclose(summary.mean_predicted_bathy_next.iloc[rows], mean, rtol=0, atol=1e-7)
-            np.testing.assert_allclose(summary.uncertainty_sd_bathy_next.iloc[rows], sd, rtol=0, atol=1e-7)
-        if (~usable).any() and not summary.loc[~usable, DERIVED].isna().all().all():
-            raise AssertionError("Unusable prediction rows must retain NA model-derived fields")
-        selected = summary.loc[usable]
-        np.testing.assert_allclose(selected.mean_predicted_change, selected.mean_predicted_bathy_next - selected.bathy_t, rtol=0, atol=1e-8)
-        np.testing.assert_allclose(selected.mean_predicted_rate, selected.mean_predicted_change / selected.interval_years, rtol=0, atol=1e-8)
-        np.testing.assert_allclose(selected.mean_predicted_standard_change, selected.mean_predicted_rate * cfg["model_config"]["standard_horizon_years"], rtol=0, atol=1e-8)
-        np.testing.assert_allclose(selected.mean_predicted_standard_bathy, selected.bathy_t + selected.mean_predicted_standard_change, rtol=0, atol=1e-8)
-        np.testing.assert_allclose(selected.mean_predicted_bathy_t1, selected.mean_predicted_bathy_next, rtol=0, atol=0)
-        np.testing.assert_allclose(selected.uncertainty_sd_bathy_t1, selected.uncertainty_sd_bathy_next, rtol=0, atol=0)
-        np.testing.assert_allclose(selected.uncertainty_sd_change, selected.uncertainty_sd_bathy_next, rtol=0, atol=0)
-        np.testing.assert_allclose(selected.uncertainty_sd_rate, selected.uncertainty_sd_bathy_next / selected.interval_years, rtol=0, atol=1e-8)
-        if (selected.uncertainty_sd_bathy_next < 0).any() or not np.isfinite(selected[DERIVED].to_numpy()).all():
-            raise AssertionError("Usable predictions/SDs must be finite, with nonnegative SD")
-        if role == "training":
-            np.testing.assert_allclose(summary.prediction_residual, source.bathy_t1 - summary.mean_predicted_bathy_next, rtol=0, atol=1e-8)
-            np.testing.assert_allclose(summary.delta_residual, source.delta_bathy - summary.mean_predicted_change, rtol=0, atol=1e-8)
-        summaries[role] = {"rows": len(summary), "usable": int(usable.sum()), "preserved_unusable": int((~usable).sum()),
-                           "source_fields": "PASS", "model_replay": "PASS", "change_rate_sd_formulas": "PASS"}
-    importance = pd.read_parquet(base / f"LOCAL_importance_{pair}.parquet")
-    if len(importance) != len(predictors) * n_boot or not np.isfinite(importance[["gain", "total_gain", "gain_fraction"]]).all().all():
-        raise AssertionError("Missing or invalid importance rows")
-    for _, group in importance.groupby("bootstrap_iteration"):
-        fraction = float(group.gain_fraction.sum())
-        np.testing.assert_allclose(fraction, 1.0 if group.total_gain.sum() > 0 else 0.0, rtol=0, atol=1e-8)
-    if cfg["model_config"]["shap_sample_rows"] > 0:
-        shap = pd.read_parquet(base / f"LOCAL_shap_summary_{pair}.parquet")
-        if len(shap) != len(predictors) * n_boot or not np.isfinite(shap.mean_abs_shap).all() or (shap.mean_abs_shap < 0).any():
-            raise AssertionError("Invalid SHAP summaries")
-    if cfg["model_config"]["save_bootstrap_indices"]:
-        for b in range(1, n_boot + 1):
-            draws = pd.read_parquet(base / "bootstrap_indices" / f"bootstrap_{b:03d}_{pair}.parquet")
-            idx = draws.training_row_index.to_numpy(dtype=int)
-            if len(idx) != len(train) or (idx < 0).any() or (idx >= len(train)).any():
-                raise AssertionError("Invalid bootstrap row indices")
-            np.testing.assert_array_equal(draws.FID, train.FID.to_numpy()[idx])
-    if cfg["model_config"]["round_selection_mode"] == "cv_with_floor" and metadata["best_iteration"] < cfg["model_config"]["minimum_nrounds"]:
-        raise AssertionError("Round floor was not honored")
-    if cfg["model_config"]["round_selection_mode"] != "fixed":
-        folds = pd.read_parquet(base / f"LOCAL_spatial_cv_folds_{pair}.parquet")
-        np.testing.assert_array_equal(folds.row_index, np.arange(len(train)))
-        np.testing.assert_array_equal(folds.FID, train.FID)
-        size = cfg["model_config"]["block_size_m"]
-        blocks = pd.DataFrame({"gx": np.floor((train.X - train.X.min()) / size),
-                               "gy": np.floor((train.Y - train.Y.min()) / size), "fold": folds.fold})
-        if blocks.groupby(["gx", "gy"]).fold.nunique().max() != 1:
-            raise AssertionError("A spatial block was split across folds")
-        oof = pd.read_parquet(base / f"LOCAL_spatial_cv_oof_{pair}.parquet")
-        if len(oof):
-            if oof.row_index.duplicated().any():
-                raise AssertionError("Duplicate CV holdout predictions")
-            np.testing.assert_allclose(oof.observed_bathy_t1, train.bathy_t1.to_numpy()[oof.row_index.to_numpy(dtype=int)], rtol=1e-6, atol=1e-6)
-            np.testing.assert_array_equal(oof.fold, folds.fold.to_numpy()[oof.row_index.to_numpy(dtype=int)])
-    return {"summaries": summaries, "best_nrounds": metadata["best_iteration"], "n_boot": n_boot,
-            "cv_status": metadata["cv_status"], "model_replay": "PASS", "schema": predictors}
-
-
-def compare_r_outputs(cfg):
-    """Compare user-provided R summaries on matching FIDs/coordinates without inventing tolerance thresholds."""
-    results = {}
-    limits = cfg.get("r_comparison_tolerances", {})
-    known_limits = ("max_abs_prediction_difference_m", "rmse_prediction_difference_m", "max_abs_sd_difference_m")
-    supplied_limits = {k: limits[k] for k in known_limits if limits.get(k) is not None}
-    for key, value in supplied_limits.items():
-        if not np.isfinite(value) or value < 0:
-            raise ValueError(f"R comparison tolerance {key} must be finite and nonnegative")
-    for role in ("training", "prediction"):
-        reference_path = cfg.get("r_references", {}).get(role)
-        if not reference_path:
-            results[role] = {"status": "NOT_RUN", "reason": "No R model-output reference supplied"}
+    for role, source in (('training', train), ('prediction', pred)):
+        if source is None or not expected:
             continue
-        python_path = Path(cfg[f"{role}_output_dir"]) / f'LOCAL_{role}_summary_{cfg["pair"]}.parquet'
-        if Path(reference_path).resolve() == python_path.resolve():
-            raise ValueError("An R reference cannot be the Python output being compared")
-        suffix = Path(reference_path).suffix.lower()
-        if suffix == ".csv":
-            ref = pd.read_csv(reference_path)
-        elif suffix in (".parquet", ".geoparquet"):
-            ref = pd.read_parquet(reference_path)
+        summary = check(f'{role} summary readable', lambda r=role: read_table(paths[r], True))
+        if summary is None:
+            continue
+        summaries[role] = summary
+
+        def summary_check():
+            require(summary.crs is not None and summary.crs == source.crs, 'Summary CRS missing/changed')
+            require(len(source) == len(summary), 'Dropped/added source rows')
+            require(summary.FID.is_unique, 'Duplicate output FID')
+            # Geometry is reconstructed from X/Y; sample_weight is recalculated by the engine.
+            columns = [c for c in source if c not in {source.geometry.name, 'sample_weight', 'prediction_row_usable'}]
+            pd.testing.assert_frame_equal(pd.DataFrame(summary[columns]).reset_index(drop=True), pd.DataFrame(source[columns]).reset_index(drop=True), check_dtype=False, check_exact=True)
+            xy_ok = np.isfinite(summary[['X', 'Y']]).all(axis=1).to_numpy()
+            require(np.array_equal(summary.geometry.isna(), ~xy_ok), 'Geometry null mask differs from valid coordinates')
+            points = summary.loc[xy_ok].geometry
+            require(points.geom_type.eq('Point').all(), 'Summary geometry must be Point')
+            close(points.x, summary.loc[xy_ok, 'X'], 'Point X', 0, 0)
+            close(points.y, summary.loc[xy_ok, 'Y'], 'Point Y', 0, 0)
+            require(set(DERIVED).issubset(summary), 'Missing derived prediction fields')
+        check(f'{role} row/geometry preservation', summary_check)
+
+        def formula_replay():
+            require(meta is not None and schema is not None and models, 'Replay blocked: missing metadata/schema/models')
+            require(set(schema).issubset(source), 'Missing source predictors')
+            usable = np.ones(len(source), dtype=bool)
+            if role == 'prediction':
+                usable = np.isfinite(source[['X', 'Y', 'bathy_t', 'interval_years']]).all(axis=1).to_numpy() & (source.interval_years.to_numpy() > 0)
+                if 'prediction_row_usable' in source:
+                    require(source.prediction_row_usable.isin([True, False]).all(), 'Invalid source usability flags')
+                    usable &= source.prediction_row_usable.to_numpy(dtype=bool)
+                require(np.array_equal(summary.prediction_row_usable, usable), 'Usable prediction mask changed')
+                require(int(usable.sum()) == meta['n_prediction_usable'], 'Metadata usable count differs')
+                result['usable_prediction_rows'] = int(usable.sum())
+            require(not np.isinf(source.loc[usable, schema].to_numpy()).any(), 'Infinite usable predictors')
+            require(summary.loc[~usable, DERIVED].isna().all().all(), 'Unusable rows contain model results')
+            positions = np.flatnonzero(usable)
+            for offset in range(0, len(positions), task['chunk_rows']):
+                rows = positions[offset:offset+task['chunk_rows']]
+                matrix = xgb.DMatrix(source.iloc[rows][schema].to_numpy(dtype=np.float32), feature_names=schema, missing=np.nan, nthread=1)
+                values = np.stack([m.predict(matrix) for m in models])
+                require(np.isfinite(values).all(), 'Saved models produce nonfinite predictions')
+                mean = values.mean(axis=0, dtype=np.float32)
+                sd = values.std(axis=0, ddof=1, dtype=np.float32) if len(models) > 1 else np.full(len(rows), np.nan, dtype=np.float32)
+                got = summary.iloc[rows]
+                same(got.mean_predicted_bathy_t1, mean, 'Saved model mean replay')
+                # Float32 Welford accumulation loses precision for very small spreads.
+                # Add a bound based on model magnitude, independently of stored SD.
+                bound = task['atol'] + 16*np.finfo(np.float32).eps*np.max(np.abs(values), axis=0)
+                require(np.all(np.isclose(got.uncertainty_sd_bathy_t1, sd, rtol=task['rtol'], atol=bound, equal_nan=True)), 'Saved ensemble sample SD replay mismatch')
+            got = summary.iloc[positions]
+            require(np.isfinite(got[DERIVED[:5]].to_numpy()).all(), 'Nonfinite usable prediction means')
+            if len(models) > 1:
+                require(np.isfinite(got[DERIVED[5:]]).all().all() and (got[DERIVED[5:]] >= 0).all().all(), 'Invalid ensemble SD')
+            same(got.mean_predicted_change, got.mean_predicted_bathy_t1-got.bathy_t, 'Change sign')
+            same(got.mean_predicted_rate, got.mean_predicted_change/got.interval_years, 'Annual rate')
+            same(got.mean_predicted_standard_change, got.mean_predicted_rate*np.float32(cfg['standard_horizon_years']), 'Standard horizon change')
+            same(got.mean_predicted_standard_bathy, got.bathy_t+got.mean_predicted_standard_change, 'Standard horizon bathy')
+            same(got.uncertainty_sd_change, got.uncertainty_sd_bathy_t1, 'Change SD')
+            same(got.uncertainty_sd_rate, got.uncertainty_sd_bathy_t1/got.interval_years, 'Rate SD')
+            if role == 'training':
+                change = np.abs(source.delta_bathy.to_numpy(dtype=np.float64))
+                weights = np.ones(len(change), dtype=np.float64)
+                if cfg['use_weighted_loss']:
+                    if cfg['weight_method'] == 'power':
+                        raw = (change+cfg['weight_epsilon'])**cfg['weight_alpha']
+                        if np.isfinite(raw.sum()) and raw.sum() > 0:
+                            weights = raw/raw.sum()*len(raw)
+                    elif cfg['weight_method'] == 'capped_linear':
+                        cap = np.quantile(change, cfg['weight_cap_quantile'], method='linear')
+                        if cap > 0:
+                            weights = 1+(cfg['max_weight']-1)*(np.minimum(change, cap)/cap)**cfg['weight_alpha']
+                    else:
+                        raise ValueError('Unknown weight method')
+                same(summary.sample_weight, weights, 'Recalculated model weights')
+                same(got.prediction_residual, got.bathy_t1-got.mean_predicted_bathy_t1, 'State residual')
+                same(got.delta_residual, got.delta_bathy-got.mean_predicted_change, 'Change residual')
+        check(f'{role} full model replay/formulas', formula_replay)
+
+    def diagnostic_check():
+        require(meta is not None and schema is not None, 'Diagnostics blocked: no metadata/schema')
+        for name, numeric in (('importance', ['gain', 'total_gain', 'gain_fraction']), ('shap_summary', ['mean_abs_shap'])):
+            table = read_table(paths[name])
+            if name == 'shap_summary' and cfg['shap_sample_rows'] <= 0:
+                require(table.empty, 'SHAP disabled but rows present')
+                continue
+            expected_keys = {(b, p) for b in range(1, meta['n_boot']+1) for p in schema}
+            require(not table.duplicated(['bootstrap_iteration', 'predictor']).any(), f'{name}: duplicate feature/bootstrap')
+            require(set(zip(table.bootstrap_iteration, table.predictor)) == expected_keys, f'{name}: missing/extra feature/bootstrap')
+            require(np.isfinite(table[numeric]).all().all() and (table[numeric] >= 0).all().all(), f'{name}: invalid values')
+            if name == 'importance':
+                for _, group in table.groupby('bootstrap_iteration'):
+                    total = group.total_gain.sum()
+                    same(group.gain_fraction, group.total_gain/total if total > 0 else np.zeros(len(group)), 'Gain fractions')
+                # Check saved gain against the actual Boosters too.
+                for index, model in enumerate(models, 1):
+                    group = table[table.bootstrap_iteration.eq(index)].set_index('predictor')
+                    for kind in ('gain', 'total_gain'):
+                        scores = model.get_score(importance_type=kind)
+                        same(group.loc[schema, kind], [scores.get(p, 0) for p in schema], f'Booster {kind}')
+    if expected:
+        check('importance/SHAP diagnostics', diagnostic_check)
+
+    def cv_check():
+        require(meta is not None and train is not None, 'CV blocked: missing metadata/training')
+        folds, metrics, oof = [read_table(paths['spatial_cv_'+name]) for name in ('folds', 'metrics', 'oof')]
+        if cfg['round_selection_mode'] == 'fixed':
+            require(folds.empty and metrics.empty and oof.empty and meta['cv_status'] == 'fixed', 'Fixed mode has unexpected CV records')
+            return
+        require(CRS(train.crs).is_projected and all(np.isclose(a.unit_conversion_factor, 1) for a in CRS(train.crs).axis_info[:2]), 'CV CRS must be projected metres')
+        require(np.array_equal(folds.row_index, np.arange(len(train))), 'CV row index differs')
+        require(np.array_equal(folds.FID, train.FID), 'CV FID differs')
+        close(folds.X, train.X, 'CV X', 0, 0)
+        close(folds.Y, train.Y, 'CV Y', 0, 0)
+        require(np.array_equal(folds[['block_q', 'block_r']], expected_hex_blocks(train, cfg['block_size_m'])), 'Saved hexagons differ from source XY')
+        require(folds.groupby(['block_q', 'block_r']).fold.nunique().max() == 1, 'Hexagonal block split across folds')
+        require(not metrics.fold.duplicated().any(), 'Duplicate CV metric folds')
+        require(set(metrics.status) <= {'ok', 'fit_failed', 'insufficient_rows'}, 'Unknown CV fold status')
+        unique = set(folds.fold)
+        if len(unique) >= 2:
+            require(set(metrics.fold) == unique, 'Missing/extra CV fold diagnostics')
+        successful = set(metrics.loc[metrics.status.eq('ok'), 'fold'])
+        expected_rows = set(np.flatnonzero(folds.fold.isin(successful)))
+        require(not oof.row_index.duplicated().any(), 'Duplicate OOF row')
+        require(set(oof.row_index) == expected_rows, 'Missing/extra OOF rows for successful folds')
+        for row in metrics.itertuples():
+            test = folds.fold.eq(row.fold)
+            require(row.n_test == int(test.sum()) and row.n_train == int((~test).sum()), 'CV fold counts differ')
+            if row.status != 'ok':
+                issue('WARN', 'CV fold', f'Fold {row.fold}: {row.status}; {getattr(row, "error", "")}')
+        if not oof.empty:
+            idx = oof.row_index.to_numpy(dtype=int)
+            require(np.array_equal(oof.FID, train.FID.to_numpy()[idx]), 'OOF FID differs')
+            require(np.array_equal(oof.fold, folds.fold.to_numpy()[idx]), 'OOF fold differs')
+            same(oof.observed_bathy_t1, train.bathy_t1.to_numpy()[idx], 'OOF observations')
+            require(np.isfinite(oof.predicted_bathy_t1).all(), 'Nonfinite OOF predictions')
+            for fold, group in oof.groupby('fold'):
+                row = metrics[metrics.fold.eq(fold)].iloc[0]
+                error = group.predicted_bathy_t1.to_numpy()-group.observed_bathy_t1.to_numpy()
+                same(row.rmse_bathy_t1, np.sqrt(np.mean(error**2)), 'OOF RMSE')
+                same(row.mae_bathy_t1, np.mean(np.abs(error)), 'OOF MAE')
+                require(group.best_nrounds.eq(row.best_nrounds).all(), 'OOF rounds differ')
+            error = oof.predicted_bathy_t1.to_numpy()-oof.observed_bathy_t1.to_numpy()
+            baseline_error = train.bathy_t.to_numpy()[idx]-oof.observed_bathy_t1.to_numpy()
+            result['cv_rmse'] = float(np.sqrt(np.mean(error**2)))
+            result['baseline_cv_rmse'] = float(np.sqrt(np.mean(baseline_error**2)))
+            if result['cv_rmse'] >= result['baseline_cv_rmse']:
+                issue('WARN', 'skill', 'Spatial CV RMSE does not improve on unchanged-bathymetry baseline')
         else:
-            raise ValueError("Model-output references must already be CSV/Parquet/GeoParquet")
-        py = pd.read_parquet(python_path)
-        required = {"FID", "X", "Y", "bathy_t", "interval_years"}
-        if not required.issubset(ref.columns) or ref.FID.isna().any() or ref.FID.duplicated().any():
-            raise ValueError(f"{role} R reference requires unique FID and X/Y/bathy_t/interval_years")
-        for key, expected in (("tile_id", cfg["tile_id"]), ("pair_id", cfg["pair"])):
-            if key in ref and not ref[key].eq(expected).all():
-                raise ValueError(f"R reference {key} does not match this tile/pair")
-        if "year_pair" in ref and not ref.year_pair.eq(cfg["pair"]).all():
-            raise ValueError("R reference year_pair mismatch")
-        indexed = ref.set_index("FID")
-        if not py.FID.isin(indexed.index).all():
-            raise ValueError(f"R reference is missing {int((~py.FID.isin(indexed.index)).sum())} Python output FIDs")
-        aligned = indexed.loc[py.FID].reset_index()
-        for col in ("X", "Y", "bathy_t", "interval_years"):
-            np.testing.assert_allclose(py[col], aligned[col], rtol=0, atol=1e-6, equal_nan=True)
-        field_map = {"prediction": "mean_predicted_bathy_t1", "sd": "uncertainty_sd_bathy_t1"}
-        record = {"reference": str(reference_path), "matched_rows": len(py), "reference_rows": len(ref),
-                  "reference_only_rows": int((~ref.FID.isin(py.FID)).sum()), "fields": {}}
-        measurements = {}
-        nan_mismatch = False
-        for name, col in field_map.items():
-            if col not in aligned:
-                raise ValueError(f"R reference missing {col}")
-            a = pd.to_numeric(py[col], errors="raise").to_numpy(dtype=float)
-            b = pd.to_numeric(aligned[col], errors="raise").to_numpy(dtype=float)
-            usable = np.ones(len(py), dtype=bool) if role == "training" else py.prediction_row_usable.to_numpy(dtype=bool)
-            mismatch = int(np.sum(usable & (np.isfinite(a) != np.isfinite(b))))
-            nan_mismatch |= mismatch > 0
-            finite = usable & np.isfinite(a) & np.isfinite(b)
-            d = a[finite] - b[finite]
-            maximum = float(np.max(np.abs(d))) if len(d) else None
-            rmse = float(np.sqrt(np.mean(d**2))) if len(d) else None
-            record["fields"][name] = {"n_finite_compared": int(len(d)), "finite_mask_mismatches_on_usable_rows": mismatch,
-                                      "max_abs_difference_m": maximum, "rmse_difference_m": rmse,
-                                      "bias_python_minus_r_m": float(np.mean(d)) if len(d) else None,
-                                      "unusable_rows_excluded_from_numeric_comparison": int((~usable).sum())}
-            if name == "prediction":
-                measurements.update(max_abs_prediction_difference_m=maximum, rmse_prediction_difference_m=rmse)
-            else:
-                measurements["max_abs_sd_difference_m"] = maximum
-        record["tolerances"] = supplied_limits
-        if not supplied_limits:
-            record["status"] = "DESCRIPTIVE_ONLY"
+            issue('WARN', 'skill', 'No held-out CV predictions; predictive skill not assessed')
+        if successful:
+            raw = int(round(float(metrics.loc[metrics.status.eq('ok'), 'best_nrounds'].mean())))
+            selected = max(cfg['minimum_nrounds'], raw) if cfg['round_selection_mode'] == 'cv_with_floor' else max(50, raw)
+            require(meta['cv_status'] == 'cv_success' and meta['best_iteration'] == selected, 'CV round selection differs')
         else:
-            record["status"] = "PASS" if not nan_mismatch and all(measurements[k] is not None and measurements[k] <= value for k, value in supplied_limits.items()) else "FAIL"
-        record["comparison_scope"] = "matching rows of supplied R/Python summaries; same training settings/seeds/folds/version must be established separately"
-        results[role] = record
+            selected = max(cfg['minimum_nrounds'], cfg['cv_fallback_nrounds']) if cfg['round_selection_mode'] == 'cv_with_floor' else cfg['cv_fallback_nrounds']
+            require(meta['best_iteration'] == selected and 'fallback' in meta['cv_status'], 'Fallback round selection differs')
+
+    def apparent_metrics_check():
+        require('training' in summaries, 'Training summary unavailable')
+        saved = read_json(paths['apparent_training_metrics'])
+        frame = summaries['training']
+        for name, a, b in (('bathy_t1', frame.bathy_t1.to_numpy(), frame.mean_predicted_bathy_t1.to_numpy()),
+                           ('change', (frame.bathy_t1-frame.bathy_t).to_numpy(), frame.mean_predicted_change.to_numpy()),
+                           ('rate', ((frame.bathy_t1-frame.bathy_t)/frame.interval_years).to_numpy(), frame.mean_predicted_rate.to_numpy())):
+            error = b-a
+            require(saved['n_'+name] == len(a), f'{name}: metric row count differs')
+            for metric, value in (('rmse', np.sqrt(np.mean(error**2))), ('mae', np.mean(np.abs(error))), ('bias', np.mean(error))):
+                same(saved[f'{metric}_{name}'], value, f'Apparent {metric} {name}')
+    if expected:
+        check('spatial CV alignment/metrics', cv_check)
+        check('apparent training metrics', apparent_metrics_check)
+    if not expected:
+        result['status'] = 'NOT_MODELED'
+    if any(i['level'] == 'FAIL' for i in issues):
+        result['status'] = 'FAIL'
+    elif issues and expected:
+        result['status'] = 'WARN'
+    return result
+
+
+def safe_validate(task):
+    try:
+        return validate_task(task)
+    except Exception as exc:
+        return {**{k: task[k] for k in ('region', 'tile', 'pair')}, 'status': 'FAIL', 'checks_passed': 0,
+                'issues': [{'level': 'FAIL', 'check': 'worker', 'message': f'{type(exc).__name__}: {exc}\n{traceback.format_exc()}'}]}
+
+
+def run_tasks(tasks, args, client=None):
+    """Keep at most 2*workers tasks in flight and print failures as they finish."""
+    completed = 0
+
+    def record(result):
+        nonlocal completed
+        completed += 1
+        print(f"{args.region}: completed {completed:,}/{len(tasks):,} ({result['tile']}/{result['pair']}) {result['status']}", flush=True)
+        for issue in result['issues']:
+            print(f"  [{issue['level']}] {issue['check']}: {issue['message']}", flush=True)
+        return result
+
+    if args.execution == 'serial' or args.workers == 1:
+        return [record(safe_validate(t)) for t in tasks]
+    results = []
+    if client is not None:
+        require(as_completed is not None, 'Dask execution requires dask[distributed]')
+        for start in range(0, len(tasks), args.workers*2):
+            futures = client.map(safe_validate, tasks[start:start+args.workers*2], pure=False)
+            try:
+                for future in as_completed(futures):
+                    try:
+                        results.append(record(future.result()))
+                    except Exception as exc:
+                        task = tasks[start+futures.index(future)]
+                        results.append(record({**{k: task[k] for k in ('region', 'tile', 'pair')}, 'status': 'FAIL', 'issues': [{'level': 'FAIL', 'check': 'Dask worker', 'message': str(exc)}]}))
+                    finally:
+                        future.release()
+            finally:
+                client.cancel(futures)
+        return results
+    with ProcessPoolExecutor(max_workers=args.workers, mp_context=multiprocessing.get_context('spawn')) as pool:
+        iterator = iter(tasks)
+        pending = {}
+        for _ in range(min(len(tasks), args.workers*2)):
+            task = next(iterator)
+            pending[pool.submit(safe_validate, task)] = task
+        while pending:
+            finished, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in finished:
+                task = pending.pop(future)
+                try:
+                    results.append(record(future.result()))
+                except Exception as exc:
+                    results.append(record({**{k: task[k] for k in ('region', 'tile', 'pair')}, 'status': 'FAIL', 'issues': [{'level': 'FAIL', 'check': 'process worker', 'message': str(exc)}]}))
+                task = next(iterator, None)
+                if task is not None:
+                    pending[pool.submit(safe_validate, task)] = task
     return results
 
 
-def run_test(module, repository_root, overrides=None, overwrite=False, validate_only=False,
-             profile="full", execution="dask"):
-    """Train or replay the actual engine and write independent contract/R statuses.
+def write_reports(results, destination, context):
+    """Persist full row-level findings and concise readable problems, locally or on S3."""
+    destination.mkdir(parents=True, exist_ok=True)
+    counts = Counter(r['status'] for r in results)
+    lines = ['XGBoost modeling validation', context, f'Tile/year pairs: {len(results)} | ' + ' | '.join(f'{k}: {counts[k]}' for k in ('PASS', 'WARN', 'FAIL', 'NOT_MODELED')),
+             'PASS checks saved artifacts; it does not prove generalization or calibrated uncertainty.',
+             'Inventory covers prepared inputs and existing model artifacts, not tiles absent from both.',
+             'Training metrics are apparent fit. Spatial CV also selected rounds.', '']
+    if not results:
+        lines.append('FAIL: No matching inputs or outputs discovered. Check paths/region/filters.')
+    for result in sorted(results, key=lambda r: (r['status'] != 'FAIL', r['tile'], r['pair'])):
+        lines.append(f"{result['status']} {result['region']}/{result['tile']}/{result['pair']} | checks passed {result.get('checks_passed', 0)} | rows train={result.get('training_rows', '?')}, prediction={result.get('prediction_rows', '?')}")
+        for issue in result['issues']:
+            lines.append(f"  {issue['level']} {issue['check']}: {issue['message']}")
+        if result.get('cv_rmse') is not None:
+            lines.append(f"  OOF RMSE {result['cv_rmse']:.5g}; unchanged-bathy baseline {result['baseline_cv_rmse']:.5g}")
+    for filename, text in (('XGBoost_validation_report.txt', '\n'.join(lines)+'\n'),):
+        with (destination / filename).open('w') as stream:
+            stream.write(text)
+    stream = io.StringIO()
+    fields = ['region', 'tile', 'pair', 'status', 'checks_passed', 'training_rows', 'prediction_rows', 'usable_prediction_rows', 'cv_rmse', 'baseline_cv_rmse', 'issues']
+    writer = csv.DictWriter(stream, fieldnames=fields, extrasaction='ignore')
+    writer.writeheader()
+    for result in sorted(results, key=lambda r: (r['tile'], r['pair'])):
+        writer.writerow({**result, 'issues': ' | '.join(f"{i['level']} {i['check']}: {i['message']}" for i in result['issues'])})
+    with (destination / 'XGBoost_validation_results.csv').open('w') as output:
+        output.write(stream.getvalue())
+    print('\n'.join(lines[:6]), flush=True)
+    print(f'Reports saved: {destination}', flush=True)
 
-    --validate-only verifies current input hashes and scientific configuration
-    against the completed run manifest before replay; it does not retrain.
-    """
-    engine = module.XGBoostModelingEngine({"env":"local", "repository_root":str(repository_root),
-                                         "modeling_settings":overrides or {}})
-    cfg = engine.configuration(profile)
-    directory = Path(cfg["training_output_dir"]); directory.mkdir(parents=True,exist_ok=True)
-    pair = cfg["pair"]
-    report_path = directory / f"XGBoost_Modeling_Engine_DV_test_report_{pair}.json"
-    manifest_path = directory / f"LOCAL_test_run_manifest_{pair}.json"
-    report = {"tile_id":cfg["tile_id"],"pair":pair,"crs":cfg["crs"],"profile":profile,
-        "execution":"validate_only" if validate_only else execution,
-        "python":sys.version,"platform":platform.platform(),"contract_status":"NOT_RUN",
-        "scope":"Saved-model execution/output-contract checks; not R model parity or held-out accuracy",
-        "versions":{p:version(p) for p in ("xgboost","numpy","pandas","geopandas","pyarrow","dask","distributed")}}
+
+def cross_tile_schemas(results):
+    """Describe exact differences from the most common schema; do not assume it correct."""
+    groups = defaultdict(list)
+    for result in results:
+        if result.get('predictors'):
+            groups[(result['region'], result['pair'])].append(result)
+    for group in groups.values():
+        counts = Counter(tuple(r['predictors']) for r in group)
+        if len(counts) < 2:
+            continue
+        reference = list(counts.most_common(1)[0][0])
+        for result in group:
+            actual = result['predictors']
+            if actual == reference:
+                continue
+            shared = set(actual) & set(reference)
+            order_differs = [p for p in actual if p in shared] != [p for p in reference if p in shared]
+            message = (f"Schema differs from most common schema ({counts[tuple(reference)]}/{len(group)} tiles): "
+                       f"missing={sorted(set(reference)-set(actual))}; extra={sorted(set(actual)-set(reference))}; "
+                       f"shared order differs={order_differs}. Reference order={reference}; actual order={actual}. "
+                       'Tile-specific schemas may be intentional; each model is also checked against its own locked schema.')
+            result['issues'].append({'level': 'WARN', 'check': 'cross-tile schema', 'message': message})
+            if result['status'] == 'PASS':
+                result['status'] = 'WARN'
+            print(f"[WARN] {result['region']}/{result['tile']}/{result['pair']}: {message}", flush=True)
+
+
+def write_combined_pdf(results, path, contexts):
+    """One readable report for every selected region, with concrete problems first."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    styles = getSampleStyleSheet()
+    fonts = Path(reportlab.__file__).parent / 'fonts'
+    pdfmetrics.registerFont(TTFont('AuditVera', str(fonts / 'Vera.ttf')))
+    pdfmetrics.registerFont(TTFont('AuditVeraBold', str(fonts / 'VeraBd.ttf')))
+    for name in styles.byName:
+        styles[name].fontName = 'AuditVeraBold' if name.startswith('Heading') or name == 'Title' else 'AuditVera'
+    styles.add(ParagraphStyle(name='AuditText', parent=styles['BodyText'], fontSize=8, leading=11, spaceAfter=5, splitLongWords=True))
+    styles.add(ParagraphStyle(name='AuditCell', parent=styles['AuditText'], fontSize=7, leading=9, wordWrap='CJK'))
+    styles.add(ParagraphStyle(name='AuditHeader', parent=styles['AuditCell'], textColor=colors.white))
+    width = A4[0]-72
+    story = []
+
+    def p(text, style='AuditText'):
+        return Paragraph(escape(str(text)).replace('\n', '<br/>'), styles[style])
+
+    def table(headers, rows, fractions):
+        if not rows:
+            return
+        data = [[p(h, 'AuditHeader') for h in headers]]
+        data.extend([[p(c, 'AuditCell') for c in row] for row in rows])
+        item = LongTable(data, colWidths=[width*f for f in fractions], repeatRows=1, hAlign='LEFT', splitInRow=1)
+        item.setStyle(TableStyle([('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#193b50')),
+                                 ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f0f4f6')]),
+                                 ('VALIGN', (0, 0), (-1, -1), 'TOP'), ('GRID', (0, 0), (-1, -1), .25, colors.HexColor('#ccd8df')),
+                                 ('TOPPADDING', (0, 0), (-1, -1), 5), ('BOTTOMPADDING', (0, 0), (-1, -1), 5)]))
+        story.extend([item, Spacer(1, 10)])
+
+    counts = Counter(r['status'] for r in results)
+    levels = Counter(i['level'] for r in results for i in r['issues'])
+    discovery_failures = [c for c in contexts if c.startswith('FAIL ')]
+    status = 'ERRORS FOUND' if counts['FAIL'] or discovery_failures or not results else 'WARNINGS FOUND' if levels['WARN'] else 'PASSED'
+    story.extend([p('XGBoost Model Validation', 'Title'), p(f'{status} | {len(results):,} tile/year pairs | {levels["FAIL"]:,} errors | {levels["WARN"]:,} warnings')])
+    story.append(p('Validation reads existing outputs only. Every usable source row is replayed through every saved bootstrap model.'))
+    region_counts = defaultdict(Counter)
+    for r in results:
+        region_counts[r['region']][r['status']] += 1
+    table(['Region', 'PASS', 'WARN', 'FAIL', 'Not modeled'], [[region, *[c[k] for k in ('PASS', 'WARN', 'FAIL', 'NOT_MODELED')]] for region, c in sorted(region_counts.items())], [.28, .18, .18, .18, .18])
+    for message in discovery_failures:
+        story.append(p(message))
+    if not results:
+        story.append(p('FAIL: No matching inputs or outputs discovered. Check paths, regions and filters.'))
+    story.append(p('Problems and affected tiles', 'Heading2'))
+    findings = [(r, i) for r in results for i in r['issues']]
+    findings.sort(key=lambda item: (item[1]['level'] != 'FAIL', item[0]['region'], item[0]['tile'], item[0]['pair']))
+    table(['Tile / pair', 'Problem'], [[f"{r['region']}/{r['tile']}\n{r['pair']}", f"{i['level']} - {i['check']}\n{i['message']}"] for r, i in findings], [.28, .72])
+    if not findings:
+        story.append(p('No issues found in the discovered artifacts.'))
+    story.append(p('What the results establish', 'Heading2'))
+    story.append(p('PASS means artifact consistency: expected tile/pair paths, input identity, rows, CRS, model features and rounds, replayed mean and sample SD, change/rate formulas, spatial CV records, and diagnostics. It does not prove which rows were used during fitting: the supplied engine does not save source fingerprints or bootstrap draws.'))
+    story.append(p('Coverage starts from prepared inputs and model artifacts. Tiles absent from both are outside this inventory. Prediction-only pairs are listed as not modeled because the supplied engine schedules training files.'))
+    story.append(p('Apparent training errors are fit diagnostics. Spatial CV also selects boosting rounds and is not an untouched final evaluation. Bootstrap SD measures ensemble spread and is not a calibrated prediction interval. A single bootstrap correctly has undefined (NaN) SD.'))
+    story.append(p('Tile inventory and spatial CV skill', 'Heading2'))
+    def fmt(value):
+        return '-' if value is None else f'{value:.5g}'
+    table(['Tile / pair', 'Status', 'Rows train / pred', 'OOF RMSE / baseline'],
+          [[f"{r['region']}/{r['tile']}\n{r['pair']}", r['status'], f"{r.get('training_rows', '?')} / {r.get('prediction_rows', '?')}", f"{fmt(r.get('cv_rmse'))} / {fmt(r.get('baseline_cv_rmse'))}"] for r in sorted(results, key=lambda r: (r['region'], r['tile'], r['pair']))], [.34, .15, .22, .29])
+    story.append(p('Configuration and paths', 'Heading2'))
+    for context in contexts:
+        story.append(p(context))
+
+    def footer(canvas, document):
+        canvas.setFont('AuditVera', 8)
+        canvas.drawString(36, 20, 'XGBoost validation | existing artifacts only')
+        canvas.drawRightString(A4[0]-36, 20, f'Page {document.page}')
+    SimpleDocTemplate(str(path), pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36).build(story, onFirstPage=footer, onLaterPages=footer)
+    return path
+
+
+def run_validation(param_lookup: dict, output_prefix: str | bool = False):
+    """Use the project runner's region object and environment without CLI parsing."""
+    values = param_lookup['eco_regions'].value
+    require(values is not None and not isinstance(values, (str, bytes)), 'eco_regions.value must be a nonempty iterable')
+    regions = list(dict.fromkeys(values))
+    require(regions and all(isinstance(r, str) and r.strip() for r in regions), 'Each eco_region must be a nonblank string')
+    argv = ['--regions', *[r.strip() for r in regions], '--env', param_lookup['env']]
+    if output_prefix:
+        argv.extend(['--output-prefix', str(output_prefix)])
+    if param_lookup.get('repository_root'):
+        argv.extend(['--repo-root', str(param_lookup['repository_root'])])
+    return main(argv)
+
+
+def repository_root(explicit=None):
+    if explicit:
+        root = Path(explicit).resolve()
+        require((root / 'src/hydro_health').is_dir(), 'repo-root must contain src/hydro_health')
+        return root
+    for parent in Path(__file__).resolve().parents:
+        if (parent / 'src/hydro_health').is_dir():
+            return parent
+    raise FileNotFoundError('Install under the hydro_health repository or supply --repo-root')
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--regions', nargs='+', required=True)
+    parser.add_argument('--env', choices=['aws', 'remote', 'local'], default='aws')
+    parser.add_argument('--output-prefix', default='')
+    parser.add_argument('--repo-root', type=Path)
+    parser.add_argument('--execution', choices=['dask', 'processes', 'serial'], default='processes')
+    parser.add_argument('--workers', type=int, default=16)
+    parser.add_argument('--memory-limit', default='6GB', help='Dask per-worker limit; process pool has no enforced per-worker limit')
+    parser.add_argument('--chunk-rows', type=int, default=10000)
+    parser.add_argument('--tiles', nargs='+')
+    parser.add_argument('--pairs', nargs='+')
+    parser.add_argument('--expected-bootstrap', type=int)
+    parser.add_argument('--rtol', type=float, default=2e-5)
+    parser.add_argument('--atol', type=float, default=2e-5)
+    parser.add_argument('--strict-warnings', action='store_true')
+    parser.add_argument('--report', type=Path, help='Local combined PDF path; default outputs/[prefix/]REPORTS.SUBFOLDER/XGBoost_Validation_<timestamp>.pdf')
+    parser.add_argument('--local-only', action='store_true', help='Disable S3 report writes, including for local inputs')
+    parser.add_argument('--report-s3-root', help='Optional s3://bucket/prefix root above REPORTS.SUBFOLDER')
+    args = parser.parse_args(argv)
+    require(args.workers > 0 and args.chunk_rows > 0, 'workers and chunk-rows must be positive')
+    require(np.isfinite(args.rtol) and np.isfinite(args.atol) and args.rtol >= 0 and args.atol >= 0, 'Tolerances must be finite and nonnegative')
+    if args.expected_bootstrap is not None:
+        require(args.expected_bootstrap > 0, 'expected-bootstrap must be positive')
+    root = repository_root(args.repo_root)
+    engine = Engine()
+    failed = False
+    all_results, contexts = [], []
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S_%fZ')
+    reports_folder = str(get_config_item('REPORTS', 'SUBFOLDER')).strip()
+    require(reports_folder and reports_folder != 'None' and not Path(reports_folder).is_absolute() and '://' not in reports_folder and '..' not in Path(reports_folder).parts, 'REPORTS.SUBFOLDER must be a relative folder')
+    local_root = root / 'outputs' / args.output_prefix if args.output_prefix else root / 'outputs'
+    report = (args.report or local_root / reports_folder / f'XGBoost_Validation_{stamp}.pdf').resolve()
+    remote_report = None
+    if not args.local_only:
+        report_root = args.report_s3_root
+        if not report_root:
+            bucket = str(get_config_item('SHARED', 'OUTPUT_BUCKET')).removeprefix('s3://').strip('/')
+            require(bucket and bucket != 'None', 'Missing SHARED.OUTPUT_BUCKET')
+            report_root = f's3://{bucket}' + (f'/{args.output_prefix}' if args.output_prefix else '')
+        require(report_root.startswith('s3://') and report_root[5:].strip('/'), 'report-s3-root must be s3://bucket/prefix')
+        remote_report = UPath(report_root) / reports_folder / report.name
+
     try:
-        train,pred,tx,px,schema,identity = engine.load_inputs(cfg)
-        report["data_prep_coverage"] = json.loads(Path(cfg["data_prep_report"]).read_text()).get("coverage", "Not specified in DataPrep report")
-        report.update(input_rows={"training":len(train),"prediction":len(pred)},input_sha256=identity,
-            schema=schema,model_config=cfg["model_config"],
-            predictor_na_counts={p:int(train[p].isna().sum()) for p in schema},
-            training_sample_weight_summary={"min":float(train.sample_weight.min()),
-                                           "mean":float(train.sample_weight.mean()),"max":float(train.sample_weight.max())},
-            source_files={key:cfg[key] for key in identity})
-        expected_contract = {"identity":identity,"model_config":cfg["model_config"],"schema":schema,"profile":profile}
-        if validate_only:
-            manifest = json.loads(manifest_path.read_text())
-            if manifest.get("contract") != expected_contract or manifest.get("model_execution_status") != "COMPLETED":
-                raise ValueError("Saved run does not match current inputs/settings, or execution did not complete")
-        else:
-            print(f"Starting {profile} XGBoost: {cfg['tile_id']} | {pair} | {len(train)} fitting rows | {len(schema)} predictors", flush=True)
-            print(f"CV/bootstrap progress is recorded in: {directory / 'log_prints.txt'}", flush=True)
-            report["task_results"] = engine.run(overwrite=overwrite, execution=execution, profile=profile)
-            manifest = json.loads(manifest_path.read_text())
-            if manifest.get("contract") != expected_contract or manifest.get("model_execution_status") != "COMPLETED":
-                raise ValueError("Input/configuration changed between preflight and completed model run")
-        report["validation"] = verify_saved_outputs(cfg,train,pred,tx,px,schema)
-        for key,digest in identity.items():
-            if module._file_hash(cfg[key]) != digest:
-                raise ValueError(f"DataPrep input changed during validation: {cfg[key]}")
-        report["contract_status"] = "PASS"
-        report["r_comparison"] = compare_r_outputs(cfg)
-        if any(r["status"] == "FAIL" for r in report["r_comparison"].values()):
-            raise AssertionError("R model-output comparison exceeds your supplied tolerance(s)")
-        report["status"] = "PASS"
-    except Exception as exc:
-        report.update(status="FAIL",error=f"{type(exc).__name__}: {exc}",traceback=traceback.format_exc())
-        if report["contract_status"] != "PASS":
-            report["contract_status"] = "FAIL"
-        raise
+        if args.execution == 'dask':
+            engine.setup_dask(args.env, n_workers=args.workers, threads_per_worker=1, memory_limit=args.memory_limit, processes=True)
+        for region in args.regions:
+            args.region = region
+            base = UPath('s3://' + str(get_config_item('SHARED', 'OUTPUT_BUCKET')).removeprefix('s3://').strip('/')) if args.env in ('aws', 'remote') else UPath(root / 'outputs')
+            if args.output_prefix:
+                base = base / args.output_prefix
+            base = base / region
+            train_dir = base / get_config_item('MODEL', 'ML_PREP_TRAIN_DIR')
+            pred_dir = base / get_config_item('MODEL', 'ML_PREP_PRED_DIR')
+            model_dir = base / get_config_item('MODEL', 'XGB_OUTPUT_DIR')
+            destination = UPath(local_root / region / reports_folder / 'xgboost_validation' / stamp)
+            print(f'{region}: discovering inputs and model artifacts under {base}', flush=True)
+            tasks = inventory(train_dir, pred_dir, model_dir, args)
+            print(f'{region}: validating {len(tasks):,} tile/year pairs', flush=True)
+            for task in tasks:
+                task['target_crs'] = str(engine.target_crs) if getattr(engine, 'target_crs', None) is not None else None
+            results = run_tasks(tasks, args, engine.client if args.execution == 'dask' else None)
+            cross_tile_schemas(results)
+            context = f'UTC {stamp}; env={args.env}; training={train_dir}; prediction={pred_dir}; models={model_dir}; rtol={args.rtol}, atol={args.atol}; replay=all usable rows'
+            write_reports(results, destination, context)
+            all_results.extend(results)
+            contexts.append(context)
+            if not results:
+                contexts.append(f'FAIL {region}: no matching prepared inputs or model artifacts found')
+            failed |= not results or any(r['status'] == 'FAIL' for r in results)
+            if args.strict_warnings:
+                failed |= any(i['level'] == 'WARN' for r in results for i in r['issues'])
     finally:
-        report_path.write_text(json.dumps(report,indent=2),encoding="utf-8")
-    print(f"PASS: {profile} model execution/output-contract checks. Report: {report_path}")
-    for role,outcome in report["r_comparison"].items():
-        print(f"R/Python {role} model-output comparison: {outcome['status']}")
-    return report
+        if engine is not None:
+            if getattr(engine, 'client', None) is not None:
+                engine.client.close()
+            if getattr(engine, 'cluster', None) is not None:
+                engine.cluster.close()
+    write_combined_pdf(all_results, report, contexts)
+    print(f'Combined PDF: {report}', flush=True)
+    if remote_report is not None:
+        try:
+            remote_report.parent.mkdir(parents=True, exist_ok=True)
+            with report.open('rb') as source, remote_report.open('wb') as target:
+                shutil.copyfileobj(source, target, length=1024*1024)
+            require(remote_report.stat().st_size == report.stat().st_size, 'Uploaded PDF size differs')
+            print(f'S3 PDF: {remote_report}', flush=True)
+        except Exception as exc:
+            print(f'Could not upload PDF: {exc}. Local report retained: {report}', file=sys.stderr)
+            return 2
+    return 1 if failed else 0
 
 
-def write_fixture(path, frame):
-    """Write synthetic point GeoParquet while retaining null geometry for invalid XY."""
-    path.parent.mkdir(parents=True,exist_ok=True)
-    valid = np.isfinite(frame.X)&np.isfinite(frame.Y)
-    points = gpd.points_from_xy(frame.X.fillna(0),frame.Y.fillna(0),crs=32617)
-    points[~valid] = None
-    gpd.GeoDataFrame(frame.copy(),geometry=points).to_parquet(path,index=False)
-
-
-def make_fixture(root, pair="2004_2006"):
-    """Create small DataPrep-shaped inputs and an explicitly synthetic PASS report.
-
-    Missing drivers, an entirely missing driver, extra source uncertainty and
-    unusable prediction rows expose accidental imputation/schema/coverage changes.
-    """
-    tile="BH4S556X_3"; rows=np.arange(256); years=[int(y) for y in pair.split("_")]
-    interval=float(years[1]-years[0]); dynamic=f"tsm_mean_{pair}"
-    train=pd.DataFrame({"X":340000.+(rows%16)*8,"Y":3024000.+(rows//16)*8,
-        "FID":rows+1,"tile_id":tile,"pair_id":pair,"year_t":years[0],"year_t1":years[1],
-        "bathy_t":-18+np.cos(rows/12)*2,"distance_from_shore":rows.astype(float)*10,
-        dynamic:np.nan,"interval_years":interval,"survey_end_date":2022.})
-    train["bathy_t1"]=train.bathy_t+1.5*np.sin(rows/20)+.3
-    train["delta_bathy"]=train.bathy_t1-train.bathy_t
-    train["delta_rate"]=train.delta_bathy/interval
-    weights=np.sqrt(abs(train.delta_bathy)+1e-6); train["sample_weight"]=weights/weights.mean()
-    train.loc[0:10,"distance_from_shore"]=np.nan
-    pred=train.drop(columns=["bathy_t1","delta_bathy","delta_rate","sample_weight","year_t","year_t1"]).copy()
-    pred["UC_t"]=1.15
-    pred.loc[0,"X"]=np.nan; pred.loc[1,"bathy_t"]=np.nan
-    pred["prediction_row_usable"]=np.isfinite(pred.X)&np.isfinite(pred.Y)&np.isfinite(pred.bathy_t)
-    schema=["bathy_t",dynamic,"distance_from_shore"]
-    for role,frame in (("training",train),("prediction",pred)):
-        directory=root/f"outputs/local_test_outputs/{role.title()}_data_grid_tiles/{tile}"
-        write_fixture(directory/f"ML_ready_{role}_{pair}.geoparquet",frame)
-    directory=root/f"outputs/local_test_outputs/Training_data_grid_tiles/{tile}"
-    pd.DataFrame({"predictor":schema}).to_parquet(directory/f"locked_predictors_{pair}.parquet",index=False)
-    (directory/f"Data_Prep_Engine_Unit_Test_report_{pair}.json").write_text(json.dumps({
-        "status":"PASS","tile_id":tile,"pair":pair,"crs":"EPSG:32617","synthetic_fixture":True,
-        "locked_predictors":schema,"counts":{"training":{"output_rows":len(train)},"prediction":{"output_rows":len(pred)}}}))
-    overrides={"pair":pair,"verification_chunk_rows":37,"model_config":{
-        "round_selection_mode":"cv_with_floor","minimum_nrounds":8,"cv_nrounds":24,
-        "cv_fallback_nrounds":8,"fixed_nrounds":20,"early_stopping_rounds":4,
-        "n_boot":3,"n_folds":3,"block_size_m":32.,"eta":.2,"gamma":0.,"reg_alpha":0.,
-        "shap_sample_rows":24,"xgb_memory_limit":"1GB","xgb_processes":False,"verbose_logging":False}}
-    return overrides,train,pred,schema
-
-
-def run_self_tests(module):
-    """Run small real XGBoost/actual Dask checks without using scientific input files."""
-    class ModelingRegressionTests(unittest.TestCase):
-        """Cover locked features, native NAs, model replay, bootstrap fit and lifecycle safeguards."""
-        def setUp(self):
-            """Create a private repository-layout fixture for each regression case."""
-            self.temp=tempfile.TemporaryDirectory(prefix="hhm_xgb_repository_test_")
-            self.root=Path(self.temp.name)
-            self.overrides,self.train,self.pred,self.schema=make_fixture(self.root)
-
-        def tearDown(self):
-            """Remove only this test's private fixture and model files."""
-            self.temp.cleanup()
-
-        def test_schema_native_na_and_input_report(self):
-            """Keep all-NA features and row coverage; reject leakage, bad weights and stale schema."""
-            a,b,tx,px,schema,_=module._prepare_model_data(self.train,self.pred,self.schema)
-            self.assertEqual(schema,self.schema)
-            self.assertTrue(tx["tsm_mean_2004_2006"].isna().all())
-            self.assertEqual(len(b),256); self.assertEqual(b.prediction_row_usable.sum(),254)
-            self.assertNotIn("UC_t",tx)
-            for leak in ("bathy_t1","year_t1","sample_weight"):
-                with self.assertRaises(ValueError):module._prepare_model_data(self.train,self.pred,self.schema+[leak])
-            for column,value in (("sample_weight",0),("distance_from_shore",np.inf)):
-                bad=self.train.copy();bad.loc[0,column]=value
-                with self.assertRaises(ValueError):module._prepare_model_data(bad,self.pred,self.schema)
-            with self.assertRaises(ValueError):module._prepare_model_data(self.train,self.pred.drop(columns="distance_from_shore"),self.schema)
-            engine=module.XGBoostModelingEngine({"repository_root":str(self.root),"modeling_settings":self.overrides})
-            cfg=engine.configuration()
-            report=Path(cfg["data_prep_report"]); data=json.loads(report.read_text()); data["locked_predictors"]=list(reversed(self.schema));report.write_text(json.dumps(data))
-            with self.assertRaisesRegex(ValueError,"differ"):engine.load_inputs(cfg)
-
-        def test_blocks_round_modes_and_cleanup(self):
-            """Keep blocks intact, honour fixed/fallback rounds and preserve setup errors."""
-            coords=pd.DataFrame({"X":np.repeat(np.arange(4)*20,20),"Y":np.tile(np.arange(20),4)})
-            folds=module._spatial_fold_ids(coords,20,3,11)
-            for x in coords.X.unique():self.assertEqual(len(set(folds[coords.X==x])),1)
-            audit={}
-            self.assertEqual(module._choose_rounds_spatial_cv(coords,coords,coords.X.to_numpy(),np.ones(len(coords)),
-                {"round_selection_mode":"fixed","fixed_nrounds":17},11,audit),17)
-            tiny=pd.DataFrame({"X":np.zeros(30),"Y":np.zeros(30)})
-            audit={}
-            self.assertEqual(module._choose_rounds_spatial_cv(tiny,tiny,np.ones(30),np.ones(30),
-                {"round_selection_mode":"cv_with_floor","cv_fallback_nrounds":4,"minimum_nrounds":12,"block_size_m":200,"n_folds":3},11,audit),12)
-            self.assertIsInstance(audit["oof"],pd.DataFrame)
-            engine=module.XGBoostModelingEngine({"repository_root":str(self.root),"modeling_settings":self.overrides})
-            def fail_setup(*args,**kwargs):
-                """Inject a setup error before client/cluster resources exist."""
-                raise RuntimeError("deliberate model Dask setup failure")
-            engine.setup_dask=fail_setup
-            with self.assertRaisesRegex(RuntimeError,"deliberate model Dask setup failure"):engine.run(execution="dask")
-            self.assertFalse(engine.local_tmp_dir.exists())
-
-        def test_dask_replay_bootstrap_and_shap_independence(self):
-            """Independently refit a saved bootstrap and confirm SHAP cannot change the ensemble."""
-            report=run_test(module,self.root,self.overrides,execution="dask")
-            self.assertEqual(report["contract_status"],"PASS")
-            self.assertEqual(report["r_comparison"]["training"]["status"],"NOT_RUN")
-            self.assertEqual(report["validation"]["summaries"]["prediction"]["preserved_unusable"],2)
-            engine=module.XGBoostModelingEngine({"repository_root":str(self.root),"modeling_settings":self.overrides})
-            cfg=engine.configuration();base=Path(cfg["training_output_dir"]);pair=cfg["pair"]
-            meta=json.loads((base/f"LOCAL_model_metadata_{pair}.json").read_text())
-            idx=pd.read_parquet(base/"bootstrap_indices"/f"bootstrap_001_{pair}.parquet").training_row_index.to_numpy(int)
-            mc=cfg["model_config"]
-            parameters={"objective":"reg:squarederror","eval_metric":["rmse","mae"],"max_depth":mc["max_depth"],
-                "eta":mc["eta"],"gamma":mc["gamma"],"lambda":mc["reg_lambda"],"alpha":mc["reg_alpha"],
-                "subsample":mc["subsample"],"colsample_bytree":mc["colsample_bytree"],"tree_method":mc["tree_method"],
-                "max_bin":mc["max_bin"],"nthread":1,"seed":meta["bootstrap_seeds"][0]["xgb_seed"]}
-            values=self.train[self.schema].to_numpy(dtype=np.float32)
-            matrix=xgb.DMatrix(values[idx],label=self.train.bathy_t1.to_numpy(dtype=np.float32)[idx],
-                weight=self.train.sample_weight.to_numpy()[idx],feature_names=self.schema,missing=np.nan)
-            reference=xgb.train(parameters,matrix,num_boost_round=meta["best_iteration"],verbose_eval=False)
-            saved=xgb.Booster();saved.load_model(meta["model_uris"][0]);saved.set_param({"nthread":1})
-            all_rows=xgb.DMatrix(values,feature_names=self.schema,missing=np.nan)
-            np.testing.assert_array_equal(saved.predict(all_rows),reference.predict(all_rows))
-            run_test(module,self.root,self.overrides,validate_only=True)
-            before=pd.read_parquet(base/f"LOCAL_training_summary_{pair}.parquet").mean_predicted_bathy_next
-            second=copy.deepcopy(self.overrides);second["model_config"]["shap_sample_rows"]=0
-            second["training_output_dir"]="outputs/local_test_outputs/second_training"
-            second["prediction_output_dir"]="outputs/local_test_outputs/second_prediction"
-            run_test(module,self.root,second,execution="inline")
-            other=self.root/second["training_output_dir"]/f"LOCAL_training_summary_{pair}.parquet"
-            np.testing.assert_array_equal(before,pd.read_parquet(other).mean_predicted_bathy_next)
-            with self.assertRaises(FileExistsError):run_test(module,self.root,self.overrides,execution="inline")
-            source=Path(cfg["training_geoparquet"]);changed=gpd.read_parquet(source);changed.loc[0,"sample_weight"]*=1.01;changed.to_parquet(source,index=False)
-            with self.assertRaisesRegex(ValueError,"Saved run does not match"):run_test(module,self.root,self.overrides,validate_only=True)
-
-        def test_alternate_pair_one_bootstrap_and_fallback(self):
-            """Use another interval and single-block CV fallback; one bootstrap must give zero SD."""
-            overrides,train,pred,schema=make_fixture(self.root,"2006_2010")
-            overrides["model_config"].update(n_boot=1,block_size_m=10000.,minimum_nrounds=4,cv_fallback_nrounds=4)
-            report=run_test(module,self.root,overrides,execution="inline")
-            self.assertEqual(report["validation"]["cv_status"],"fewer_than_two_folds_using_fallback")
-            base=self.root/"outputs/local_test_outputs/Training_data_grid_tiles/BH4S556X_3"
-            output=pd.read_parquet(base/"LOCAL_training_summary_2006_2010.parquet")
-            np.testing.assert_allclose(output.uncertainty_sd_bathy_t1,0)
-            np.testing.assert_allclose(output.mean_predicted_rate,output.mean_predicted_change/4)
-
-        def test_smoke_isolation_and_stale_artifact_cleanup(self):
-            """Keep smoke models separate and remove only stale same-pair model-owned files."""
-            changes=copy.deepcopy(self.overrides)
-            changes["smoke_model_overrides"]={"fixed_nrounds":4,"n_boot":1,"shap_sample_rows":4}
-            report=run_test(module,self.root,changes,execution="inline",profile="smoke")
-            self.assertEqual(report["validation"]["n_boot"],1)
-            engine=module.XGBoostModelingEngine({"repository_root":str(self.root),"modeling_settings":changes})
-            full=engine.configuration("full");smoke=engine.configuration("smoke")
-            self.assertNotEqual(full["training_output_dir"],smoke["training_output_dir"])
-            self.assertEqual(full["training_geoparquet"],smoke["training_geoparquet"])
-            root=Path(smoke["training_output_dir"])
-            stale=root/"models/model_boot_999_2004_2006.json";stale.write_text("stale")
-            another=root/"models/model_boot_999_2010_2015.json";another.write_text("keep another pair")
-            cv=root/"LOCAL_spatial_cv_oof_2004_2006.parquet"
-            cv.write_text("stale CV artifact")
-            protected=module._file_hash(smoke["locked_predictors_parquet"])
-            run_test(module,self.root,changes,execution="inline",profile="smoke",overwrite=True)
-            self.assertFalse(stale.exists());self.assertTrue(another.exists())
-            self.assertTrue(pd.read_parquet(cv).empty)
-            self.assertEqual(protected,module._file_hash(smoke["locked_predictors_parquet"]))
-
-        def test_comparator_and_corruption_detection(self):
-            """Exercise optional reference mechanics and reject a corrupted ensemble mean."""
-            run_test(module,self.root,self.overrides,execution="inline")
-            engine=module.XGBoostModelingEngine({"repository_root":str(self.root),"modeling_settings":self.overrides})
-            cfg=engine.configuration();pair=cfg["pair"]
-            for role in ("training","prediction"):
-                summary=pd.read_parquet(Path(cfg[f"{role}_output_dir"])/f"LOCAL_{role}_summary_{pair}.parquet")
-                reference=self.root/f"synthetic_{role}_reference.parquet";summary.to_parquet(reference,index=False)
-                cfg["r_references"][role]=str(reference)
-            self.assertEqual(compare_r_outputs(cfg)["training"]["status"],"DESCRIPTIVE_ONLY")
-            cfg["r_comparison_tolerances"].update(max_abs_prediction_difference_m=0.,max_abs_sd_difference_m=0.)
-            self.assertEqual(compare_r_outputs(cfg)["prediction"]["status"],"PASS")
-            path=Path(cfg["r_references"]["training"]);data=pd.read_parquet(path);data.loc[0,"mean_predicted_bathy_t1"]+=1;data.to_parquet(path,index=False)
-            self.assertEqual(compare_r_outputs(cfg)["training"]["status"],"FAIL")
-            prepared=engine.load_inputs(cfg)
-            path=Path(cfg["training_output_dir"])/f"LOCAL_training_summary_{pair}.parquet"
-            data=pd.read_parquet(path);data.loc[0,"mean_predicted_bathy_next"]+=1;data.to_parquet(path,index=False)
-            with self.assertRaises(AssertionError):verify_saved_outputs(cfg,*prepared[:5])
-
-    suite=unittest.defaultTestLoader.loadTestsFromTestCase(ModelingRegressionTests)
-    result=unittest.TextTestRunner(verbosity=2).run(suite)
-    if not result.wasSuccessful():raise SystemExit(1)
-
-
-def main():
-    """Provide a Windows-safe, repo-location-independent terminal entry point."""
-    parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo-root",type=Path,default=None)
-    parser.add_argument("--overwrite",action="store_true")
-    parser.add_argument("--validate-only",action="store_true")
-    parser.add_argument("--profile",choices=("full","smoke"),default="full")
-    parser.add_argument("--execution",choices=("dask","inline"),default="dask")
-    parser.add_argument("--self-test",action="store_true",help="Synthetic software regression, not your scientific run")
-    args=parser.parse_args()
-    root=args.repo_root.resolve() if args.repo_root else find_repository_root(Path(__file__))
-    module=load_engine(root,self_test=args.self_test)
-    if args.self_test:run_self_tests(module)
-    else:run_test(module,root,overwrite=args.overwrite,validate_only=args.validate_only,profile=args.profile,execution=args.execution)
-
-
-if __name__ == "__main__":
-    # Required when Dask spawns Windows worker processes.
-    main()
+if __name__ == '__main__':
+    multiprocessing.freeze_support()
+    try:
+        raise SystemExit(main())
+    except (Exception, KeyboardInterrupt) as exc:
+        print(f'Fatal validation/reporting error: {type(exc).__name__}: {exc}', file=sys.stderr)
+        raise SystemExit(2)
