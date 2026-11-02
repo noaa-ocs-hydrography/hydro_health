@@ -1,6 +1,7 @@
 import copy
 import csv
 import textwrap
+import traceback
 import gc
 import json
 import math
@@ -102,7 +103,13 @@ def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> np.
         with WarpedVRT(source, crs=profile["crs"], transform=profile["transform"],
                        width=profile["width"], height=profile["height"], dtype="float32",
                        nodata=float("nan"), resampling=method) as overview:
-            return np.ma.masked_invalid(overview.read(1, masked=True))
+            data = np.ma.masked_invalid(overview.read(1, masked=True))
+        if not data.count():
+            source_has_data = any(np.ma.masked_invalid(source.read(1, window=window, masked=True)).count()
+                                  for _, window in source.block_windows(1))
+            if not source_has_data:
+                raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
+        return data
 
 
 def _report_color_scale(family: str, limits: list[float]) -> tuple[object, Normalize]:
@@ -155,7 +162,7 @@ def _render_mosaic_page(pdf: PdfPages, entry: dict, grid: np.ma.MaskedArray, pro
                  fontsize=11, weight="bold", color="#17685b")
         reasons = Counter(item["category"] for item in entry["skipped_tiles"])
         summary = "; ".join(f"{label}: {count}" for label, count in sorted(reasons.items())) or "No tiles skipped"
-        fig.text(.055, .787, textwrap.shorten(summary, width=140, placeholder=" ... (see export audit)"), fontsize=9, color="#52616c")
+        fig.text(.055, .787, textwrap.shorten(summary, width=140, placeholder=" ... (see mosaic skip details)"), fontsize=9, color="#52616c")
         ax = fig.add_axes([.065, .175, .77, .575])
         ax.set_facecolor("#e5edf1")
         if basemap is not None:
@@ -194,7 +201,7 @@ def _render_mosaic_page(pdf: PdfPages, entry: dict, grid: np.ma.MaskedArray, pro
             bar.update_ticks()
         fig.text(.055, .11, f"Mosaic: {Path(entry['styled_path']).name}", fontsize=8, color="#31495b")
         fig.text(.055, .085, f"{profile['crs']}  |  {profile['width']} x {profile['height']} pixels  |  Shared {family} scale across all pages", fontsize=8, color="#52616c")
-        fig.text(.055, .06, f"Prior-run TIFFs included: {len(entry.get('previous_export_tiles', []))}. This run: see export audit pages. Full mosaic details: mosaic_inventory.json", fontsize=8, color="#52616c")
+        fig.text(.055, .06, f"Prior-run TIFFs included: {len(entry.get('previous_export_tiles', []))}. This run: see PDF export problem pages.", fontsize=8, color="#52616c")
         attribution = "Map services and data available from U.S. Geological Survey, National Geospatial Program." if basemap is not None else "Basemap unavailable; see the export log."
         fig.text(.055, .032, attribution, fontsize=7, color="#52616c")
         fig.text(.945, .032, f"{number} / {total}", ha="right", fontsize=8, color="#52616c")
@@ -204,10 +211,39 @@ def _render_mosaic_page(pdf: PdfPages, entry: dict, grid: np.ma.MaskedArray, pro
 
 
 
+def _render_mosaic_skip_details(pdf: PdfPages, region: str, entries: list[dict]) -> None:
+    """Append per-product skip explanations without truncating reasons or paths."""
+
+    lines = []
+    for entry in entries:
+        if not entry["skipped_tiles"]:
+            continue
+        lines.extend([f"{entry['pair']} | {entry['role']} / {entry['column']}",
+                      f"Included {entry['included_count']}; skipped {entry['skipped_count']} of {entry['total_count']}"])
+        for item in entry["skipped_tiles"]:
+            lines.extend(textwrap.wrap(f"{item['tile_id']} | " + "; ".join(_concise_export_problems(item)), width=145))
+        lines.append("")
+    for offset in range(0, len(lines), 45):
+        fig = plt.figure(figsize=(11.7, 8.3), facecolor="white")
+        try:
+            fig.text(.055, .95, f"{region} | MOSAIC SKIP DETAILS", fontsize=16, weight="bold")
+            fig.text(.055, .90, "\n".join(lines[offset:offset + 45]), va="top", fontsize=8, linespacing=1.4)
+            fig.text(.055, .035, "Overlap skips mean another tile already covers those cells; they are not export failures.", fontsize=8)
+            pdf.savefig(fig)
+        finally:
+            plt.close(fig)
+
+
 def _export_problem_category(reason: str) -> str:
     """Classify tile-level eligibility or raster diagnostics for report counts."""
 
     text = reason.lower()
+    if "no crs" in text or "crs is none" in text:
+        return "No CRS"
+    if "crs mismatch" in text or "template crs must match" in text:
+        return "CRS mismatch"
+    if "no valid raster values" in text:
+        return "No valid raster values"
     if "polygon" in text and any(word in text for word in ("invalid", "expected one", "missing geometry", "empty geometry")):
         return "Invalid tile polygon"
     if any(word in text for word in ("prediction-mask", "mask overlap", "mask cell centers")):
@@ -254,44 +290,62 @@ def _build_export_audit(candidates: dict, records: list[dict], prep_reasons: dic
     return dict(pairs=pairs, tiles=tiles)
 
 
+def _concise_export_problems(item: dict) -> list[str]:
+    """Explain each actual failure without embedding paths or diagnostic JSON."""
+
+    details = item.get("details", {})
+    lines = []
+    for key, check in details.get("input_checks", {}).items():
+        label = key.replace("_", " ")
+        if check.get("exists") is False:
+            lines.append(f"Missing {label}.")
+        lines.extend(f"{label}: {problem}" for problem in check.get("problems", []))
+    for issue in details.get("issues", []):
+        message = issue["message"]
+        for check in details.get("input_checks", {}).values():
+            if check.get("path"):
+                message = message.replace(str(check["path"]) + ": ", "")
+        if not any(message in line or line in message for line in lines):
+            lines.append(message)
+    if not lines:
+        reason = item.get("reason", item.get("category", "Unknown failure"))
+        reason = reason.split("\nDiagnostics:", 1)[0]
+        reason = reason.split(" Expected TIFF:", 1)[0].split(" Source TIFF:", 1)[0]
+        lines = [reason]
+    if "finite_xy_value_rows" in details:
+        label = f"{details.get('role', '')}/{details.get('column', details.get('value_column', ''))}"
+        lines.append(f"{label}: {details.get('input_rows', 0)} rows; "
+                     f"{details['finite_xy_value_rows']} with finite X/Y/value; "
+                     f"{details.get('rows_inside_tile_grid', 0)} inside grid; "
+                     f"{details.get('input_rows_in_polygon_touching_cells', 0)} inside polygon cells.")
+    return list(dict.fromkeys(lines))
+
+
 def _render_export_audit(pdf: PdfPages, region: str, audit: dict) -> int:
-    """Add export totals plus readable per-tile reasons ahead of the mosaic maps."""
+    """Put complete, concise diagnoses in the PDF, with automatic continuation pages."""
 
     pages = 0
     for summary in audit["pairs"]:
-        fig = plt.figure(figsize=(11.7, 8.3), facecolor="white")
-        try:
-            fig.text(.055, .95, "HYDRO HEALTH  /  ML RASTER EXPORT AUDIT", fontsize=10, color="#426078", weight="bold")
-            fig.text(.055, .89, f"{region}  |  {summary['pair'].replace('_', ' - ')}", fontsize=23, color="#152f42", weight="bold")
-            fig.text(.055, .83, f"EXPORTED  {summary['exported']}     SKIPPED  {summary['skipped']}     NOT RUN  {summary['not_run']}     TOTAL  {summary['total']}", fontsize=12, color="#17685b", weight="bold")
-            lines = ["WHY EXPORTS WERE SKIPPED"]
-            lines.extend(f"{category}: {count} tile(s)" for category, count in sorted(summary["skip_categories"].items()))
-            if not summary["skip_categories"]:
-                lines.append("No export skips for this year pair.")
-            if summary["input_issue_tiles"]:
-                lines.extend(["", "INPUT PROBLEMS FOUND (one tile can have several problems)"])
-                lines.extend(f"{category}: {count} tile(s)" for category, count in sorted(summary["input_issue_tiles"].items()))
-            fig.text(.065, .76, "\n".join(lines), va="top", fontsize=min(11, 330 / max(1, len(lines) * 1.65)), linespacing=1.65, color="#31495b")
-            fig.text(.055, .12, "These are this run's export outcomes. Mosaic pages separately count available TIFFs, including older outputs.", fontsize=9, color="#52616c")
-            fig.text(.055, .085, "Exact paths, missing fields and data counts: export_audit.json and export_audit.csv.", fontsize=9, color="#52616c")
-            pdf.savefig(fig)
-            pages += 1
-        finally:
-            plt.close(fig)
-        skipped = [item for item in audit["tiles"] if item["pair"] == summary["pair"] and item["status"] == "Skipped"]
-        for offset in range(0, len(skipped), 4):
+        selected = [item for item in audit["tiles"] if item["pair"] == summary["pair"] and item["status"] != "Exported"]
+        lines = [f"EXPORTED {summary['exported']}   SKIPPED {summary['skipped']}   NOT RUN {summary['not_run']}   TOTAL {summary['total']}", ""]
+        counts = Counter(problem for item in selected for problem in _concise_export_problems(item))
+        lines.append("PROBLEMS FOUND (number of affected tiles)")
+        for problem, count in counts.most_common():
+            lines.extend(textwrap.wrap(f"{count} tile(s): {problem}", width=125))
+        if not selected:
+            lines.append("No export problems found.")
+        lines.extend(["", "AFFECTED TILES"] if selected else [])
+        for item in selected:
+            lines.append(f"{item['tile_id']} | {item['status']}")
+            for problem in _concise_export_problems(item):
+                lines.extend(textwrap.wrap("  " + problem, width=125, subsequent_indent="  "))
+            lines.append("")
+        for offset in range(0, len(lines), 40):
             fig = plt.figure(figsize=(11.7, 8.3), facecolor="white")
             try:
-                fig.text(.055, .95, "HYDRO HEALTH  /  TILE EXPORT PROBLEMS", fontsize=10, color="#426078", weight="bold")
-                fig.text(.055, .90, f"{region}  |  {summary['pair'].replace('_', ' - ')}", fontsize=20, color="#152f42", weight="bold")
-                for index, item in enumerate(skipped[offset:offset + 4]):
-                    y = .82 - index * .18
-                    fig.text(.055, y, f"{item['tile_id']}  |  {item['category']}", fontsize=11, weight="bold", color="#17685b")
-                    wrapped = textwrap.wrap(item["reason"].replace("\n", " "), width=143)
-                    if len(wrapped) > 6:
-                        wrapped = wrapped[:5] + ["... full details in export_audit.json / export_audit.csv"]
-                    fig.text(.065, y - .025, "\n".join(wrapped), fontsize=8, va="top", linespacing=1.25, color="#31495b")
-                fig.text(.055, .04, "Each problem was logged and skipped so other tiles could continue.", fontsize=8, color="#52616c")
+                fig.text(.055, .95, f"{region} | {summary['pair']} | EXPORT PROBLEMS", fontsize=16, weight="bold")
+                fig.text(.055, .89, "\n".join(lines[offset:offset + 40]), va="top", fontsize=9, linespacing=1.35)
+                fig.text(.055, .035, "Current run only. Mosaic pages may also include TIFFs from previous runs.", fontsize=8)
                 pdf.savefig(fig)
                 pages += 1
             finally:
@@ -736,7 +790,7 @@ def _load_summary(path: str, role: str, cfg: dict, predictors: list[str], audit:
     audit["rows"] = len(df)
     errors = []
     if spatial.crs is None or spatial.crs != cfg["crs"]:
-        errors.append(f"CRS is {spatial.crs}; expected {cfg['crs']}")
+        errors.append(f"No CRS; expected {cfg['crs']}" if spatial.crs is None else f"CRS mismatch: {spatial.crs}; expected {cfg['crs']}")
     if not df.columns.is_unique:
         errors.append("duplicate column names")
     if df.empty:
@@ -947,6 +1001,15 @@ def _export_tile_task(cfg: dict) -> dict:
         return {"region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
                 "skipped": True, "status": "Skipped", "category": exc.category, "details": exc.details,
                 "reason": str(exc), "results": {}, "visual_outputs": []}
+    except Exception as exc:
+        details = {"exception_type": type(exc).__name__, "traceback": traceback.format_exc(),
+                   "input_checks": cfg.get("_input_audit", {}),
+                   "training_summary": cfg["training_summary"], "prediction_summary": cfg["prediction_summary"]}
+        reason = f"{type(exc).__name__}: {exc}"
+        Engine.write_message_dask(f"Raster export failed for {cfg['region']}/{cfg['tile_id']} | {cfg['pair']}: {reason}\n{details['traceback']}", cfg["log_dir"])
+        return {"region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
+                "skipped": True, "status": "Skipped", "category": "Export exception", "details": details,
+                "reason": reason, "results": {}, "visual_outputs": []}
     finally:
         gc.collect()
 
@@ -1019,7 +1082,7 @@ class MLRasterExportEngine(Engine):
         self.tile_grid_path = UPath(f"{s3_dir_base}/{tile_grid}") if self.is_aws else UPath(self.outputs_dir / tile_grid)
 
     def load_template_metadata(self) -> dict:
-        """Read the template header once; workers never download the template raster."""
+        """Read grid alignment and extent; template values never control export eligibility."""
 
         path = str(self.template_path).replace("s3://", "/vsis3/", 1)
         with rasterio.open(path) as template:
@@ -1039,42 +1102,6 @@ class MLRasterExportEngine(Engine):
                     tile_root = path.parent.parent
                     expected.add(str(tile_root / "Training" / f"LOCAL_training_summary_{match[1]}.geoparquet"))
         return [UPath(path) for path in sorted(expected)]
-
-    def _tile_mask_skip_reason(self, tile_geom_wkb: bytes) -> str | None:
-        """Skip tiles without a valid prediction-mask pixel touched by the polygon.
-
-        Valid prediction-mask pixels are unmasked, finite and nonzero.
-        Eligibility and export both use all_touched=True for the polygon mask.
-        """
-
-        geom = wkb.loads(tile_geom_wkb)
-        metadata = self.template_metadata
-        t = metadata["transform"]
-        if t.b != 0 or t.d != 0 or t.a <= 0 or t.e >= 0:
-            raise ValueError("Use a north-up, unrotated prediction mask")
-        raw = from_bounds(*geom.bounds, transform=t)
-        c0 = max(0, math.floor(raw.col_off + 1e-8))
-        r0 = max(0, math.floor(raw.row_off + 1e-8))
-        c1 = min(metadata["width"], math.ceil(raw.col_off + raw.width - 1e-8))
-        r1 = min(metadata["height"], math.ceil(raw.row_off + raw.height - 1e-8))
-        height, width = r1 - r0, c1 - c0
-        if height <= 0 or width <= 0:
-            return "tile lies outside the prediction-mask raster extent"
-        if height * width > self.settings["raster_config"]["max_grid_cells"]:
-            raise ValueError(f"Prediction-mask overlap window is oversized ({height} x {width}); check tile bounds and max_grid_cells")
-        window = Window(c0, r0, width, height)
-        transform = window_transform(window, t)
-        polygon_cells = geometry_mask([mapping(geom)], out_shape=(height, width),
-                                      transform=transform, invert=True, all_touched=True)
-        if not polygon_cells.any():
-            return "no prediction-mask pixels intersect the tile polygon"
-        path = str(self.template_path).replace("s3://", "/vsis3/", 1)
-        with rasterio.open(path) as mask_raster:
-            data = mask_raster.read(1, window=window, masked=True)
-        valid = ~np.ma.getmaskarray(data) & np.isfinite(data.data) & (data.data != 0)
-        if not np.any(polygon_cells & valid):
-            return "tile contains no valid prediction-mask cells (valid = unmasked, finite and nonzero)"
-        return None
 
     def load_tile_grid(self) -> gpd.GeoDataFrame:
         """Read the official tile polygons once per region in the target CRS."""
@@ -1097,7 +1124,6 @@ class MLRasterExportEngine(Engine):
 
         self.task_configs = []
         seen = set()
-        mask_skip_reasons = {}
         self.report_candidates = {}
         self.report_skip_reasons = {}
         for training_file in self.collect_training_files():
@@ -1132,13 +1158,6 @@ class MLRasterExportEngine(Engine):
             except (ValueError, ShapelyError) as exc:
                 self.report_skip_reasons[tile_id, pair] = f"Invalid official tile polygon: {exc}"
                 self.write_message(f"Skipping raster export for {region}/{tile_id}, pair {pair}: invalid official tile polygon ({exc}).", OUTPUTS)
-                continue
-            if tile_id not in mask_skip_reasons:
-                mask_skip_reasons[tile_id] = self._tile_mask_skip_reason(geom.wkb)
-            skip_reason = mask_skip_reasons[tile_id]
-            if skip_reason is not None:
-                self.report_skip_reasons[tile_id, pair] = skip_reason
-                self.write_message(f"Skipping raster export for {region}/{tile_id}, pair {pair}: {skip_reason}.", OUTPUTS)
                 continue
             model_train = training_file.parent
             model_pred = self.model_out_dir / tile_id / "Prediction"
@@ -1253,17 +1272,17 @@ class MLRasterExportEngine(Engine):
                             try:
                                 data = _read_report_grid(uri, profile, family in ("survey", "count"))
                             except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
-                                entry["skipped_tiles"].append(dict(tile_id=tile_id, category="Read error", reason=f"{uri}: {exc}"))
+                                entry["skipped_tiles"].append(dict(tile_id=tile_id, category=_export_problem_category(str(exc)), reason=str(exc)))
                                 self.write_message(f"Skipping {region}/{tile_id} from {name}: {exc}", OUTPUTS)
                                 continue
                             usable = ~np.ma.getmaskarray(data)
                             if not usable.any():
-                                entry["skipped_tiles"].append(dict(tile_id=tile_id, category="No overview data", reason="No finite cells remain at report resolution."))
+                                entry["skipped_tiles"].append(dict(tile_id=tile_id, category="No overview data", reason=f"No finite cells remain at report resolution ({width} x {height}). A small valid footprint may disappear during resampling. Source TIFF: {uri}"))
                                 continue
                             # A mosaic uses the first valid tile in sorted ID order at overlaps.
                             take = usable & np.ma.getmaskarray(mosaic)
                             if not take.any():
-                                entry["skipped_tiles"].append(dict(tile_id=tile_id, category="Covered by earlier tiles", reason="All overview cells are already covered by an earlier tile."))
+                                entry["skipped_tiles"].append(dict(tile_id=tile_id, category="Covered by earlier tiles", reason=f"All {int(usable.sum())} usable overview cells are already covered by earlier tiles in sorted ID order; the TIFF exists and is readable. Source TIFF: {uri}"))
                                 continue
                             mosaic.data[take] = data.data[take]
                             mosaic.mask[take] = False
@@ -1282,8 +1301,14 @@ class MLRasterExportEngine(Engine):
                                                included_tiles=entry["included_count"], skipped_tiles=entry["skipped_count"],
                                                resampling="mode" if family in ("survey", "count") else "average",
                                                overlap_rule="first valid tile in sorted tile ID order")
+                        entry["skip_categories"] = dict(Counter(item["category"] for item in entry["skipped_tiles"]))
                         entries.append(entry)
                         self.write_message(f"Mosaic {region}/{name}: included {entry['included_count']}, skipped {entry['skipped_count']} of {entry['total_count']} tiles.", OUTPUTS)
+                        for category, count in sorted(entry["skip_categories"].items()):
+                            self.write_message(f"  {name}: {category}: {count} tile(s)", OUTPUTS)
+                        for item in entry["skipped_tiles"]:
+                            self.write_message(f"  SKIPPED {region}/{item['tile_id']} | {pair} | {role}/{column} | {item['category']}: {item['reason']}", OUTPUTS)
+
             report_name = f"{region}_mosaic_report.pdf"
             scale_metadata = {}
             with PdfPages(root / report_name) as pdf:
@@ -1308,25 +1333,26 @@ class MLRasterExportEngine(Engine):
                         output.update_tags(display_min=norm.vmin, display_max=norm.vmax, display_cmap=cmap.name,
                                            source_values=entry["data_path"])
                     _render_mosaic_page(pdf, entry, grid, profile, mask, basemap, cmap, norm, region, number + audit_pages, len(entries) + audit_pages)
+                _render_mosaic_skip_details(pdf, region, entries)
             inventory = dict(region=region, mask_uri=str(self.template_path),
                              counts_note="Per mosaic: included tiles contribute finite overview cells; skipped tiles are missing, unreadable or contribute no cells. Existing exports count as included.",
-                             mask_validity="unmasked, finite, nonzero", mask_outline="nearest sampled at report resolution",
+                             mask_used_for_export_eligibility=False, mask_validity="report outline only: unmasked, finite, nonzero", mask_outline="nearest sampled at report resolution",
                              scale_note="Shared scales use all finite numeric mosaic values in each unit family across this region's roles and year pairs.",
                              basemap_available=basemap is not None, export_summary=export_audit["pairs"], color_scales=scale_metadata, mosaics=entries)
             (root / "mosaic_inventory.json").write_text(json.dumps(inventory, indent=2), encoding="utf-8")
-            (root / "export_audit.json").write_text(json.dumps(export_audit, indent=2, default=str), encoding="utf-8")
-            with (root / "export_audit.csv").open("w", newline="", encoding="utf-8") as stream:
-                writer = csv.DictWriter(stream, fieldnames=["tile_id", "pair", "status", "category", "reason", "input_checks"])
+            with (root / "mosaic_skips.csv").open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(stream, fieldnames=["region", "pair", "role", "column", "tile_id", "category", "reason"])
                 writer.writeheader()
-                for tile in export_audit["tiles"]:
-                    writer.writerow({key: tile[key] for key in ("tile_id", "pair", "status", "category", "reason")} | {"input_checks": json.dumps(tile["details"], default=str)})
+                for entry in entries:
+                    for item in entry["skipped_tiles"]:
+                        writer.writerow(dict(region=region, pair=entry["pair"], role=entry["role"], column=entry["column"], **item))
             # Publish the PDF last, after its accompanying TIFFs and inventory succeed.
             files = sorted(path for path in root.iterdir() if path.name != report_name)
             files.append(root / report_name)
             for path in files:
                 _copy_file(str(path), str(destination / path.name))
         result = str(destination / report_name)
-        self.write_message(f"Successfully generated mosaic report for {region}: {result} ({len(entries) + audit_pages} pages).", OUTPUTS)
+        self.write_message(f"Successfully generated mosaic report for {region}: {result} ({len(entries) + audit_pages} map/audit pages plus mosaic skip details).", OUTPUTS)
         return result
 
 
@@ -1335,7 +1361,9 @@ class MLRasterExportEngine(Engine):
 
         jobs = iter(dict(cfg, overwrite=overwrite) for cfg in self.task_configs)
         initial = list(islice(jobs, 2 * self.settings["raster_workers"]))
-        pending = set(self.client.map(_export_tile_task, initial, pure=False))
+        futures = self.client.map(_export_tile_task, initial, pure=False)
+        job_by_future = dict(zip(futures, initial))
+        pending = set(futures)
         completed = as_completed(pending)
         records = []
         try:
@@ -1343,12 +1371,21 @@ class MLRasterExportEngine(Engine):
                 pending.remove(future)
                 try:
                     records.append(future.result())
+                except Exception as exc:
+                    cfg = job_by_future[future]
+                    reason = f"{type(exc).__name__}: {exc}"
+                    self.write_message(f"Export worker failed for {cfg['region']}/{cfg['tile_id']} | {cfg['pair']}: {reason}", OUTPUTS)
+                    records.append(dict(region=cfg["region"], tile_id=cfg["tile_id"], pair=cfg["pair"],
+                                        skipped=True, status="Skipped", category="Worker failure", reason=reason,
+                                        details={"traceback": traceback.format_exc()}, results={}, visual_outputs=[]))
                 finally:
+                    job_by_future.pop(future, None)
                     future.release()
                 job = next(jobs, None)
                 if job is not None:
                     future = self.client.submit(_export_tile_task, job, pure=False)
                     pending.add(future)
+                    job_by_future[future] = job
                     completed.add(future)
         except Exception:
             self.client.cancel(list(pending))
