@@ -139,6 +139,7 @@ def run_training_rasters_engine(param_lookup: dict[dict], output_prefix: str|boo
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)    
 
+
 def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
@@ -151,6 +152,7 @@ def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool)
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
 
 def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
@@ -165,11 +167,16 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
 
+
 def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the distance to shore raster creator"""
 
-    engine = DistanceToShoreEngine(param_lookup)
+    engine = DistanceToShoreEngine(param_lookup, data_type='BlueTopo')
     engine.run(output_prefix)
+
+    engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
+    engine.run(output_prefix)
+
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
@@ -198,6 +205,7 @@ def run_sediment_layer_engine() -> None:
 
     engine = CreateSedimentLayerEngine()
     engine.run()
+
 
 def run_hurricane_layer_engine() -> None:
     """Entry point for parallel processing of sediment model data"""

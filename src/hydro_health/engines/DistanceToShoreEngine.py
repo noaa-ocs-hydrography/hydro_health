@@ -55,31 +55,31 @@ def _process_tile(param_inputs: list) -> dict:
     Defined at the module level so Dask can safely pickle and distribute it.
     """
 
-    (bluetopo_path, ecoregion, ecoregion_gdf, 
+    (geotiff_string, data_type, ecoregion, ecoregion_gdf, 
      temp_path, param_lookup, output_prefix) = param_inputs
 
     _set_gdal_s3_options()
     engine = DistanceToShoreEngine(param_lookup)
 
     try:
-        bluetopo_path = pathlib.Path(bluetopo_path)
+        geotiff_path = pathlib.Path(geotiff_string)
         temp_path = pathlib.Path(temp_path)
         
-        tile_id = bluetopo_path.parents[0].name
-        raster_stem = bluetopo_path.stem
+        parent_folder = geotiff_path.parents[0].name
+        raster_stem = geotiff_path.stem
 
-        tile_dir = temp_path / tile_id
+        tile_dir = temp_path / parent_folder
         tile_dir.mkdir(parents=True, exist_ok=True)
 
-        water_mask, valid_cells = engine.build_ocean_mask(bluetopo_path, ecoregion_gdf, temp_path)
+        water_mask, valid_cells = engine.build_ocean_mask(geotiff_path, ecoregion_gdf, temp_path)
 
         if valid_cells == 0:
             shutil.rmtree(tile_dir, ignore_errors=True)
-            return {"status": "skipped", "file": str(bluetopo_path), "stats": None}
+            return {"status": "skipped", "file": str(geotiff_path), "stats": None}
 
         print(f"  - Loading precomputed shoreline vertices for: {raster_stem}...")
         # Direct .npy array load
-        shoreline_vertices = engine.get_shoreline_vertices(bluetopo_path, ecoregion)
+        shoreline_vertices = engine.get_shoreline_vertices(geotiff_path, ecoregion)
 
         print(f"  - Calculating Vector-to-Point Distance to Shoreline for {raster_stem}...")
         distance_raster_path, stats = engine.build_distance_from_shoreline(
@@ -95,16 +95,16 @@ def _process_tile(param_inputs: list) -> dict:
         gc.collect()
 
         if param_lookup['env'] == 'aws':
-            # TODO should we upload water mask
-            engine.upload_file_to_s3(distance_raster_path, ecoregion, tile_id, output_prefix)
+            output_subfolder = parent_folder if data_type == 'BlueTopo' else f'{parent_folder}/distance_to_shore'
+            engine.upload_file_to_s3(distance_raster_path, ecoregion, output_subfolder, output_prefix)
             shutil.rmtree(tile_dir, ignore_errors=True)
 
-        return {"status": "success", "file": str(bluetopo_path), "stats": stats}
+        return {"status": "success", "file": str(geotiff_path), "stats": stats}
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"Error processing {bluetopo_path}:\n{error_trace}")
-        return {"status": "error", "file": str(bluetopo_path), "error": error_trace}
+        print(f"Error processing {geotiff_path}:\n{error_trace}")
+        return {"status": "error", "file": str(geotiff_path), "error": error_trace}
     finally:
         gc.collect()
         _trim_memory()  # Release unmanaged glibc memory arenas to OS
@@ -116,16 +116,20 @@ class DistanceToShoreEngine(Engine):
     and calculating vector-to-point distance-to-shore rasters.
     """
 
-    def __init__(self, param_lookup):
+    def __init__(self, param_lookup, data_type):
         super().__init__()
         self.param_lookup = param_lookup
+        self.data_type = data_type
 
     def get_shoreline_vertices(
         self,
         bluetopo_path: pathlib.Path,
         ecoregion: str
     ) -> np.ndarray:
-        """Determines the raster's CRS and loads the matching precomputed .npy vertex array."""
+        """
+        Determines the raster's CRS and loads the matching precomputed .npy vertex array.
+        - Run scripts\store_coastal_shoreline_vertices.py to generate arrays
+        """
         
         with rasterio.open(str(bluetopo_path)) as ref:
             crs = ref.crs
@@ -313,72 +317,86 @@ class DistanceToShoreEngine(Engine):
 
         return str(output_file), valid_cells
     
-    def get_temp_path_and_bluetopo_paths(self, output_prefix: str, ecoregion: str) -> tuple:    
+    def get_temp_path_and_geotiff_paths(self, output_prefix: str, ecoregion: str) -> tuple:    
         """Set up target folder for local output or AWS intermediate file creation"""
 
         starting_path = f'{output_prefix}/{ecoregion}' if output_prefix else ecoregion
-        subfolder = get_config_item('BLUETOPO', 'SUBFOLDER')
+        subfolder = get_config_item(self.data_type.upper(), 'SUBFOLDER') 
 
         if self.param_lookup['env'] == 'aws':
-            bluetopo_paths = self.get_s3_bluetopo_files(ecoregion)
-            temp_path = pathlib.Path.home() / 'local_tmp_dir' / starting_path / subfolder / 'BlueTopo'
+            geotiff_paths = self.get_s3_geotiff_files(ecoregion)
+            temp_path = pathlib.Path.home() / 'local_tmp_dir' / starting_path / subfolder / self.data_type
         else:
-            bluetopo_paths = self.get_local_bluetopo_files(ecoregion, output_prefix)
-            temp_path = OUTPUTS / starting_path / subfolder / 'BlueTopo'
+            geotiff_paths = self.get_local_geotiff_files(ecoregion, output_prefix)
+            temp_path = OUTPUTS / starting_path / subfolder / self.data_type
             
-        return temp_path, bluetopo_paths
+        return temp_path, geotiff_paths
 
-    def get_local_bluetopo_files(self, ecoregion: str, output_prefix: str = "") -> list[pathlib.Path]:
-        """Search for local BlueTopo geotiffs"""
+    def get_local_geotiff_files(self, ecoregion: str, output_prefix: str = "") -> list[pathlib.Path]:
+        """Search for local data type geotiffs"""
         
         if output_prefix:
-            bluetopo_folder = OUTPUTS / output_prefix / ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
+            data_type_folder = OUTPUTS / output_prefix / ecoregion / get_config_item(
+                self.data_type.upper(), 'SUBFOLDER'
+            ) / self.data_type
         else:
-            bluetopo_folder = OUTPUTS / ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / "BlueTopo"
+            data_type_folder = OUTPUTS / ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / "BlueTopo"
         
         raster_files = []
-        raster_files.extend([raster for raster in list(bluetopo_folder.rglob("*[0-9].tiff")) if 'ISS' not in raster.name])
 
-        print(f"- Discovered {len(raster_files)} local BlueTopo file(s)")
+        geotiff_syntax = "*[0-9].tiff" if self.data_type == 'BlueTopo' else "*.tif"
+        raster_files.extend([raster for raster in list(data_type_folder.rglob(geotiff_syntax)) if 'ISS' not in raster.name])
+
+        print(f"- Discovered {len(raster_files)} local {self.data_type} file(s)")
         return raster_files
 
-    def get_s3_bluetopo_files(self, ecoregion: str = "*") -> list[str]:
-        """Search for all BlueTopo geotiffs for current ecoregion"""
-
+    def get_s3_geotiff_files(self, ecoregion: str = "*") -> list[str]:
+        """Search for all geotiffs for current data type and ecoregion"""
+                
         _set_gdal_s3_options()
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
-        s3_search_pattern = f"{bucket}/{ecoregion}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo/**/*[0-9].tiff"
+        geotiff_syntax = f"{self.data_type}/**/*[0-9].tiff" if self.data_type == 'BlueTopo' else f"{self.data_type}/**/*.tif"
+        s3_search_pattern = f"{bucket}/{ecoregion}/{
+            get_config_item(self.data_type.upper(), 'SUBFOLDER')
+        }/{geotiff_syntax}"
+
         raw_paths = s3_files.glob(s3_search_pattern)
-        geotiffs = [
-            gt for gt in raw_paths 
-            if not any(pattern in gt.lower() for pattern in [
-                '_unc', 
-                '_slope', 
-                '_iss', 
-                '_survey_end_date', 
-                'decay'])
-        ]
+
+        if self.data_type == 'BlueTopo':
+            geotiffs = [
+                gt for gt in raw_paths 
+                if not any(pattern in gt.lower() for pattern in [
+                    '_unc', 
+                    '_slope', 
+                    '_iss', 
+                    '_survey_end_date', 
+                    'decay'])
+            ]
+        else:
+            geotiffs = raw_paths
         
-        vsi_bluetopo_paths = [
+        vsi_geotiff_paths = [
             f"/vsis3/{p}" for p in geotiffs 
             if p.lower().endswith(('.tif', '.tiff'))
         ]
 
-        print(f"- Discovered {len(vsi_bluetopo_paths)} S3 BlueTopo file(s) matching: s3://{s3_search_pattern}")
-        return vsi_bluetopo_paths
+        print(f"- Discovered {len(vsi_geotiff_paths)} S3 {self.data_type} file(s) matching: s3://{s3_search_pattern}")
+        return vsi_geotiff_paths
         
-    def upload_file_to_s3(self, distance_raster_path: pathlib.Path, ecoregion: str, tile_id: str, output_prefix: str=False) -> None:
+    def upload_file_to_s3(self, distance_raster_path: pathlib.Path, ecoregion: str, output_subfolder: str, output_prefix: str=False) -> None:
         """Upload distance raster file to S3"""
 
         s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
         ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
-        s3_path = f"{bucket}/{ecoregion_path}/{get_config_item('BLUETOPO', 'SUBFOLDER')}/BlueTopo/{tile_id}"
+        s3_path = f"{bucket}/{ecoregion_path}/{
+            get_config_item(self.data_type.upper(), 'SUBFOLDER')
+        }/{self.data_type}/{output_subfolder}"
         
-        print(f"  - Uploading {tile_id} to s3://{s3_path}")
+        print(f"  - Uploading {output_subfolder} to s3://{s3_path}")
         s3.put(str(distance_raster_path), s3_path, recursive=True)
 
     def run(self, output_prefix: str='') -> None:
@@ -393,19 +411,20 @@ class DistanceToShoreEngine(Engine):
         ecoregions = self.param_lookup['eco_regions'].value
         
         for ecoregion in ecoregions:
-            temp_path, bluetopo_paths = self.get_temp_path_and_bluetopo_paths(output_prefix, ecoregion)
+            temp_path, geotiff_paths = self.get_temp_path_and_geotiff_paths(output_prefix, ecoregion)
 
-            if not bluetopo_paths:
-                print(f" - No BlueTopo tiles found for {ecoregion}")
+            if not geotiff_paths:
+                print(f" - No {self.data_type} tiles found for {ecoregion}")
                 continue
 
             enhanced_ecoregions = gpd.read_file(str(master_gpkg), layer='Enhanced_EcoRegions_50m')
             ecoregion_gdf = enhanced_ecoregions[enhanced_ecoregions['EcoRegion'] == ecoregion]
 
             param_inputs = []
-            for bluetopo_path in bluetopo_paths:
+            for geotiff_path in geotiff_paths:
                 param_inputs.append([
-                    bluetopo_path,
+                    geotiff_path,
+                    self.data_type,
                     ecoregion,
                     ecoregion_gdf,  # Direct parameter passing avoids scattered handle loss if workers restart
                     str(temp_path),
@@ -427,6 +446,7 @@ class DistanceToShoreEngine(Engine):
             success_count = sum(1 for r in results if r.get('status') == 'success')
             print(f" - Completed {success_count}/{len(results)} tiles successfully for {ecoregion}.")
             beginning_prefix = f"{output_prefix}/{ecoregion}" if output_prefix else ecoregion
+            # TODO write manifest depending on data type
             manifest_path = pathlib.Path(beginning_prefix) / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
             self.write_run_manifest(manifest_path, {'tiles': len(param_inputs)})
 
