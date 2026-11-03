@@ -170,7 +170,6 @@ def log_step(text: str) -> None:
 ###############################################################################
 # Directory and tile discovery
 ###############################################################################
-
 def get_hhm_config(
     root_dir: str | Path = DEFAULT_ROOT_DIR,
     resolution: Resolution = "100m",
@@ -287,7 +286,6 @@ def get_tile_table(config: HHMConfig, eco_regions: EcoRegions = "all") -> list[T
 ###############################################################################
 # Raster discovery and IO
 ###############################################################################
-
 def find_raster(directory: str | Path, pattern: str) -> Path:
     """Find exactly one raster in a directory by regex pattern.
 
@@ -504,7 +502,6 @@ def write_hhm_raster(
 ###############################################################################
 # Chunk-safe scientific helper functions
 ###############################################################################
-
 def clean_year_values(x: np.ndarray, analysis_year: int) -> np.ndarray:
     """Clean survey year/date values.
 
@@ -676,7 +673,6 @@ def make_dss_values(
 ###############################################################################
 # Stage 1 calculation kernel
 ###############################################################################
-
 def _stage1_numpy_kernel(
     bathy: np.ndarray,
     survey_date: np.ndarray,
@@ -862,7 +858,6 @@ def create_decay_coefficient(
 ###############################################################################
 # Stage 2 calculation kernel
 ###############################################################################
-
 def _stage2_numpy_kernel(
     survey_year: np.ndarray,
     iss: np.ndarray,
@@ -1036,7 +1031,6 @@ def create_survey_scores(
 ###############################################################################
 # Hazard raster mosaic helper
 ###############################################################################
-
 def merge_hazard_tifs_resampled(
     input_dir: str | Path,
     pattern: str,
@@ -1201,7 +1195,6 @@ def merge_p1_true_geometry_hazards(
 ###############################################################################
 # Optional GeoParquet helpers for future vector hazard workflows
 ###############################################################################
-
 def read_vector_any(path: str | Path):
     """Read a vector dataset from GeoPackage, Shapefile, or GeoParquet.
 
@@ -1247,7 +1240,6 @@ def write_geoparquet(gdf, path: str | Path, overwrite: bool = True) -> Path:
 ###############################################################################
 # Plotting
 ###############################################################################
-
 def _read_for_plot(path: str | Path) -> tuple[np.ndarray, rasterio.coords.BoundingBox]:
     """Read raster data and bounds for simple matplotlib plotting."""
 
@@ -1366,7 +1358,6 @@ def make_gap_dss_pss_plot(
 ###############################################################################
 # Tile-level and workflow-level orchestration
 ###############################################################################
-
 def run_one_tile(
     tile: TileRecord,
     resolution: Resolution,
@@ -1553,7 +1544,6 @@ def run_hhm_simple_workflow(
 ###############################################################################
 # Example calls
 ###############################################################################
-
 if __name__ == "__main__":
 
     # -------------------------------------------------------------------------

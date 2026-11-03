@@ -4,27 +4,28 @@ import cProfile
 import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
-from hydro_health.engines.tiling.BatchTilingEngine import BatchTilingEngine
-from hydro_health.engines.tiling.DigitalCoastEngine import DigitalCoastEngine
-from hydro_health.engines.tiling.DigitalCoastS3Engine import DigitalCoastS3Engine
+from hydro_health.engines.BatchTilingEngine import BatchTilingEngine
+from hydro_health.engines.DataPrepEngine import DataPrepEngine
+from hydro_health.engines.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
-from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
-from hydro_health.engines.tiling.LAZConversionEngine import LAZConversionEngine
-from hydro_health.engines.tiling.LidarGapFillEngine import LidarGapFillEngine
-from hydro_health.engines.tiling.PredictionRastersEngine import PredictionRastersEngine
-from hydro_health.engines.tiling.SubgridTilingEngine import SubgridTilingEngine
-from hydro_health.engines.tiling.TrainingRastersEngine import TrainingRastersEngine
-from hydro_health.engines.tiling.RasterMaskEngine import RasterMaskEngine
-from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
-from hydro_health.engines.tiling.SurgeTideForecastEngine import SurgeTideForecastEngine
+from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine
+from hydro_health.engines.LAZConversionEngine import LAZConversionEngine
+from hydro_health.engines.LidarGapFillEngine import LidarGapFillEngine
+from hydro_health.engines.MLRasterExportEngine import MLRasterExportEngine
+from hydro_health.engines.PredictionRastersEngine import PredictionRastersEngine
+from hydro_health.engines.SubgridTilingEngine import SubgridTilingEngine
+from hydro_health.engines.TrainingRastersEngine import TrainingRastersEngine
+from hydro_health.engines.RasterMaskEngine import RasterMaskEngine
+from hydro_health.engines.RasterMaskS3Engine import RasterMaskS3Engine
+from hydro_health.engines.SurgeTideForecastEngine import SurgeTideForecastEngine
 from hydro_health.engines.CreateTSMLayerEngine import CreateTSMLayerEngine
 from hydro_health.engines.CreateSedimentLayerEngine import CreateSedimentLayerEngine
 from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayerEngine
 from hydro_health.engines.DistanceToShoreEngine import DistanceToShoreEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
-
-from hydro_health.engines.tiling.TerrainProductsEngine import TerrainProductsEngine
+from hydro_health.engines.TerrainProductsEngine import TerrainProductsEngine
+from hydro_health.engines.XGBoostModelingEngine import XGBoostModelingEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
 
 
@@ -53,24 +54,8 @@ def run_raster_mask_engine(param_lookup:dict[dict], output_prefix: str, pilot_mo
 
 def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of Digital Coast data"""
-
-    if param_lookup['env'] in ['local', 'remote']:
-        run_digital_coast_engine_local(tiles, param_lookup, output_prefix)
-    else:
-        run_digital_coast_engine_s3(tiles, param_lookup, output_prefix)
-
-
-def run_digital_coast_engine_local(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
-    """Entry point for parallel proccessing of Digital Coast data"""
     
     engine = DigitalCoastEngine(param_lookup)
-    engine.run(tiles, output_prefix)
-
-
-def run_digital_coast_engine_s3(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
-    """Entry point for parallel proccessing of Digital Coast data on AWS VM"""
-    
-    engine = DigitalCoastS3Engine(param_lookup)
     engine.run(tiles, output_prefix)
 
 
@@ -157,6 +142,7 @@ def run_training_rasters_engine(param_lookup: dict[dict], output_prefix: str|boo
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)    
 
+
 def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
@@ -169,6 +155,35 @@ def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool)
     profiler.disable()
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
+
+def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = DataPrepEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+
+
+def run_xgboost_modeling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the XGBoost modeling engine"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = XGBoostModelingEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)         
+
 
 def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
@@ -183,11 +198,55 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
     stats = pstats.Stats(profiler)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)
 
+
 def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the distance to shore raster creator"""
 
     engine = DistanceToShoreEngine(param_lookup)
     engine.run(output_prefix)
+
+
+def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = DataPrepEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+
+
+def run_xgboost_modeling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = XGBoostModelingEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+
+
+def run_ml_raster_export_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = MLRasterExportEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
+
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""

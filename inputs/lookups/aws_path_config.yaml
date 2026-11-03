@@ -25,23 +25,31 @@ MASK:
   PREDICTION_MASK_PQ: masks/prediction_mask.parquet
   TRAINING_MASK_PQ: masks/training_mask.parquet
 MODEL:
+  ML_PREP_TRAIN_DIR: model_variables/Training/training_tiles_cleaned
+  ML_PREP_PRED_DIR: model_variables/Prediction/prediction_tiles_cleaned
+  MASTER_PREDICTORS_PATH: boruta_master_predictor_list_new.txt
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables/Prediction/pre_processed
   PREDICTION_OUTPUT_DIR: model_variables/Prediction/processed
   PREDICTION_TILES_DIR: model_variables/Prediction/prediction_tiles
   TRAINING_TILES_DIR: model_variables/Training/training_tiles
+  RASTER_OUTPUT_DIR: model_outputs/model_rasters
   SUBGRIDS: model_subgrids/model_subgrids.gpkg
   SUBGRIDS_LAYER: final_model_subgrids
   PREDICTION_SUB_GRIDS_LAYER: prediction_intersecting_subgrids
+  TEMPLATE_RASTER_URI: model_outputs/model_raster_template
   TRAINING_SUB_GRIDS_LAYER: training_intersecting_subgrids
   TRAINING_OUTPUT_DIR: model_variables/Training/processed
   TILED_LIDAR_DIR: model_variables/Prediction/pre_processed/tiled
   TILED_LIDAR_PROC: model_variables/Prediction/pre_processed/tiled_processed
+  XGB_OUTPUT_DIR: model_outputs/xgboost_results
 PREPROCESSED:
   BLUETOPO: model_variables/Prediction/pre_processed/BlueTopo
   HURRICANE: model_variables/Prediction/pre_processed/hurricane_year_pair_rasters
   SEDIMENT: model_variables/Prediction/pre_processed/sediment_rasters
   TSM: original_data_files/tsm_data/TSM_year_pair_rasters/
+REPORTS:
+  SUBFOLDER: reports
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
@@ -55,6 +63,8 @@ SHARED:
   ECOREGION_COLUMN: EcoRegion
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
+REPORTS:
+  SUBFOLDER: reports  
 TERRAIN:
   COMBINED_LIDAR_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/combined_lidar_tifs
   DICTIONARIES_DIR: model_variables/Prediction/processed/terrain_digitalcoast_outputs/dictionaries

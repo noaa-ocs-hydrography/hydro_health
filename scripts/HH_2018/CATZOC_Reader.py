@@ -75,6 +75,7 @@ for f in s57_files:
             hnum = feature['SORIND'][len(feature['SORIND'])-6:]
             s57_dict[hnum] = [feature['CATZOC'], feature['ogrGeom']]
 '''
+
 #more efficient to combine these (otherwise you iterate through 3000 files twice
 def return_catzoc_geom(mquals):
     s57_files = {}
@@ -183,6 +184,7 @@ class S57_to_Shape:
         polygon = feature['ogrGeom']
         self.add_polyline_to_shape(polygon, ptype, pval)
 
+        
 '''
 # build list of all s57 files (ones that have .000 extension).  s57_files is the list
 for root, dirs, files in os.walk(mquals):
@@ -209,6 +211,7 @@ for f in s57_files:
         for featureID,feature in features.iteritems():
             hnum = feature['SORIND'][len(feature['SORIND'])-6:]
             s57_dict[hnum] = [feature['CATZOC'], feature['ogrGeom']]
+
 
 #more efficient to combine these (otherwise you iterate through 3000 files twice
 def return_catzoc_geom(mquals):
@@ -249,25 +252,26 @@ def return_catzoc_geom(mquals):
                 print(count)
     return s57_files
 
+
 if __name__ == "__main__":
     return_catzoc_geom(r'Z:\Products\Data Archive')
 
-307
-found
-Traceback (most recent call last):
-  File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\ecs\ECSObject.py", line 808, in OpenENCObject
-    if ogrENCcell.GetDriver().GetName().upper()!="S57":
-AttributeError: 'NoneType' object has no attribute 'GetDriver'
-Traceback (most recent call last):
-  File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\demos\HowTo_Make_A_Simple_Demo.py.mod.py", line 118, in <module>
-    return_catzoc_geom(r'Z:\Products\Data Archive')
-  File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\demos\HowTo_Make_A_Simple_Demo.py.mod.py", line 91, in return_catzoc_geom
-    ECSObject.ECS.LoadENCtoSENCdatabase(filename)
-  File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\ecs\ECSObject.py", line 1211, in LoadENCtoSENCdatabase
-    if self.OpenENCObject(path2ENCBaseCell,clipping):
-  File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\ecs\ECSObject.py", line 818, in OpenENCObject
-    "Error", wx.OK | wx.CENTRE | wx.ICON_EXCLAMATION, self.frame)
-  File "C:\PYDRO6~2\pkgs\FromWheels\py27\extracted_wheels\wx30\wx-3.0-msw\wx\_misc.py", line 491, in MessageBox
-    return _misc_.MessageBox(*args, **kwargs)
-wx._core.PyNoAppError: The wx.App object must be created first!
-Exception AttributeError: AttributeError("'NoneType' object has no attribute 'Error_GetErrorCount'",) in <bound method IndexStreamHandle.__del__ of <rtree.index.IndexStreamHandle object at 0x00000001B15373C8>> ignored
+# 307
+# found
+# Traceback (most recent call last):
+#   File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\ecs\ECSObject.py", line 808, in OpenENCObject
+#     if ogrENCcell.GetDriver().GetName().upper()!="S57":
+# AttributeError: 'NoneType' object has no attribute 'GetDriver'
+# Traceback (most recent call last):
+#   File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\demos\HowTo_Make_A_Simple_Demo.py.mod.py", line 118, in <module>
+#     return_catzoc_geom(r'Z:\Products\Data Archive')
+#   File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\demos\HowTo_Make_A_Simple_Demo.py.mod.py", line 91, in return_catzoc_geom
+#     ECSObject.ECS.LoadENCtoSENCdatabase(filename)
+#   File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\ecs\ECSObject.py", line 1211, in LoadENCtoSENCdatabase
+#     if self.OpenENCObject(path2ENCBaseCell,clipping):
+#   File "C:\PYDRO6~2\NOAA\site-packages\Python2\HSTB\ecs\ECSObject.py", line 818, in OpenENCObject
+#     "Error", wx.OK | wx.CENTRE | wx.ICON_EXCLAMATION, self.frame)
+#   File "C:\PYDRO6~2\pkgs\FromWheels\py27\extracted_wheels\wx30\wx-3.0-msw\wx\_misc.py", line 491, in MessageBox
+#     return _misc_.MessageBox(*args, **kwargs)
+# wx._core.PyNoAppError: The wx.App object must be created first!
+# Exception AttributeError: AttributeError("'NoneType' object has no attribute 'Error_GetErrorCount'",) in <bound method IndexStreamHandle.__del__ of <rtree.index.IndexStreamHandle object at 0x00000001B15373C8>> ignored

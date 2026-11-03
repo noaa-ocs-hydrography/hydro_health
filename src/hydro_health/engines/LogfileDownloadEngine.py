@@ -5,6 +5,7 @@ import pathlib
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+
 class LogfileDownloadEngine:
     """Read logfile for failed file downloads"""
     
@@ -72,6 +73,7 @@ class LogfileDownloadEngine:
         # self.download_files(timeout_errors)
         code_errors = self.get_code_errors()
         self.download_files(code_errors)
+
 
 if __name__ == "__main__":
     engine = LogfileDownloadEngine()

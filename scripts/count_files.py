@@ -3,6 +3,7 @@ import cProfile
 import pstats
 import io
 
+
 def get_tif_stats(directory_path):
     """Counts .tif/.tiff files and calculates their total size in bytes.
 
@@ -26,6 +27,7 @@ def get_tif_stats(directory_path):
                     
     return tif_count, total_size_bytes
 
+
 def format_size(size_bytes):
     """Converts bytes to a human-readable format.
 
@@ -40,6 +42,7 @@ def format_size(size_bytes):
         size_bytes /= 1024.0
         i += 1
     return f"{size_bytes:.2f} {size_name[i]}"
+
 
 def run_profiler(directory_path):
     """Runs the file stats function under cProfile and prints results.
@@ -68,6 +71,7 @@ def run_profiler(directory_path):
     ps.print_stats(15) # Print top 15 lines
     
     print(s.getvalue())
+
 
 if __name__ == "__main__":
     # Specify the directory you want to search

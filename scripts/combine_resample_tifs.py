@@ -48,6 +48,7 @@ def merge_and_resample_tifs(input_folder, output_tif, target_resolution=500.0):
     print(msg)
     return msg
 
+
 if __name__ == '__main__':
     # --- User-defined variables ---
     parent_directory = r'N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Cost_Manual_Downloads'

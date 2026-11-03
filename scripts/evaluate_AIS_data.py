@@ -2,10 +2,8 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import pyogrio
-import fiona
 import logging
 import re
-import os
 import s3fs
 import boto3
 import rasterio
@@ -32,6 +30,7 @@ def is_garbage_text(text):
     if len(text) > 0 and (symbols / len(text)) > 0.3:
         return True
     return False
+
 
 def process_ais_layer(gdf, layer_name):
     """
@@ -317,6 +316,7 @@ def main():
         logging.info("Pipeline Complete!")
     else:
         logging.error("Processed AIS GPKG not found. Cannot calculate underkeel clearance.")
+
 
 if __name__ == "__main__":
     main()

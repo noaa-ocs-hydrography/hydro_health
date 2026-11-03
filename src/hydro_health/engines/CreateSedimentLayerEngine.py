@@ -1,4 +1,6 @@
 import sys
+import cProfile
+import pstats
 import pathlib
 import requests
 import rasterio
@@ -7,7 +9,6 @@ import tempfile
 import sqlite3
 import pandas as pd
 import geopandas as gpd
-import numpy as np
 
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
@@ -20,6 +21,7 @@ from hydro_health.helpers.tools import get_config_item
 
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
+
 
 class CreateSedimentLayerEngine(Engine):
     """Class to hold the logic for processing the Sediment layer"""
@@ -303,3 +305,16 @@ class CreateSedimentLayerEngine(Engine):
                 self.convert_polys_to_raster('sand_mud_mask')
                 self.filesystem.put_file(str(self.working_gpkg_path), str(self.gpkg_path))
                 self.write_message(f'Sediment GeoPackage saved to {self.gpkg_path}', OUTPUTS)
+
+
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateSedimentLayerEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10) 

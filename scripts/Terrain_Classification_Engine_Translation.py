@@ -35,10 +35,10 @@ from scipy.ndimage import generic_filter
 from dask.distributed import Client, LocalCluster
 import dask
 
+
 # ==============================================================================
 #   CORE BTM HELPER FUNCTIONS
 # ==============================================================================
-
 def calculate_bpi(bathy_array, cell_size, inner_radius, outer_radius):
     """Calculates the Bathymetric Position Index for a numpy array."""
     inner_cells = int(round(inner_radius / cell_size))
@@ -63,6 +63,7 @@ def calculate_bpi(bathy_array, cell_size, inner_radius, outer_radius):
     
     return bathy_array - mean_annulus
 
+
 def standardize_raster_array(input_array):
     """Standardizes a numpy array (mean=0, sd=1)."""
     mean = np.nanmean(input_array)
@@ -70,6 +71,7 @@ def standardize_raster_array(input_array):
     if std == 0:
         return np.zeros_like(input_array)
     return (input_array - mean) / std
+
 
 def calculate_slope_and_tri(bathy_array, cell_size):
     """Calculates slope (in degrees) and Terrain Ruggedness Index (TRI)."""
@@ -85,6 +87,7 @@ def calculate_slope_and_tri(bathy_array, cell_size):
     tri = generic_filter(bathy_array, function=tri_func, footprint=footprint, mode='mirror')
     
     return slope_deg, tri
+
 
 def create_classification_dictionary(bpi_broad_std_sample, bpi_fine_std_sample, slope_sample):
     """Creates a data-driven classification dictionary from representative sample arrays."""
@@ -111,10 +114,10 @@ def create_classification_dictionary(bpi_broad_std_sample, bpi_fine_std_sample, 
                'Slope_Lower': -9999, 'Slope_Upper': 9999}, inplace=True)
     return df
 
+
 # ==============================================================================
 #   PHASE 1: PRE-COMPUTATION OF CONSISTENT DICTIONARIES
 # ==============================================================================
-
 def create_regionally_consistent_dictionaries(all_files, best_radii, output_dir, max_sample_files=10, pixels_per_file=20000):
     """
     Scans files, groups by year, samples pixels, and creates a single consistent
@@ -195,10 +198,10 @@ def create_regionally_consistent_dictionaries(all_files, best_radii, output_dir,
             
     print("\n--- PHASE 1 Complete ---")
 
+
 # ==============================================================================
 #   PHASE 2: PARALLEL PROCESSING OF INDIVIDUAL RASTERS
 # ==============================================================================
-
 def generate_terrain_products_python(bathy_path, best_radii, dictionary_dir):
     """
     Main function to process one bathymetry raster using a pre-computed dictionary.
@@ -265,6 +268,7 @@ def generate_terrain_products_python(bathy_path, best_radii, dictionary_dir):
         error_msg = f"FAILED to process {bathy_path}: {e}"
         print(error_msg)
         return error_msg
+
 
 # ==============================================================================
 #   MAIN ORCHESTRATION SCRIPT
@@ -336,6 +340,7 @@ def main():
                 
     client.close()
     cluster.close()
+
 
 if __name__ == "__main__":
     main()

@@ -20,7 +20,6 @@ from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.inspection import partial_dependence
 import joblib # for exporting the model file
 import mlflow
-import mlflow.sklearn
 import cProfile
 import pstats
 
@@ -28,6 +27,7 @@ import pstats
 # 1. Location of support rasters for processing- N:/HSD/Projects/HSD_DATA/NHSP_2_0/HH_2024/working/Pilot_model/Model_variables/Prediction/raw
 # training_out = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Training\processed_python'
 # os.makedirs(training_out, exist_ok=True)  
+
 
 # 1. create survey date tiffs, works correctly but check the crs
 def create_survey_end_date_tiffs():
@@ -105,6 +105,7 @@ def create_survey_end_date_tiffs():
         transform=transform,
         nodata=nodata) as dst: dst.write(reclassified_band, 1)       
 
+
 ## 2. standardize all rasters to have same X, Y, FID 
 def process_raster(raster_path, mask_gdf, output_path, target_crs="EPSG:32617", target_res=8):
     with rasterio.open(raster_path) as src:
@@ -153,6 +154,7 @@ def process_raster(raster_path, mask_gdf, output_path, target_crs="EPSG:32617", 
 # for variables they have in common, even if the datasets vary between the two final datasets, we will divide the pertiant 
 #columns afterward.
 
+
 def standardize_rasters(mask_pred, mask_train):
     prediction_dir = r'N:\HSD\Projects\HSD_DATA\NHSP_2_0\HH_2024\working\Pilot_model\Model_variables\Prediction\raw_testing'
     prediction_out = r"C:\Users\aubrey.mccutchan\Documents\HydroHealth\model_data\prediction_processed" 
@@ -183,6 +185,7 @@ def standardize_rasters(mask_pred, mask_train):
 
     dask.compute(*tasks)    
 
+
 # Create dataframes for Training and Prediction masks
 def raster_to_spatial_df(raster_path):
     with rasterio.open(raster_path) as src:
@@ -195,6 +198,7 @@ def raster_to_spatial_df(raster_path):
         # gdf = gdf.to_crs(epsg=32617)  # Skips if already in utm zone 17
 
     return gdf
+
 
 # 2. prepare_subgrids - saves intersecting sub-grids to the gpkg, filters w/ masks
 def prepare_subgrids(mask_gdf, output_dir):
@@ -211,6 +215,7 @@ def prepare_subgrids(mask_gdf, output_dir):
     intersecting_sub_grids.to_file(os.path.join(output_dir, "intersecting_sub_grids.gpkg"), driver="GPKG") 
     
     return intersecting_sub_grids
+
 
 def tile_process(sub_grid, raster_dir, output_dir, data_type):
     raster_files = [os.path.join(raster_dir, f) for f in os.listdir(raster_dir) if f.endswith('.tif')]
@@ -265,6 +270,7 @@ def tile_process(sub_grid, raster_dir, output_dir, data_type):
     clipped_data_path = os.path.join(tile_dir, f"{tile_name}_{data_type}_clipped_data.parquet")
     combined_data.to_parquet(clipped_data_path)
 
+
 # 5. process_rasters - processes raster files by clipping, extracting values, 
 # combining them, calculating depth changes, and saving the data per tile
 def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
@@ -275,6 +281,7 @@ def clip_rasters_by_tile(sub_grid_gpkg, raster_dir, output_dir, data_type):
         tasks.append(dask.delayed(tile_process)(sub_grid, raster_dir, output_dir, data_type))
 
     dask.compute(*tasks) 
+
 
 def dask_workflow():
     client = Client(n_workers=1, threads_per_worker=1, memory_limit="16GB")
@@ -287,6 +294,7 @@ def dask_workflow():
         clip_rasters_by_tile(sub_grid_gpkg=training_sub_grids, raster_dir=input_dir_pred, output_dir=output_dir_train, data_type="training")
     
     client.close()   
+
 
 # TODO more work is needed on the training and prediction code
 def tile_model_training(tiles_df, output_dir_train, year_pairs):
@@ -411,6 +419,7 @@ def tile_model_training(tiles_df, output_dir_train, year_pairs):
 
     print("Model training complete and logged to MLflow.")
 
+
 def tile_model_predictions(tiles_df, output_dir_train, year_pairs):
     print("Starting model prediction for all tiles...")
 
@@ -469,6 +478,7 @@ def tile_model_predictions(tiles_df, output_dir_train, year_pairs):
     results_df.to_csv(results_csv_path, index=False)
     print("Prediction complete and results saved.")
 
+
 def generate_pdp(model, X, tile_dir, pair):
     pdp_data = {}
     
@@ -497,6 +507,7 @@ def generate_pdp(model, X, tile_dir, pair):
     plt.close()
     print(f"  PDP plot saved for year pair: {pair}")
 
+
 def clean_tile_folders(root_folder):
     for dirpath, dirnames, filenames in os.walk(root_folder):
         if 'Tile' in os.path.basename(dirpath):  # Check if folder name contains 'Tile'
@@ -505,6 +516,7 @@ def clean_tile_folders(root_folder):
                     file_path = os.path.join(dirpath, filename)
                     os.remove(file_path)
                     print(f"Deleted: {file_path}")
+
 
 if __name__ == '__main__':
     profiler = cProfile.Profile()

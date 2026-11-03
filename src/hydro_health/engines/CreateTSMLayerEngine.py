@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import cProfile
+import pstats
 import pathlib
 import fsspec
 import geopandas as gpd
@@ -596,3 +598,16 @@ class CreateTSMLayerEngine(Engine):
             self.create_mean_year_rasters()
             for start_year, end_year in self.year_ranges:
                 self.year_pair_rasters(start_year, end_year)
+
+
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateTSMLayerEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  

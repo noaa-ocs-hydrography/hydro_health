@@ -1,7 +1,6 @@
 import pandas as pd
-import numpy as np
 import os
-from typing import Tuple, Dict
+
 
 def compare_nan_distribution(path: str, col1: str, col2: str) -> None:
     print(f"Loading columns ['{col1}', '{col2}'] using fastparquet...")
@@ -58,6 +57,7 @@ def compare_nan_distribution(path: str, col1: str, col2: str) -> None:
     else:
         print(f"\nSuccess: These columns share the exact same missing data structure.")
 
+
 def main():
     file_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Training\training_tiles\BH4S5574_4\BH4S5574_4_training_clipped_data.parquet"
     # file_path = r"N:\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\prediction_tiles\BH4SD56H_1\BH4SD56H_1_prediction_clipped_data.parquet"
@@ -68,6 +68,7 @@ def main():
 
     print(f"Analyzing file: {os.path.basename(file_path)}")
     compare_nan_distribution(file_path, column_a, column_b)
+
 
 if __name__ == "__main__":
     main()

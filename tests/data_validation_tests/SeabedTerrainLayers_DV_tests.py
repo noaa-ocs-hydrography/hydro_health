@@ -10,7 +10,6 @@ Instructions for running:
 """
 
 import os
-import random
 import pytest
 import rasterio
 from upath import UPath
@@ -28,6 +27,7 @@ except ImportError:
 # --- GLOBAL REPORT TRACKER ---
 REPORT_DATA = {}
 REPORT_FILENAME = "Seabed_Terrain_Validation_Report"
+
 
 # --- PDF REPORT GENERATOR ---
 def generate_pdf_report(data, filename=REPORT_FILENAME):
@@ -88,6 +88,7 @@ def generate_pdf_report(data, filename=REPORT_FILENAME):
                         f.write(f"- {err}\n")
                     f.write("\n")
 
+
 def fail_with_errors(errors, test_name="Test"):
     """Helper to fail tests cleanly and record all full paths for the PDF."""
     REPORT_DATA[test_name] = errors
@@ -99,11 +100,13 @@ def fail_with_errors(errors, test_name="Test"):
             error_msg += f"\n...and {len(errors) - 50} more errors omitted from console. See generated PDF report."
         pytest.fail(error_msg)
 
+
 def skip_test(reason, test_name="Test"):
     """Helper to skip tests and record the skip reason for the PDF."""
     REPORT_DATA[test_name] = [f"SKIPPED: {reason}"]
     generate_pdf_report(REPORT_DATA)  # Write to PDF immediately
     pytest.skip(reason)
+
 
 def log_error(errors_list, msg):
     """Helper to instantly print out a failure to the console and track it."""
@@ -192,7 +195,6 @@ def base_file_groups(s3_all_files):
 
 
 # --- TESTS ---
-
 def test_files_exist_in_bucket(s3_all_files):
     """Ensure that the engine actually wrote files to the bucket."""
     errors = []
@@ -390,7 +392,6 @@ def test_dictionaries_created(base_file_groups):
 
 # --- CUSTOM TEST RUNNER ---
 # Run via `python test_seabed_terrain_outputs.py` to use this block!
-
 if __name__ == "__main__":
     import sys
 

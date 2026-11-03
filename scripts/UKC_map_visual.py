@@ -8,6 +8,7 @@ import contextily as ctx
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 from pyproj import Transformer
 
+
 def create_ukc_visualization(region_id, config, base_dir, show_plot=False):
     """
     Generates a UKC map for a specific region with an inset map for a notable port.
@@ -203,6 +204,7 @@ def create_ukc_visualization(region_id, config, base_dir, show_plot=False):
         plt.show()
     else:
         plt.close(fig)
+
 
 if __name__ == "__main__":
     # Define the base directory where all the TIFF files are located

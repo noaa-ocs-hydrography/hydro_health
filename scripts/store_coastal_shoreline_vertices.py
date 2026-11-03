@@ -1,5 +1,4 @@
 # prep_shorelines.py
-import os
 import sys
 import pathlib
 import numpy as np
@@ -18,6 +17,7 @@ from hydro_health.helpers.tools import get_config_item
 # Adjust these paths as needed for your project structure
 INPUTS = pathlib.Path(__file__).parents[1] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[1] / 'outputs'
+
 
 def _set_gdal_s3_options() -> None:
     """Configure GDAL /vsis3/ driver options for fast cloud S3 header reads."""
@@ -145,6 +145,7 @@ def precompute_shoreline_vertices(master_gpkg: pathlib.Path, ecoregions: list, b
             np.save(npy_path, np.array(all_coords))
             upload_file_to_s3(npy_path, ecoregion)
             print(f"   Saved {len(all_coords)} vertices to {npy_path.name}")
+
 
 if __name__ == "__main__":
     master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')

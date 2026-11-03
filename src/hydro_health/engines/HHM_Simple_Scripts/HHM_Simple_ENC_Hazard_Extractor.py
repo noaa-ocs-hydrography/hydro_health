@@ -93,12 +93,11 @@ import math
 import os
 import re
 import shutil
-import warnings
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Literal, Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -192,7 +191,6 @@ class MaskRecord:
 ###############################################################################
 # Logging and error handling
 ###############################################################################
-
 def log_step(text: str) -> None:
     """Print timestamped status messages."""
 
@@ -242,7 +240,6 @@ def log_error_row(
 ###############################################################################
 # GDAL / S-57 environment helpers
 ###############################################################################
-
 def set_s57_feature_env() -> None:
     """Set GDAL options for reading normal S-57 feature records.
 
@@ -306,7 +303,6 @@ def set_proj_lib_if_needed() -> None:
 ###############################################################################
 # Geometry helpers
 ###############################################################################
-
 def clean_geometries(gdf: gpd.GeoDataFrame, label: str = "GeoDataFrame") -> gpd.GeoDataFrame:
     """Make geometries valid and remove empty/null/bad rows."""
 
@@ -380,7 +376,6 @@ def representative_points(gdf: gpd.GeoDataFrame) -> gpd.GeoSeries:
 ###############################################################################
 # Mask helpers
 ###############################################################################
-
 def normalize_regions(regions: RegionsArg) -> str | list[str]:
     """Normalize region selection.
 
@@ -545,7 +540,6 @@ def make_summary_grid_from_mask(
 ###############################################################################
 # NOAA catalog, download, and extraction
 ###############################################################################
-
 def read_enc_catalog_urls(catalog_url: str = NOAA_ENC_CATALOG_URL) -> pd.DataFrame:
     """Read NOAA ENC product catalog and extract US ENC zip URLs."""
 
@@ -646,7 +640,6 @@ def download_and_unzip_cell(
 ###############################################################################
 # S-57 layer readers
 ###############################################################################
-
 def get_available_layers(s57_path: str | Path, error_log: str | Path) -> pd.DataFrame:
     """List available layers in one S-57 file."""
 
@@ -863,7 +856,6 @@ def read_s57_quapos_primitives(
 ###############################################################################
 # QUAPOS transfer and hazard classification
 ###############################################################################
-
 def attach_quapos_from_primitives(
     hazards: gpd.GeoDataFrame,
     quapos_primitives: Optional[gpd.GeoDataFrame],
@@ -1128,7 +1120,6 @@ def add_hazard_classification(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 ###############################################################################
 # Neighbourhood scoring and buffering
 ###############################################################################
-
 def calculate_neighbourhood_scores(
     hazards: gpd.GeoDataFrame,
     search_radius_nm: float = 2,
@@ -1222,7 +1213,6 @@ def make_buffered_product_geometry(
 ###############################################################################
 # Cache read/write helpers
 ###############################################################################
-
 def write_hazard_cache(
     hazards: gpd.GeoDataFrame,
     cache_path: str | Path,
@@ -1267,7 +1257,6 @@ def read_hazard_cache(
 ###############################################################################
 # Stage 1: build NOAA S-57 hazard cache
 ###############################################################################
-
 def build_noaa_s57_hazard_cache(
     work_dir: str | Path,
     mask_dir: Optional[str | Path] = None,
@@ -1902,7 +1891,6 @@ def run_hazard_summaries_by_ecoregion(
 ###############################################################################
 # Full workflow wrapper
 ###############################################################################
-
 def run_full_enc_hazard_ecoregion_workflow(
     work_dir: str | Path,
     mask_dir: str | Path,
@@ -1962,7 +1950,6 @@ def run_full_enc_hazard_ecoregion_workflow(
 ###############################################################################
 # Verification helper
 ###############################################################################
-
 def verify_hazard_cache(
     cache_path: str | Path,
     cache_layer: str = "hazard_features_cache",
@@ -2010,7 +1997,6 @@ def verify_hazard_cache(
 ###############################################################################
 # Example calls
 ###############################################################################
-
 if __name__ == "__main__":
 
     # -------------------------------------------------------------------------

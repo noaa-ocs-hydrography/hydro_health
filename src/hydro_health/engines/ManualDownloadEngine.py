@@ -8,9 +8,9 @@ sys.path.append(str(HH_MODEL))
 
 from hydro_health.helpers.tools import Param
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
-from hydro_health.engines.RasterVRTS3Engine import RasterVRTS3Engine
-from hydro_health.engines.tiling.RasterMaskS3Engine import RasterMaskS3Engine
-from hydro_health.engines.tiling.GridDigitalCoastEngine import GridDigitalCoastEngine
+from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
+from hydro_health.engines.RasterMaskS3Engine import RasterMaskS3Engine
+from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.helpers.tools import get_config_item
 
 
@@ -49,7 +49,7 @@ class ManualDownloadEngine:
     def process_vrt(self, output_prefix) -> None:
         """Create VRT files for each manually downloaded provider"""
         
-        engine = RasterVRTS3Engine(self.param_lookup)
+        engine = RasterVRTEngine(self.param_lookup)
         engine.setup_dask('aws')
         engine.run(OUTPUTS, 'NCMP', 'ER_3', 'DigitalCoast', manual_downloads=True)
         engine.close_dask()
@@ -75,6 +75,7 @@ class ManualDownloadEngine:
         # Need to run both folders separately or fix code
         # self.process_grid_tiles(output_prefix)
         print('Done')
+
 
 if __name__ == '__main__':
     param_lookup = {

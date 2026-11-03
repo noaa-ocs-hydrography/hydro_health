@@ -92,6 +92,7 @@ def _worker_density(layer, input_gdb, final_crs_wkt, mask_bounds, mask_crs_wkt, 
         print(f"  > [Worker {layer}] FATAL ERROR: {e}")
         return None
 
+
 def _worker_draft(layer, input_gdb, orig_bounds, orig_crs_wkt, final_crs_wkt, temp_dir, out_meta, height, width, transform, block_size):
     """Worker process for reading, filtering, and rasterizing a single month's max draft data."""
     try:
@@ -187,6 +188,7 @@ def get_wkt(crs):
     """Safely converts a CRS object to its WKT or string representation."""
     if crs is None: return None
     return crs.to_wkt() if hasattr(crs, 'to_wkt') else str(crs)
+
 
 def process_density_raster(input_gdb, mask_tif, output_raster, isobath_shp, temp_dir, max_cutoff=1000, target_crs=None, max_workers=8):
     """
@@ -534,6 +536,7 @@ def main():
                 target_crs=explicit_crs,
                 max_workers=parallel_cores
             )
+
 
 if __name__ == "__main__":
     # Required for Windows multiprocessing safety
