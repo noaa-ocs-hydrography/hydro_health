@@ -105,7 +105,7 @@ def _stable_seed(global_seed: int, *parts: object) -> int:
 
 def _hex_block_ids(df: pd.DataFrame, block_size_m: float) -> np.ndarray:
     """Pointy-top hexagons; opposite-edge width=block_size_m; centered origin."""
-    xy = df[["X", "Y"]].to_numpy(dtype=np.float64)
+    xy = df[["X", "Y"]].to_numpy(dtype=np.float32)
     if len(xy) == 0 or not np.isfinite(xy).all():
         raise ValueError("Hexagonal folds require nonempty finite coordinates")
     size = float(block_size_m)
@@ -155,7 +155,7 @@ def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed:
     """Native hexagonal blocked CV; returns row folds and axial block IDs.
 
     Aligns the blockCV design, not its exact grid or random memberships.
-    Float64 grid arithmetic avoids introducing further coordinate rounding.
+    Float32 grid arithmetic avoids introducing further coordinate rounding.
     """
     reference = CRS.from_user_input(crs)
     if not reference.is_projected or len(reference.axis_info) < 2:
@@ -167,10 +167,10 @@ def _spatial_fold_ids(df: pd.DataFrame, block_size_m: float, n_folds: int, seed:
     return folds, blocks
 
 def _safe_correlation(observed: np.ndarray, predicted: np.ndarray) -> float | None:
-    """Compute Pearson correlation in float64; return None when undefined."""
+    """Compute Pearson correlation in float32; return None when undefined."""
 
-    a = np.asarray(observed, dtype=np.float64)
-    b = np.asarray(predicted, dtype=np.float64)
+    a = np.asarray(observed, dtype=np.float32)
+    b = np.asarray(predicted, dtype=np.float32)
     valid = np.isfinite(a) & np.isfinite(b)
     a, b = a[valid], b[valid]
     if len(a) < 2 or np.all(a == a[0]) or np.all(b == b[0]):
@@ -261,7 +261,7 @@ def _fit_cv_fold(fold: int, folds: np.ndarray, features: pd.DataFrame, labels: n
         rounds = int(best) + 1
     else:
         # Match the R script's exceptional test_rmse recovery branch.
-        history = np.asarray(evaluations.get("test", {}).get("rmse", []), dtype=float)
+        history = np.asarray(evaluations.get("test", {}).get("rmse", []), dtype=np.float32)
         if not np.isfinite(history).any():
             raise ValueError("CV produced no usable best iteration or RMSE history")
         rounds = int(np.argmin(np.where(np.isfinite(history), history, np.inf))) + 1
@@ -329,9 +329,9 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
     )
     audit["fold_method"] = "hexagonal_random_balanced_native"
     audit["grid_origin"] = (
-        coordinates[["X", "Y"]].min().to_numpy(dtype=float)
-        + (coordinates[["X", "Y"]].max().to_numpy(dtype=float)
-           - coordinates[["X", "Y"]].min().to_numpy(dtype=float)) / 2
+        coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)
+        + (coordinates[["X", "Y"]].max().to_numpy(dtype=np.float32)
+           - coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)) / 2
     ).tolist()
     audit["folds"] = pd.DataFrame(
         {
@@ -409,13 +409,13 @@ def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndar
     """R local weights: calculate once, then subset without renormalizing."""
     if not isinstance(model_cfg["use_weighted_loss"], (bool, np.bool_)):
         raise ValueError("use_weighted_loss must be boolean")
-    x = np.abs(np.asarray(change_vec, dtype=np.float64))
+    x = np.abs(np.asarray(change_vec, dtype=np.float32))
     if x.ndim != 1 or not np.isfinite(x).all():
         raise ValueError("Weight calculation needs finite, one-dimensional changes")
     if not model_cfg["use_weighted_loss"]:
-        return np.ones(len(x), dtype=np.float64)
+        return np.ones(len(x), dtype=np.float32)
     if len(x) == 0:
-        return np.ones(0, dtype=np.float64)
+        return np.ones(0, dtype=np.float32)
     alpha = float(model_cfg["weight_alpha"])
     if not np.isfinite(alpha) or alpha <= 0:
         raise ValueError("weight_alpha must be finite and positive")
@@ -425,10 +425,10 @@ def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndar
         if not np.isfinite(epsilon) or epsilon <= 0:
             raise ValueError("weight_epsilon must be finite and positive")
         w = (x + epsilon) ** alpha
-        total = w.sum(dtype=np.float64)
+        total = w.sum(dtype=np.float32)
         # Same fallback as the R power helper.
         if not np.isfinite(total) or total <= 0:
-            return np.ones(len(x), dtype=np.float64)
+            return np.ones(len(x), dtype=np.float32)
         w = w / total * len(x)
     elif method == "capped_linear":
         quantile = float(model_cfg["weight_cap_quantile"])
@@ -439,7 +439,7 @@ def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndar
             raise ValueError("max_weight must be finite and at least 1")
         cap = float(np.quantile(x, quantile, method="linear"))
         if not np.isfinite(cap) or cap <= 0:
-            return np.ones(len(x), dtype=np.float64)
+            return np.ones(len(x), dtype=np.float32)
         w = 1.0 + (maximum - 1.0) * (np.minimum(x, cap) / cap) ** alpha
     else:
         raise ValueError(f"Unknown weight_method: {method}")
@@ -797,8 +797,8 @@ def _model_metadata(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rounds:
     return {
         "data_dtype": "float32",
         "coordinate_dtype": "float32",
-        "cv_grid_arithmetic_dtype": "float64",
-        "weight_dtype": "float64",
+        "cv_grid_arithmetic_dtype": "float32",
+        "weight_dtype": "float32",
         "tile_id": cfg["tile_id"],
         "pair": cfg["pair"],
         "target": "bathy_t1",
@@ -1110,42 +1110,42 @@ class XGBoostModelingEngine(Engine):
         self.tile_id = settings.get("tile_id")
         self.pair = settings.get("pair")
         self.model_config = {
-            "max_depth": 4,
-            "eta": 0.01,
-            "gamma": 1.0,
-            "reg_lambda": 1.0,
-            "reg_alpha": 1.0,
-            "subsample": 0.7,
-            "colsample_bytree": 0.8,
-            "tree_method": "hist",
-            "max_bin": 256,
-            "round_selection_mode": "cv_with_floor",
-            "minimum_nrounds": 1000,
-            "fixed_nrounds": 1000,
-            "cv_nrounds": 2000,
-            "early_stopping_rounds": 15,
-            "cv_fallback_nrounds": 1000,
-            "n_folds": 5,
-            "cv_assignment_iterations": 200,
-            "use_weighted_loss": True,
-            "weight_method": "power",
-            "weight_alpha": 0.5,
-            "weight_cap_quantile": 0.95,
-            "max_weight": 2.0,
-            "weight_epsilon": 1e-6,
-            "block_size_m": 200.0,
-            "n_boot": 5,
-            "standard_horizon_years": 2.0,
-            "minimum_training_rows": 100,
-            "global_seed": 12345,
-            "shap_sample_rows": 1000,
-            "overwrite": False,
-            "xgb_workers": 16,
-            "xgb_memory_limit": "4GB",
-            "xgb_threads_per_worker": 2,
-            "xgb_tasks_per_batch": 32,
-            "xgb_processes": True,
-            "verbose_logging": True,
+            "max_depth": 4,  # Maximum depth of each tree; deeper trees learn more complex patterns but can overfit.
+            "eta": 0.01,  # Learning rate: scales each tree's contribution; smaller values usually need more rounds.
+            "gamma": 1.0,  # Minimum loss reduction required for a split; higher values discourage additional splits.
+            "reg_lambda": 1.0,  # L2 penalty on leaf weights; higher values shrink predictions and increase regularization.
+            "reg_alpha": 1.0,  # L1 penalty on leaf weights; higher values can drive some leaf weights to zero.
+            "subsample": 0.7,  # Fraction of training rows sampled per boosting round: 70%.
+            "colsample_bytree": 0.8,  # Fraction of predictor columns sampled for each tree: 80%.
+            "tree_method": "hist",  # Builds trees using histogram-based, approximate split finding.
+            "max_bin": 256,  # Maximum histogram bins per feature; more bins allow finer splits but use more resources.
+            "round_selection_mode": "cv_with_floor",  # Custom: selects rounds using CV, with minimum_nrounds as a lower bound.
+            "minimum_nrounds": 1000,  # Custom: the minimum final training rounds allowed by that selection mode.
+            "fixed_nrounds": 1000,  # Custom: the round count used when fixed-round training is selected.
+            "cv_nrounds": 2000,  # Custom: the maximum boosting rounds evaluated during cross-validation.
+            "early_stopping_rounds": 15,  # Stop after 15 rounds without improvement in the monitored validation metric.
+            "cv_fallback_nrounds": 1000,  # Custom: the round count used if CV cannot provide a usable selection.
+            "n_folds": 5,  # Custom wrapper setting: five-fold CV, training on four folds and validating on one.
+            "cv_assignment_iterations": 200, # Custom: the number of random spatial assignments to attempt for CV fold creation.
+            "use_weighted_loss": True, # Custom: whether to apply sample weights during training and CV.
+            "weight_method": "power", # Custom: the method for computing sample weights; "power" may raise a base weight to a power.
+            "weight_alpha": 0.5, # Custom: the exponent used in the "power" weight method to scale sample weights.
+            "weight_cap_quantile": 0.95, # Custom: the quantile above which sample weights are capped to reduce influence of outliers.
+            "max_weight": 2.0, # Custom: the maximum allowed sample weight after applying the weight method and cap.
+            "weight_epsilon": 1e-6, # Custom: a small constant added to weights to avoid zero weights or numerical issues.
+            "block_size_m": 200.0,  # Custom: spatial block size in meters for grouping observations into CV folds.
+            "n_boot": 5,  # Custom: number of bootstrap resamples/model fits for estimating variability.
+            "standard_horizon_years": 2.0,  # Custom: a reference time horizon for scaling targets or predictions to two years.
+            "minimum_training_rows": 100,  # Custom: the minimum eligible observations required to train a model.
+            "global_seed": 12345,  # Custom: random seed for reproducibility where your code passes it to random operations.
+            "shap_sample_rows": 1000,  # Custom: the number, or maximum number, of rows used for SHAP explanations.
+            "overwrite": False, # Custom: whether to overwrite existing outputs; if False, existing outputs may be reused or skipped.
+            "xgb_workers": 16,  # Custom: number of parallel workers available for model tasks.
+            "xgb_memory_limit": "4GB",  # Custom: memory allowance per worker; confirm whether enforced by your scheduler.
+            "xgb_threads_per_worker": 2,  # Custom: CPU threads allocated to XGBoost within each worker.
+            "xgb_tasks_per_batch": 32,  # Custom: model tasks submitted together per batch; concurrency depends on scheduling.
+            "xgb_processes": True,  # Custom: runs workers in separate processes rather than using threads only.
+            "verbose_logging": True,  # Custom: enables detailed progress and diagnostic logging.
         }
         self.model_config.update(settings.get("model_config", {}))
         for key in (
