@@ -1,3 +1,9 @@
+"""Fit local tile/year-pair ensembles and deploy prepared prediction inputs.
+
+Training can run without prediction input. Discovery includes prediction-only
+pairs. After training completes, deployment uses the tile-native ensemble or
+the nearest available local ensemble for the same year pair and region.
+"""
 import hashlib
 import json
 import re
@@ -15,6 +21,7 @@ from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 from pyproj import CRS
 from upath import UPath
+from shapely.strtree import STRtree
 
 OUTPUTS = Path(__file__).parents[3] / "outputs"
 
@@ -83,8 +90,9 @@ def _write_task_progress(cfg: dict, message: str, verbose_only: bool = False) ->
         return
     number, total = cfg.get("task_number", 1), cfg.get("task_total", 1)
     region, tile_id, pair = cfg["region"], cfg["tile_id"], cfg["pair"]
+    stage = "MODEL TRAINING" if cfg.get("training_geoparquet") else "PREDICTION DEPLOYMENT"
     Engine.write_message_dask(
-        f"[{region} task {number}/{total}: {tile_id}, {pair}] {message}",
+        f"[{region} | {stage} | task {number}/{total}: {tile_id}, {pair}] {message}",
         Path(cfg["log_dir"]),
     )
 
@@ -439,7 +447,7 @@ def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndar
         raise ValueError("Calculated weights must be finite and positive")
     return w
 
-def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_predictors: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list[str]]:
+def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, locked_predictors: list[str]) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame, pd.DataFrame | None, list[str]]:
     """Use DataPrep's ordered schema: bathy_t plus drivers predicts bathy_t1.
 
     Keep predictor NAs and all prediction rows. No silent feature
@@ -452,7 +460,7 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_pr
     if not locked_predictors or "bathy_t" not in locked_predictors:
         raise ValueError("Supply DataPrep's locked_predictors; bathy_t must be included")
     for frame in (train_df, pred_df):
-        if len(frame) > np.iinfo(np.int32).max:
+        if frame is not None and len(frame) > np.iinfo(np.int32).max:
             raise ValueError("A tile cannot exceed the int32 row-index range")
     predictors = list(locked_predictors)
     if len(predictors) != len(set(predictors)):
@@ -490,6 +498,15 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_pr
             'Predictors contain infinity; diagnose source data rather than impute it'
         )
     
+    pred_df, pred_features = _prepare_prediction_data(pred_df, predictors)
+    return train_df, pred_df, train_features, pred_features, predictors
+
+def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str]) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """Validate deployment rows independently of the availability of training data."""
+    if pred_df is None:
+        return None, None
+    if len(pred_df) > np.iinfo(np.int32).max:
+        raise ValueError("A tile cannot exceed the int32 row-index range")
     required_pred = {"X", "Y", "FID", "bathy_t", "interval_years"}
     if missing := (required_pred | set(predictors)) - set(pred_df.columns):
         raise ValueError(
@@ -511,7 +528,7 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame, locked_pr
     if np.isinf(pred_features.loc[usable].to_numpy()).any():
         raise ValueError("Usable prediction rows contain infinite predictors")
     
-    return train_df, pred_df, train_features, pred_features, predictors
+    return pred_df, pred_features
 
 def _update_running_stats(mean: np.ndarray, squared_difference: np.ndarray, values: np.ndarray, count: int) -> None:
     """Update float32 Welford statistics without storing all bootstrap results."""
@@ -568,9 +585,9 @@ def _save_geoparquet(df: pd.DataFrame, path: str, crs: str, local_tmp_dir: str) 
 @dataclass
 class ModelInputs:
     train: pd.DataFrame
-    prediction: pd.DataFrame
+    prediction: pd.DataFrame | None
     train_features: pd.DataFrame
-    prediction_features: pd.DataFrame
+    prediction_features: pd.DataFrame | None
     predictors: list[str]
 
 def _bootstrap_diagnostics(model: xgb.Booster, x_fit: np.ndarray, predictors: list[str], model_cfg: dict, seed: int, bootstrap_index: int) -> tuple[list[dict], list[dict]]:
@@ -681,8 +698,8 @@ def _fit_bootstrap_ensemble(inputs: ModelInputs, cfg: dict, best_rounds: int, se
     x_fit = train_features.to_numpy(copy=False)
     d_full = xgb.DMatrix(x_fit, feature_names=predictors, missing=np.nan, nthread=1)
     d_pred = None
-    pred_usable = pred_df.prediction_row_usable.to_numpy(dtype=bool)
-    if pred_usable.any():
+    pred_usable = pred_df.prediction_row_usable.to_numpy(dtype=bool) if pred_df is not None else None
+    if pred_usable is not None and pred_usable.any():
         d_pred = xgb.DMatrix(
             pred_features.loc[pred_usable].to_numpy(copy=False),
             nthread=1,
@@ -692,8 +709,8 @@ def _fit_bootstrap_ensemble(inputs: ModelInputs, cfg: dict, best_rounds: int, se
 
     train_mean = np.zeros(len(train_df), dtype=np.float32)
     train_m2 = np.zeros(len(train_df), dtype=np.float32)
-    pred_mean = np.where(pred_usable, np.float32(0.0), np.float32(np.nan))
-    pred_m2 = np.where(pred_usable, np.float32(0.0), np.float32(np.nan))
+    pred_mean = np.where(pred_usable, np.float32(0.0), np.float32(np.nan)) if pred_df is not None else None
+    pred_m2 = np.where(pred_usable, np.float32(0.0), np.float32(np.nan)) if pred_df is not None else None
 
     # Bootstrap and SHAP use separate streams so diagnostics cannot
     # change the fitted ensemble.
@@ -794,8 +811,8 @@ def _model_metadata(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rounds:
         "crs": cfg["crs"],
         "n_boot": model_cfg["n_boot"],
         "n_fit": len(inputs.train),
-        "n_prediction_rows": len(inputs.prediction),
-        "n_prediction_usable": int(inputs.prediction.prediction_row_usable.sum()),
+        "n_prediction_rows": len(inputs.prediction) if inputs.prediction is not None else 0,
+        "n_prediction_usable": int(inputs.prediction.prediction_row_usable.sum()) if inputs.prediction is not None else 0,
         "bootstrap_seeds": ensemble["bootstrap_audit"],
         "global_seed": model_cfg["global_seed"],
         "round_selection_mode": model_cfg["round_selection_mode"],
@@ -830,6 +847,8 @@ def _save_model_outputs(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rou
         ("training", inputs.train, "train"),
         ("prediction", inputs.prediction, "pred"),
     ):
+        if frame is None:
+            continue
         summary = _prediction_summary(
             frame,
             ensemble[f"{prefix}_mean"],
@@ -837,6 +856,9 @@ def _save_model_outputs(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rou
             model_cfg,
             training=role == "training",
         )
+        if role == "prediction":
+            summary["local_source_model_tile"] = cfg["tile_id"]
+            summary["local_source_model_distance"] = 0.0
         _write_task_progress(cfg, f"Saving {role} GeoParquet summary: {len(summary):,} rows.")
         _save_geoparquet(summary, paths[f"{role}_summary_geo"], cfg["crs"], tmp_dir)
         if role == "training":
@@ -862,42 +884,40 @@ def _save_model_outputs(inputs: ModelInputs, ensemble: dict, cfg: dict, best_rou
         paths["model_metadata"],
     )
 
-def _load_model_inputs(cfg: dict) -> ModelInputs | None:
-    """Load prepared inputs, or report a missing prediction file for skipping."""
+def _load_prepared_frame(path: str, role: str, cfg: dict) -> pd.DataFrame:
+    """Read a prepared table and verify its CRS and row identities."""
+    _write_task_progress(cfg, f"Loading {role} input.")
+    spatial = _read_geoparquet(path)
+    if spatial.crs is None or spatial.crs != cfg["crs"]:
+        raise ValueError(f"{role} CRS must already be {cfg['crs']}")
+    frame = pd.DataFrame(spatial.drop(columns=spatial.geometry.name))
+    if frame.empty or not frame.columns.is_unique:
+        raise ValueError(f"{role} table is empty or has duplicate columns")
+    if "FID" not in frame or frame.FID.isna().any() or frame.FID.duplicated().any():
+        raise ValueError(f"{role} FID must be nonmissing and unique")
+    for column, expected in (("tile_id", cfg["tile_id"]), ("pair_id", cfg["pair"])):
+        if column in frame and not frame[column].eq(expected).all():
+            raise ValueError(f"{role} {column} does not match {expected}")
+    _write_task_progress(cfg, f"Loaded {role} input: {len(frame):,} rows.")
+    return frame
 
-    prediction_path = cfg["prediction_geoparquet"]
+def _load_model_inputs(cfg: dict) -> ModelInputs:
+    """Training is required for fitting; deployment input is optional."""
     with UPath(cfg["locked_predictors_parquet"]).open("rb") as stream:
         schema = pd.read_parquet(stream)
     if "predictor" not in schema:
         raise ValueError("Locked predictor schema needs a predictor column")
-    frames = {}
-    for role in ("training", "prediction"):
-        _write_task_progress(cfg, f"Loading {role} input.")
+    train = _load_prepared_frame(cfg["training_geoparquet"], "training", cfg)
+    prediction = None
+    if cfg["prediction_geoparquet"]:
         try:
-            spatial = _read_geoparquet(cfg[f"{role}_geoparquet"])
+            prediction = _load_prepared_frame(cfg["prediction_geoparquet"], "prediction", cfg)
         except FileNotFoundError:
-            if role != "prediction":
-                raise
-            _write_task_progress(cfg, f"Missing prediction input: {prediction_path}")
-            return None
-        _write_task_progress(cfg, f"Loaded {role} input: {len(spatial):,} rows.")
-        if spatial.crs is None or spatial.crs != cfg["crs"]:
-            raise ValueError(f"{role} CRS must already be {cfg['crs']}")
-        frame = pd.DataFrame(spatial.drop(columns=spatial.geometry.name))
-        if frame.empty or not frame.columns.is_unique:
-            raise ValueError(f"{role} table is empty or has duplicate columns")
-        if "FID" not in frame or frame.FID.isna().any() or frame.FID.duplicated().any():
-            raise ValueError(f"{role} FID must be nonmissing and unique")
-        for column, expected in (
-            ("tile_id", cfg["tile_id"]),
-            ("pair_id", cfg["pair"]),
-        ):
-            if column in frame and not frame[column].eq(expected).all():
-                raise ValueError(f"{role} {column} does not match {expected}")
-        frames[role] = frame
-    inputs = ModelInputs(
-        *_prepare_model_data(frames["training"], frames["prediction"], schema.predictor.tolist())
-    )
+            _write_task_progress(cfg, "Prediction input is missing; continuing with training only.")
+            cfg["prediction_geoparquet"] = None
+    else:
+        _write_task_progress(cfg, "No matching prediction input; continuing with training only.")
+    inputs = ModelInputs(*_prepare_model_data(train, prediction, schema.predictor.tolist()))
     inputs.train["sample_weight"] = _calculate_model_weights(
         inputs.train.delta_bathy.to_numpy(), cfg["model_config"]
     )
@@ -905,11 +925,75 @@ def _load_model_inputs(cfg: dict) -> ModelInputs | None:
         raise ValueError("Fewer eligible fitting rows than the configured minimum")
     return inputs
 
+def _predict_saved_tile_task(cfg: dict) -> dict:
+    """Deploy an existing same-tile, same-pair ensemble without retraining/deleting it."""
+    identity = {key: cfg[key] for key in ("region", "tile_id", "pair")}
+    paths = cfg["output_paths"]
+    metadata_path = UPath(cfg.get("source_metadata_path", paths["model_metadata"]))
+    source_tile = cfg.get("source_model_tile", cfg["tile_id"])
+    if not metadata_path.exists():
+        _write_task_progress(cfg, "NOT MODELED: prediction input exists, but no training input or saved same-tile/year-pair ensemble exists.")
+        return dict(identity, ok=False, skipped=True, reason="no_training_or_saved_model", n_prediction_rows=None)
+    with metadata_path.open("rt", encoding="utf-8") as stream:
+        metadata = json.load(stream)
+    for key in ("tile_id", "pair", "crs"):
+        if metadata.get(key) != (source_tile if key == "tile_id" else cfg[key]):
+            raise ValueError(f"Saved model {key} does not match prediction task")
+    if metadata.get("target") != "bathy_t1" or metadata.get("model_baseline_feature") != "bathy_t":
+        raise ValueError("Saved model must predict bathy_t1 using bathy_t")
+    predictors = metadata.get("predictors", [])
+    if not predictors or "bathy_t" not in predictors or len(predictors) != len(set(predictors)):
+        raise ValueError("Saved model has an invalid ordered predictor schema")
+    if (set(predictors) & NON_PREDICTORS) - {"bathy_t"}:
+        raise ValueError("Saved model schema contains target/metadata leakage")
+    model_uris = metadata.get("model_uris", [])
+    n_boot = metadata.get("n_boot")
+    if isinstance(n_boot, bool) or not isinstance(n_boot, int) or n_boot < 1 or len(model_uris) != n_boot or len(set(model_uris)) != n_boot:
+        raise ValueError("Saved ensemble model list does not match n_boot")
+    if any(not UPath(uri).exists() for uri in model_uris):
+        _write_task_progress(cfg, "NOT MODELED: saved same-tile/year-pair ensemble is incomplete; training input is unavailable.")
+        return dict(identity, ok=False, skipped=True, reason="incomplete_saved_ensemble")
+    if not cfg["overwrite"] and UPath(paths["prediction_summary_geo"]).exists():
+        _write_task_progress(cfg, "SKIPPING prediction: summary exists and overwrite=False.")
+        return dict(identity, ok=True, skipped=True, reason="outputs_complete")
+    frame = _load_prepared_frame(cfg["prediction_geoparquet"], "prediction", cfg)
+    frame, features = _prepare_prediction_data(frame, predictors)
+    usable = frame.prediction_row_usable.to_numpy(dtype=bool)
+    mean = np.where(usable, np.float32(0.0), np.float32(np.nan))
+    m2 = mean.copy()
+    matrix = xgb.DMatrix(features.loc[usable].to_numpy(copy=False), feature_names=predictors, missing=np.nan, nthread=1) if usable.any() else None
+    for index, uri in enumerate(model_uris, 1):
+        model = xgb.Booster(params={"nthread": 1})
+        with UPath(uri).open("rb") as stream:
+            model.load_model(bytearray(stream.read()))
+        if model.feature_names != predictors:
+            raise ValueError(f"Saved model feature order differs from metadata: {uri}")
+        if matrix is not None:
+            values = np.full(len(frame), np.nan, dtype=np.float32)
+            values[usable] = model.predict(matrix)
+            _update_running_stats(mean, m2, values, index)
+        _write_task_progress(cfg, f"Reused saved bootstrap {index}/{n_boot}.", verbose_only=True)
+    # Use the original ensemble size and horizon, not settings for a new fit.
+    summary_cfg = dict(cfg["model_config"], n_boot=n_boot, standard_horizon_years=metadata["model_config"]["standard_horizon_years"])
+    summary = _prediction_summary(frame, mean, m2, summary_cfg)
+    summary["local_source_model_tile"] = source_tile
+    summary["local_source_model_distance"] = cfg.get("source_model_distance", 0.0)
+    UPath(cfg["prediction_output_dir"]).mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="hhm_xgb_prediction_") as tmp_dir:
+        _save_geoparquet(summary, paths["prediction_summary_geo"], cfg["crs"], tmp_dir)
+    deployment_metadata = dict(metadata, tile_id=cfg["tile_id"], source_model_tile=source_tile,
+        source_model_distance=cfg.get("source_model_distance", 0.0), source_metadata_path=str(metadata_path),
+        n_prediction_rows=len(frame), n_prediction_usable=int(usable.sum()),
+        prediction_model_source="tile_native" if source_tile == cfg["tile_id"] else "nearest_local_model")
+    _save_json(deployment_metadata, str(UPath(cfg["prediction_output_dir"]) / f"LOCAL_prediction_metadata_{cfg['pair']}.json"))
+    _write_task_progress(cfg, f"Completed prediction from saved ensemble: {int(usable.sum()):,}/{len(frame):,} usable rows.")
+    return dict(identity, ok=True, skipped=False, task_type="prediction_only", n_prediction_rows=len(frame), n_prediction_usable=int(usable.sum()))
+
 def _prepare_outputs(cfg: dict) -> bool:
     """Skip complete runs; allow retries when only some outputs exist."""
 
     paths = cfg["output_paths"]
-    required = [path for path in paths.values() if isinstance(path, str)]
+    required = [path for key, path in paths.items() if isinstance(path, str) and (key != "prediction_summary_geo" or cfg["prediction_geoparquet"])]
     required.extend(paths["models"])
     if not cfg["overwrite"] and all(UPath(path).exists() for path in required):
         _write_task_progress(
@@ -922,7 +1006,10 @@ def _prepare_outputs(cfg: dict) -> bool:
         if metadata.exists():
             metadata.unlink()
     if cfg["overwrite"]:
-        for path in cfg["owned_outputs"]:
+        old_models = UPath(cfg["training_output_dir"]) / "models"
+        owned = cfg["owned_outputs"] + [str(path) for path in old_models.glob(f"model_boot_*_{cfg['pair']}.json")]
+        owned.append(str(UPath(cfg["prediction_output_dir"]) / f"LOCAL_prediction_metadata_{cfg['pair']}.json"))
+        for path in set(owned):
             target = UPath(path)
             if target.exists():
                 target.unlink()
@@ -936,57 +1023,36 @@ def _train_tile_task(cfg: dict) -> dict:
     log_dir = Path(cfg["log_dir"])
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
-        _write_task_progress(cfg, "Starting training/prediction task.")
-        if not cfg["overwrite"] and not _prepare_outputs(cfg):
-            return {
-                "ok": True,
-                "skipped": True,
-                "reason": "outputs_complete",
-                "region": cfg["region"],
-                "tile_id": cfg["tile_id"],
-                "pair": cfg["pair"],
-            }
+        _write_task_progress(cfg, "Starting task.")
+        if not cfg["training_geoparquet"]:
+            return _predict_saved_tile_task(cfg)
+        if not cfg["overwrite"]:
+            metadata_path = UPath(cfg["output_paths"]["model_metadata"])
+            if metadata_path.exists():
+                with metadata_path.open("rt", encoding="utf-8") as stream:
+                    metadata = json.load(stream)
+                models = metadata.get("model_uris", [])
+                if (metadata.get("tile_id") == cfg["tile_id"] and metadata.get("pair") == cfg["pair"]
+                        and metadata.get("crs") == cfg["crs"] and metadata.get("target") == "bathy_t1"
+                        and models and len(models) == metadata.get("n_boot")
+                        and len(set(models)) == len(models) and all(UPath(uri).exists() for uri in models)):
+                    _write_task_progress(cfg, "SKIPPING training: complete saved ensemble exists; missing predictions are handled during deployment.")
+                    return dict(ok=True, skipped=True, reason="saved_ensemble_exists", region=cfg["region"], tile_id=cfg["tile_id"], pair=cfg["pair"])
+            existing = [path for path in cfg["owned_outputs"] if UPath(path).exists()]
+            if existing:
+                _write_task_progress(cfg, "SKIPPING incomplete existing outputs: set overwrite=True to rebuild this tile/year pair safely.")
+                return dict(ok=False, skipped=True, reason="incomplete_outputs_require_overwrite", region=cfg["region"], tile_id=cfg["tile_id"], pair=cfg["pair"])
         inputs = _load_model_inputs(cfg)
-        if inputs is None:
-            _write_task_progress(
-                cfg,
-                'SKIPPING tile/year pair: ML-ready prediction input does not exist.',
-            )
+        if inputs.prediction is not None:
+            usable_count = int(inputs.prediction.prediction_row_usable.sum())
+            _write_task_progress(cfg, f'Prediction eligibility: {usable_count:,}/{len(inputs.prediction):,} usable rows.')
+            if usable_count == 0:
+                _write_task_progress(cfg, "No usable prediction rows; training will continue and prediction rows will retain NaN outputs.")
+        if not _prepare_outputs(cfg):
             return {
-                "ok": True,
-                "skipped": True,
-                "reason": "missing_prediction_input",
-                "region": cfg["region"],
-                "tile_id": cfg["tile_id"],
-                "pair": cfg["pair"],
-                "missing_path": cfg["prediction_geoparquet"],
+                "ok": True, "skipped": True, "reason": "outputs_complete",
+                "region": cfg["region"], "tile_id": cfg["tile_id"], "pair": cfg["pair"],
             }
-        usable_count = int(inputs.prediction.prediction_row_usable.sum())
-        _write_task_progress(
-            cfg,
-            f'Prediction eligibility: {usable_count:,}/{len(inputs.prediction):,} usable rows.',
-        )
-        if usable_count == 0:
-            _write_task_progress(
-                cfg,
-                "SKIPPING tile/year pair: no usable prediction rows after "
-                "validating "
-                "coordinates, baseline bathymetry, positive intervals and "
-                "prediction_row_usable.",
-            )
-            return {
-                "ok": True,
-                "skipped": True,
-                "reason": "no_usable_prediction_rows",
-                "region": cfg["region"],
-                "tile_id": cfg["tile_id"],
-                "pair": cfg["pair"],
-                "n_fit": len(inputs.train),
-                "n_prediction_rows": len(inputs.prediction),
-                "n_prediction_usable": 0,
-            }
-        if cfg["overwrite"]:
-            _prepare_outputs(cfg)
         seed = _stable_seed(
             cfg["model_config"]["global_seed"],
             "local",
@@ -1010,7 +1076,7 @@ def _train_tile_task(cfg: dict) -> dict:
         with tempfile.TemporaryDirectory(prefix="hhm_xgb_") as tmp_dir:
             ensemble = _fit_bootstrap_ensemble(inputs, cfg, best_rounds, seed, tmp_dir)
             _save_model_outputs(inputs, ensemble, cfg, best_rounds, audit, tmp_dir)
-        _write_task_progress(cfg, "Completed training, prediction and output saving.")
+        _write_task_progress(cfg, "Completed training and output saving.")
         return {
             "ok": True,
             "skipped": False,
@@ -1018,12 +1084,15 @@ def _train_tile_task(cfg: dict) -> dict:
             "tile_id": cfg["tile_id"],
             "pair": cfg["pair"],
             "n_fit": len(inputs.train),
+            "n_prediction_rows": len(inputs.prediction) if inputs.prediction is not None else 0,
+            "n_prediction_usable": int(inputs.prediction.prediction_row_usable.sum()) if inputs.prediction is not None else 0,
+            "task_type": "training_and_prediction" if inputs.prediction is not None else "training_only",
             "best_iteration": best_rounds,
         }
-    except Exception:
-        _write_task_progress(cfg, "FAILED training/prediction task; traceback follows.")
+    except Exception as exc:
+        _write_task_progress(cfg, f"FAILED task: {exc}")
         Engine.write_message_dask(traceback.format_exc(), log_dir)
-        raise
+        return dict(ok=False, skipped=False, region=cfg["region"], tile_id=cfg["tile_id"], pair=cfg["pair"], reason=str(exc))
 
 class XGBoostModelingEngine(Engine):
     """Train prepared tile/year-pair ensembles for each configured ecoregion."""
@@ -1070,10 +1139,11 @@ class XGBoostModelingEngine(Engine):
             "minimum_training_rows": 100,
             "global_seed": 12345,
             "shap_sample_rows": 1000,
+            "overwrite": False,
             "xgb_workers": 16,
             "xgb_memory_limit": "4GB",
-            "xgb_threads_per_worker": 1,
-            "xgb_tasks_per_batch": 16,
+            "xgb_threads_per_worker": 2,
+            "xgb_tasks_per_batch": 32,
             "xgb_processes": True,
             "verbose_logging": True,
         }
@@ -1153,6 +1223,14 @@ class XGBoostModelingEngine(Engine):
             else UPath(self.outputs_dir / model_dir)
         )
 
+        subgrids = get_config_item("MODEL", "SUBGRIDS")
+        self.subgrids_path = (
+            UPath(f"{s3_dir_base}/{subgrids}")
+            if self.is_aws
+            else UPath(self.outputs_dir / subgrids)
+        )
+        self.subgrids_layer = get_config_item("MODEL", "SUBGRIDS_LAYER")
+
     def collect_training_files(self) -> list[UPath]:
         """Collect prepared training files under the resolved regional directory."""
 
@@ -1162,25 +1240,27 @@ class XGBoostModelingEngine(Engine):
         )
 
     def prepare_tasks(self, region: str) -> None:
-        """Build tile/year-pair task settings from the prepared training files."""
-
+        """Schedule the union of prepared training and prediction tile/year pairs."""
         self.task_configs = []
-        seen = set()
-        for training_file in self.collect_training_files():
-            match = re.fullmatch(
-                r"ML_ready_training_(\d{4}_\d{4})\.geoparquet",
-                training_file.name,
-            )
-            if match is None:
-                continue
-            tile_id, pair = training_file.parent.name, match[1]
-            if (self.tile_id and tile_id != self.tile_id) or (self.pair and pair != self.pair):
-                continue
-            if (tile_id, pair) in seen:
-                raise ValueError(f"Duplicate prepared input for {tile_id}, {pair}")
-            if int(pair[:4]) >= int(pair[5:]):
-                raise ValueError(f"Year pair must be increasing: {pair}")
-            seen.add((tile_id, pair))
+        inventory = {"training": {}, "prediction": {}}
+        for role, root in (("training", self.ml_prep_train_dir), ("prediction", self.ml_prep_pred_dir)):
+            for path in sorted(root.rglob(f"ML_ready_{role}_*.geoparquet"), key=str):
+                match = re.fullmatch(rf"ML_ready_{role}_(\d{{4}}_\d{{4}})\.geoparquet", path.name)
+                if match is None:
+                    continue
+                tile_id, pair = path.parent.name, match[1]
+                if (self.tile_id and tile_id != self.tile_id) or (self.pair and pair != self.pair):
+                    continue
+                if int(pair[:4]) >= int(pair[5:]):
+                    raise ValueError(f"Year pair must be increasing: {pair}")
+                key = (tile_id, pair)
+                if key in inventory[role]:
+                    raise ValueError(f"Duplicate prepared {role} input for {tile_id}, {pair}")
+                inventory[role][key] = path
+        keys = inventory["training"].keys() | inventory["prediction"].keys()
+        for tile_id, pair in sorted(keys):
+            training_file = inventory["training"].get((tile_id, pair))
+            prediction_file = inventory["prediction"].get((tile_id, pair))
             train_out, pred_out = (
                 self.xgb_out_dir / tile_id / "Training",
                 self.xgb_out_dir / tile_id / "Prediction",
@@ -1208,22 +1288,18 @@ class XGBoostModelingEngine(Engine):
                 for i in range(1, self.model_config["n_boot"] + 1)
             ]
             owned = [path for path in paths.values() if isinstance(path, str)] + paths["models"]
-            owned += [
-                str(path) for path in (train_out / "models").glob(f"model_boot_*_{pair}.json")
-            ]
+
             self.task_configs.append(
                 {
                     "region": region,
                     "tile_id": tile_id,
                     "pair": pair,
                     "crs": str(self.target_crs),
-                    "training_geoparquet": str(training_file),
-                    "prediction_geoparquet": str(
-                        self.ml_prep_pred_dir / tile_id / f"ML_ready_prediction_{pair}.geoparquet"
-                    ),
+                    "training_geoparquet": str(training_file) if training_file is not None else None,
+                    "prediction_geoparquet": str(prediction_file) if prediction_file is not None else None,
                     "locked_predictors_parquet": str(
                         training_file.parent / f"locked_predictors_{pair}.parquet"
-                    ),
+                    ) if training_file is not None else None,
                     "training_output_dir": str(train_out),
                     "prediction_output_dir": str(pred_out),
                     "model_config": self.model_config,
@@ -1233,12 +1309,79 @@ class XGBoostModelingEngine(Engine):
                 }
             )
 
+    def _load_deployment_grid(self) -> gpd.GeoDataFrame:
+        """Use official tile polygons and metric representative points for assignment."""
+        with self.subgrids_path.open("rb") as stream:
+            grid = gpd.read_file(stream, layer=self.subgrids_layer)
+        if grid.crs is None or "tile_id" not in grid:
+            raise ValueError("Deployment grid requires a CRS and tile_id column")
+        crs = CRS.from_user_input(self.target_crs)
+        if not crs.is_projected or not all(np.isclose(a.unit_conversion_factor, 1) for a in crs.axis_info[:2]):
+            raise ValueError("Nearest-model assignment requires a projected CRS in metres")
+        grid = grid.to_crs(crs)
+        grid["tile_id"] = grid.tile_id.astype(str)
+        return grid
+
+    def prepare_deployment_tasks(self, configs: list[dict], failed_training: set[tuple[str, str]]) -> list[dict]:
+        """Assign own models first, then nearest same-pair models from this region."""
+        targets = [cfg for cfg in configs if cfg["prediction_geoparquet"]]
+        self.task_configs = []
+        if not targets:
+            return []
+        grid = self._load_deployment_grid()
+        valid = grid.geometry.notna() & ~grid.geometry.is_empty & grid.geometry.is_valid & grid.geometry.geom_type.isin(["Polygon", "MultiPolygon"])
+        grid = grid.loc[valid].copy()
+        if grid.tile_id.duplicated().any():
+            raise ValueError("Deployment grid contains duplicate tile_id values")
+        points = dict(zip(grid.tile_id, grid.geometry.representative_point()))
+        inventories = {}
+        for path in sorted(self.xgb_out_dir.rglob("LOCAL_model_metadata_*.json"), key=str):
+            try:
+                with path.open("rt", encoding="utf-8") as stream:
+                    meta = json.load(stream)
+                tile, pair = meta["tile_id"], meta["pair"]
+                models = meta.get("model_uris", [])
+                if (tile, pair) in failed_training or tile not in points:
+                    continue
+                if meta.get("crs") != str(self.target_crs) or meta.get("target") != "bathy_t1":
+                    continue
+                if not models or len(models) != meta.get("n_boot") or len(set(models)) != len(models) or not all(UPath(uri).exists() for uri in models):
+                    continue
+                inventories.setdefault(pair, {})[tile] = str(path)
+            except (ValueError, KeyError, OSError) as exc:
+                self.write_message(f"Ignoring unusable model metadata {path}: {exc}", self.outputs_dir)
+        spatial_indexes = {}
+        for pair, candidates in inventories.items():
+            donor_ids = sorted(candidates)
+            spatial_indexes[pair] = (donor_ids, STRtree([points[tile] for tile in donor_ids]))
+        results = []
+        for cfg in targets:
+            tile, pair = cfg["tile_id"], cfg["pair"]
+            candidates = inventories.get(pair, {})
+            reason = "missing_or_invalid_tile_polygon" if tile not in points else "no_trained_models_for_year_pair" if not candidates else None
+            if reason:
+                self.write_message(f"NOT MODELED {cfg['region']}/{tile}/{pair}: {reason}", self.outputs_dir)
+                results.append(dict(ok=False, skipped=True, region=cfg["region"], tile_id=tile, pair=pair, reason=reason))
+                continue
+            if tile in candidates:
+                source = tile
+            else:
+                donor_ids, tree = spatial_indexes[pair]
+                nearest = tree.query_nearest(points[tile], all_matches=True)
+                source = min(donor_ids[int(index)] for index in nearest)
+            distance = float(points[tile].distance(points[source]))
+            self.task_configs.append(dict(cfg, training_geoparquet=None,
+                source_model_tile=source, source_model_distance=distance, source_metadata_path=candidates[source]))
+            self.write_message(f"Deploying {tile}/{pair} from {source} ({distance:.1f} m)", self.outputs_dir)
+        return results
+
     def execute_tasks(self, overwrite: bool = False) -> list[dict]:
         """Submit configurable batches across the available Dask worker threads."""
 
         results = []
         batch_size = self.model_config["xgb_tasks_per_batch"]
         total = len(self.task_configs)
+        stage = "MODEL TRAINING" if any(cfg.get("training_geoparquet") for cfg in self.task_configs) else "PREDICTION DEPLOYMENT"
         for start in range(0, len(self.task_configs), batch_size):
             jobs = [
                 dict(
@@ -1251,15 +1394,16 @@ class XGBoostModelingEngine(Engine):
             ]
             region = jobs[0]["region"]
             self.write_message(
-                f'{region}: submitting training/prediction tasks {start + 1}-{start + len(jobs)}/{total}.',
+                f'{region} | {stage}: submitting tasks {start + 1}-{start + len(jobs)}/{total}.',
                 OUTPUTS,
             )
             futures = self.client.map(_train_tile_task, jobs, pure=False)
             try:
                 results.extend(self.client.gather(futures))
-                skipped = sum(bool(result.get("skipped", False)) for result in results)
+                failed = sum(not result.get("ok", False) for result in results)
+                skipped = sum(result.get("ok", False) and bool(result.get("skipped", False)) for result in results)
                 self.write_message(
-                    f'{region}: processed {len(results)}/{total} training/prediction tasks ({len(results) - skipped} completed, {skipped} skipped).',
+                    f'{region} | {stage}: processed {len(results)}/{total} tasks ({len(results) - skipped - failed} completed, {skipped} skipped, {failed} not modeled).',
                     OUTPUTS,
                 )
             except Exception:
@@ -1270,10 +1414,13 @@ class XGBoostModelingEngine(Engine):
                     future.release()
         return results
 
-    def run(self, overwrite: bool = False) -> list[dict]:
+    def run(self, overwrite: bool | None = None) -> list[dict]:
         """Set up Dask, process ecoregions and always close the worker pool."""
 
         results = []
+        overwrite = self.model_config["overwrite"] if overwrite is None else overwrite
+        if not isinstance(overwrite, bool):
+            raise ValueError("overwrite must be boolean")
         try:
             cfg = self.model_config
             self.setup_dask(
@@ -1287,9 +1434,18 @@ class XGBoostModelingEngine(Engine):
                 self._resolve_paths(eco_region)
                 self.prepare_tasks(eco_region)
                 self.write_message(
-                    f'Queuing {len(self.task_configs)} XGBoost tasks for {eco_region}.',
+                    f'{eco_region}: discovered {len(self.task_configs)} tile/year pairs across training and prediction inputs.',
                     OUTPUTS,
                 )
+                all_configs = self.task_configs
+                self.task_configs = [job for job in all_configs if job["training_geoparquet"]]
+                self.write_message(f"{eco_region} | STAGE 1/2: MODEL TRAINING — {len(self.task_configs)} tasks; fit local ensembles or reuse existing models.", OUTPUTS)
+                training_results = self.execute_tasks(overwrite)
+                results.extend(training_results)
+                failed_training = {(row["tile_id"], row["pair"]) for row in training_results if not row.get("ok")}
+                self.write_message(f"{eco_region} | STAGE 2/2: PREDICTION DEPLOYMENT — assigning saved local models to prediction tiles.", OUTPUTS)
+                results.extend(self.prepare_deployment_tasks(all_configs, failed_training))
+                self.write_message(f"{eco_region} | PREDICTION DEPLOYMENT: {len(self.task_configs)} tasks; apply saved ensembles without training new models.", OUTPUTS)
                 results.extend(self.execute_tasks(overwrite))
             return results
         finally:
