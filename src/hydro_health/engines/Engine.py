@@ -38,10 +38,11 @@ class Engine:
         self.approved_size = 200000000  # 2015 USACE polygon was 107,987,252 sq. meters
         self.cluster = None
         self.client = None
+        self.target_crs = 'EPSG:32617'
         self.target_res = 8
         self.target_crs = 'EPSG:32617'
         self.year_ranges = [
-            (1998, 2001),
+            # (1998, 2001),
             (2004, 2006),
             (2006, 2010),
             (2010, 2015),

@@ -562,7 +562,7 @@ class CreateHurricaneLayerEngine(Engine):
         
         # Project EcoRegions to match target CRS (EPSG:32617)
         self.logger.info("Projecting EcoRegions to match target projection (EPSG:32617)...")
-        eco_gdf = eco_gdf.to_crs('EPSG:32617')
+        eco_gdf = eco_gdf.to_crs(self.target_crs)
         
         # FIX for topology twisting: Repair self-intersecting lines caused by out-of-bounds projection distortion
         eco_gdf['geometry'] = eco_gdf.geometry.buffer(0)
@@ -720,7 +720,7 @@ class CreateHurricaneLayerEngine(Engine):
             return
 
         self.logger.info("Projecting trimmed polygons to target CRS (EPSG:32617) to prevent raster warping failure...")
-        gdf = gdf.to_crs('EPSG:32617')
+        gdf = gdf.to_crs(self.target_crs)
         
         # Repair the vector topology in case the extreme UTM distortion folded any polygons over themselves
         gdf['geometry'] = gdf.geometry.buffer(0)
@@ -729,7 +729,7 @@ class CreateHurricaneLayerEngine(Engine):
         # UPDATED: Safely read the EcoRegions GPKG via the class helper
         self.logger.info(f"Reading EcoRegions from {self.coast_boundary_path} to constrain raster bounding boxes...")
         eco_gdf = self._read_gpkg_layer(layer_name='Enhanced_EcoRegions', path_obj=self.coast_boundary_path)
-        eco_gdf = eco_gdf.to_crs('EPSG:32617')
+        eco_gdf = eco_gdf.to_crs(self.target_crs)
         eco_minx, eco_miny, eco_maxx, eco_maxy = eco_gdf.total_bounds
             
         # Group by 'area_date' ensures unique files per storm.
