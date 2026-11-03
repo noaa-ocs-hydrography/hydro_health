@@ -110,6 +110,8 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
                 runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_data_prep_engine" and step["run"]:
+                runners.run_data_prep_engine(param_lookup, output_prefix)    
             elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
                 runners.run_batch_tiling_engine(param_lookup, output_prefix)    
 
