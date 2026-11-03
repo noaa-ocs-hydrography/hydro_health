@@ -1103,12 +1103,9 @@ class XGBoostModelingEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
-        if param_lookup["env"] not in ("local", "aws"):
-            raise ValueError("env must be local or aws")
         self.is_aws = param_lookup["env"] == "aws"
-        settings = param_lookup.get("modeling_settings", {})
-        self.tile_id = settings.get("tile_id")
-        self.pair = settings.get("pair")
+        self.tile_id = None
+        self.pair = None
         self.model_config = {
             "max_depth": 4,  # Maximum depth of each tree; deeper trees learn more complex patterns but can overfit.
             "eta": 0.01,  # Learning rate: scales each tree's contribution; smaller values usually need more rounds.
@@ -1147,7 +1144,6 @@ class XGBoostModelingEngine(Engine):
             "xgb_processes": True,  # Custom: runs workers in separate processes rather than using threads only.
             "verbose_logging": True,  # Custom: enables detailed progress and diagnostic logging.
         }
-        self.model_config.update(settings.get("model_config", {}))
         for key in (
             "n_boot",
             "max_depth",
@@ -1168,8 +1164,6 @@ class XGBoostModelingEngine(Engine):
             if isinstance(value, (bool, np.bool_)) or not np.isfinite(value) or int(value) != value or value < 1:
                 raise ValueError(f"{key} must be a positive integer")
             self.model_config[key] = int(value)
-        if self.model_config["round_selection_mode"] not in {"fixed", "cv_with_floor", "cv_only"}:
-            raise ValueError("Invalid round_selection_mode")
         for key in ("eta", "subsample", "colsample_bytree"):
             value = float(self.model_config[key])
             if not np.isfinite(value) or not 0 < value <= 1:
@@ -1419,8 +1413,6 @@ class XGBoostModelingEngine(Engine):
 
         results = []
         overwrite = self.model_config["overwrite"] if overwrite is None else overwrite
-        if not isinstance(overwrite, bool):
-            raise ValueError("overwrite must be boolean")
         try:
             cfg = self.model_config
             self.setup_dask(
