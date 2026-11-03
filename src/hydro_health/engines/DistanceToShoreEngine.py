@@ -59,7 +59,7 @@ def _process_tile(param_inputs: list) -> dict:
      temp_path, param_lookup, output_prefix) = param_inputs
 
     _set_gdal_s3_options()
-    engine = DistanceToShoreEngine(param_lookup)
+    engine = DistanceToShoreEngine(param_lookup, data_type)
 
     try:
         geotiff_path = pathlib.Path(geotiff_string)
@@ -130,7 +130,7 @@ class DistanceToShoreEngine(Engine):
         Determines the raster's CRS and loads the matching precomputed .npy vertex array.
         - Run scripts\store_coastal_shoreline_vertices.py to generate arrays
         """
-        
+
         with rasterio.open(str(raster_path)) as ref:
             crs = ref.crs
 
@@ -152,7 +152,7 @@ class DistanceToShoreEngine(Engine):
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
             # Using the output path structure you defined in prep_shorelines.py
             s3_path = f"{bucket}/{ecoregion}/support_data/{npy_filename}"
-            
+
             with s3.open(s3_path, 'rb') as f:
                 return np.load(f)
         else:
@@ -160,7 +160,7 @@ class DistanceToShoreEngine(Engine):
             npy_path = INPUTS / 'support_data' / npy_filename
             if not npy_path.exists():
                 raise FileNotFoundError(f"Precomputed vertices not found: {npy_path}")
-            
+
             return np.load(npy_path)
 
     def build_distance_from_shoreline(
@@ -228,7 +228,7 @@ class DistanceToShoreEngine(Engine):
 
         distance_raster_path = tile_folder / f"{raster_filename}_distance_from_shore.tif"
         distance_raster_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         self.write_message(f'- writing distance raster to: {distance_raster_path}', str(OUTPUTS))
         with rasterio.open(distance_raster_path, "w", **profile) as dst:
             dst.write(dist_in_meters, 1)
@@ -256,10 +256,10 @@ class DistanceToShoreEngine(Engine):
 
         raster_path = pathlib.Path(raster_path)
         tile_id = raster_path.parents[0].name
-        
+
         tile_output_path = pathlib.Path(temp_path) / tile_id
         tile_output_path.mkdir(parents=True, exist_ok=True)
-        
+
         output_name = f"{raster_path.stem}_ocean_mask.tif"
         output_file = tile_output_path / output_name
 
@@ -316,7 +316,7 @@ class DistanceToShoreEngine(Engine):
             _trim_memory()
 
         return str(output_file), valid_cells
-    
+
     def get_temp_path_and_geotiff_paths(self, output_prefix: str, ecoregion: str) -> tuple:    
         """Set up target folder for local output or AWS intermediate file creation"""
 
@@ -329,19 +329,19 @@ class DistanceToShoreEngine(Engine):
         else:
             geotiff_paths = self.get_local_geotiff_files(ecoregion, output_prefix)
             temp_path = OUTPUTS / starting_path / subfolder / self.data_type
-            
+
         return temp_path, geotiff_paths
 
     def get_local_geotiff_files(self, ecoregion: str, output_prefix: str = "") -> list[pathlib.Path]:
         """Search for local data type geotiffs"""
-        
+
         if output_prefix:
             data_type_folder = OUTPUTS / output_prefix / ecoregion / get_config_item(
                 self.data_type.upper(), 'SUBFOLDER'
             ) / self.data_type
         else:
             data_type_folder = OUTPUTS / ecoregion / get_config_item(self.data_type.upper(), 'SUBFOLDER') / self.data_type
-        
+
         raster_files = []
 
         geotiff_syntax = "*[0-9].tiff" if self.data_type == 'BlueTopo' else "*.tif"
@@ -352,15 +352,13 @@ class DistanceToShoreEngine(Engine):
 
     def get_s3_geotiff_files(self, ecoregion: str = "*") -> list[str]:
         """Search for all geotiffs for current data type and ecoregion"""
-                
+
         _set_gdal_s3_options()
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
         geotiff_syntax = f"{self.data_type}/**/*[0-9].tiff" if self.data_type == 'BlueTopo' else f"{self.data_type}/**/*.tif"
-        s3_search_pattern = f"{bucket}/{ecoregion}/{
-            get_config_item(self.data_type.upper(), 'SUBFOLDER')
-        }/{geotiff_syntax}"
+        s3_search_pattern = f"{bucket}/{ecoregion}/{get_config_item(self.data_type.upper(), 'SUBFOLDER')}/{geotiff_syntax}"
 
         raw_paths = s3_files.glob(s3_search_pattern)
 
@@ -376,7 +374,7 @@ class DistanceToShoreEngine(Engine):
             ]
         else:
             geotiffs = raw_paths
-        
+
         vsi_geotiff_paths = [
             f"/vsis3/{p}" for p in geotiffs 
             if p.lower().endswith(('.tif', '.tiff'))
@@ -384,7 +382,7 @@ class DistanceToShoreEngine(Engine):
 
         print(f"- Discovered {len(vsi_geotiff_paths)} S3 {self.data_type} file(s) matching: s3://{s3_search_pattern}")
         return vsi_geotiff_paths
-        
+
     def upload_file_to_s3(self, distance_raster_path: pathlib.Path, ecoregion: str, output_subfolder: str, output_prefix: str=False) -> None:
         """Upload distance raster file to S3"""
 
@@ -392,10 +390,8 @@ class DistanceToShoreEngine(Engine):
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
         ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
-        s3_path = f"{bucket}/{ecoregion_path}/{
-            get_config_item(self.data_type.upper(), 'SUBFOLDER')
-        }/{self.data_type}/{output_subfolder}"
-        
+        s3_path = f"{bucket}/{ecoregion_path}/{get_config_item(self.data_type.upper(),'SUBFOLDER')}/{self.data_type}/{output_subfolder}"
+
         print(f"  - Uploading {output_subfolder} to s3://{s3_path}")
         s3.put(str(distance_raster_path), s3_path, recursive=True)
 
@@ -409,7 +405,7 @@ class DistanceToShoreEngine(Engine):
         # Master geopackage is still needed once to isolate the ecoregion boundary for the water mask.
         master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
         ecoregions = self.param_lookup['eco_regions'].value
-        
+
         for ecoregion in ecoregions:
             temp_path, geotiff_paths = self.get_temp_path_and_geotiff_paths(output_prefix, ecoregion)
 
@@ -433,7 +429,7 @@ class DistanceToShoreEngine(Engine):
                 ])
 
             print(f" - Submitting {len(param_inputs)} tiles to Dask cluster...")
-            
+
             future_tiles = self.client.map(_process_tile, param_inputs)
 
             # Process futures as completed and release references to prevent holding cluster RAM
@@ -442,7 +438,7 @@ class DistanceToShoreEngine(Engine):
                 res = future.result()
                 results.append(res)
                 self.client.cancel(future)
-            
+
             success_count = sum(1 for r in results if r.get('status') == 'success')
             print(f" - Completed {success_count}/{len(results)} tiles successfully for {ecoregion}.")
             beginning_prefix = f"{output_prefix}/{ecoregion}" if output_prefix else ecoregion
