@@ -51,7 +51,7 @@ def _set_gdal_s3_options() -> None:
 
 def _process_tile(param_inputs: list) -> dict:
     """
-    Parallel worker function to process a single BlueTopo tile.
+    Parallel worker function to process a single raster geotiff tile.
     Defined at the module level so Dask can safely pickle and distribute it.
     """
 
@@ -123,7 +123,7 @@ class DistanceToShoreEngine(Engine):
 
     def get_shoreline_vertices(
         self,
-        bluetopo_path: pathlib.Path,
+        raster_path: pathlib.Path,
         ecoregion: str
     ) -> np.ndarray:
         """
@@ -131,7 +131,7 @@ class DistanceToShoreEngine(Engine):
         - Run scripts\store_coastal_shoreline_vertices.py to generate arrays
         """
         
-        with rasterio.open(str(bluetopo_path)) as ref:
+        with rasterio.open(str(raster_path)) as ref:
             crs = ref.crs
 
         # Replicate safe CRS naming logic
@@ -168,7 +168,7 @@ class DistanceToShoreEngine(Engine):
         shoreline_vertices: np.ndarray,
         water_mask: pathlib.Path,
         tile_folder: pathlib.Path,
-        bluetopo_filename: str
+        raster_filename: str
     ) -> tuple:
         """Calculates distance from every valid water cell to the nearest shoreline vertex using cKDTree."""
 
@@ -226,7 +226,7 @@ class DistanceToShoreEngine(Engine):
             "tiled": True
         }
 
-        distance_raster_path = tile_folder / f"{bluetopo_filename}_distance_from_shore.tif"
+        distance_raster_path = tile_folder / f"{raster_filename}_distance_from_shore.tif"
         distance_raster_path.parent.mkdir(parents=True, exist_ok=True)
         
         self.write_message(f'- writing distance raster to: {distance_raster_path}', str(OUTPUTS))
@@ -248,30 +248,30 @@ class DistanceToShoreEngine(Engine):
 
     def build_ocean_mask(
         self, 
-        bluetopo_path: str | pathlib.Path,
+        raster_path: str | pathlib.Path,
         current_ecoregion_gdf: gpd.GeoDataFrame,
         temp_path: str | pathlib.Path
     ) -> tuple:
-        """Creates a clean binary water mask for a single BlueTopo dataset."""
+        """Creates a clean binary water mask for a single raster geotiff dataset."""
 
-        bluetopo_path = pathlib.Path(bluetopo_path)
-        tile_id = bluetopo_path.parents[0].name
+        raster_path = pathlib.Path(raster_path)
+        tile_id = raster_path.parents[0].name
         
         tile_output_path = pathlib.Path(temp_path) / tile_id
         tile_output_path.mkdir(parents=True, exist_ok=True)
         
-        output_name = f"{bluetopo_path.stem}_ocean_mask.tif"
+        output_name = f"{raster_path.stem}_ocean_mask.tif"
         output_file = tile_output_path / output_name
 
-        print(f"  - Creating water mask: {bluetopo_path.name} -> {output_name}")
+        print(f"  - Creating water mask: {raster_path.name} -> {output_name}")
 
-        with rasterio.open(str(bluetopo_path)) as src:
+        with rasterio.open(str(raster_path)) as src:
             bathy_data = src.read(1)
             profile = src.profile.copy()
             src_crs = src.crs
 
             if src_crs and src_crs.is_geographic:
-                raise ValueError(f"- Bathymetry ({bluetopo_path.name}) must be projected, not geographic!")
+                raise ValueError(f"- Bathymetry ({raster_path.name}) must be projected, not geographic!")
 
             # Only select water pixels(negative)
             water_mask = np.where(
@@ -340,7 +340,7 @@ class DistanceToShoreEngine(Engine):
                 self.data_type.upper(), 'SUBFOLDER'
             ) / self.data_type
         else:
-            data_type_folder = OUTPUTS / ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / "BlueTopo"
+            data_type_folder = OUTPUTS / ecoregion / get_config_item(self.data_type.upper(), 'SUBFOLDER') / self.data_type
         
         raster_files = []
 
@@ -447,7 +447,7 @@ class DistanceToShoreEngine(Engine):
             print(f" - Completed {success_count}/{len(results)} tiles successfully for {ecoregion}.")
             beginning_prefix = f"{output_prefix}/{ecoregion}" if output_prefix else ecoregion
             # TODO write manifest depending on data type
-            manifest_path = pathlib.Path(beginning_prefix) / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
+            manifest_path = pathlib.Path(beginning_prefix) / get_config_item(self.data_type.upper(), 'SUBFOLDER') / self.data_type
             self.write_run_manifest(manifest_path, {'tiles': len(param_inputs)})
 
         self.close_dask()

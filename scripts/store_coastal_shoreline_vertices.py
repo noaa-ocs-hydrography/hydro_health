@@ -1,5 +1,6 @@
 # prep_shorelines.py
 import sys
+import time
 import pathlib
 import numpy as np
 import geopandas as gpd
@@ -213,7 +214,8 @@ if __name__ == "__main__":
     The gpkg is stored in S3 because it is too large for the repository. 
     Use the AWS CLI to copy it to the box temporarily to run this code.
     """
-    
+
+    start = time.time()
     master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
     ecoregions = ['ER_3']
     precompute_shoreline_vertices(
@@ -222,3 +224,5 @@ if __name__ == "__main__":
         # data_types=['BlueTopo', 'DigitalCoast']
         data_types = ['DigitalCoast']
     )
+    end = time.time()
+    print(f'Done - {(end - start)/60} minutes')
