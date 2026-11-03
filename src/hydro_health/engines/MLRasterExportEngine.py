@@ -1,4 +1,3 @@
-import copy
 import csv
 import textwrap
 import traceback
@@ -1022,8 +1021,6 @@ class MLRasterExportEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
-        if param_lookup["env"] not in ("local", "aws"):
-            raise ValueError("env must be local or aws")
         self.is_aws = param_lookup["env"] == "aws"
         self.settings = {
             "tile_id": None, "pair": None, "tile_id_column": "tile_id",
@@ -1040,9 +1037,6 @@ class MLRasterExportEngine(Engine):
                 "max_grid_cells": 25000000,
             },
         }
-        overrides = copy.deepcopy(param_lookup.get("raster_settings", {}))
-        self.settings["raster_config"].update(overrides.pop("raster_config", {}))
-        self.settings.update(overrides)
         if self.settings["raster_processes"] is not True:
             raise ValueError("Raster plotting requires process workers with one thread each")
         for key in ("raster_workers", "plot_max_dimension", "plot_max_points", "report_max_dimension", "report_basemap_timeout"):
