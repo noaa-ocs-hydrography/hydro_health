@@ -24,6 +24,9 @@ MASK:
   PREDICTION_MASK_PQ: masks\prediction_mask.parquet
   TRAINING_MASK_PQ: masks\training_mask.parquet
 MODEL:
+  ML_PREP_TRAIN_DIR: model_variables\Training\training_tiles_cleaned
+  ML_PREP_PRED_DIR: model_variables\Prediction\prediction_tiles_cleaned
+  MASTER_PREDICTORS_PATH: boruta_master_predictor_list_new.txt
   MODEL_SUBGRIDS: model_subgrids
   PREPROCESSED_DIR: model_variables\Prediction\pre_processed
   PREDICTION_MASK: masks\prediction_mask_ER_3.tif
@@ -43,17 +46,18 @@ PREPROCESSED:
   SEDIMENT: model_variables\Prediction\pre_processed\sediment_rasters
   TSM: model_variables\Prediction\pre_processed\TSM_year_pair_rasters
 SEDIMENT:
+  SUBFOLDER: original_data_files\sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  DATA_PATH: original_data_files\sediment_data
   GPKG_PATH: original_data_files\sediment_data\sediment_data.gpkg
-  MASK_PATH: prediction_masks\prediction.mask.UTM17_8m.tif
   RASTER_PATH: model_variables\Prediction\pre_processed\sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grid_Reference_Layers.gpkg
   TILES: BlueTopo_Tile_Scheme_20260626_132625
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
+  ECOREGION_COLUMN: EcoRegion
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
+  OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
   MANUAL_DOWNLOADS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\ER_3\model_variables\Prediction\raw\Digital_Coast_Manual_Downloads
 TERRAIN:
   COMBINED_LIDAR_DIR: model_variables\Prediction\processed\terrain_digitalcoast_outputs\combined_lidar_tifs
@@ -64,4 +68,5 @@ TERRAIN:
 TSM:
   DATA_PATH: original_data_files\tsm_data\nc_files
   MEAN_RASTER_PATH: original_data_files\tsm_data\tsm_rasters\mean_rasters
+  SUBFOLDER: original_data_files\tsm_data
   YEAR_PAIR_RASTER_PATH: model_variables\Prediction\pre_processed\TSM_year_pair_rasters
