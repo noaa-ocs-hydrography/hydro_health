@@ -53,13 +53,14 @@ REPORTS:
 SEDIMENT:
   SUBFOLDER: original_data_files/sediment_data
   DATA_URL: https://cmgds.marine.usgs.gov/data/whcmsc/data-release/doi-P9H3LGWM/unpacked/usSEABED_EEZ/US9_ONE.csv
-  MASK_PATH: masks/prediction_mask_ER_3.tif
+  GPKG_PATH: original_data_files/sediment_data/sediment_data.gpkg
   RASTER_PATH: model_variables/Prediction/pre_processed/sediment_rasters
 SHARED:
   BBOX_SHP: north_america_clip_wgs84.shp
   MASTER_GRIDS: Master_Grid_Reference_Layers.gpkg
   TILES: BlueTopo_Tile_Scheme_20260626_132625
   ENHANCED_ECOREGIONS: Enhanced_EcoRegions
+  ECOREGION_COLUMN: EcoRegion
   BOUNDARY: USMaritimeLimitsNBoundaries_cz_1_100km
   OUTPUT_BUCKET: ocs-dev-csdl-hydrohealth
 REPORTS:
