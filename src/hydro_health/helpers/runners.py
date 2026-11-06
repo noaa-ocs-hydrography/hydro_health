@@ -171,8 +171,8 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
 def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the distance to shore raster creator"""
 
-    engine = DistanceToShoreEngine(param_lookup, data_type='BlueTopo')
-    engine.run(output_prefix)
+    # engine = DistanceToShoreEngine(param_lookup, data_type='BlueTopo')
+    # engine.run(output_prefix)
 
     engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
     engine.run(output_prefix)

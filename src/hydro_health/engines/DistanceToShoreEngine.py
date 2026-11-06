@@ -95,7 +95,14 @@ def _process_tile(param_inputs: list) -> dict:
         gc.collect()
 
         if param_lookup['env'] == 'aws':
-            output_subfolder = parent_folder if data_type == 'BlueTopo' else f'{parent_folder}/distance_to_shore'
+            if data_type == 'BlueTopo':
+                output_subfolder = parent_folder
+            else:
+                parent_dir = geotiff_path.parent
+                provider_folder_index = parent_dir.parts.index(data_type) + 1
+                provider_folder_subpath = pathlib.PurePosixPath(*parent_dir.parts[provider_folder_index:])
+                output_subfolder = str(provider_folder_subpath / "distance_to_shore")
+
             engine.upload_file_to_s3(distance_raster_path, ecoregion, output_subfolder, output_prefix)
             shutil.rmtree(tile_dir, ignore_errors=True)
 
@@ -456,4 +463,4 @@ if __name__ == "__main__":
         'eco_regions': Param(['ER_3'])
     }
     engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
-    engine.run(ecoregion="*")
+    engine.run()
