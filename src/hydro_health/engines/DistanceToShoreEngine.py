@@ -321,7 +321,7 @@ class DistanceToShoreEngine(Engine):
         """Set up target folder for local output or AWS intermediate file creation"""
 
         starting_path = f'{output_prefix}/{ecoregion}' if output_prefix else ecoregion
-        subfolder = get_config_item(self.data_type.upper(), 'SUBFOLDER') 
+        subfolder = get_config_item(self.data_type.upper(), 'SUBFOLDER')
 
         if self.param_lookup['env'] == 'aws':
             geotiff_paths = self.get_s3_geotiff_files(ecoregion)
@@ -373,7 +373,7 @@ class DistanceToShoreEngine(Engine):
                     'decay'])
             ]
         else:
-            geotiffs = raw_paths
+            geotiffs = [raw_path for raw_path in raw_paths if 'original' not in str(raw_path)]
 
         vsi_geotiff_paths = [
             f"/vsis3/{p}" for p in geotiffs 
@@ -455,5 +455,5 @@ if __name__ == "__main__":
         'output_directory': Param(OUTPUTS),
         'eco_regions': Param(['ER_3'])
     }
-    engine = DistanceToShoreEngine(param_lookup)
+    engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
     engine.run(ecoregion="*")

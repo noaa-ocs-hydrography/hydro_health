@@ -62,7 +62,11 @@ def discover_unique_crss_concurrent(
     data_type: str,
     max_workers: int = 32
 ) -> set[rasterio.crs.CRS]:
-    """Discover GeoTIFFs on S3 and read their CRSs concurrently using a thread pool."""
+    """
+    Discover GeoTIFFs on S3 and read their CRSs.
+    - BlueTopo: Scans headers across all tiles concurrently.
+    - DigitalCoast: Reads only the first tile's header since all tiles share the same CRS.
+    """
     subfolder = get_config_item(data_type.upper(), 'SUBFOLDER')
     
     if data_type == 'BlueTopo':
@@ -73,28 +77,37 @@ def discover_unique_crss_concurrent(
             if p.lower().endswith(('.tif', '.tiff', '.vrt'))
             and not any(pat in p.lower() for pat in ['_unc', '_slope', '_iss', '_survey_end_date', 'decay'])
         ]
+
+        if not geotiffs:
+            print(f"  - No {data_type} tiles found at s3://{s3_search_pattern}")
+            return set()
+
+        vsi_paths = [f"/vsis3/{p}" for p in geotiffs]
+        print(f"  - Scanning headers of {len(vsi_paths)} {data_type} tiles (concurrency={max_workers})...")
+
+        unique_crss = set()
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_path = {executor.submit(_inspect_single_crs, path): path for path in vsi_paths}
+            for future in as_completed(future_to_path):
+                crs = future.result()
+                if crs:
+                    unique_crss.add(crs)
+
+        return unique_crss
+
     else:  # DigitalCoast
-        # Matches arbitrary provider/subfolder depths for GeoTIFFs
         s3_search_pattern = f"{bucket}/{ecoregion}/{subfolder}/DigitalCoast/**/*.tif"
         raw_paths = s3.glob(s3_search_pattern)
-        geotiffs = [p for p in raw_paths if p.lower().endswith(('.tif', '.tiff'))]
+        first_tile = next((p for p in raw_paths if p.lower().endswith(('.tif', '.tiff'))), None)
 
-    if not geotiffs:
-        print(f"  - No {data_type} tiles found at s3://{s3_search_pattern}")
-        return set()
+        if not first_tile:
+            print(f"  - No {data_type} tiles found at s3://{s3_search_pattern}")
+            return set()
 
-    vsi_paths = [f"/vsis3/{p}" for p in geotiffs]
-    print(f"  - Scanning headers of {len(vsi_paths)} {data_type} tiles (concurrency={max_workers})...")
-
-    unique_crss = set()
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_path = {executor.submit(_inspect_single_crs, path): path for path in vsi_paths}
-        for future in as_completed(future_to_path):
-            crs = future.result()
-            if crs:
-                unique_crss.add(crs)
-
-    return unique_crss
+        print(f"  - Reading CRS from first {data_type} tile: s3://{first_tile}")
+        crs = _inspect_single_crs(f"/vsis3/{first_tile}")
+        
+        return {crs} if crs else set()
 
 
 def upload_file_to_s3(output_file_path: pathlib.Path, ecoregion: str, output_prefix: str = "") -> None:
@@ -112,12 +125,12 @@ def upload_file_to_s3(output_file_path: pathlib.Path, ecoregion: str, output_pre
 def precompute_shoreline_vertices(
     master_gpkg: pathlib.Path,
     ecoregions: list[str],
-    data_types: list[str] = ['BlueTopo', 'DigitalCoast'],
+    data_types: list[str] = ['DigitalCoast'],
     boundary_clip_buffer_m: float = 100.0,
     output_prefix: str = ""
 ) -> None:
     """
-    Scans tiles across multiple datasets on S3, determines required projection zones,
+    Scans tiles across specified datasets on S3, determines required projection zones,
     and extracts local shoreline vertex arrays per Ecoregion and CRS.
     """
     out_dir = INPUTS / 'precomputed_shorelines'
@@ -136,7 +149,7 @@ def precompute_shoreline_vertices(
         print(f"Processing Ecoregion: {ecoregion}")
         print(f"==========================================")
 
-        # 1. Discover all unique CRSs needed across both BlueTopo and DigitalCoast
+        # 1. Discover unique CRSs needed for the chosen data types
         all_unique_crss = set()
         for dtype in data_types:
             dtype_crss = discover_unique_crss_concurrent(s3, bucket, ecoregion, dtype)
@@ -149,7 +162,29 @@ def precompute_shoreline_vertices(
 
         print(f"\nTotal combined unique CRSs to compute for {ecoregion}: {len(all_unique_crss)}")
 
-        # 2. Extract bounding box and master shoreline for this ecoregion
+        # 2. Check local & S3 caches first before loading heavy master GPKG layers
+        ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
+        crss_to_process = []
+        for crs in all_unique_crss:
+            safe_crs_name = get_safe_crs_name(crs)
+            npy_filename = f"{ecoregion}_shoreline_{safe_crs_name}.npy"
+            npy_path = out_dir / npy_filename
+            s3_dest_path = f"{bucket}/{ecoregion_path}/support_data/{npy_filename}"
+
+            if npy_path.exists():
+                print(f" - [Cached Local] {npy_filename} already exists. Skipping.")
+                continue
+            if s3.exists(s3_dest_path):
+                print(f" - [Cached S3] s3://{s3_dest_path} already exists. Skipping.")
+                continue
+
+            crss_to_process.append((crs, safe_crs_name, npy_path, npy_filename))
+
+        if not crss_to_process:
+            print(f"All arrays for {ecoregion} already generated and cached.")
+            continue
+
+        # 3. Extract bounding box and master shoreline for this ecoregion
         ecoregion_gdf = enhanced_ecoregions[enhanced_ecoregions['EcoRegion'] == ecoregion]
         if ecoregion_gdf.empty:
             print(f"Ecoregion '{ecoregion}' not found in Enhanced_EcoRegions_50m layer. Skipping.")
@@ -167,23 +202,8 @@ def precompute_shoreline_vertices(
             print(f"No shoreline features found for {ecoregion}. Skipping.")
             continue
 
-        # 3. Project, clip, and store vertex arrays for each CRS
-        ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
-
-        for crs in all_unique_crss:
-            safe_crs_name = get_safe_crs_name(crs)
-            npy_filename = f"{ecoregion}_shoreline_{safe_crs_name}.npy"
-            npy_path = out_dir / npy_filename
-            s3_dest_path = f"{bucket}/{ecoregion_path}/support_data/{npy_filename}"
-
-            # Check both local and S3 cache
-            if npy_path.exists():
-                print(f" - [Cached Local] {npy_filename} already exists. Skipping.")
-                continue
-            if s3.exists(s3_dest_path):
-                print(f" - [Cached S3] s3://{s3_dest_path} already exists. Skipping.")
-                continue
-
+        # 4. Project, clip, and store vertex arrays
+        for crs, safe_crs_name, npy_path, npy_filename in crss_to_process:
             print(f" - Building vertex array for {safe_crs_name}...")
 
             local_eco_gdf = ecoregion_gdf.to_crs(crs) if ecoregion_gdf.crs != crs else ecoregion_gdf
@@ -214,15 +234,15 @@ if __name__ == "__main__":
     The gpkg is stored in S3 because it is too large for the repository. 
     Use the AWS CLI to copy it to the box temporarily to run this code.
     """
-
     start = time.time()
     master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
     ecoregions = ['ER_3']
+
+    # Runs single-file header lookup for DigitalCoast
     precompute_shoreline_vertices(
         master_gpkg, 
         ecoregions, 
-        # data_types=['BlueTopo', 'DigitalCoast']
-        data_types = ['DigitalCoast']
+        data_types=['BlueTopo', 'DigitalCoast'],
     )
     end = time.time()
-    print(f'Done - {(end - start)/60} minutes')
+    print(f'Done - {(end - start)/60:.2f} minutes')
