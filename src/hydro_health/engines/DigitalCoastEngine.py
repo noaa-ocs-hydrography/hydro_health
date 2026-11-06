@@ -368,7 +368,7 @@ class DigitalCoastEngine(Engine):
 
         providers = []
         for shp_path in tile_index_shapefiles:
-            shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
+            shp_df = gpd.read_file(shp_path).to_crs(5072)  # latest (NAD83 (NSRS2007) / Conus Albers)
             shp_df['area'] = shp_df['geometry'].area
             total_area = shp_df["area"].sum()
             if total_area < self.approved_size:
