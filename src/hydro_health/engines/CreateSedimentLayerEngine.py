@@ -9,6 +9,7 @@ import tempfile
 import sqlite3
 import pandas as pd
 import geopandas as gpd
+import numpy as np
 
 from scipy.spatial import Voronoi
 from shapely.geometry import Polygon
@@ -88,10 +89,10 @@ class CreateSedimentLayerEngine(Engine):
     def add_sed_size_column(self) -> None:
         """
         Adds column for the sediment size in mm
-        Renames Grainsze column to Size_phi to clarify size is in phi units
+        Renames Grainsze column to Size_phi to clarify size is in phi units, therfore must have decimal values
         """
 
-        self.sediment_data['sed_size'] = 2 ** -(self.sediment_data['Grainsze'])
+        self.sediment_data['sed_size'] = 2.0 ** -(self.sediment_data['Grainsze'])
         self.sediment_data = self.sediment_data.rename(columns={'Grainsze': 'Size_phi'})
 
     def add_sediment_mapping_column(self) -> None:

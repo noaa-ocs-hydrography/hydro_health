@@ -6,13 +6,13 @@ import shutil
 import s3fs
 import numpy as np
 import rasterio
-
 from pathlib import Path
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from shapely.geometry import box
 from dask.distributed import Client
 from upath import UPath
+from rasterio.warp import transform_bounds
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
@@ -34,41 +34,76 @@ def _check_intersection(src_pred: rasterio.DatasetReader, mask_bounds: tuple, ra
 
 
 def _prepare_metadata(src_pred: rasterio.DatasetReader) -> tuple:
-    """Prepare the metadata for the output raster."""
-    src_nodata = src_pred.nodata if src_pred.nodata is not None else np.nan
+    """Prepare output metadata, using a float dtype when nodata is NaN."""
+    src_nodata = (
+        src_pred.nodata if src_pred.nodata is not None else np.nan
+    )
     meta = src_pred.meta.copy()
-    
-    is_src_nodata_nan = isinstance(src_nodata, (float, np.floating)) and np.isnan(src_nodata)
+
+    is_src_nodata_nan = (
+        isinstance(src_nodata, (float, np.floating))
+        and np.isnan(src_nodata)
+    )
+
     meta.update({
-        'nodata': np.nan if is_src_nodata_nan else src_nodata,
-        'compress': 'lzw',
-        'tiled': True
+        "nodata": np.nan if is_src_nodata_nan else src_nodata,
+        "compress": "lzw",
+        "tiled": True,
     })
+
+    # Integer rasters cannot store NaN nodata.
+    # Promote the output dtype before creating the output raster.
+    if is_src_nodata_nan and not np.issubdtype(
+        np.dtype(meta["dtype"]), np.floating
+    ):
+        meta["dtype"] = "float32"
+
+    # Always return metadata, including when no dtype change was needed.
     return meta, src_nodata
 
 
-def _pre_check_valid_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, meta: dict) -> bool:
-    """Fast pre-check to avoid expensive LZW writing if there's no valid data."""
+def _pre_check_valid_data(
+    src_pred: rasterio.DatasetReader,
+    vrt_mask: WarpedVRT,
+    meta: dict,
+) -> bool:
+    """Return whether any focus-area pixel contains valid prediction data."""
     nodata_val = meta['nodata']
-    is_nan_nodata = isinstance(nodata_val, (float, np.floating)) and np.isnan(nodata_val)
+    is_nan_nodata = (
+        isinstance(nodata_val, (float, np.floating))
+        and np.isnan(nodata_val)
+    )
 
-    for ji, window in src_pred.block_windows(1):
+    for _, window in src_pred.block_windows(1):
         mask_arr = vrt_mask.read(1, window=window)
-        
-        # ONLY read prediction array if the mask indicates training valid areas (== 2) here
-        if np.any(mask_arr == 2):
-            pred_arr = src_pred.read(1, window=window)
-            
-            # Extract only the prediction pixels where the mask is 2
-            valid_pred_pixels = pred_arr[mask_arr == 2]
-            
-            if is_nan_nodata:
-                if np.any(~np.isnan(valid_pred_pixels)):
-                    return True
-            else:
-                if np.any(valid_pred_pixels != nodata_val):
-                    return True
+
+        # Mask classes: 0 = nodata, 1 = excluded, 2 = focus area.
+        focus_pixels = mask_arr == 2
+
+        # Avoid reading prediction data for blocks outside the focus area.
+        if not np.any(focus_pixels):
+            continue
+
+        pred_arr = src_pred.read(1, window=window)
+
+        # Check prediction values only where the mask equals 2.
+        focus_pred_values = pred_arr[focus_pixels]
+
+        # NaN prediction values are always missing, even when the raster's
+        # declared nodata value is a numeric sentinel such as -9999.
+        valid = ~np.isnan(focus_pred_values)
+
+        # Also exclude the declared numeric nodata value, when present.
+        if nodata_val is not None and not is_nan_nodata:
+            valid &= focus_pred_values != nodata_val
+
+        # One valid prediction pixel is enough to justify writing this raster.
+        if np.any(valid):
+            return True
+
+    # Every block was checked without finding valid data in the focus area.
     return False
+
 
 
 def _write_masked_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, tmp_dst_path: str, meta: dict) -> None:
@@ -90,25 +125,47 @@ def _write_masked_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, tm
 
 
 def _process_training_raster(params: list) -> None:
-    """Process a training raster by extracting array blocks and masking them mathematically.
-    Executed at the module level to avoid pickling class instances via Dask."""
+    """Extract training pixels using a mask aligned to the prediction grid.
 
-    raster_path, mask_bounds, output_path_str, global_mask_path, current_index, total_count, is_aws, local_tmp_dir_str = params
-    
+    Executed at module level to avoid pickling class instances via Dask.
+    Mask values: 0 = nodata, 1 = excluded, 2 = focus area.
+    """
+    (
+        raster_path,
+        mask_bounds,
+        output_path_str,
+        global_mask_path,
+        current_index,
+        total_count,
+        is_aws,
+        local_tmp_dir_str,
+    ) = params
+
     raster_name = pathlib.Path(raster_path).name.lower()
     open_path = str(raster_path)
     output_path = UPath(output_path_str)
 
-    progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
+    progress_str = (
+        f" [{current_index}/{total_count}]"
+        if current_index and total_count
+        else ""
+    )
 
     if output_path.exists():
-        Engine.write_message_dask(f" - [SKIP]{progress_str} File already exists: {raster_name}", str(OUTPUTS))
+        Engine.write_message_dask(
+            f" - [SKIP]{progress_str} File already exists: {raster_name}",
+            str(OUTPUTS),
+        )
         return
 
     if is_aws:
-        open_path = open_path.replace('s3://', '/vsis3/')
+        open_path = open_path.replace("s3://", "/vsis3/")
 
-    Engine.write_message_dask(f"-> [STARTING]{progress_str} Worker executing training array mask on: {raster_name}", str(OUTPUTS))
+    Engine.write_message_dask(
+        f"-> [STARTING]{progress_str} Worker executing training array mask "
+        f"on: {raster_name}",
+        str(OUTPUTS),
+    )
 
     tmp_dst_path = str(output_path)
     local_tmp_dir = pathlib.Path(local_tmp_dir_str)
@@ -117,20 +174,86 @@ def _process_training_raster(params: list) -> None:
         with tempfile.TemporaryDirectory(dir=local_tmp_dir) as task_tmp_dir:
             try:
                 with rasterio.open(open_path) as src_pred:
-                    if not _check_intersection(src_pred, mask_bounds, raster_name, progress_str):
-                        return
-
                     meta, _ = _prepare_metadata(src_pred)
 
+                    # NaN output nodata requires a floating-point output dtype.
+                    # This is harmless if _prepare_metadata already handles it.
+                    nodata_val = meta["nodata"]
+                    is_nan_nodata = (
+                        isinstance(nodata_val, (float, np.floating))
+                        and np.isnan(nodata_val)
+                    )
+
+                    if is_nan_nodata and not np.issubdtype(
+                        np.dtype(meta["dtype"]), np.floating
+                    ):
+                        meta["dtype"] = "float32"
+
                     if is_aws:
-                        tmp_dst_path = str(Path(task_tmp_dir) / "train_mask_tmp.tif")
+                        tmp_dst_path = str(
+                            Path(task_tmp_dir) / "train_mask_tmp.tif"
+                        )
 
                     open_mask_path = str(global_mask_path)
                     if is_aws:
-                        open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
+                        open_mask_path = open_mask_path.replace(
+                            "s3://", "/vsis3/"
+                        )
 
                     with rasterio.open(open_mask_path) as src_mask:
-                        mask_nodata = src_mask.nodata if src_mask.nodata is not None else 255
+                        # Both datasets need a defined CRS.
+                        if src_pred.crs is None:
+                            raise ValueError(
+                                f"Prediction raster has no CRS: {raster_path}"
+                            )
+
+                        if src_mask.crs is None:
+                            raise ValueError(
+                                f"Training mask has no CRS: {global_mask_path}"
+                            )
+
+                        # These bounds arrive in the training mask's CRS.
+                        mask_bounds_for_source = tuple(mask_bounds)
+
+                        # Compare bounds only after expressing them in the
+                        # prediction raster's CRS.
+                        if src_mask.crs != src_pred.crs:
+                            mask_bounds_for_source = transform_bounds(
+                                src_mask.crs,
+                                src_pred.crs,
+                                *mask_bounds_for_source,
+                                densify_pts=21,
+                            )
+
+                        left, bottom, right, top = mask_bounds_for_source
+
+                        if (
+                            not np.all(np.isfinite(mask_bounds_for_source))
+                            or right <= left
+                            or top <= bottom
+                        ):
+                            raise ValueError(
+                                "Invalid training mask bounds in prediction "
+                                f"CRS: {mask_bounds_for_source}"
+                            )
+
+                        if not _check_intersection(
+                            src_pred,
+                            mask_bounds_for_source,
+                            raster_name,
+                            progress_str,
+                        ):
+                            return
+
+                        # Use the mask's declared nodata value, including 0.
+                        mask_nodata = (
+                            src_mask.nodata
+                            if src_mask.nodata is not None
+                            else 255
+                        )
+
+                        # Align the categorical mask to the prediction grid.
+                        # Nearest-neighbor resampling preserves mask classes.
                         with WarpedVRT(
                             src_mask,
                             crs=src_pred.crs,
@@ -141,31 +264,58 @@ def _process_training_raster(params: list) -> None:
                             src_nodata=mask_nodata,
                             nodata=mask_nodata,
                         ) as vrt_mask:
-                            
-                            if not _pre_check_valid_data(src_pred, vrt_mask, meta):
-                                Engine.write_message_dask(f" - [SKIP]{progress_str} No valid data within mask for {raster_name}. Skipping disk write.", str(OUTPUTS))
+                            # The pre-check considers only mask class 2.
+                            if not _pre_check_valid_data(
+                                src_pred, vrt_mask, meta
+                            ):
+                                Engine.write_message_dask(
+                                    f" - [SKIP]{progress_str} No valid data "
+                                    f"within mask for {raster_name}. "
+                                    "Skipping disk write.",
+                                    str(OUTPUTS),
+                                )
                                 return
 
-                            _write_masked_data(src_pred, vrt_mask, tmp_dst_path, meta)
+                            _write_masked_data(
+                                src_pred,
+                                vrt_mask,
+                                tmp_dst_path,
+                                meta,
+                            )
 
                     if is_aws:
                         fs = s3fs.S3FileSystem()
                         fs.put(tmp_dst_path, str(output_path))
 
-                Engine.write_message_dask(f" - [SUCCESS]{progress_str} Processed training raster via array masking: {raster_name}", str(OUTPUTS))
+                Engine.write_message_dask(
+                    f" - [SUCCESS]{progress_str} Processed training raster "
+                    f"via array masking: {raster_name}",
+                    str(OUTPUTS),
+                )
 
             except Exception as e:
-                Engine.write_message_dask(f"Unexpected failure during array masking for {raster_name}: {e}", str(OUTPUTS))
+                Engine.write_message_dask(
+                    "Unexpected failure during array masking for "
+                    f"{raster_name}: {e}",
+                    str(OUTPUTS),
+                )
 
             finally:
-                if tmp_dst_path != str(output_path) and Path(tmp_dst_path).exists():
+                if (
+                    tmp_dst_path != str(output_path)
+                    and Path(tmp_dst_path).exists()
+                ):
                     try:
                         os.remove(tmp_dst_path)
                     except Exception as e:
-                        Engine.write_message_dask(f"Failed to explicitly delete temp file {tmp_dst_path}: {e}", str(OUTPUTS))
+                        Engine.write_message_dask(
+                            "Failed to explicitly delete temp file "
+                            f"{tmp_dst_path}: {e}",
+                            str(OUTPUTS),
+                        )
+
     finally:
         gc.collect()
-
 
 class TrainingRastersEngine(Engine):
     """Class for parallel processing training rasters and applying mathematical masks"""

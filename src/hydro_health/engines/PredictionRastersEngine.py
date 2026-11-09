@@ -107,14 +107,9 @@ def _apply_tsm_smoothing(gdal_dst_str: str, src_str: str, warp_opts: dict) -> No
                         col_offset = int(x - read_xoff)
                         core_array = final_array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
                         
-                        original_core = array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
-                        
-                        if pd.isna(nodata):
-                            out_of_bounds_mask = np.isnan(original_core)
-                        else:
-                            out_of_bounds_mask = (original_core == nodata)
-                        
-                        core_array[out_of_bounds_mask] = nodata
+        # Allow smoothing to fill originally missing cells where valid neighbors exist.
+         # The weighted average excludes nodata values. Cells with no valid neighbors
+        # retain nodata through the weights > 0 condition above.
                         dst.write(core_array.astype(kwargs['dtype']), 1, window=window)
 
     if os.path.exists(gdal_dst_str):

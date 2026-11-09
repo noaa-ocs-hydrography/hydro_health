@@ -871,16 +871,48 @@ def _sample_ungridded_raster(
     bathy_pair_mask: np.ndarray | None,
 ) -> np.ndarray | None:
     """Sample a static raster at tile points, honoring the bathymetry mask."""
+
+    # Express the tile bounds in the static raster's CRS.
     raster_bounds = _bounds_in_crs(tile_extent, subgrid_crs, src.crs)
-    window = _clipped_window(src, raster_bounds)
-    if window is None:
+
+    if disjoint_bounds(raster_bounds, src.bounds):
         return None
 
+    # Round the window edges outward so all intersecting pixels are read.
+    # Rounding offsets and lengths separately can omit an in-bounds pixel.
+    requested = src.window(*raster_bounds)
+
+    col_start = max(0, int(np.floor(requested.col_off)))
+    row_start = max(0, int(np.floor(requested.row_off)))
+
+    col_stop = min(
+        src.width,
+        int(np.ceil(requested.col_off + requested.width)),
+    )
+    row_stop = min(
+        src.height,
+        int(np.ceil(requested.row_off + requested.height)),
+    )
+
+    # Reject empty windows after clipping to the raster dimensions.
+    if col_stop <= col_start or row_stop <= row_start:
+        return None
+
+    window = Window(
+        col_start,
+        row_start,
+        col_stop - col_start,
+        row_stop - row_start,
+    )
+
+    # Express the sampling points in the static raster's CRS.
     sample_xs = xs
     sample_ys = ys
+
     if point_crs is not None and src.crs is not None:
         source = CRS.from_user_input(point_crs)
         destination = CRS.from_user_input(src.crs)
+
         if source != destination:
             tx, ty = transform(source, destination, xs, ys)
             sample_xs = np.asarray(tx)
@@ -888,8 +920,12 @@ def _sample_ungridded_raster(
 
     win_data = src.read(1, window=window)
     win_transform = src.window_transform(window)
+
+    # Locate each sampling point within the loaded raster window.
     win_rows, win_cols = rasterio.transform.rowcol(
-        win_transform, sample_xs, sample_ys
+        win_transform,
+        sample_xs,
+        sample_ys,
     )
     win_rows = np.asarray(win_rows)
     win_cols = np.asarray(win_cols)
@@ -900,17 +936,24 @@ def _sample_ungridded_raster(
         & (win_cols >= 0)
         & (win_cols < win_data.shape[1])
     )
+
+    # For paired training variables, require both bathymetry years.
     if bathy_pair_mask is not None:
         in_window &= bathy_pair_mask
+
+    # Uncovered or excluded points remain missing.
     vals = np.full(len(xs), np.nan, dtype=np.float32)
 
     if in_window.any():
         extracted = win_data[
-            win_rows[in_window], win_cols[in_window]
+            win_rows[in_window],
+            win_cols[in_window],
         ]
+
         extracted_valid = _valid_mask(extracted, src.nodata)
         extracted = extracted.astype(np.float32, copy=False)
         extracted[~extracted_valid] = np.nan
+
         vals[in_window] = extracted
 
     return vals
@@ -933,10 +976,10 @@ def _subtile_process_ungridded(
         return pd.DataFrame()
 
     combined_df = gridded_df
-    xs = combined_df['X'].to_numpy(copy=False)
-    ys = combined_df['Y'].to_numpy(copy=False)
+    xs = combined_df["X"].to_numpy(copy=False)
+    ys = combined_df["Y"].to_numpy(copy=False)
     tile_extent = sub_grid.geometry.bounds
-    original_tile = str(sub_grid.get('original_tile', ''))
+    original_tile = str(sub_grid.get("original_tile", ""))
     allowed_training_year_pairs = set(training_year_pairs or [])
 
     candidate_files = []
@@ -951,35 +994,54 @@ def _subtile_process_ungridded(
     for file in candidate_files:
         col_name = _standardize_col_name(Path(file).stem, original_tile)
         bathy_pair_mask = None
+
+        # Training hurricane/TSM values require a configured bathymetry pair.
         if data_type == "training" and (
             col_name.startswith("hurr_") or col_name.startswith("tsm_")
         ):
             year_pair = _extract_year_pair(col_name)
-            if year_pair is None or year_pair not in allowed_training_year_pairs:
+
+            if (
+                year_pair is None
+                or year_pair not in allowed_training_year_pairs
+            ):
                 continue
 
+            # Sample only where both bathymetry years have data.
             bathy_pair_mask = (
                 combined_df[f"bathy_{year_pair[0]}_filled"].notna().to_numpy()
                 & combined_df[f"bathy_{year_pair[1]}_filled"].notna().to_numpy()
             )
+
             if not bathy_pair_mask.any():
                 continue
 
         try:
             with rasterio.open(_to_rasterio_path(file, is_aws)) as src:
                 vals = _sample_ungridded_raster(
-                    src, tile_extent, subgrid_crs, point_crs, xs, ys,
+                    src,
+                    tile_extent,
+                    subgrid_crs,
+                    point_crs,
+                    xs,
+                    ys,
                     bathy_pair_mask,
                 )
+
                 if vals is None:
                     continue
 
                 if col_name in combined_df:
                     existing = combined_df[col_name].to_numpy(copy=False)
+
+                    # Fill gaps only; preserve existing valid values.
                     fill_mask = pd.isna(existing) & ~np.isnan(vals)
+
                     if fill_mask.any():
-                        existing[fill_mask] = vals[fill_mask]
+                        # Assign through pandas to support Copy-on-Write.
+                        combined_df.loc[fill_mask, col_name] = vals[fill_mask]
                 else:
+                    # First raster supplying this variable creates the column.
                     combined_df[col_name] = vals
 
         except Exception as e:
