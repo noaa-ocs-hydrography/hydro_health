@@ -1,3 +1,4 @@
+import os
 import sys
 import pathlib
 import numpy as np
@@ -36,17 +37,15 @@ def _trim_memory() -> None:
 
 
 def _set_gdal_s3_options() -> None:
-    """Configure GDAL /vsis3/ driver options for cloud S3 access."""
+    """Configure GDAL /vsis3/ driver options for cloud S3 access via process environment variables."""
 
-    rasterio.env.Env(
-        AWS_NO_SIGN_REQUEST='NO',
-        AWS_EC2_METADATA_DISABLED='FALSE',
-        GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
-        VSI_CACHE='FALSE',
-        GDAL_HTTP_MERGE_CONSECUTIVE_RANGES='YES',
-        GDAL_HTTP_MULTIPLEX='YES',
-        GDAL_CACHEMAX='128',
-    )
+    os.environ['AWS_NO_SIGN_REQUEST'] = 'NO'
+    os.environ['AWS_EC2_METADATA_DISABLED'] = 'FALSE'
+    os.environ['GDAL_DISABLE_READDIR_ON_OPEN'] = 'EMPTY_DIR'
+    os.environ['VSI_CACHE'] = 'FALSE'
+    os.environ['GDAL_HTTP_MERGE_CONSECUTIVE_RANGES'] = 'YES'
+    os.environ['GDAL_HTTP_MULTIPLEX'] = 'YES'
+    os.environ['GDAL_CACHEMAX'] = '128'
 
 
 def _process_tile(param_inputs: list) -> dict:
@@ -54,11 +53,15 @@ def _process_tile(param_inputs: list) -> dict:
     Parallel worker function to process a single raster geotiff tile.
     Defined at the module level so Dask can safely pickle and distribute it.
     """
+
     (geotiff_string, data_type, ecoregion, ecoregion_gdf, 
      temp_path, param_lookup, output_prefix) = param_inputs
 
     _set_gdal_s3_options()
     engine = DistanceToShoreEngine(param_lookup, data_type)
+
+    water_mask = None
+    distance_raster_path = None
 
     try:
         geotiff_path = pathlib.Path(geotiff_string)
@@ -67,44 +70,54 @@ def _process_tile(param_inputs: list) -> dict:
 
         output_subfolder = engine.get_output_subfolder(geotiff_path)
 
-        # Build execution directory:
-        # - BlueTopo:     {temp_path}/{tile_id}/
-        # - DigitalCoast: {temp_path}/{survey}/dem/{tile_id}/distance_to_shore/
         tile_dir = temp_path / output_subfolder
         tile_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate ocean mask directly inside tile_dir
+        # Generate ocean mask directly inside shared tile_dir
         water_mask, valid_cells = engine.build_ocean_mask(geotiff_path, ecoregion_gdf, tile_dir)
 
+        # Skip if pure land / no valid water
         if valid_cells == 0:
-            shutil.rmtree(tile_dir, ignore_errors=True)
-            return {"status": "skipped", "file": str(geotiff_path), "stats": None}
+            pathlib.Path(water_mask).unlink(missing_ok=True)
+            return {"status": "skipped", "file": str(geotiff_path)}  #, "stats": None}
 
         print(f"  - Loading precomputed shoreline vertices for: {raster_stem}...")
         shoreline_vertices = engine.get_shoreline_vertices(geotiff_path, ecoregion)
 
         print(f"  - Calculating Vector-to-Point Distance to Shoreline for {raster_stem}...")
-        distance_raster_path, stats = engine.build_distance_from_shoreline(
+        distance_raster_path = engine.build_distance_from_shoreline(
             shoreline_vertices,
             water_mask,
             tile_dir,
             raster_stem
         )
-        print(f"  - Successfully generated distance raster: {stats}")
+        # print(f"  - Successfully generated distance raster: {stats}")
 
         del shoreline_vertices
         gc.collect()
+
+        # Clean up the intermediate water mask as soon as the distance raster is generated
         pathlib.Path(water_mask).unlink(missing_ok=True)
+        water_mask = None
 
         if param_lookup['env'] == 'aws':
             engine.upload_file_to_s3(distance_raster_path, ecoregion, str(output_subfolder), output_prefix)
-            shutil.rmtree(tile_dir, ignore_errors=True)
+            # Remove the local distance raster only after successful upload to S3
+            pathlib.Path(distance_raster_path).unlink(missing_ok=True)
+            distance_raster_path = None
 
-        return {"status": "success", "file": str(geotiff_path), "stats": stats}
+        return {"status": "success", "file": str(geotiff_path)}  #, "stats": stats}
 
     except Exception as e:
         error_trace = traceback.format_exc()
         print(f"Error processing {geotiff_path}:\n{error_trace}")
+
+        # Clean up leftover files on failure
+        if water_mask:
+            pathlib.Path(water_mask).unlink(missing_ok=True)
+        if param_lookup['env'] == 'aws' and distance_raster_path:
+            pathlib.Path(distance_raster_path).unlink(missing_ok=True)
+
         return {"status": "error", "file": str(geotiff_path), "error": error_trace}
     finally:
         gc.collect()
@@ -181,7 +194,7 @@ class DistanceToShoreEngine(Engine):
         water_mask: pathlib.Path,
         tile_folder: pathlib.Path,
         raster_filename: str
-    ) -> tuple:
+    ) -> pathlib.Path:
         """Calculates distance from every valid water cell to the nearest shoreline vertex using cKDTree."""
 
         with rasterio.open(str(water_mask)) as water_src:
@@ -240,18 +253,18 @@ class DistanceToShoreEngine(Engine):
         with rasterio.open(distance_raster_path, "w", **profile) as dst:
             dst.write(dist_in_meters, 1)
 
-        valid_distances = dist_in_meters[dist_in_meters != -9999.0]
-        stats = {
-            "min": float(np.min(valid_distances)) if valid_distances.size else None,
-            "mean": float(np.mean(valid_distances)) if valid_distances.size else None,
-            "max": float(np.max(valid_distances)) if valid_distances.size else None,
-        }
+        # valid_distances = dist_in_meters[dist_in_meters != -9999.0]
+        # stats = {
+        #     "min": float(np.min(valid_distances)) if valid_distances.size else None,
+        #     "mean": float(np.mean(valid_distances)) if valid_distances.size else None,
+        #     "max": float(np.max(valid_distances)) if valid_distances.size else None,
+        # }
 
-        del dist_in_meters, valid_distances
+        del dist_in_meters  #, valid_distances
         gc.collect()
         _trim_memory()
 
-        return distance_raster_path, stats
+        return distance_raster_path  #, stats
 
     def build_ocean_mask(
             self, 
@@ -388,17 +401,23 @@ class DistanceToShoreEngine(Engine):
         print(f"- Discovered {len(vsi_geotiff_paths)} S3 {self.data_type} file(s) matching: s3://{s3_search_pattern}")
         return vsi_geotiff_paths
 
-    def upload_file_to_s3(self, distance_raster_path: pathlib.Path, ecoregion: str, output_subfolder: str, output_prefix: str = "") -> None:
-        """Upload distance raster file to S3"""
+    def upload_file_to_s3(
+            self, 
+            distance_raster_path: pathlib.Path, 
+            ecoregion: str, 
+            output_subfolder: str, 
+            output_prefix: str = "") -> None:
+        """Upload distance raster file to S3 targeting the exact destination key."""
 
         s3 = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
         ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
-        s3_path = f"{bucket}/{ecoregion_path}/{get_config_item(self.data_type.upper(),'SUBFOLDER')}/{self.data_type}/{output_subfolder}"
+        subfolder_key = get_config_item(self.data_type.upper(), 'SUBFOLDER')
+        s3_key = f"{bucket}/{ecoregion_path}/{subfolder_key}/{self.data_type}/{output_subfolder}/{distance_raster_path.name}"
 
-        print(f"  - Uploading {output_subfolder} to s3://{s3_path}")
-        s3.put(str(distance_raster_path), s3_path, recursive=True)
+        print(f"  - Uploading {distance_raster_path.name} to s3://{s3_key}")
+        s3.put(str(distance_raster_path), s3_key)
 
     def run(self, output_prefix: str = '') -> None:
         """Main function for processing Distance-to-Shore across local or S3 environments using Dask."""
