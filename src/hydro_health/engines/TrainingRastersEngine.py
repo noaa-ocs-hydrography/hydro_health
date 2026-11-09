@@ -6,13 +6,14 @@ import shutil
 import s3fs
 import numpy as np
 import rasterio
-
+pre_check_valid_data()
 from pathlib import Path
 from rasterio.vrt import WarpedVRT
 from rasterio.enums import Resampling
 from shapely.geometry import box
 from dask.distributed import Client
 from upath import UPath
+from rasterio.warp import transform_bounds
 
 from hydro_health.helpers.tools import get_config_item
 from hydro_health.engines.Engine import Engine
@@ -62,13 +63,10 @@ def _pre_check_valid_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT,
             # Extract only the prediction pixels where the mask is 2
             valid_pred_pixels = pred_arr[mask_arr == 2]
             
-            if is_nan_nodata:
-                if np.any(~np.isnan(valid_pred_pixels)):
-                    return True
-            else:
-                if np.any(valid_pred_pixels != nodata_val):
-                    return True
-    return False
+          valid = ~np.isnan(valid_pred_pixels) & (valid_pred_pixels != nodata_val)
+        if np.any(valid):
+            return True
+
 
 
 def _write_masked_data(src_pred: rasterio.DatasetReader, vrt_mask: WarpedVRT, tmp_dst_path: str, meta: dict) -> None:
@@ -117,11 +115,11 @@ def _process_training_raster(params: list) -> None:
         with tempfile.TemporaryDirectory(dir=local_tmp_dir) as task_tmp_dir:
             try:
                 with rasterio.open(open_path) as src_pred:
-                    if not _check_intersection(src_pred, mask_bounds, raster_name, progress_str):
-                        return
 
                     meta, _ = _prepare_metadata(src_pred)
-
+                    if is_src_nodata_nan and not np.issubdtype(
+                     np.dtype(meta['dtype']), np.floating
+                     ): meta['dtype'] = 'float32'
                     if is_aws:
                         tmp_dst_path = str(Path(task_tmp_dir) / "train_mask_tmp.tif")
 
@@ -130,7 +128,53 @@ def _process_training_raster(params: list) -> None:
                         open_mask_path = open_mask_path.replace('s3://', '/vsis3/')
 
                     with rasterio.open(open_mask_path) as src_mask:
-                        mask_nodata = src_mask.nodata if src_mask.nodata is not None else 255
+    # Both datasets need a defined CRS for a meaningful comparison.
+    if src_pred.crs is None:
+        raise ValueError(
+            f"Prediction raster has no CRS: {raster_path}"
+        )
+
+    if src_mask.crs is None:
+        raise ValueError(
+            f"Training mask has no CRS: {global_mask_path}"
+        )
+
+    # prepare_mask_bounds() supplies bounds in the training mask's CRS.
+    mask_bounds_for_source = tuple(mask_bounds)
+
+    # Express those bounds in the prediction raster's CRS.
+    if src_mask.crs != src_pred.crs:
+        mask_bounds_for_source = transform_bounds(
+            src_mask.crs,
+            src_pred.crs,
+            *mask_bounds_for_source,
+            densify_pts=21,
+        )
+
+    # Reject unusable bounds rather than silently making a bad decision.
+    left, bottom, right, top = mask_bounds_for_source
+    if (
+        not np.all(np.isfinite(mask_bounds_for_source))
+        or right <= left
+        or top <= bottom
+    ):
+        raise ValueError(
+            "Invalid training mask bounds in prediction CRS: "
+            f"{mask_bounds_for_source}"
+        )
+
+    # Both bounding boxes now use the prediction raster's CRS.
+    if not _check_intersection(
+        src_pred,
+        mask_bounds_for_source,
+        raster_name,
+        progress_str,
+    ):
+        return
+
+    mask_nodata = (
+        src_mask.nodata if src_mask.nodata is not None else 255
+    )
                         with WarpedVRT(
                             src_mask,
                             crs=src_pred.crs,
