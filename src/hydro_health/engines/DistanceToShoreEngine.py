@@ -1,20 +1,24 @@
-import os
-import sys
-import pathlib
-import numpy as np
-import geopandas as gpd
-import rasterio
-import traceback
 import ctypes
+import gc
+import os
+import pathlib
+import re
+import shutil
+import sys
+import traceback
 
+from distributed import as_completed
+import geopandas as gpd
+import numpy as np
+import rasterio
 from rasterio.features import rasterize
 from scipy.spatial import cKDTree
 from shapely.geometry import box
 import s3fs
-import gc
-import shutil
-import re
-from distributed import as_completed
+
+# Force Linux glibc allocator to return freed heap pages to OS kernel
+os.environ['MALLOC_TRIM_THRESHOLD_'] = '65536'
+os.environ['MALLOC_MMAP_THRESHOLD_'] = '65536'
 
 HH_MODEL = pathlib.Path(__file__).parents[2]
 sys.path.append(str(HH_MODEL))
@@ -45,7 +49,7 @@ def _set_gdal_s3_options() -> None:
     os.environ['VSI_CACHE'] = 'FALSE'
     os.environ['GDAL_HTTP_MERGE_CONSECUTIVE_RANGES'] = 'YES'
     os.environ['GDAL_HTTP_MULTIPLEX'] = 'YES'
-    os.environ['GDAL_CACHEMAX'] = '128'
+    os.environ['GDAL_CACHEMAX'] = '64'
 
 
 def _process_tile(param_inputs: list) -> dict:
@@ -55,7 +59,7 @@ def _process_tile(param_inputs: list) -> dict:
     """
 
     (geotiff_string, data_type, ecoregion, ecoregion_gdf, 
-     temp_path, param_lookup, output_prefix) = param_inputs
+     temp_path, param_lookup, output_prefix, local_npy_path) = param_inputs
 
     _set_gdal_s3_options()
     engine = DistanceToShoreEngine(param_lookup, data_type)
@@ -78,11 +82,17 @@ def _process_tile(param_inputs: list) -> dict:
 
         # Skip if pure land / no valid water
         if valid_cells == 0:
-            pathlib.Path(water_mask).unlink(missing_ok=True)
+            if water_mask:
+                pathlib.Path(water_mask).unlink(missing_ok=True)
             return {"status": "skipped", "file": str(geotiff_path)}
 
-        print(f"  - Loading precomputed shoreline vertices for: {raster_stem}...")
-        shoreline_vertices = engine.get_shoreline_vertices(geotiff_path, ecoregion)
+        # Shoreline vertex loading: use memory-mapped static array for DigitalCoast, dynamic for BlueTopo
+        if local_npy_path and pathlib.Path(local_npy_path).exists():
+            print(f"  - Reading cached EPSG:32617 shoreline vertices for: {raster_stem}...")
+            shoreline_vertices = np.load(local_npy_path, mmap_mode='r')
+        else:
+            print(f"  - Loading precomputed shoreline vertices for: {raster_stem}...")
+            shoreline_vertices = engine.get_shoreline_vertices(geotiff_path, ecoregion)
 
         print(f"  - Calculating Vector-to-Point Distance to Shoreline for {raster_stem}...")
         distance_raster_path = engine.build_distance_from_shoreline(
@@ -151,6 +161,36 @@ class DistanceToShoreEngine(Engine):
             relative_parts = parent_dir.parts[idx:]
             return pathlib.PurePosixPath(*relative_parts) / "distance_to_shore"
 
+    def ensure_local_shoreline_npy(
+        self, 
+        ecoregion: str, 
+        crs_name: str, 
+        cache_dir: pathlib.Path
+    ) -> pathlib.Path:
+        """Downloads the standardized ecoregion .npy file once to scratch space for memory-mapping."""
+
+        npy_filename = f"{ecoregion}_shoreline_{crs_name}.npy"
+        local_target = cache_dir / npy_filename
+
+        if local_target.exists():
+            return local_target
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if self.param_lookup['env'] == 'aws':
+            s3 = s3fs.S3FileSystem()
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            s3_path = f"{bucket}/{ecoregion}/support_data/{npy_filename}"
+            print(f"  - Downloading shared shoreline reference once: s3://{s3_path} -> {local_target}")
+            s3.get(s3_path, str(local_target))
+        else:
+            npy_path = INPUTS / 'support_data' / npy_filename
+            if not npy_path.exists():
+                raise FileNotFoundError(f"Precomputed vertices not found: {npy_path}")
+            shutil.copyfile(npy_path, local_target)
+
+        return local_target
+
     def get_shoreline_vertices(
         self,
         raster_path: pathlib.Path,
@@ -173,19 +213,25 @@ class DistanceToShoreEngine(Engine):
         safe_crs_name = f"EPSG_{epsg_code}"
         npy_filename = f"{ecoregion}_shoreline_{safe_crs_name}.npy"
 
-        if self.param_lookup['env'] == 'aws':
-            s3 = s3fs.S3FileSystem()
-            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-            s3_path = f"{bucket}/{ecoregion}/support_data/{npy_filename}"
+        cache_dir = pathlib.Path.home() / 'local_tmp_dir' / 'support_cache'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cached_local_file = cache_dir / npy_filename
 
-            with s3.open(s3_path, 'rb') as f:
-                return np.load(f)
+        if self.param_lookup['env'] == 'aws':
+            if not cached_local_file.exists():
+                s3 = s3fs.S3FileSystem()
+                bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+                s3_path = f"{bucket}/{ecoregion}/support_data/{npy_filename}"
+                print(f"  - Fetching {npy_filename} from s3://{s3_path}...")
+                s3.get(s3_path, str(cached_local_file))
+
+            return np.load(str(cached_local_file), mmap_mode='r')
         else:
             npy_path = INPUTS / 'support_data' / npy_filename
             if not npy_path.exists():
                 raise FileNotFoundError(f"Precomputed vertices not found: {npy_path}")
 
-            return np.load(npy_path)
+            return np.load(str(npy_path), mmap_mode='r')
 
     def build_distance_from_shoreline(
         self,
@@ -204,7 +250,7 @@ class DistanceToShoreEngine(Engine):
 
         dist_in_meters = np.full(water_data.shape, -9999.0, dtype=np.float32)
 
-        if shoreline_vertices.size > 0:
+        if shoreline_vertices.shape[0] > 0:
             # Crop vertices to tile extent + 50km buffer to prevent memory bloat
             min_x, min_y, max_x, max_y = rasterio.transform.array_bounds(height, width, transform)
             search_buffer = 50_000
@@ -215,11 +261,21 @@ class DistanceToShoreEngine(Engine):
                 (shoreline_vertices[:, 1] <= max_y + search_buffer)
             )
             local_vertices = shoreline_vertices[in_bounds]
-            target_vertices = local_vertices if local_vertices.size > 0 else shoreline_vertices
+
+            # If offshore (>50km), decimate regional vertices to prevent allocating massive KDTrees
+            if local_vertices.shape[0] > 0:
+                target_vertices = np.ascontiguousarray(local_vertices, dtype=np.float32)
+            else:
+                step_sample = max(1, shoreline_vertices.shape[0] // 50_000)
+                target_vertices = np.ascontiguousarray(shoreline_vertices[::step_sample], dtype=np.float32)
 
             tree = cKDTree(target_vertices)
             num_rows, num_cols = water_data.shape
             step = 500
+
+            # Pre-extract affine parameters to vectorize coordinate math without object overhead
+            a, b, c = transform.a, transform.b, transform.c
+            d, e, f = transform.d, transform.e, transform.f
 
             for r_start in range(0, num_rows, step):
                 r_end = min(r_start + step, num_rows)
@@ -230,15 +286,19 @@ class DistanceToShoreEngine(Engine):
                     continue
 
                 actual_rows = sub_rows + r_start
-                xs, ys = rasterio.transform.xy(transform, actual_rows, sub_cols, offset='center')
-                water_points = np.column_stack((xs, ys)).astype(np.float32)
 
-                distances, _ = tree.query(water_points)
+                col_c = sub_cols.astype(np.float32) + 0.5
+                row_c = actual_rows.astype(np.float32) + 0.5
+                xs = c + a * col_c + b * row_c
+                ys = f + d * col_c + e * row_c
+
+                water_points = np.column_stack((xs, ys))
+                distances, _ = tree.query(water_points, workers=1)
                 dist_in_meters[actual_rows, sub_cols] = distances.astype(np.float32)
 
-                del sub_water, sub_rows, sub_cols, actual_rows, xs, ys, water_points, distances
+                del sub_water, sub_rows, sub_cols, actual_rows, col_c, row_c, xs, ys, water_points, distances
 
-            del tree
+            del tree, target_vertices, local_vertices
             gc.collect()
 
         del water_data
@@ -304,21 +364,32 @@ class DistanceToShoreEngine(Engine):
 
             del bathy_data
 
-            if current_ecoregion_gdf.crs != src_crs:
-                eco_proj = current_ecoregion_gdf.to_crs(src_crs)
-            else:
-                eco_proj = current_ecoregion_gdf
+            # Spatial clipping using tile bounding box
+            bounds = src.bounds
+            tile_poly = box(bounds.left, bounds.bottom, bounds.right, bounds.top)
 
-            boundary_mask = rasterize(
-                shapes=eco_proj.geometry,
-                out_shape=src.shape,
-                transform=src.transform,
-                fill=0,
-                default_value=1,
-                dtype=np.uint8,
-            )
-            water_mask[boundary_mask == 0] = 255
-            del boundary_mask
+            if current_ecoregion_gdf.crs != src_crs:
+                # BlueTopo dynamic branch: reproject bounding box to GDF CRS
+                tile_poly_gdf_crs = gpd.GeoSeries([tile_poly], crs=src_crs).to_crs(current_ecoregion_gdf.crs).iloc[0]
+                intersecting = current_ecoregion_gdf[current_ecoregion_gdf.intersects(tile_poly_gdf_crs)]
+                eco_proj = intersecting.to_crs(src_crs) if not intersecting.empty else gpd.GeoDataFrame(geometry=[], crs=src_crs)
+            else:
+                # DigitalCoast streamlined branch: matching EPSG:32617
+                eco_proj = current_ecoregion_gdf[current_ecoregion_gdf.intersects(tile_poly)]
+
+            if not eco_proj.empty:
+                boundary_mask = rasterize(
+                    shapes=eco_proj.geometry,
+                    out_shape=src.shape,
+                    transform=src.transform,
+                    fill=0,
+                    default_value=1,
+                    dtype=np.uint8,
+                )
+                water_mask[boundary_mask == 0] = 255
+                del boundary_mask
+            else:
+                water_mask[:] = 255
 
             profile.update(
                 driver="GTiff",
@@ -328,6 +399,7 @@ class DistanceToShoreEngine(Engine):
                 compress="deflate",
                 tiled=True,
             )
+
             self.write_message(f'- writing ocean mask raster to: {output_file}', str(OUTPUTS))
             with rasterio.open(output_file, "w", **profile) as dst:
                 dst.write(water_mask, 1)
@@ -386,8 +458,8 @@ class DistanceToShoreEngine(Engine):
         print(f" - Found {skipped_count} already completed tile(s). {len(unprocessed)} remaining to process.")
         return unprocessed
 
-    def get_temp_path_and_geotiff_paths(self, output_prefix: str, ecoregion: str) -> tuple:    
-        """Set up target folder for local output or AWS intermediate file creation"""
+    def get_temp_path_and_geotiff_paths(self, output_prefix: str, ecoregion: str) -> tuple:
+        """Set up target folder for local output or AWS intermediate file creation."""
 
         starting_path = f'{output_prefix}/{ecoregion}' if output_prefix else ecoregion
         subfolder = get_config_item(self.data_type.upper(), 'SUBFOLDER')
@@ -402,7 +474,7 @@ class DistanceToShoreEngine(Engine):
         return temp_path, geotiff_paths
 
     def get_local_geotiff_files(self, ecoregion: str, output_prefix: str = "") -> list[pathlib.Path]:
-        """Search for local data type geotiffs"""
+        """Search for local data type geotiffs."""
 
         if output_prefix:
             data_type_folder = OUTPUTS / output_prefix / ecoregion / get_config_item(
@@ -419,7 +491,7 @@ class DistanceToShoreEngine(Engine):
         return raster_files
 
     def get_s3_geotiff_files(self, ecoregion: str = "*") -> list[str]:
-        """Search for all geotiffs for current data type and ecoregion"""
+        """Search for all geotiffs for current data type and ecoregion."""
 
         _set_gdal_s3_options()
         s3_files = s3fs.S3FileSystem()
@@ -492,6 +564,20 @@ class DistanceToShoreEngine(Engine):
             enhanced_ecoregions = gpd.read_file(str(master_gpkg), layer='Enhanced_EcoRegions_50m')
             ecoregion_gdf = enhanced_ecoregions[enhanced_ecoregions['EcoRegion'] == ecoregion]
 
+            # Route by data_type: Pre-cache EPSG:32617 for DigitalCoast; keep dynamic routing for BlueTopo
+            if self.data_type == 'DigitalCoast':
+                scratch_cache = pathlib.Path.home() / 'local_tmp_dir' / 'support_cache'
+                local_npy_path = str(self.ensure_local_shoreline_npy(
+                    ecoregion=ecoregion,
+                    crs_name="EPSG_32617",
+                    cache_dir=scratch_cache
+                ))
+                if ecoregion_gdf.crs != "EPSG:32617":
+                    print(f" - Pre-reprojecting {ecoregion} ecoregion boundary to EPSG:32617...")
+                    ecoregion_gdf = ecoregion_gdf.to_crs("EPSG:32617")
+            else:
+                local_npy_path = None
+
             param_inputs = []
             for geotiff_path in geotiff_paths:
                 param_inputs.append([
@@ -501,7 +587,8 @@ class DistanceToShoreEngine(Engine):
                     ecoregion_gdf,
                     str(temp_path),
                     self.param_lookup,
-                    output_prefix
+                    output_prefix,
+                    local_npy_path
                 ])
 
             print(f" - Submitting {len(param_inputs)} tiles to Dask cluster...")
