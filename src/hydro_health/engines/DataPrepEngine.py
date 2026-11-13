@@ -1,6 +1,6 @@
 """Prepare all training and prediction tile/year pairs independently.
 
-Prediction export is skipped when any expected predictor is at least 20%
+Prediction export is skipped when any expected predictor is at least 70%
 missing (prediction_max_missing_fraction). Skipped roles produce no cleaned
 or auxiliary files; stale outputs are removed. Training with too few eligible
 rows is also skipped. Each cleaned parquet is written before its auxiliaries.
@@ -40,8 +40,8 @@ DYNAMIC_BASES = ('hurr_strength_mean', 'tsm_mean')
 NON_PREDICTORS = {
     'X', 'Y', 'FID', 'tile_id', 'source', 'dataset_role',
     'year_t', 'year_t1', 'year_t1', 'interval_years', 'pair_id',
-    'bathy_t1', 'bathy_t1', 'delta_bathy', 'delta_rate', 'survey_end_date',
-    'geometry', 'prediction_row_usable', 'sample_weight',
+    'bathy_t1', 'bathy_t1', 'delta_bathy', 'delta_rate', 'distance_from_shore', 'survey_end_date',
+    'geometry', 'prediction_row_usable', 'sample_weight', 
 }
 
 def _pair_duration_years(pair: str) -> float:
@@ -457,7 +457,7 @@ class DataPrepEngine(Engine):
             'max_weight': 2.0, 'minimum_training_rows': 100, 'verbose_logging': True,
             'write_unusable_prediction': True,
             'missingness_warning_fraction': 0.20, 'worker_temp_dir': None,
-            'prediction_max_missing_fraction': 0.20,
+            'prediction_max_missing_fraction': 0.70,
             'n_workers': 16, 'threads_per_worker': 2, 'memory_limit': '6GB',
             'raise_on_failure': True,
         }

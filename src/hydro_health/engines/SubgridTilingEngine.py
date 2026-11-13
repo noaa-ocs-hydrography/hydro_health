@@ -28,6 +28,7 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs' 
 
 TERRAIN_PRODUCT_ALIASES = {
+    "distance_to_shore": "distance_to_shore",
     "bathy": "bathy",
     "bpi_broad": "bpi_broad",
     "broad_bpi": "bpi_broad",
@@ -75,6 +76,7 @@ PREDICTION_BT_VARIABLES = [
     "tci",
     "terrain_classification",
     "uc",
+    "distance_to_shore",
 ]
 
 TRAINING_TERRAIN_VARIABLES = [
@@ -92,6 +94,7 @@ TRAINING_TERRAIN_VARIABLES = [
     "slope_deg",
     "tci",
     "terrain_classification",
+    "distance_to_shore",
 ]
 
 
