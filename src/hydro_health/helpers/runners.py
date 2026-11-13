@@ -174,7 +174,10 @@ def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bo
     # engine = DistanceToShoreEngine(param_lookup, data_type='BlueTopo')
     # engine.run(output_prefix)
 
-    engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
+    # engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
+    # engine.run(output_prefix)
+
+    engine = DistanceToShoreEngine(param_lookup, data_type='Digital_Coast_Manual_Downloads')
     engine.run(output_prefix)
 
 

@@ -43,22 +43,7 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 _WORKER_GDF_CACHE: dict[str, gpd.GeoDataFrame] = {}
 _WORKER_GDF_LOCK = threading.Lock()
 
-
-# TODO skip 1885 provider datasets that don't overlap ecoregion
-# from pyproj import Transformer
-# from shapely.geometry import box
-# from shapely.ops import transform
-# def tile_intersects_ecoregion(s3_tif_path: str, ecoregion_geom, ecoregion_crs: str) -> bool:
-#     vsi_path = s3_tif_path.replace("s3://", "/vsis3/")
-#     with rasterio.open(vsi_path) as src:
-#         tile_poly = box(*src.bounds)
-#         if src.crs and src.crs.to_string() != ecoregion_crs:
-#             transformer = Transformer.from_crs(src.crs, ecoregion_crs, always_xy=True)
-#             tile_poly = transform(transformer.transform, tile_poly)
-#     return tile_poly.intersects(ecoregion_geom)
-# usage:
-# if not tile_intersects_ecoregion(tif_path, self.ecoregion_geom, self.ecoregion_crs):
-#     return None
+DIGITAL_COAST_TYPES = ('DigitalCoast', 'Digital_Coast_Manual_Downloads')
 
 
 def _get_worker_ecoregion_gdf(gdf_path: str) -> gpd.GeoDataFrame:
@@ -198,11 +183,21 @@ class DistanceToShoreEngine(Engine):
         self.param_lookup = param_lookup
         self.data_type = data_type
 
+    def _get_subfolder(self) -> str:
+        """Resolve config SUBFOLDER key, mapping Digital_Coast_Manual_Downloads to DIGITALCOAST."""
+
+        config_section = (
+            'DIGITALCOAST'
+            if self.data_type in DIGITAL_COAST_TYPES
+            else self.data_type.upper()
+        )
+        return get_config_item(config_section, 'SUBFOLDER')
+
     def get_output_subfolder(self, raster_path: str | pathlib.Path) -> pathlib.PurePosixPath:
         """
         Determines the output subfolder relative to the dataset root based on self.data_type.
-        - BlueTopo:     {tile_id}
-        - DigitalCoast: {survey_id}/dem/{tile_id}/distance_to_shore
+        - BlueTopo:                     {tile_id}
+        - DigitalCoast / Manual:        {survey_id}/dem/{tile_id}/distance_to_shore
         """
 
         p = pathlib.Path(raster_path)
@@ -509,7 +504,7 @@ class DistanceToShoreEngine(Engine):
         if not geotiff_paths:
             return []
 
-        subfolder_key = get_config_item(self.data_type.upper(), 'SUBFOLDER')
+        subfolder_key = self._get_subfolder()
         ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
 
         if self.param_lookup['env'] == 'aws':
@@ -548,10 +543,10 @@ class DistanceToShoreEngine(Engine):
         """Set up target folder for local output or AWS intermediate file creation."""
 
         starting_path = f'{output_prefix}/{ecoregion}' if output_prefix else ecoregion
-        subfolder = get_config_item(self.data_type.upper(), 'SUBFOLDER')
+        subfolder = self._get_subfolder()
 
         if self.param_lookup['env'] == 'aws':
-            geotiff_paths = self.get_s3_geotiff_files(ecoregion)
+            geotiff_paths = self.get_s3_geotiff_files(ecoregion, output_prefix)
             temp_path = pathlib.Path.home() / 'local_tmp_dir' / starting_path / subfolder / self.data_type
         else:
             geotiff_paths = self.get_local_geotiff_files(ecoregion, output_prefix)
@@ -562,50 +557,54 @@ class DistanceToShoreEngine(Engine):
     def get_local_geotiff_files(self, ecoregion: str, output_prefix: str = "") -> list[pathlib.Path]:
         """Search for local data type geotiffs."""
 
+        subfolder = self._get_subfolder()
         if output_prefix:
-            data_type_folder = OUTPUTS / output_prefix / ecoregion / get_config_item(
-                self.data_type.upper(), 'SUBFOLDER'
-            ) / self.data_type
+            data_type_folder = OUTPUTS / output_prefix / ecoregion / subfolder / self.data_type
         else:
-            data_type_folder = OUTPUTS / ecoregion / get_config_item(self.data_type.upper(), 'SUBFOLDER') / self.data_type
+            data_type_folder = OUTPUTS / ecoregion / subfolder / self.data_type
 
-        geotiff_syntax = "*[0-9].tiff" if self.data_type == 'BlueTopo' else "*.tif"
-        raster_files = [raster for raster in list(data_type_folder.rglob(geotiff_syntax)) if 'ISS' not in raster.name]
+        if self.data_type == 'BlueTopo':
+            candidates = list(data_type_folder.rglob("*[0-9].tiff"))
+        else:
+            candidates = list(data_type_folder.rglob("*.tif")) + list(data_type_folder.rglob("*.tiff"))
+
         raster_files = [
             raster
-            for raster in raster_files
-            if 'original' not in str(raster)
-            and 'distance_to_shore' not in str(raster)
+            for raster in candidates
+            if 'ISS' not in raster.name
+            and 'original' not in raster.parts
+            and 'distance_to_shore' not in raster.parts
             and not raster.name.lower().endswith(('_distance_from_shore.tif', '_ocean_mask.tif'))
         ]
 
         print(f"- Discovered {len(raster_files)} local {self.data_type} file(s)")
         return raster_files
 
-    def get_s3_geotiff_files(self, ecoregion: str = "*") -> list[str]:
+    def get_s3_geotiff_files(self, ecoregion: str = "*", output_prefix: str = "") -> list[str]:
         """Search for all geotiffs for current data type and ecoregion."""
 
         _set_gdal_s3_options()
         s3_files = s3fs.S3FileSystem()
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-
-        geotiff_syntax = f"{self.data_type}/**/*[0-9].tiff" if self.data_type == 'BlueTopo' else f"{self.data_type}/**/*.tif"
-        s3_search_pattern = f"{bucket}/{ecoregion}/{get_config_item(self.data_type.upper(), 'SUBFOLDER')}/{geotiff_syntax}"
-
-        raw_paths = s3_files.glob(s3_search_pattern)
+        subfolder = self._get_subfolder()
+        ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else ecoregion
 
         if self.data_type == 'BlueTopo':
+            s3_search_pattern = f"{bucket}/{ecoregion_path}/{subfolder}/{self.data_type}/**/*[0-9].tiff"
+            raw_paths = s3_files.glob(s3_search_pattern)
             geotiffs = [
                 gt for gt in raw_paths
                 if not any(pattern in gt.lower() for pattern in [
                     '_unc', '_slope', '_iss', '_survey_end_date', 'decay'])
             ]
         else:
+            s3_search_pattern = f"{bucket}/{ecoregion_path}/{subfolder}/{self.data_type}/**/*.tif*"
+            raw_paths = s3_files.glob(s3_search_pattern)
             geotiffs = [
                 raw_path
                 for raw_path in raw_paths
-                if 'original' not in str(raw_path)
-                and 'distance_to_shore' not in str(raw_path)
+                if 'original' not in pathlib.PurePosixPath(raw_path).parts
+                and 'distance_to_shore' not in pathlib.PurePosixPath(raw_path).parts
                 and not raw_path.lower().endswith(('_distance_from_shore.tif', '_ocean_mask.tif'))
             ]
 
@@ -630,7 +629,7 @@ class DistanceToShoreEngine(Engine):
         bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
         ecoregion_path = f"{output_prefix}/{ecoregion}" if output_prefix else f"{ecoregion}"
-        subfolder_key = get_config_item(self.data_type.upper(), 'SUBFOLDER')
+        subfolder_key = self._get_subfolder()
         s3_key = f"{bucket}/{ecoregion_path}/{subfolder_key}/{self.data_type}/{output_subfolder}/{distance_raster_path.name}"
 
         print(f"  - Uploading {distance_raster_path.name} to s3://{s3_key}")
@@ -641,7 +640,6 @@ class DistanceToShoreEngine(Engine):
 
         print("Starting Distance To Shore engine")
 
-        # 1 worker with 2 threads shares memory cleanly and leaves headroom on a 30 GiB host
         self.setup_dask(self.param_lookup['env'], n_workers=3, threads_per_worker=1, memory_limit="36GB")
 
         master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
@@ -667,7 +665,7 @@ class DistanceToShoreEngine(Engine):
             del enhanced_ecoregions
             gc.collect()
 
-            if self.data_type == 'DigitalCoast':
+            if self.data_type in DIGITAL_COAST_TYPES:
                 local_npy_path = str(
                     self.ensure_local_shoreline_npy(
                         ecoregion=ecoregion,
@@ -728,7 +726,7 @@ class DistanceToShoreEngine(Engine):
             beginning_prefix = f"{output_prefix}/{ecoregion}" if output_prefix else ecoregion
             manifest_path = (
                 pathlib.Path(beginning_prefix)
-                / get_config_item(self.data_type.upper(), 'SUBFOLDER')
+                / self._get_subfolder()
                 / self.data_type
             )
             self.write_run_manifest(manifest_path, {'tiles': len(param_inputs)})
@@ -742,5 +740,6 @@ if __name__ == "__main__":
         'output_directory': Param(OUTPUTS),
         'eco_regions': Param(['ER_3']),
     }
-    engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
-    engine.run()
+    for dt in ('BlueTopo', 'DigitalCoast', 'Digital_Coast_Manual_Downloads'):
+        engine = DistanceToShoreEngine(param_lookup, data_type=dt)
+        engine.run()
