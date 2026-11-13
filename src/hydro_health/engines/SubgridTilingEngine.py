@@ -1439,14 +1439,12 @@ class SubgridTilingEngine(Engine):
         self,
         param_lookup: dict,
         output_prefix: str | bool = False,
-        overwrite_outputs: bool = True,
     ) -> None:
         """Initialize paths, configurations, and environment variables"""
 
         super().__init__()
         self.param_lookup = param_lookup
         self.output_prefix = output_prefix
-        self.overwrite_outputs = overwrite_outputs
 
         # Setup local temp dir mapping to ensure EC2 limits aren't exceeded
         self.local_tmp_dir = pathlib.Path(str(Path.home() / "hydro_health_local_tmp" / "subgrid_tmp"))
@@ -1616,7 +1614,7 @@ class SubgridTilingEngine(Engine):
                                 is_aws=self.is_aws,
                                 local_tmp_dir=str(self.local_tmp_dir),
                                 created_sequence=created_parquet_count,
-                                overwrite_outputs=self.overwrite_outputs,
+                                overwrite_outputs=self.overwrite,
                             )
                         )
                 valid_results.append(result)
@@ -1668,7 +1666,7 @@ class SubgridTilingEngine(Engine):
                 total_count=total_tiles,
                 verbose=verbose_workers,
                 subgrid_crs=subgrid_crs,
-                overwrite_outputs=self.overwrite_outputs,
+                overwrite_outputs=self.overwrite,
                 year_ranges=self.year_ranges,
             ))
 
@@ -1727,7 +1725,7 @@ class SubgridTilingEngine(Engine):
         self.write_message(
             f"Submitting {total_tiles} whole-tile tasks in batches of "
             f"{self.tile_batch_size}. Raster arrays remain inside workers. "
-            f"Overwrite outputs: {self.overwrite_outputs}. {geotiff_message}",
+            f"Overwrite outputs: {self.overwrite}. {geotiff_message}",
             OUTPUTS,
         )
 

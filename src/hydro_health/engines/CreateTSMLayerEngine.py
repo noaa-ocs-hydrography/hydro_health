@@ -68,9 +68,6 @@ class CreateTSMLayerEngine(Engine):
         self.downloaded_files = []
         self.output_folder = OUTPUTS
         
-        # Flag to control whether to overwrite existing NC files or just check for new ones
-        self.force_download = False
-        
         # Setup paths
         tsm_data_path = get_config_item("TSM", "DATA_PATH")
         
@@ -160,8 +157,8 @@ class CreateTSMLayerEngine(Engine):
                         s3_files = s3fs.S3FileSystem()
                         s3_prefix = f'{self.nc_files_path}/{name}'
                         
-                        # Respecting the force_download flag
-                        if self.force_download or not s3_files.exists(s3_prefix):
+                        # Never redownload an existing NetCDF file.
+                        if not s3_files.exists(s3_prefix):
                             print(f"Downloading {name} to S3...")
                             with s3_files.open(s3_prefix, 'wb') as writer:
                                 ftp.retrbinary(f'RETR {name}', writer.write)
@@ -170,8 +167,8 @@ class CreateTSMLayerEngine(Engine):
                         local_path = self.nc_files_path / name
                         self.nc_files_path.mkdir(parents=True, exist_ok=True)
                         
-                        # Respecting the force_download flag
-                        if self.force_download or not local_path.exists():
+                        # Never redownload an existing NetCDF file.
+                        if not local_path.exists():
                             print(f"Downloading {name} locally...")
                             with open(local_path, 'wb') as f:
                                 ftp.retrbinary(f'RETR {name}', f.write)
@@ -201,6 +198,16 @@ class CreateTSMLayerEngine(Engine):
         s3_files = s3fs.S3FileSystem()
 
         for year in range(1998, 2025):
+            filename = f"TSM_mean_{year}.tif"
+            if not self.overwrite:
+                if get_environment() in ['local', 'remote']:
+                    output_exists = (self.raster_path / filename).exists()
+                else:
+                    output_exists = s3_files.exists(f"s3://{self.raster_path}/{filename}")
+                if output_exists:
+                    print(f"Skipping existing annual raster: {filename}")
+                    continue
+
             print(f'Processing year: {year}')
             if get_environment() in ['local', 'remote']:
                 if not self.nc_files_path.exists():
@@ -235,7 +242,6 @@ class CreateTSMLayerEngine(Engine):
                 continue
 
             annual_mean = np.where(valid_count > 0, running_sum / valid_count, nodata_val)
-            filename = f"TSM_mean_{year}.tif"
 
             if get_environment() in ['local', 'remote']:
                 self.raster_path.mkdir(parents=True, exist_ok=True)
@@ -254,6 +260,16 @@ class CreateTSMLayerEngine(Engine):
         """Build and store year-pair mean and cumulative rasters"""
 
         s3_files = s3fs.S3FileSystem()
+        out_name_mean = f'tsm_mean_{start_year}_{end_year}.tif'
+        if not self.overwrite:
+            if get_environment() in ['local', 'remote']:
+                output_exists = (self.year_pair_path / out_name_mean).exists()
+            else:
+                output_exists = s3_files.exists(f"s3://{self.year_pair_path}/{out_name_mean}")
+            if output_exists:
+                print(f"Skipping existing year-pair raster: {out_name_mean}")
+                return
+
         if get_environment() in ['local', 'remote']:
             raster_files = [os.path.join(self.raster_path, f) for f in os.listdir(self.raster_path)
                             if f.endswith(".tif") and any(str(y) in f for y in range(start_year, end_year + 1))]
@@ -280,8 +296,7 @@ class CreateTSMLayerEngine(Engine):
         avg_array = np.where(count_array > 0, sum_array / count_array, np.nan)
         # cumulative_array = np.where(count_array > 0, sum_array, np.nan)
 
-        # Output filenames updated to place year pairs at the end
-        out_name_mean = f'tsm_mean_{start_year}_{end_year}.tif'
+        # Output filenames place year pairs at the end
         # out_name_cumulative = f'tsm_cumulative_{start_year}_{end_year}.tif'
 
         if get_environment() in ['local', 'remote']:

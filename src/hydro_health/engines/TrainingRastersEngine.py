@@ -93,7 +93,7 @@ def _process_training_raster(params: list) -> None:
     """Process a training raster by extracting array blocks and masking them mathematically.
     Executed at the module level to avoid pickling class instances via Dask."""
 
-    raster_path, mask_bounds, output_path_str, global_mask_path, current_index, total_count, is_aws, local_tmp_dir_str = params
+    raster_path, mask_bounds, output_path_str, global_mask_path, current_index, total_count, is_aws, local_tmp_dir_str, overwrite = params
     
     raster_name = pathlib.Path(raster_path).name.lower()
     open_path = str(raster_path)
@@ -101,7 +101,7 @@ def _process_training_raster(params: list) -> None:
 
     progress_str = f" [{current_index}/{total_count}]" if current_index and total_count else ""
 
-    if output_path.exists():
+    if not overwrite and output_path.exists():
         Engine.write_message_dask(f" - [SKIP]{progress_str} File already exists: {raster_name}", str(OUTPUTS))
         return
 
@@ -298,7 +298,8 @@ class TrainingRastersEngine(Engine):
                 i + 1,
                 total_train,
                 self.is_aws,
-                str(self.local_tmp_dir)
+                str(self.local_tmp_dir),
+                self.overwrite
             ]
             for i, file_path in enumerate(training_files)
         ]

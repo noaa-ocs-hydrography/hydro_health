@@ -191,11 +191,11 @@ def _warp_to_cutline(src_path: str, dst_path: str, cutline_path: str, task_tmp_d
 def _process_prediction_raster(params: list) -> None:
     """Core worker task for processing prediction rasters. Designed for dask pickling."""
     
-    raster_path, mask_bounds, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir = params
+    raster_path, mask_bounds, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir, overwrite = params
     raster_name = pathlib.Path(raster_path).name.lower()
     
-    # Implicit Skipping 
-    if UPath(output_path).exists():
+    # Skip existing outputs when overwrite is disabled.
+    if not overwrite and UPath(output_path).exists():
         Engine.write_message_dask(f"[SKIP] Output already exists for {raster_name}. Skipping computation.", OUTPUTS)
         return
 
@@ -434,7 +434,8 @@ class PredictionRastersEngine(Engine):
                         self.is_aws,
                         self.target_crs,
                         self.target_res,
-                        str(self.local_tmp_dir)
+                        str(self.local_tmp_dir),
+                        self.overwrite
                     ])
 
                 if params_list:

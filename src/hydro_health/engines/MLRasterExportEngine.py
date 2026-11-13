@@ -2226,10 +2226,10 @@ class MLRasterExportEngine(Engine):
         return results
 
 
-    def execute_tasks(self, overwrite: bool = False) -> list[dict]:
-        """Skip existing outputs by default, with jobs bounded by worker/thread capacity."""
+    def execute_tasks(self) -> list[dict]:
+        """Use inherited self.overwrite, with jobs bounded by worker/thread capacity."""
 
-        self.write_message(f"Raster export: overwrite={overwrite}; existing tile outputs will be {'replaced' if overwrite else 'skipped'}. Final variable PDFs will always be replaced.", OUTPUTS)
+        self.write_message(f"Raster export: overwrite={self.overwrite}; existing tile outputs will be {'replaced' if self.overwrite else 'skipped'}. Final variable PDFs will always be replaced.", OUTPUTS)
         jobs = iter(self.task_configs)
         limit = self.settings["raster_workers"] * self.settings["raster_threads_per_worker"]
         pending = set()
@@ -2243,7 +2243,7 @@ class MLRasterExportEngine(Engine):
             cfg = next(jobs, None)
             if cfg is None:
                 return False
-            job = dict(cfg, overwrite=overwrite)
+            job = dict(cfg, overwrite=self.overwrite)
             future = self.client.submit(_export_tile_task, job, pure=False)
             pending.add(future)
             job_by_future[future] = job
@@ -2292,7 +2292,7 @@ class MLRasterExportEngine(Engine):
         self.write_message(f"Raster export finished: {len(records)} total ({exported} completed, {skipped} skipped).", OUTPUTS)
         return records
 
-    def run(self, overwrite: bool = False) -> list[dict]:
+    def run(self) -> list[dict]:
         """Build reports from existing TIFFs, optionally creating model exports first."""
 
         records = []
@@ -2312,7 +2312,7 @@ class MLRasterExportEngine(Engine):
                     grid = self.load_tile_grid()
                     self.task_configs = self.prepare_tasks(eco_region, grid)
                     self.write_message(f"Discovering and submitting raster exports incrementally for {eco_region}; at most {settings['raster_workers'] * settings['raster_threads_per_worker']} jobs in flight.", OUTPUTS)
-                    region_records = self.execute_tasks(overwrite)
+                    region_records = self.execute_tasks()
                     records.extend(region_records)
                 else:
                     self.write_message(f"{eco_region}: create_model_tifs=False; skipping model TIFF creation and building the PDF from existing TIFFs.", OUTPUTS)

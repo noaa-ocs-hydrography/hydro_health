@@ -38,11 +38,10 @@ from hydro_health.helpers.tools import get_config_item, get_environment
 class CreateHurricaneLayerEngine(Engine):
     """Class to hold the logic for processing the Hurricane layer"""
 
-    def __init__(self, overwrite: bool = False):
+    def __init__(self):
         super().__init__()
         
         self.is_aws = (get_environment() == 'aws')
-        self.overwrite = overwrite
         
         # --- Setup Logging ---
         self.log_file = pathlib.Path.home() / 'hurricane_engine.log'
@@ -204,6 +203,10 @@ class CreateHurricaneLayerEngine(Engine):
 
         mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
         cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
+
+        if not self.overwrite and mean_output_path.exists():
+            self.logger.info(f"Skipping mean raster - already exists at {mean_output_path}.")
+            return
 
         try:
             # Safely grab matching raster files and keep track of which years were found
@@ -745,8 +748,8 @@ class CreateHurricaneLayerEngine(Engine):
             output_folder.mkdir(parents=True, exist_ok=True)
             raster_file = output_folder / f"{safe_name}_{area_date}.tif"
             
-            # Prevent overwriting existing individual rasters
-            if raster_file.exists():
+            # Skip existing individual rasters when overwrite is disabled.
+            if not self.overwrite and raster_file.exists():
                 self.logger.info(f"Skipping individual raster {safe_name}_{area_date}.tif ({year}) - already exists.")
                 continue  
 
@@ -828,22 +831,26 @@ class CreateHurricaneLayerEngine(Engine):
         """Entrypoint for processing the Hurricane layer"""
         self.logger.info("Starting Hurricane Layer Engine processing...")
 
-        self.logger.info("Always overwriting GPKG: Removing existing GeoPackage to pull the latest dataset...")
-        try:
-            if self.hurricane_data_path.exists():
-                self.hurricane_data_path.unlink()
-        except Exception as e:
-            self.logger.warning(f"Could not delete existing GPKG: {e}")
+        if self.overwrite or not self.hurricane_data_path.exists():
+            if self.overwrite:
+                self.logger.info("Removing existing GeoPackage to pull the latest dataset...")
+                try:
+                    if self.hurricane_data_path.exists():
+                        self.hurricane_data_path.unlink()
+                except Exception as e:
+                    self.logger.warning(f"Could not delete existing GPKG: {e}")
 
-        self.download_hurricane_data()    
+            self.download_hurricane_data()    
         
-        # Parse points once and pass the Dataframe down the chain
-        point_gdf = self.convert_text_to_gpkg()
-        self.create_line_layer(point_gdf)
-        self.create_overlapping_buffers(point_gdf)
+            # Parse points once and pass the Dataframe down the chain
+            point_gdf = self.convert_text_to_gpkg()
+            self.create_line_layer(point_gdf)
+            self.create_overlapping_buffers(point_gdf)
         
-        self.clip_polygons()
-            
+            self.clip_polygons()
+        else:
+            self.logger.info(f"Reusing existing GeoPackage: {self.hurricane_data_path}")
+
         self.polygons_to_raster()
 
         self.generate_cumulative_rasters(
@@ -876,6 +883,10 @@ class CreateHurricaneLayerEngine(Engine):
 
     def save_raster(self, data, path_obj, height, width, transform, crs) -> None:
         """Save the raster data to a file safely using a local temp file."""
+        if not self.overwrite and path_obj.exists():
+            self.logger.info(f"Skipping raster - already exists at {path_obj}.")
+            return
+
         with tempfile.TemporaryDirectory() as tmpdir:
             local_raster = os.path.join(tmpdir, "temp.tif")
             with rasterio.open(
@@ -904,7 +915,7 @@ if __name__ == '__main__':
     profiler = cProfile.Profile()
     profiler.enable()
 
-    engine = CreateHurricaneLayerEngine(overwrite=True)
+    engine = CreateHurricaneLayerEngine()
     engine.run()
 
     profiler.disable()

@@ -516,8 +516,6 @@ class BatchTilingEngine(Engine):
         inherited_yr = getattr(self, 'year_ranges', [])
         yr_val = year_ranges if year_ranges is not None else param_lookup.get('year_ranges', inherited_yr)
         self.year_ranges = yr_val.value if hasattr(yr_val, 'value') else (yr_val if isinstance(yr_val, list) else inherited_yr)
-
-        self.overwrite_files = overwrite_files
         
         self.local_tmp_dir = pathlib.Path(
             tempfile.gettempdir()
@@ -586,7 +584,7 @@ class BatchTilingEngine(Engine):
                 i + 1,
                 total_files,
                 verbose_workers,
-                self.overwrite_files,
+                self.overwrite,
             ])
 
         batch_size = max(4, self._worker_count * 4)
@@ -621,7 +619,7 @@ class BatchTilingEngine(Engine):
         """Main entry point for executing the batch format transformations"""
         try:
             self.write_message(
-                f"Overwrite existing batch files: {self.overwrite_files}",
+                f"Overwrite existing batch files: {self.overwrite}",
                 OUTPUTS,
             )
             self.setup_dask(

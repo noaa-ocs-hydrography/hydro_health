@@ -331,7 +331,7 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
     audit["grid_origin"] = (
         coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)
         + (coordinates[["X", "Y"]].max().to_numpy(dtype=np.float32)
-           - coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)) / 2
+        - coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)) / 2
     ).tolist()
     audit["folds"] = pd.DataFrame(
         {
@@ -984,7 +984,7 @@ def _predict_saved_tile_task(cfg: dict) -> dict:
     deployment_metadata = dict(metadata, tile_id=cfg["tile_id"], source_model_tile=source_tile,
         source_model_distance=cfg.get("source_model_distance", 0.0), source_metadata_path=str(metadata_path),
         n_prediction_rows=len(frame), n_prediction_usable=int(usable.sum()),
-        prediction_model_source="tile_native" if source_tile == cfg["tile_id"] else "nearest_local_model")
+    prediction_model_source="tile_native" if source_tile == cfg["tile_id"] else "nearest_local_model")
     _save_json(deployment_metadata, str(UPath(cfg["prediction_output_dir"]) / f"LOCAL_prediction_metadata_{cfg['pair']}.json"))
     _write_task_progress(cfg, f"Completed prediction from saved ensemble: {int(usable.sum()):,}/{len(frame):,} usable rows.")
     return dict(identity, ok=True, skipped=False, task_type="prediction_only", n_prediction_rows=len(frame), n_prediction_usable=int(usable.sum()))
@@ -1033,9 +1033,9 @@ def _train_tile_task(cfg: dict) -> dict:
                     metadata = json.load(stream)
                 models = metadata.get("model_uris", [])
                 if (metadata.get("tile_id") == cfg["tile_id"] and metadata.get("pair") == cfg["pair"]
-                        and metadata.get("crs") == cfg["crs"] and metadata.get("target") == "bathy_t1"
-                        and models and len(models) == metadata.get("n_boot")
-                        and len(set(models)) == len(models) and all(UPath(uri).exists() for uri in models)):
+                    and metadata.get("crs") == cfg["crs"] and metadata.get("target") == "bathy_t1"
+                    and models and len(models) == metadata.get("n_boot")
+                and len(set(models)) == len(models) and all(UPath(uri).exists() for uri in models)):
                     _write_task_progress(cfg, "SKIPPING training: complete saved ensemble exists; missing predictions are handled during deployment.")
                     return dict(ok=True, skipped=True, reason="saved_ensemble_exists", region=cfg["region"], tile_id=cfg["tile_id"], pair=cfg["pair"])
             existing = [path for path in cfg["owned_outputs"] if UPath(path).exists()]
@@ -1136,7 +1136,6 @@ class XGBoostModelingEngine(Engine):
             "minimum_training_rows": 100,  # Custom: the minimum eligible observations required to train a model.
             "global_seed": 12345,  # Custom: random seed for reproducibility where your code passes it to random operations.
             "shap_sample_rows": 1000,  # Custom: the number, or maximum number, of rows used for SHAP explanations.
-            "overwrite": False, # Custom: whether to overwrite existing outputs; if False, existing outputs may be reused or skipped.
             "xgb_workers": 16,  # Custom: number of parallel workers available for model tasks.
             "xgb_memory_limit": "4GB",  # Custom: memory allowance per worker; confirm whether enforced by your scheduler.
             "xgb_threads_per_worker": 2,  # Custom: CPU threads allocated to XGBoost within each worker.
@@ -1365,11 +1364,11 @@ class XGBoostModelingEngine(Engine):
                 source = min(donor_ids[int(index)] for index in nearest)
             distance = float(points[tile].distance(points[source]))
             self.task_configs.append(dict(cfg, training_geoparquet=None,
-                source_model_tile=source, source_model_distance=distance, source_metadata_path=candidates[source]))
+            source_model_tile=source, source_model_distance=distance, source_metadata_path=candidates[source]))
             self.write_message(f"Deploying {tile}/{pair} from {source} ({distance:.1f} m)", self.outputs_dir)
         return results
 
-    def execute_tasks(self, overwrite: bool = False) -> list[dict]:
+    def execute_tasks(self) -> list[dict]:
         """Submit configurable batches across the available Dask worker threads."""
 
         results = []
@@ -1380,7 +1379,7 @@ class XGBoostModelingEngine(Engine):
             jobs = [
                 dict(
                     cfg,
-                    overwrite=overwrite,
+                    overwrite=self.overwrite,
                     task_number=start + offset + 1,
                     task_total=total,
                 )
@@ -1408,11 +1407,10 @@ class XGBoostModelingEngine(Engine):
                     future.release()
         return results
 
-    def run(self, overwrite: bool | None = None) -> list[dict]:
+    def run(self) -> list[dict]:
         """Set up Dask, process ecoregions and always close the worker pool."""
 
         results = []
-        overwrite = self.model_config["overwrite"] if overwrite is None else overwrite
         try:
             cfg = self.model_config
             self.setup_dask(
@@ -1432,13 +1430,13 @@ class XGBoostModelingEngine(Engine):
                 all_configs = self.task_configs
                 self.task_configs = [job for job in all_configs if job["training_geoparquet"]]
                 self.write_message(f"{eco_region} | STAGE 1/2: MODEL TRAINING — {len(self.task_configs)} tasks; fit local ensembles or reuse existing models.", OUTPUTS)
-                training_results = self.execute_tasks(overwrite)
+                training_results = self.execute_tasks()
                 results.extend(training_results)
                 failed_training = {(row["tile_id"], row["pair"]) for row in training_results if not row.get("ok")}
                 self.write_message(f"{eco_region} | STAGE 2/2: PREDICTION DEPLOYMENT — assigning saved local models to prediction tiles.", OUTPUTS)
                 results.extend(self.prepare_deployment_tasks(all_configs, failed_training))
                 self.write_message(f"{eco_region} | PREDICTION DEPLOYMENT: {len(self.task_configs)} tasks; apply saved ensembles without training new models.", OUTPUTS)
-                results.extend(self.execute_tasks(overwrite))
+                results.extend(self.execute_tasks())
             return results
         finally:
             self.cleanup_resources(OUTPUTS)

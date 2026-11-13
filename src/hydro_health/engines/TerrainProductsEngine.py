@@ -49,21 +49,6 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 DEFAULT_DASK_CHUNK_SIZE = 1024
 MAX_BPI_OUTER_CELLS = 512
 
-# Tags invalidate legacy outputs whose filename stayed the same while the
-# calculation changed. They prevent old aspect/TRI rasters from being mistaken
-# for the corrected D8-pointer/surface-rugosity products.
-PRODUCT_VERSIONS = {
-    "_flowdir.tif": "d8_pointer_v1",
-    "_rugosity.tif": "surface_area_ratio_v1",
-    "_tci.tif": "neighbor_variance_v2",
-    "_slope.tif": "central_difference_nodata_edges_v2",
-    "_gradmag.tif": "slope_radians_zero_valid_v2",
-    "_bpi_fine.tif": "annular_bpi_nodata_edges_v2",
-    "_bpi_broad.tif": "annular_bpi_nodata_edges_v2",
-    "_terrain_classification.tif": "bpi_nodata_edges_v2",
-}
-
-
 def _silence_aws_credential_discovery_logs() -> None:
     """Hide repetitive IAM credential discovery while preserving real warnings."""
     logging.getLogger("botocore.credentials").setLevel(logging.WARNING)
@@ -150,40 +135,6 @@ def _validate_raster(
         return False, str(exc)
 
 
-def _validate_product_raster(
-    path: str | UPath,
-    suffix: str,
-    expected_shape: Tuple[int, int] | None = None,
-    expected_crs=None,
-    expected_transform=None,
-) -> Tuple[bool, str]:
-    """Validate a raster and, when defined, its algorithm-version tag."""
-    valid, reason = _validate_raster(
-        path,
-        expected_shape=expected_shape,
-        expected_crs=expected_crs,
-        expected_transform=expected_transform,
-    )
-    if not valid:
-        return valid, reason
-
-    expected_version = PRODUCT_VERSIONS.get(suffix)
-    if expected_version is None:
-        return True, ""
-
-    try:
-        with rasterio.open(str(UPath(path))) as src:
-            actual_version = src.tags().get("hydro_health_product_version")
-        if actual_version != expected_version:
-            return False, (
-                f"legacy or mismatched product version {actual_version!r}; "
-                f"expected {expected_version!r}"
-            )
-        return True, ""
-    except Exception as exc:
-        return False, str(exc)
-
-
 def _publish_local_raster(local_path: str, out_path: str) -> None:
     """Validate locally, then publish through a temporary destination name."""
     # Read every encoded block locally so a damaged LZW tile is caught before
@@ -255,7 +206,6 @@ def _save_memmap_to_raster(
     profile: dict,
     local_tmp_dir: str,
     log_prefix: str = "",
-    product_suffix: str | None = None,
 ):
     """Stream a memory-mapped array block-by-block into a validated raster."""
     out_u = UPath(out_path)
@@ -266,10 +216,6 @@ def _save_memmap_to_raster(
         with rasterio.open(local_tmp_path, 'w', **profile) as dst:
             for ji, window in dst.block_windows(1):
                 dst.write(mmap_array[window.toslices()], 1, window=window)
-            if product_suffix in PRODUCT_VERSIONS:
-                dst.update_tags(
-                    hydro_health_product_version=PRODUCT_VERSIONS[product_suffix]
-                )
                 
         _publish_local_raster(local_tmp_path, str(out_u))
             
@@ -286,7 +232,6 @@ def _save_dask_to_raster(
     profile: dict,
     local_tmp_dir: str,
     log_prefix: str = "",
-    product_suffix: str | None = None,
 ):
     """Compute a chunked Dask array into a disk memmap, then publish it."""
     with tempfile.NamedTemporaryFile(suffix='.dat', delete=False, dir=local_tmp_dir) as tmp_mmap:
@@ -308,7 +253,6 @@ def _save_dask_to_raster(
             profile,
             local_tmp_dir,
             log_prefix,
-            product_suffix=product_suffix,
         )
     finally:
         if 'mmap_arr' in locals():
@@ -497,11 +441,11 @@ def _create_classification_dictionary(bpi_broad_sample: np.ndarray, bpi_fine_sam
     return df
 
 
-def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_dir: str, best_radii: Dict[str, Tuple[int, int]], local_tmp_dir: str, prediction_output_dir: str = "") -> Tuple[bool, str]:
+def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_dir: str, best_radii: Dict[str, Tuple[int, int]], local_tmp_dir: str, prediction_output_dir: str = "", overwrite: bool = False) -> Tuple[bool, str]:
     """Module-level worker to sample valid pixels and generate regional class limits."""
     dict_path = UPath(dictionary_dir) / f"dictionary_{year}.csv"
     
-    if dict_path.exists():
+    if not overwrite and dict_path.exists():
         return True, f"Skipping dictionary creation for {year} (Already exists)"
         
     Engine.write_message_dask(f"Processing regional dictionary for: {year} ({len(files)} files)", OUTPUTS)
@@ -616,8 +560,10 @@ def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_d
         gc.collect()
 
 
-def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, prediction_output_dir: str) -> bool:
-    """Return True when any required output is missing or unreadable."""
+def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, prediction_output_dir: str, overwrite: bool) -> bool:
+    """Return True when overwriting or any required output is missing or unreadable."""
+    if overwrite:
+        return True
     try:
         base_name = os.path.splitext(os.path.basename(str(bathy_path)))[0]
         is_bluetopo = 'bluetopo' in base_name.lower()
@@ -630,7 +576,7 @@ def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, predict
             "_curv_plan.tif", "_curv_total.tif", "_flowacc.tif"
         ]
         for suffix in wbt_suffixes:
-            if not _validate_product_raster(resolve_out_path(suffix), suffix)[0]:
+            if not _validate_raster(resolve_out_path(suffix))[0]:
                 return True
             
         if not _validate_raster(resolve_out_path("_shearproxy.tif"))[0]:
@@ -641,11 +587,11 @@ def _check_unprocessed_worker(bathy_path: str, terrain_outputs_dir: str, predict
             "_terrain_classification.tif", "_gradmag.tif", "_tci.tif"
         ]
         for suffix in numpy_suffixes:
-            if not _validate_product_raster(resolve_out_path(suffix), suffix)[0]:
+            if not _validate_raster(resolve_out_path(suffix))[0]:
                 return True
             
-        if not is_bluetopo and not _validate_product_raster(
-            resolve_out_path("_slope.tif"), "_slope.tif"
+        if not is_bluetopo and not _validate_raster(
+            resolve_out_path("_slope.tif")
         )[0]:
             return True
         
@@ -668,11 +614,6 @@ def _generate_whitebox_products(missing_wbt, wbt, local_bathy, local_slope, loca
                 product_errors.append(message)
                 Engine.write_message_dask(f"[ERROR] {base_name}: {message}", OUTPUTS)
             else:
-                if product_suffix in PRODUCT_VERSIONS:
-                    with rasterio.open(local_out, "r+") as product_dst:
-                        product_dst.update_tags(
-                            hydro_health_product_version=PRODUCT_VERSIONS[product_suffix]
-                        )
                 _publish_local_raster(local_out, out_s3)
                 if local_out not in [local_slope, local_plan]:
                     try: os.remove(local_out)
@@ -853,7 +794,7 @@ def _mask_bluetopo_bathy(bathy_array, shape_2d, source_crs, source_transform, ba
 
             if make_gradmag:
                 _float_product_profile(profile)
-                _save_memmap_to_raster(gradmag_mmap, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_gradmag.tif")
+                _save_memmap_to_raster(gradmag_mmap, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str)
     finally:
         _close_memmap(gradmag_mmap)
 
@@ -862,13 +803,13 @@ def _generate_tci_and_slope(missing_numpy_dict, d_bathy, cell_size, profile, out
     if missing_numpy_dict["_tci.tif"]: 
         tci_lazy = _calculate_tci_dask(d_bathy)
         _float_product_profile(profile)
-        _save_dask_to_raster(tci_lazy, out_tci, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_tci.tif")
+        _save_dask_to_raster(tci_lazy, out_tci, profile, local_tmp_dir, log_prefix=progress_str)
         del tci_lazy; gc.collect()
 
     if missing_numpy_dict["_slope.tif"]:
         slope_lazy = _calculate_slope_dask(d_bathy, cell_size)
         _float_product_profile(profile)
-        _save_dask_to_raster(slope_lazy, out_slope, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_slope.tif")
+        _save_dask_to_raster(slope_lazy, out_slope, profile, local_tmp_dir, log_prefix=progress_str)
         del slope_lazy; gc.collect()
 
 
@@ -905,7 +846,6 @@ def _ensure_validated_slope(missing_numpy_dict, is_bluetopo, tmpdir, out_slope, 
                 profile,
                 local_tmp_dir,
                 log_prefix=progress_str,
-                product_suffix="_slope.tif",
             )
             del slope_lazy
             gc.collect()
@@ -926,7 +866,7 @@ def _generate_gradmag_from_slope(local_validated_slope, tmpdir, shape_2d, profil
                 gradmag_mmap[window.toslices()] = np.radians(s_chunk)
 
         _float_product_profile(profile)
-        _save_memmap_to_raster(gradmag_mmap, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_gradmag.tif")
+        _save_memmap_to_raster(gradmag_mmap, out_gradmag, profile, local_tmp_dir, log_prefix=progress_str)
         gc.collect()
     finally:
         _close_memmap(gradmag_mmap)
@@ -936,13 +876,13 @@ def _generate_bpi_products(missing_numpy_dict, d_bathy, cell_size, best_radii, p
     if missing_numpy_dict["_bpi_fine.tif"]:
         bpi_fine_lazy = _calculate_bpi_dask(d_bathy, cell_size, best_radii['fine'][0], best_radii['fine'][1])
         _float_product_profile(profile)
-        _save_dask_to_raster(bpi_fine_lazy, out_fine, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_bpi_fine.tif")
+        _save_dask_to_raster(bpi_fine_lazy, out_fine, profile, local_tmp_dir, log_prefix=progress_str)
         del bpi_fine_lazy; gc.collect()
 
     if missing_numpy_dict["_bpi_broad.tif"]:
         bpi_broad_lazy = _calculate_bpi_dask(d_bathy, cell_size, best_radii['broad'][0], best_radii['broad'][1])
         _float_product_profile(profile)
-        _save_dask_to_raster(bpi_broad_lazy, out_broad, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_bpi_broad.tif")
+        _save_dask_to_raster(bpi_broad_lazy, out_broad, profile, local_tmp_dir, log_prefix=progress_str)
         del bpi_broad_lazy; gc.collect()
 
 
@@ -981,7 +921,6 @@ def _materialize_or_rebuild_bpi(
             profile,
             local_tmp_dir,
             log_prefix=progress_str,
-            product_suffix=product_suffix,
         )
         del bpi_lazy
         gc.collect()
@@ -1070,7 +1009,7 @@ def _classify_terrain(is_bluetopo, bathy_path, base_name, prediction_output_dir,
                 classified_array[window.toslices()] = c_c
 
         _float_product_profile(profile)
-        _save_memmap_to_raster(classified_array, out_class, profile, local_tmp_dir, log_prefix=progress_str, product_suffix="_terrain_classification.tif")
+        _save_memmap_to_raster(classified_array, out_class, profile, local_tmp_dir, log_prefix=progress_str)
     finally:
         _close_memmap(classified_array)
 
@@ -1133,7 +1072,7 @@ def _terrain_local_paths(tmpdir):
     )}
 
 
-def _missing_terrain_products(outputs, local, wbt, is_bluetopo):
+def _missing_terrain_products(outputs, local, wbt, is_bluetopo, overwrite):
     commands = (
         ("_slope_deg.tif", lambda i, o: wbt.slope(i, o, units="degrees"), "slope_deg"),
         ("_flowdir.tif", lambda i, o: wbt.d8_pointer(i, o, esri_pntr=False), "flowdir"),
@@ -1145,13 +1084,13 @@ def _missing_terrain_products(outputs, local, wbt, is_bluetopo):
     )
     missing_wbt = [(outputs[suffix], command, local[name], suffix)
                    for suffix, command, name in commands
-                   if not _validate_product_raster(outputs[suffix], suffix)[0]]
-    missing_shear = not _validate_raster(outputs["_shearproxy.tif"])[0]
+                   if overwrite or not _validate_raster(outputs[suffix])[0]]
+    missing_shear = overwrite or not _validate_raster(outputs["_shearproxy.tif"])[0]
     missing_numpy = {
-        suffix: not _validate_product_raster(outputs[suffix], suffix)[0]
+        suffix: overwrite or not _validate_raster(outputs[suffix])[0]
         for suffix in ("_bpi_fine.tif", "_bpi_broad.tif", "_terrain_classification.tif", "_gradmag.tif", "_tci.tif")
     }
-    missing_numpy["_slope.tif"] = not is_bluetopo and not _validate_product_raster(outputs["_slope.tif"], "_slope.tif")[0]
+    missing_numpy["_slope.tif"] = not is_bluetopo and (overwrite or not _validate_raster(outputs["_slope.tif"])[0])
     if missing_numpy["_terrain_classification.tif"]:
         missing_numpy["_bpi_fine.tif"] = True
         missing_numpy["_bpi_broad.tif"] = True
@@ -1191,15 +1130,15 @@ def _validate_terrain_outputs(outputs, is_bluetopo, source_grid, product_errors)
     source_shape, source_crs, source_transform = source_grid
     required = [suffix for suffix in outputs if not (is_bluetopo and suffix == "_slope.tif")]
     for suffix in required:
-        valid, reason = _validate_product_raster(
-            outputs[suffix], suffix, expected_shape=source_shape,
+        valid, reason = _validate_raster(
+            outputs[suffix], expected_shape=source_shape,
             expected_crs=source_crs, expected_transform=source_transform,
         )
         if not valid:
             product_errors.append(f"Invalid required output {UPath(outputs[suffix]).name}: {reason}")
 
 
-def _process_terrain_raster_worker(bathy_path: str, current_index: int, total_count: int, best_radii: Dict[str, Tuple[int, int]], terrain_outputs_dir: str, prediction_output_dir: str, dictionary_dir: str, local_tmp_dir: str) -> Tuple[bool, str]:
+def _process_terrain_raster_worker(bathy_path: str, current_index: int, total_count: int, best_radii: Dict[str, Tuple[int, int]], terrain_outputs_dir: str, prediction_output_dir: str, dictionary_dir: str, local_tmp_dir: str, overwrite: bool) -> Tuple[bool, str]:
     """Generate missing terrain products for one bathymetry raster."""
     _silence_aws_credential_discovery_logs()
     if sys.stdout is None:
@@ -1221,7 +1160,7 @@ def _process_terrain_raster_worker(bathy_path: str, current_index: int, total_co
         try:
             wbt.set_working_dir(tmpdir)
             local = _terrain_local_paths(tmpdir)
-            missing_wbt, missing_shear, missing_numpy = _missing_terrain_products(outputs, local, wbt, is_bluetopo)
+            missing_wbt, missing_shear, missing_numpy = _missing_terrain_products(outputs, local, wbt, is_bluetopo, overwrite)
             if not (missing_wbt or missing_shear or any(missing_numpy.values())):
                 return True, f"Skipped: {base_name} (All exist)"
             Engine.write_message_dask(f"-> [STARTING] {progress_str}Generating products for: {base_name}", OUTPUTS)
@@ -1363,7 +1302,8 @@ class TerrainProductsEngine(Engine):
                 dictionary_dir=str(self.dictionary_dir), 
                 best_radii=best_radii, 
                 local_tmp_dir=str(self.local_tmp_dir), 
-                prediction_output_dir=str(self.prediction_output_dir)
+                prediction_output_dir=str(self.prediction_output_dir),
+                overwrite=self.overwrite
             )
             dict_results = self.client.gather(dict_futures)
             for success, msg in dict_results:
@@ -1383,7 +1323,8 @@ class TerrainProductsEngine(Engine):
             _check_unprocessed_worker,
             valid_files,
             terrain_outputs_dir=str(self.terrain_outputs_dir),
-            prediction_output_dir=str(self.prediction_output_dir)
+            prediction_output_dir=str(self.prediction_output_dir),
+            overwrite=self.overwrite
         )
         check_results = self.client.gather(check_futures)
         
@@ -1422,7 +1363,8 @@ class TerrainProductsEngine(Engine):
             terrain_outputs_dir=str(self.terrain_outputs_dir),
             prediction_output_dir=str(self.prediction_output_dir),
             dictionary_dir=str(self.dictionary_dir),
-            local_tmp_dir=str(self.local_tmp_dir)
+            local_tmp_dir=str(self.local_tmp_dir),
+            overwrite=self.overwrite
         )
         
         terrain_results = self.client.gather(terrain_futures)
