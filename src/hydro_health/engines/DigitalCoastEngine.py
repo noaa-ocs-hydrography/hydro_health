@@ -1,30 +1,30 @@
 """Class for obtaining all available files"""
 
-import boto3
+import ctypes
 import gc
 import logging
 import os
 import pathlib
-import requests
 import shutil
 import tempfile
+import uuid
 import zipfile
 from collections import defaultdict
 from multiprocessing import set_executable
 
+import boto3
 import geopandas as gpd
-import rasterio
-import rasterio.shutil
+import requests
 from botocore import UNSIGNED
 from botocore.client import Config
-from rasterio.enums import Resampling
+from osgeo import gdal
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from hydro_health.engines.Engine import Engine
 from hydro_health.helpers.tools import get_config_item
 
-os.environ['SHAPE_RESTORE_SHX'] = 'YES'  # Reruns throwing fiona DriverError for .SHX
+os.environ['SHAPE_RESTORE_SHX'] = 'YES'
 
 # RedHat UTF encodings
 os.environ["PYTHONIOENCODING"] = "utf-8"
@@ -34,13 +34,75 @@ os.environ["LANG"] = "en_US.UTF-8"
 logging.getLogger("pyproj").setLevel(logging.ERROR)
 
 
+def _trim_memory() -> None:
+    """Forces Linux glibc to release unmanaged C/GDAL memory arenas back to the OS."""
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:
+        pass
+
+
+def _reproject_raster_gdal(
+    src_path: str | pathlib.Path,
+    dst_path: str | pathlib.Path,
+    target_crs: str = "EPSG:32617",
+) -> None:
+    """
+    Native C++ streaming reprojection and COG conversion using gdal.Warp.
+    Streams block-by-block with a strict 128MB warp cache limit.
+    """
+    src_path_str = str(src_path)
+    dst_path_str = str(dst_path)
+
+    # Determine predictor: 3 for floating point DEMs, 2 for integers
+    src_ds = gdal.Open(src_path_str, gdal.GA_ReadOnly)
+    if not src_ds:
+        raise RuntimeError(f"Could not open source raster: {src_path_str}")
+
+    band = src_ds.GetRasterBand(1)
+    band_type = gdal.GetDataTypeName(band.DataType)
+    predictor = "3" if "Float" in band_type else "2"
+    src_ds = None  # Close handle
+
+    warp_options = gdal.WarpOptions(
+        dstSRS=target_crs,
+        resampleAlg="bilinear",
+        format="GTiff",
+        warpMemoryLimit=128 * 1024 * 1024,  # Exactly 128 MB in bytes
+        creationOptions=[
+            "TILED=YES",
+            "BLOCKXSIZE=512",
+            "BLOCKYSIZE=512",
+            "COMPRESS=DEFLATE",
+            f"PREDICTOR={predictor}",
+            "BIGTIFF=IF_SAFER"
+        ]
+    )
+
+    # Stream warp directly to destination file
+    dst_ds = gdal.Warp(dst_path_str, src_path_str, options=warp_options)
+    if dst_ds is None:
+        raise RuntimeError(f"gdal.Warp failed for {src_path_str}")
+
+    # Build internal overviews
+    min_dim = min(dst_ds.RasterXSize, dst_ds.RasterYSize)
+    potential_ov = [2, 4, 8, 16]
+    valid_ov = [o for o in potential_ov if (min_dim // o) >= 4]
+    if valid_ov:
+        dst_ds.BuildOverviews("AVERAGE", valid_ov)
+
+    # Close and flush destination dataset
+    dst_ds = None
+
+
 def _download_tile_index(param_inputs: list[list]) -> None:
     """Parallel process and download tile index shapefiles"""
 
     download_link, provider_folder, param_lookup, outputs = param_inputs
     engine = DigitalCoastEngine(param_lookup)
 
-    # TODO could check dataType != 'Lidar'
     if get_config_item('DIGITALCOAST', 'BUCKET') in download_link and ('dem' in download_link):
         _, data_file = download_link.replace('/index.html', '').split('.com')
         lidar_bucket = engine.get_bucket()
@@ -60,13 +122,16 @@ def _download_tile_index(param_inputs: list[list]) -> None:
                     lidar_bucket.download_fileobj(obj_summary.key, tile_index)
 
 
-def _download_intersected_datasets_local(param_inputs: list[list]) -> str:
-    """Parallel process spatial filter and download of datasets to local disk"""
+def _download_intersected_datasets_local(param_inputs: list) -> str:
+    """
+    Downloads raw GeoTIFFs to an 'original' subfolder and reprojects
+    them into the parent folder as EPSG:32617.
+    """
 
     tile_gdf, shp_path, param_lookup, outputs = param_inputs
+    shp_path = pathlib.Path(shp_path)
     engine = DigitalCoastEngine(param_lookup)
 
-    # GeoPandas handles standard pathlib.Path across Linux & Windows natively
     shp_df = gpd.read_file(shp_path).to_crs(4326)
     shp_df.columns = shp_df.columns.str.lower()
     
@@ -78,7 +143,11 @@ def _download_intersected_datasets_local(param_inputs: list[list]) -> str:
 
     if df_joined['url'].any():
         df_joined = df_joined.loc[df_joined['tile'].notnull()]
-        shp_folder = shp_path.parents[0]
+        shp_folder = shp_path.parent
+        
+        original_folder = shp_folder / "original"
+        original_folder.mkdir(parents=True, exist_ok=True)
+        
         urls = df_joined['url'].unique()
         
         for i, url in enumerate(urls):
@@ -87,45 +156,51 @@ def _download_intersected_datasets_local(param_inputs: list[list]) -> str:
                 continue
                 
             dataset_name = cleansed_url.split('/')[-1]
-            output_file = shp_folder / dataset_name
+            raw_output_file = original_folder / dataset_name
+            reprojected_output_file = shp_folder / dataset_name
 
-            # Apply extended path formatting ONLY when executing on Windows
-            if os.name == 'nt':
-                abs_str = str(output_file.resolve())
-                # Escaped backslash prevents string termination syntax errors
-                file_target = abs_str if abs_str.startswith("\\\\?\\") else "\\\\?\\" + abs_str
-            else:
-                file_target = output_file
+            raw_target = str(raw_output_file)
+            rep_target = str(reprojected_output_file)
 
-            if os.path.exists(file_target):
-                engine.write_message(f' - ({i} of {len(urls)}) Skipping data: {output_file.stem}', outputs)
+            if os.path.exists(rep_target):
+                engine.write_message(f' - ({i} of {len(urls)}) Skipping (already reprojected): {reprojected_output_file.stem}', outputs)
                 continue
-            else:
-                engine.write_message(f' - ({i} of {len(urls)}) Downloading data: {output_file.stem}', outputs)
 
+            # 1. Download to original/
+            if not os.path.exists(raw_target):
+                engine.write_message(f' - ({i} of {len(urls)}) Downloading original: {raw_output_file.stem}', outputs)
+                try:
+                    retry_strategy = Retry(
+                        total=3,
+                        backoff_factor=1,
+                        status_forcelist=[404, 500, 502, 503, 504],
+                        allowed_methods=["GET"]
+                    )
+                    adapter = HTTPAdapter(max_retries=retry_strategy)
+                    request_session = requests.Session()
+                    request_session.mount("https://", adapter)
+                    request_session.mount("http://", adapter)
+
+                    intersected_response = request_session.get(cleansed_url, timeout=10)
+                except requests.exceptions.RequestException:
+                    engine.write_message(f'Connection/Timeout error: {cleansed_url}', outputs)
+                    continue
+
+                if intersected_response.status_code == 200:
+                    with open(raw_target, 'wb') as file:
+                        file.write(intersected_response.content)
+                else:
+                    return f'Failed to download: {cleansed_url}'
+
+            # 2. Native streaming reprojection
             try:
-                retry_strategy = Retry(
-                    total=3,
-                    backoff_factor=1,
-                    status_forcelist=[404],
-                    allowed_methods=["GET"]
-                )
-                adapter = HTTPAdapter(max_retries=retry_strategy)
-                request_session = requests.Session()
-                request_session.mount("https://", adapter)
-                request_session.mount("http://", adapter)
-
-                intersected_response = request_session.get(cleansed_url, timeout=5)
-            except requests.exceptions.ConnectionError:
-                engine.write_message(f'Timeout error: {cleansed_url}', outputs)
+                engine.write_message(f' - ({i} of {len(urls)}) Reprojecting to EPSG:32617: {reprojected_output_file.stem}', outputs)
+                _reproject_raster_gdal(raw_target, rep_target, target_crs="EPSG:32617")
+            except Exception as e:
+                engine.write_message(f'Reprojection error on {dataset_name}: {e}', outputs)
                 continue
-
-            if intersected_response.status_code == 200:
-                output_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(file_target, 'wb') as file:
-                    file.write(intersected_response.content)
-            else:
-                return f'Failed to download: {cleansed_url}'
+            finally:
+                _trim_memory()
                 
         return f'- {shp_path.stem}'
     else:
@@ -134,8 +209,8 @@ def _download_intersected_datasets_local(param_inputs: list[list]) -> str:
 
 def _download_intersected_datasets_s3(param_inputs: list) -> str:
     """
-    Safely download DigitalCoast files that intersect the input polygon.
-    Files are downloaded to /home/"user"/temp_scratch instead of RAM.
+    Downloads DigitalCoast files, preserves raw original in S3 under /original/,
+    reprojects to EPSG:32617 using GDAL C-streaming, and uploads to S3.
     """
 
     ecoregion, tile_gdf, shp_path, outputs, param_lookup, temp_root = param_inputs
@@ -145,10 +220,10 @@ def _download_intersected_datasets_s3(param_inputs: list) -> str:
     scratch_dir = pathlib.Path.home() / "temp_scratch"
     scratch_dir.mkdir(parents=True, exist_ok=True)
 
-    gdal_config = {
-        "GDAL_TMPDIR": str(scratch_dir),
-        "GDAL_CACHEMAX": 512
-    }
+    # Correct cache limit: 256 MB in bytes (not 256 bytes)
+    gdal.SetCacheMax(256 * 1024 * 1024)
+    gdal.SetConfigOption("GDAL_TMPDIR", str(scratch_dir))
+    gdal.SetConfigOption("GDAL_DISABLE_READDIR_ON_OPEN", "TRUE")
 
     shp_df = gpd.read_file(shp_path, engine="pyogrio")
     shp_df['geometry'] = shp_df.geometry.make_valid()
@@ -173,7 +248,7 @@ def _download_intersected_datasets_s3(param_inputs: list) -> str:
     
     del shp_df
     del df_joined
-    gc.collect()
+    _trim_memory()
 
     if urls:
         retry_strategy = Retry(
@@ -185,63 +260,57 @@ def _download_intersected_datasets_s3(param_inputs: list) -> str:
         request_session = requests.Session()
         request_session.mount("https://", adapter)
 
-        with rasterio.Env(**gdal_config):
-            for url in urls:
-                cleansed_url = engine.cleansed_url(url)
-                if not cleansed_url.endswith('.tif'): 
-                    continue
+        for url in urls:
+            cleansed_url = engine.cleansed_url(url)
+            if not cleansed_url.endswith('.tif'): 
+                continue
 
-                try:
-                    with tempfile.NamedTemporaryFile(suffix='.tif', dir=scratch_dir, delete=True) as tmp_raw:
-                        with request_session.get(cleansed_url, timeout=15, stream=True) as r:
-                            r.raise_for_status()
-                            for chunk in r.iter_content(chunk_size=1024 * 1024): 
-                                tmp_raw.write(chunk)
-                            tmp_raw.flush()
+            unique_id = uuid.uuid4().hex[:8]
+            tmp_raw_path = scratch_dir / f"raw_{unique_id}.tif"
+            tmp_rep_path = scratch_dir / f"rep_{unique_id}.tif"
 
-                        with rasterio.open(tmp_raw.name) as src:
-                            dst_profile = src.profile.copy()
-                            dst_profile.update({
-                                "driver": "GTiff", 
-                                "tiled": True, 
-                                "blockxsize": 512, 
-                                "blockysize": 512, 
-                                "compress": "deflate", 
-                                "predictor": 3, 
-                                "interleave": "pixel"
-                            })
+            try:
+                dataset_name = cleansed_url.split('/')[-1]
+                local_parent_dir = shp_path_obj.parent
+                relative_s3_path = local_parent_dir.relative_to(temp_root)
 
-                            with tempfile.NamedTemporaryFile(suffix='.tif', dir=scratch_dir, delete=True) as tmp_cog:
-                                rasterio.shutil.copy(src, tmp_cog.name, **dst_profile)
-                                
-                                with rasterio.open(tmp_cog.name, 'r+') as dst:
-                                    min_dim = min(dst.width, dst.height)
-                                    potential_ov = [2, 4, 8, 16]
-                                    valid_ov = [o for o in potential_ov if (min_dim // o) >= 4]
-                                    
-                                    if valid_ov:
-                                        dst.build_overviews(valid_ov, Resampling.average)
-                                
-                                dataset_name = cleansed_url.split('/')[-1]
-                                
-                                # FIXED RELATIVE PATH LOGIC: Extracts path dynamically including testing/ prefix
-                                local_parent_dir = shp_path_obj.parent
-                                relative_s3_path = local_parent_dir.relative_to(temp_root)
-                                s3_prefix = f"{relative_s3_path.as_posix()}/{dataset_name}"
-                                
-                                engine.upload_file_to_s3(tmp_cog.name, s3_prefix)
-                                
-                    gc.collect()
-                except Exception as e:
-                    engine.write_message(f"Error processing {cleansed_url}: {e}", outputs)
-                    continue
+                # 1. Download directly to scratch file
+                with request_session.get(cleansed_url, timeout=20, stream=True) as r:
+                    r.raise_for_status()
+                    with open(tmp_raw_path, 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 1024): 
+                            f.write(chunk)
+
+                # 2. Upload raw file to S3 under /original/
+                s3_original_prefix = f"{relative_s3_path.as_posix()}/original/{dataset_name}"
+                engine.upload_file_to_s3(str(tmp_raw_path), s3_original_prefix)
+
+                # 3. Stream warp to EPSG:32617 and build overviews
+                _reproject_raster_gdal(tmp_raw_path, tmp_rep_path, target_crs="EPSG:32617")
+
+                # 4. Upload reprojected raster to S3
+                s3_prefix = f"{relative_s3_path.as_posix()}/{dataset_name}"
+                engine.upload_file_to_s3(str(tmp_rep_path), s3_prefix)
+
+            except Exception as e:
+                engine.write_message(f"Error processing {cleansed_url}: {e}", outputs)
+                continue
+            finally:
+                # Always remove temp scratch files and trim memory
+                if tmp_raw_path.exists():
+                    tmp_raw_path.unlink()
+                if tmp_rep_path.exists():
+                    tmp_rep_path.unlink()
+                _trim_memory()
 
         request_session.close()
+
     return f'- {shp_path_obj.stem}'
 
 
 def _download_intersected_datasets(param_inputs: list) -> str:
     """Parallel process spatial filter and download of datasets (local disk or S3 upload)"""
+    
     if len(param_inputs) == 6:
         return _download_intersected_datasets_s3(param_inputs)
     return _download_intersected_datasets_local(param_inputs)
@@ -299,7 +368,7 @@ class DigitalCoastEngine(Engine):
 
         providers = []
         for shp_path in tile_index_shapefiles:
-            shp_df = gpd.read_file(shp_path).to_crs(9822)  # Albers Equal Area
+            shp_df = gpd.read_file(shp_path).to_crs(5072)  # latest (NAD83 (NSRS2007) / Conus Albers)
             shp_df['area'] = shp_df['geometry'].area
             total_area = shp_df["area"].sum()
             if total_area < self.approved_size:
@@ -336,7 +405,6 @@ class DigitalCoastEngine(Engine):
     ) -> None:
         """Download tile_index shapefiles"""
 
-        # Accommodates both argument order conventions seamlessly
         if isinstance(digital_coast_folder, gpd.GeoDataFrame):
             tile_gdf, ecoregion, digital_coast_folder = digital_coast_folder, tile_gdf, ecoregion
 
@@ -423,7 +491,10 @@ class DigitalCoastEngine(Engine):
     def _run_local(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str | bool) -> None:
         """Local pipeline execution"""
 
-        outputs = self.param_lookup['output_directory'].valueAsText
+        outputs = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
+        outputs.mkdir(parents=True, exist_ok=True)
+        outputs_str = str(outputs)
+
         self.setup_dask(self.param_lookup['env'])
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         for ecoregion in ecoregions:
@@ -431,13 +502,13 @@ class DigitalCoastEngine(Engine):
                 digital_coast_subfolder = pathlib.Path(ecoregion) / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
                 if output_prefix:
                     digital_coast_subfolder = pathlib.Path(output_prefix) / digital_coast_subfolder
-                digital_coast_folder = pathlib.Path(outputs) / digital_coast_subfolder
+                digital_coast_folder = outputs / digital_coast_subfolder
                 ecoregion_tile_gdf = tile_gdf.loc[tile_gdf['EcoRegion'] == ecoregion]
-                self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
-                self.check_tile_index_areas(digital_coast_folder, outputs)
-                self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs)
+                self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs_str)
+                self.check_tile_index_areas(digital_coast_folder, outputs_str)
+                self.process_intersected_datasets(digital_coast_folder, ecoregion_tile_gdf, outputs_str)
                 if digital_coast_folder.exists():
-                    self.delete_unused_folder(digital_coast_folder, outputs)
+                    self.delete_unused_folder(digital_coast_folder, outputs_str)
             found_providers = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
             self.write_run_manifest(digital_coast_subfolder, {'providers': len(found_providers)})
         self.close_dask()
@@ -445,10 +516,13 @@ class DigitalCoastEngine(Engine):
     def _run_s3(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str) -> None:
         """S3 cloud upload pipeline execution"""
 
-        outputs = self.param_lookup['output_directory'].valueAsText
-        provider_log = pathlib.Path(outputs) / "processed_providers.log"
+        outputs = pathlib.Path(self.param_lookup['output_directory'].valueAsText)
+        outputs.mkdir(parents=True, exist_ok=True)
+        provider_log = outputs / "processed_providers.log"
         provider_log.touch(exist_ok=True)
-        self.setup_dask(self.param_lookup['env'])
+        outputs_str = str(outputs)
+
+        self.setup_dask(self.param_lookup['env'], threads_per_worker=1)
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         
         for ecoregion in ecoregions:
@@ -464,35 +538,48 @@ class DigitalCoastEngine(Engine):
                     
                     digital_coast_folder = temp_digital_coast_outputs / digital_coast_subfolder
                     
-                    self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs)
+                    self.download_support_files(digital_coast_folder, ecoregion_tile_gdf, ecoregion, outputs_str)
                     tile_index_shapefiles = [shp for shp in digital_coast_folder.rglob('*index*.shp') if 'unused_providers' not in str(shp)]
-                    approved_index_shapefiles = self.check_tile_index_areas(tile_index_shapefiles, outputs)
+                    approved_index_shapefiles = self.check_tile_index_areas(tile_index_shapefiles, outputs_str) or []
 
                     chunk_size = 5
                     for i in range(0, len(approved_index_shapefiles), chunk_size):
-                        current_files = approved_index_shapefiles[i:i+chunk_size]
-                        provider_folders = [shp_path.parents[0].name for shp_path in current_files]
+                        current_files = approved_index_shapefiles[i:i + chunk_size]
+                        
+                        completed_providers = set(provider_log.read_text().splitlines()) if provider_log.exists() else set()
+                        files_to_process = [
+                            shp for shp in current_files 
+                            if shp.parents[0].name not in completed_providers
+                        ]
 
-                        for provider in provider_folders:
-                            print(f'Processing provider: {provider}')
-                        for provider in provider_folders:
-                            completed_providers = set(provider_log.read_text().splitlines())
-                            if provider in completed_providers:
-                                print(f'Skipping already processed provider: {provider}')
-                                continue
-                            
-                            param_inputs = [[ecoregion, ecoregion_tile_gdf, shp_path, outputs, self.param_lookup, temp_digital_coast_outputs] for shp_path in current_files]
-                            future_intersected_datasets = self.client.map(_download_intersected_datasets, param_inputs)
-                            self.client.gather(future_intersected_datasets)
-                            with open(provider_log, "a") as f:
-                                f.write(f"{provider}\n")
+                        if not files_to_process:
+                            continue
 
-                        # Upload tile_index files
-                        for provider_shp in current_files:
+                        for shp in files_to_process:
+                            print(f'Processing provider: {shp.parents[0].name}')
+
+                        param_inputs = [
+                            [ecoregion, ecoregion_tile_gdf, shp_path, outputs_str, self.param_lookup, temp_digital_coast_outputs] 
+                            for shp_path in files_to_process
+                        ]
+                        future_intersected_datasets = self.client.map(_download_intersected_datasets, param_inputs)
+                        self.client.gather(future_intersected_datasets)
+
+                        # Record completion
+                        with open(provider_log, "a") as f:
+                            for shp in files_to_process:
+                                f.write(f"{shp.parents[0].name}\n")
+
+                        # Upload tile_index shapefiles
+                        uploaded_providers = set()
+                        for provider_shp in files_to_process:
                             provider_path_parts = provider_shp.parts
                             digital_coast_index = provider_path_parts.index('DigitalCoast')
                             provider_folder = pathlib.Path(*provider_path_parts[:digital_coast_index + 2])
-                            self.upload_files_to_s3(provider_folder, temp_digital_coast_outputs)
+                            if provider_folder not in uploaded_providers:
+                                self.upload_files_to_s3(provider_folder, temp_digital_coast_outputs)
+                                uploaded_providers.add(provider_folder)
+
                     found_providers = [folder for folder in digital_coast_folder.glob('*') if folder.is_dir()]
                     self.write_run_manifest(digital_coast_subfolder, {'providers': len(found_providers)})
         self.close_dask()
