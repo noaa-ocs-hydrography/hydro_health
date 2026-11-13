@@ -311,6 +311,10 @@ class Engine:
                 "distributed.scheduler.dashboard.tls.key": str(keys[0]),
             })
             self.set_proj_path()
+        # Dask settings for all ENVs
+        dask.config.set({
+            "distributed.scheduler.allowed-failures": 10,
+        })
         self.cluster = LocalCluster(processes=processes, n_workers=n_workers, threads_per_worker=threads_per_worker, memory_limit=memory_limit) # new port for SSL
         self.client = Client(self.cluster)
         # print(self.client.dashboard_link)
