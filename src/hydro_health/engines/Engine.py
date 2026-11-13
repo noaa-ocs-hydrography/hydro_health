@@ -40,7 +40,6 @@ class Engine:
         self.client = None
         self.target_crs = 'EPSG:32617'
         self.target_res = 8
-        self.target_crs = 'EPSG:32617'
         self.year_ranges = [
             # (1998, 2001),
             (2004, 2006),

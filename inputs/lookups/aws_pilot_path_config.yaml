@@ -15,7 +15,7 @@ HURRICANE:
 LIDAR_PLOTS:
   INPUT_VRTS: ER_3/pilot/model_variables/Prediction/raw/DigitalCoast
   PLOT_OUTPUTS: ER_3/pilot/model_variables/Prediction/raw/DigitalCoast_plots
-  RESAMPLED_VRTS: ER_3/pilot/model_variables/Prediction/raw/DigitalCoast_resampled
+  RESAMPLED_MOSAICS: ER_3/pilot/model_variables/Prediction/raw/DigitalCoast_resampled
 MASK:
   SUBFOLDER: masks 
   MASK_PRED_PATH: ER_3/pilot/masks/prediction_mask_pilot.tif
