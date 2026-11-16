@@ -149,7 +149,8 @@ def _read_dataset_coverage(uri: str, profile: dict) -> tuple:
                            nodata=float("nan"), resampling=Resampling.nearest) as vrt:
                 values = np.ma.masked_invalid(vrt.read(1, masked=True))
             valid = ~np.ma.getmaskarray(values)
-            valid &= values.filled(-9999) != -9999
+            # The source TIFF defines missing pixels; the export sentinel may differ.
+            # WarpedVRT preserves its source mask/NoData and uses NaN on this preview.
             if source.crs.is_projected:
                 factor = source.crs.linear_units_factor[1]
                 pixel_note = f"{source.res[0]*factor:.4g} x {source.res[1]*factor:.4g} m native"
@@ -195,17 +196,12 @@ def _render_coverage_year_thumbnails(fig, year_grids: dict, profile: dict, color
 
 
 def _check_native_raster_values(source) -> None:
-    """Reject empty or all-zero TIFFs using native blocks; stop at the first finite nonzero value."""
+    """Reject TIFFs with no finite, unmasked values; zero is a valid data value."""
 
-    has_valid = False
     for _, window in source.block_windows(1):
         values = np.ma.masked_invalid(source.read(1, window=window, masked=True)).compressed()
         if values.size:
-            has_valid = True
-            if np.any(values != 0):
-                return
-    if has_valid:
-        raise ValueError("All-zero TIFF: all finite, unmasked source values are zero")
+            return
     raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
 
 
@@ -642,7 +638,7 @@ class LocalizedFile:
         if self.tempdir is not None:
             self.tempdir.cleanup()
 
-def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict, tile_geom_wkb: bytes, crs: str, nodata: float = -9999.0, max_grid_cells: int = 25000000, diagnostics: dict | None = None) -> tuple[np.ndarray, dict]:
+def _dataframe_to_grid(df: pd.DataFrame, value_col: str, template_metadata: dict, tile_geom_wkb: bytes, crs: str, nodata: float = 9999.0, max_grid_cells: int = 25000000, diagnostics: dict | None = None) -> tuple[np.ndarray, dict]:
     """Mean finite point values per cell and retain cells touched by the polygon.
 
     The official polygon determines extent, never the surviving data rows.
@@ -1130,7 +1126,7 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
 
     # Clean visual copies only; summary files and model outputs remain untouched.
     frames = {role: frame.copy() for role, frame in frames.items()}
-    nodata_values = {-9999.0, float(settings["raster_config"]["nodata"])}
+    nodata_values = {9999, float(settings["raster_config"]["nodata"])}
     for role, frame in frames.items():
         rejected = np.zeros(len(frame), dtype=bool)
         for column in set(REPORT_PRODUCTS) | {"bathy_t1"}:
@@ -1584,16 +1580,16 @@ class MLRasterExportEngine(Engine):
             "create_model_tifs": False,  # False: skip tile exports and rebuild the PDF from existing TIFFs.
             "legacy_survey_year_offset": True,
             "raster_workers": 16,
-            "raster_threads_per_worker": 2,  # In-flight limit = workers * threads (32).
+            "raster_threads_per_worker": 1,  # In-flight limit = workers * threads (32).
             "mosaic_report": True, "report_max_dimension": 1600,
             "report_progress_interval": 250,  # Log aggregate progress every 250 files, including skipped tiles.
             "report_basemap_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Base/MapServer",
             "report_basemap_reference_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Reference/MapServer",
             "report_basemap_timeout": 20,
-            "memory_limit": "5GB", "raster_processes": True,
+            "memory_limit": "2GB", "raster_processes": True,
             "plot_max_dimension": 1000, "plot_max_points": 50000,
             "raster_config": {
-                "nodata": -9999.0, "compress": "DEFLATE", "blocksize": 512,
+                "nodata": self.nodata_value, "compress": "DEFLATE", "blocksize": 512,
                 "overview_levels": [2, 4, 8, 16, 32], "overview_resampling": "average",
                 "max_grid_cells": 25000000,
             },
@@ -1785,7 +1781,8 @@ class MLRasterExportEngine(Engine):
                         with WarpedVRT(source, crs=profile["crs"], transform=transform, width=width, height=height,
                                        dtype="float32", nodata=float("nan"), resampling=Resampling.nearest) as vrt:
                             background = np.ma.masked_invalid(vrt.read(1, masked=True))
-                    background = np.ma.masked_where(~inside | (background.filled(-9999) == -9999), background)
+                    # Preserve the source TIFF mask/NoData; clip only to the tile polygon.
+                    background = np.ma.masked_where(~inside, background)
                     if not background.count():
                         continue
                     lo, hi = np.percentile(background.compressed(), [2, 98])
@@ -1989,7 +1986,7 @@ class MLRasterExportEngine(Engine):
         height, width = max(1, math.ceil(meta["height"] / factor)), max(1, math.ceil(meta["width"] / factor))
         transform = meta["transform"] * Affine.scale(meta["width"] / width, meta["height"] / height)
         profile = dict(driver="GTiff", count=1, dtype="float32", crs=meta["crs"], transform=transform,
-                       width=width, height=height, nodata=-9999.0, compress="DEFLATE", tiled=True,
+                       width=width, height=height, nodata=self.nodata_value, compress="DEFLATE", tiled=True,
                        blockxsize=256, blockysize=256)
         bounds = rasterio.transform.array_bounds(height, width, transform)
         # Read the mask directly at the bounded overview size using categorical sampling.
@@ -2315,7 +2312,7 @@ class MLRasterExportEngine(Engine):
                     region_records = self.execute_tasks()
                     records.extend(region_records)
                 else:
-                    self.write_message(f"{eco_region}: create_model_tifs=False; skipping model TIFF creation and building the PDF from existing TIFFs.", OUTPUTS)
+                    self.write_message(f"{eco_region}: create_model_tifs={self.overwrite}; skipping model TIFF creation and building the PDF from existing TIFFs.", OUTPUTS)
                 try:
                     diagnostic = self.generate_tile_diagnostic_report(eco_region)
                     if diagnostic:
