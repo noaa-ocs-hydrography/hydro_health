@@ -90,7 +90,6 @@ class MetadataEngine(Engine):
                     if self.is_s3
                     else pathlib.Path(provider_folder) / 'metadata.txt'
                 )
-
                 with self._open(target_file, 'w') as writer:
                     for time in time_frames:
                         desc_elem = time.find('description')
@@ -123,7 +122,7 @@ class MetadataEngine(Engine):
 
         metadata_params = []
         for json_path in json_files:
-            provider_folder = str(pathlib.PurePosixPath(json_path).parent)
+            provider_folder = pathlib.Path(json_path).parent
             try:
                 with self._open(json_path, 'r') as json_file:
                     feature = json.load(json_file)
@@ -155,14 +154,14 @@ class MetadataEngine(Engine):
 
         return geometry_coords
 
-    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str | bool, outputs: str,) -> None:
+    def run(self, tile_gdf: gpd.GeoDataFrame, output_prefix: str | bool) -> None:
         """Main entry point for creating metadata.txt for tracking year-pairs"""
 
         print(f"Starting MetadataEngine ({'aws' if self.is_s3 else 'local'})")
 
         ecoregions = list(tile_gdf['EcoRegion'].unique())
         subfolder = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-
+        outputs = self.param_lookup['output_directory'].valueAsText
         for ecoregion in ecoregions:
             print('- Starting:', ecoregion)
             ecoregion_subpath = f'{ecoregion}/{subfolder}/DigitalCoast'
@@ -170,11 +169,11 @@ class MetadataEngine(Engine):
                 ecoregion_subpath = f'{output_prefix}/{ecoregion_subpath}'
 
             if self.is_s3:
-                target_folder = f's3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion_subpath}'
+                target_folder = f"s3://{get_config_item('SHARED', 'OUTPUT_BUCKET')}/{ecoregion_subpath}"
             else:
                 base_dir = (pathlib.Path(output_prefix) if output_prefix else pathlib.Path(outputs))
                 target_folder = base_dir / ecoregion_subpath
 
             self.read_json_files(target_folder, outputs)
             found_metadata = self._find_files(target_folder, 'metadata.txt')
-            self.write_run_manifest(ecoregion_subpath, {'metadata': len(found_metadata)})
+            self.write_run_manifest(pathlib.Path(ecoregion_subpath), {'metadata': len(found_metadata)})
