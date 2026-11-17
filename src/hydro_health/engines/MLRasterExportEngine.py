@@ -13,6 +13,8 @@ from io import BytesIO
 from collections.abc import Iterator
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from uuid import uuid4
 
@@ -33,7 +35,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 from matplotlib.colors import BoundaryNorm, Normalize, TwoSlopeNorm
 from matplotlib.patches import Patch
-from rasterio.enums import ColorInterp, Resampling
+from rasterio.enums import Resampling
 from rasterio.transform import Affine
 from rasterio.warp import transform_bounds
 from rasterio.warp import transform as transform_coordinates
@@ -96,41 +98,6 @@ def _report_raster_path(uri: str) -> str:
     """Read remote GeoTIFFs by range requests rather than downloading full tiles."""
 
     return str(uri).replace("s3://", "/vsis3/", 1)
-
-
-def _probe_report_gaps(source, data: np.ma.MaskedArray, profile: dict, limit: int = 32) -> list[tuple]:
-    """Compare blank overview cells with native centers and their 3x3 neighborhoods."""
-
-    valid = ~np.ma.getmaskarray(data)
-    adjacent = np.zeros(valid.shape, dtype=bool)
-    adjacent[1:, :] |= valid[:-1, :]
-    adjacent[:-1, :] |= valid[1:, :]
-    adjacent[:, 1:] |= valid[:, :-1]
-    adjacent[:, :-1] |= valid[:, 1:]
-    rows, cols = np.where(adjacent & ~valid)
-    if not len(rows):
-        return []
-    xs, ys = rasterio.transform.xy(profile["transform"], rows, cols)
-    xs, ys = transform_coordinates(profile["crs"], source.crs, xs, ys)
-    native_rows, native_cols = rasterio.transform.rowcol(source.transform, xs, ys)
-    inside = [i for i, (r, c) in enumerate(zip(native_rows, native_cols))
-              if 0 <= r < source.height and 0 <= c < source.width]
-    if not inside:
-        return []
-    selected = np.linspace(0, len(inside) - 1, min(limit, len(inside)), dtype=int)
-    probes = []
-    for index in selected:
-        i = inside[index]
-        pixel = source.read(1, window=Window(int(native_cols[i]), int(native_rows[i]), 1, 1), masked=True)
-        native_valid = bool(np.ma.masked_invalid(pixel).count())
-        r, c = int(native_rows[i]), int(native_cols[i])
-        r0, c0 = max(0, r - 1), max(0, c - 1)
-        neighborhood = source.read(1, window=Window(c0, r0, min(source.width, c + 2) - c0,
-                                                   min(source.height, r + 2) - r0), masked=True)
-        nearby_valid = bool(np.ma.masked_invalid(neighborhood).count())
-        edge = min(r, c, source.height - 1 - r, source.width - 1 - c) <= 1
-        probes.append((int(rows[i]), int(cols[i]), native_valid, nearby_valid, edge))
-    return probes
 
 
 def _read_dataset_coverage(uri: str, profile: dict) -> tuple:
@@ -205,7 +172,7 @@ def _check_native_raster_values(source) -> None:
     raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
 
 
-def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> tuple:
+def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> np.ma.MaskedArray:
     """Read one tile onto the bounded report grid, preserving NoData coverage."""
 
     method = Resampling.mode if categorical else Resampling.average
@@ -226,7 +193,6 @@ def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> tup
         xs, ys = np.asarray(xs), np.asarray(ys)
         inside = (xs >= bounds[0]) & (xs < bounds[2]) & (ys > bounds[1]) & (ys <= bounds[3])
         rows, cols, xs, ys = rows[inside], cols[inside], xs[inside], ys[inside]
-        restored = 0
         for start in range(0, len(rows), 4096):
             stop = start + 4096
             sx, sy = transform_coordinates(profile["crs"], source.crs, xs[start:stop].tolist(), ys[start:stop].tolist())
@@ -236,13 +202,7 @@ def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> tup
             rr, cc = rows[start:stop][valid], cols[start:stop][valid]
             data.data[rr, cc] = samples.data[valid]
             data.mask[rr, cc] = False
-            restored += int(valid.sum())
-        try:
-            probes = _probe_report_gaps(source, data, profile)
-            probe_error = None
-        except Exception as exc:
-            probes, probe_error = [], f"{type(exc).__name__}: {exc}"
-        return data, probes, probe_error, restored
+        return data
 
 
 
@@ -332,6 +292,21 @@ def _fetch_report_basemap(bounds: tuple, crs: str, width: int, height: int, sett
 
 
 
+def _add_report_date(fig, pdf: PdfPages) -> None:
+    """Stamp each PDF page with the report creation date in Eastern time."""
+
+    info = pdf.infodict()
+    created = info.get("CreationDate")
+    if not isinstance(created, datetime):
+        created = datetime.now(ZoneInfo("America/New_York"))
+        info["CreationDate"] = created
+    elif created.tzinfo is None:
+        created = created.astimezone()
+    created = created.astimezone(ZoneInfo("America/New_York"))
+    fig.text(.945, .985, f"Report created: {created:%B %d, %Y}",
+             ha="right", va="top", fontsize=8, color="#52616c")
+
+
 def _render_mosaic_page(pdf: PdfPages, entry: dict, grid: np.ma.MaskedArray, profile: dict, mask: np.ndarray, basemap: tuple | None, cmap: object, norm: Normalize, region: str, number: int, total: int) -> None:
     """Draw one labelled mosaic and auditable tile counts on each report page."""
 
@@ -344,11 +319,11 @@ def _render_mosaic_page(pdf: PdfPages, entry: dict, grid: np.ma.MaskedArray, pro
         fig.text(.055, .903, title, color="#152f42", fontsize=23, weight="bold")
         fig.text(.055, .865, f"{region}  |  {entry['role'].title()}  |  {entry['pair'].replace('_', ' - ')}", fontsize=12, color="#426078")
         included, skipped = len(entry["included_tiles"]), len(entry["skipped_tiles"])
-        fig.text(.055, .817, f"INCLUDED  {included}     SKIPPED  {skipped}     TOTAL  {included + skipped}",
+        fig.text(.055, .817, f"TILES INCLUDED  {included}     SKIPPED  {skipped}     TOTAL  {included + skipped}",
                  fontsize=11, weight="bold", color="#17685b")
         reasons = _mosaic_skip_counts(entry)
         summary = "; ".join(f"{label}: {count}" for label, count in sorted(reasons.items())) or "No tiles skipped"
-        fig.text(.055, .787, textwrap.shorten(summary, width=140, placeholder=" ... (see variable count summary)"), fontsize=9, color="#52616c")
+        fig.text(.055, .787, textwrap.shorten(summary, width=140, placeholder=" ..."), fontsize=9, color="#52616c")
         ax = fig.add_axes([.065, .175, .77, .575])
         ax.set_facecolor("#e5edf1")
         if basemap is not None:
@@ -388,24 +363,17 @@ def _render_mosaic_page(pdf: PdfPages, entry: dict, grid: np.ma.MaskedArray, pro
             bar.update_ticks()
         stats = entry.get("value_summary")
         if stats:
-            value_caption = (f"Values ({units}): min {stats['min']:.4g} | P02 {stats['p02']:.4g} | "
-                             f"median {stats['median']:.4g} | P98 {stats['p98']:.4g} | max {stats['max']:.4g}")
-            zero_caption = (f"Zero cells: {stats['zero_cells']:,} / {stats['valid_cells']:,} valid "
-                            f"({100 * stats['zero_cells'] / max(stats['valid_cells'], 1):.2f}%). "
-                            "Statistics describe the report-resolution mosaic; P02/P98 are the 2nd/98th percentiles.")
+            value_caption = (f"Values ({units}): min {stats['min']:.4g} | P25 {stats['p25']:.4g} | "
+                             f"median {stats['median']:.4g} | P95 {stats['p95']:.4g} | max {stats['max']:.4g}")
         else:
-            value_caption = "Value check: no valid mosaic cells; minimum, percentiles, median and maximum unavailable."
-            zero_caption = "Zero cells: 0 / 0 valid."
+            value_caption = "Value check: no valid mosaic cells; min, P25, median, P95 and max unavailable."
         fig.text(.055, .112, value_caption, fontsize=7.5, color="#31495b")
-        fig.text(.055, .094, zero_caption, fontsize=7, color="#52616c")
-        valid_values = grid.compressed()
-        outside = "" if family in ("survey", "count") else f" | Below/above scale: {np.count_nonzero(valid_values < norm.vmin):,}/{np.count_nonzero(valid_values > norm.vmax):,}"
-        scale_note = "full range" if family in ("survey", "count") else "P02–P98 envelope; symmetric changes; uncertainty starts at 0"
-        fig.text(.055, .072, f"Shared scale: {norm.vmin:.4g} to {norm.vmax:.4g} ({scale_note}){outside}", fontsize=7, color="#52616c")
-        fig.text(.055, .050, f"Prior-run TIFFs included: {len(entry.get('previous_export_tiles', []))}. See the variable summary for availability counts.", fontsize=8, color="#52616c")
+        fig.text(.055, .094, "Statistics describe the report-resolution mosaic; P25/P95 are the 25th/95th percentiles.",
+                 fontsize=7, color="#52616c")
         attribution = "Basemap: Esri Light Gray Canvas | Sources: Esri, HERE, Garmin, OpenStreetMap contributors." if basemap is not None else "Basemap unavailable; see the export log."
         fig.text(.055, .025, attribution, fontsize=7, color="#52616c")
         fig.text(.945, .025, f"{number} / {total}", ha="right", fontsize=8, color="#52616c")
+        _add_report_date(fig, pdf)
         pdf.savefig(fig, dpi=150)
     finally:
         plt.close(fig)
@@ -444,29 +412,19 @@ def _render_mosaic_skip_details(pdf: PdfPages, region: str, entries: list[dict])
     lines = []
     for entry in entries:
         lines.append(f"{entry['pair']} | {entry['role']} / {entry['column']}")
-        lines.append(f"Included {entry['included_count']:,}; skipped {entry['skipped_count']:,}; total {entry['total_count']:,}")
+        lines.append(f"TILES INCLUDED {entry['included_count']:,}; skipped {entry['skipped_count']:,}; total {entry['total_count']:,}")
         counts = _mosaic_skip_counts(entry)
         summary = "; ".join(f"{label}: {count:,}" for label, count in sorted(counts.items())) or "No tiles skipped"
         lines.extend(textwrap.wrap(summary, width=140))
-        gap = entry.get("gap_check")
-        if gap is None:
-            lines.append("GAP TEST: NOT AVAILABLE — no diagnostic result recorded.")
-        else:
-            blank, total = gap["blank_inside_mask"], gap["mask_cells"]
-            lines.append(f"GAP CHECK: {blank:,}/{total:,} report cells blank inside mask ({100 * blank / max(total, 1):.2f}%).")
-            lines.append(f"GAP SOURCE TEST: {gap['sampled_blank_cells']:,} sampled blanks; valid native centers {gap['native_valid']:,}; "
-                         f"valid neighbors only {gap['nearby_only']:,}; no valid 3x3 pixels {gap['native_nodata']:,}.")
-            lines.append(f"Near TIFF edge: {gap['source_edge_samples']:,}; failed tile checks: {gap['failed_tile_checks']:,}. "
-                         "No samples means inconclusive, not no gaps.")
-        lines.append(f"Native-center recovery: {entry.get('native_center_restored', 0):,} per-tile cells (overlaps possible); stored overviews disabled.")
         lines.append("")
     pages = 0
     for offset in range(0, len(lines), 40):
         fig = plt.figure(figsize=(11.7, 8.3), facecolor="white")
         try:
-            fig.text(.055, .95, f"{region} | TIFF AVAILABILITY AND GAP DIAGNOSTICS", fontsize=16, weight="bold")
+            fig.text(.055, .95, f"{region} | TIFF AVAILABILITY", fontsize=16, weight="bold")
             fig.text(.055, .90, "\n".join(lines[offset:offset + 40]), va="top", fontsize=9, linespacing=1.4)
-            fig.text(.055, .035, "Blank coverage is measured on the report grid. Source samples are not area percentages; valid centers flag a discrepancy, not a confirmed cause.", fontsize=8)
+            fig.text(.055, .035, "Counts describe TIFF availability and contribution to the report-resolution mosaic.", fontsize=8)
+            _add_report_date(fig, pdf)
             pdf.savefig(fig)
             pages += 1
         finally:
@@ -585,6 +543,7 @@ def _render_export_audit(pdf: PdfPages, region: str, audit: dict) -> int:
             fig.text(.055, .95, f"{region} | EXPORT SUMMARY", fontsize=16, weight="bold")
             fig.text(.055, .89, "\n".join(lines[offset:offset + 40]), va="top", fontsize=9, linespacing=1.35)
             fig.text(.055, .035, "Current-run counts only. TIFF availability and skip reasons are counted separately for each variable.", fontsize=8)
+            _add_report_date(fig, pdf)
             pdf.savefig(fig)
             pages += 1
         finally:
@@ -1120,6 +1079,7 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
         fig.text(.06, .92, heading, fontsize=11, color="#375b7a")
         fig.text(.06, .035, caption, fontsize=8, color="#375b7a", parse_math=False)
         try:
+            _add_report_date(fig, pdf)
             pdf.savefig(fig, dpi=160)
         finally:
             plt.close(fig)
@@ -1283,10 +1243,9 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
                     elif family == "change":
                         bar.set_ticks(np.arange(math.ceil(norm.vmin), math.floor(norm.vmax) + 1, 1))
                 values = z[valid]
-                p02, median, p98 = np.percentile(values, [2, 50, 98])
-                clipped = "" if family == "survey" else f"; below/above scale={np.count_nonzero(values < norm.vmin):,}/{np.count_nonzero(values > norm.vmax):,}"
-                ax.annotate(f"N={len(values):,}{clipped}; zeros={np.count_nonzero(values == 0):,}\nmin / p02 / median / p98 / max\n{values.min():.3g} / {p02:.3g} / {median:.3g} / {p98:.3g} / {values.max():.3g}", xy=(0, 0), xycoords="axes fraction", xytext=(0, -27), textcoords="offset points", va="top", fontsize=6.5)
-        finish(fig, "Tile uncertainty" if uncertainty else "Training and prediction summary", "Water-only: finite bathy_t < 0. All finite cells plotted at X/Y spacing; missing cells stay blank. No interpolation.\n" + " | ".join(crs_labels) + f"\nShared scales: depth {depth_limits[0]:g} to {depth_limits[1]:g} m; change {change_limits[0]:g} to {change_limits[1]:g} m; uncertainty 0–P98. End colors saturate outside limits; counts shown under plots.")
+                p25, median, p95 = np.percentile(values, [25, 50, 95])
+                ax.annotate(f"min / P25 / median / P95 / max\n{values.min():.3g} / {p25:.3g} / {median:.3g} / {p95:.3g} / {values.max():.3g}", xy=(0, 0), xycoords="axes fraction", xytext=(0, -27), textcoords="offset points", va="top", fontsize=6.5)
+        finish(fig, "Tile uncertainty" if uncertainty else "Training and prediction summary", "Water-only: finite bathy_t < 0. All finite cells plotted at X/Y spacing; missing cells stay blank. No interpolation.\n" + " | ".join(crs_labels) + f"\nShared scales: depth {depth_limits[0]:g} to {depth_limits[1]:g} m; change {change_limits[0]:g} to {change_limits[1]:g} m; uncertainty 0–P98. End colors saturate outside limits; statistics shown under plots.")
     if notes:
         fig = plt.figure(figsize=(11.7, 8.3))
         fig.text(.06, .82, "\n\n".join(textwrap.fill(note, 110) for note in notes), va="top", fontsize=10, parse_math=False)
@@ -1579,14 +1538,14 @@ class MLRasterExportEngine(Engine):
             "diagnostic_tile_id": "BH4S556X_3",  # None disables the separate tile PDF; does not filter regional reports.
             "create_model_tifs": False,  # False: skip tile exports and rebuild the PDF from existing TIFFs.
             "legacy_survey_year_offset": True,
-            "raster_workers": 16,
+            "raster_workers": 32,
             "raster_threads_per_worker": 1,  # In-flight limit = workers * threads (32).
             "mosaic_report": True, "report_max_dimension": 1600,
             "report_progress_interval": 250,  # Log aggregate progress every 250 files, including skipped tiles.
             "report_basemap_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Base/MapServer",
             "report_basemap_reference_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Reference/MapServer",
             "report_basemap_timeout": 20,
-            "memory_limit": "2GB", "raster_processes": True,
+            "memory_limit": "1GB", "raster_processes": True,
             "plot_max_dimension": 1000, "plot_max_points": 50000,
             "raster_config": {
                 "nodata": self.nodata_value, "compress": "DEFLATE", "blocksize": 512,
@@ -1886,6 +1845,7 @@ class MLRasterExportEngine(Engine):
             counts["Coverage page error"] += 1
             ax.text(.05, .5, textwrap.fill(f"Coverage unavailable: {type(exc).__name__}: {str(exc)[:350]}", 85), transform=ax.transAxes, parse_math=False)
         finally:
+            _add_report_date(fig, pdf)
             pdf.savefig(fig)
             plt.close(fig)
         self.write_message(f"DATASET COVERAGE {region}/{tile}: {dict(counts)}; source: {self.resampled_mosaics_dir}", OUTPUTS)
@@ -1896,6 +1856,7 @@ class MLRasterExportEngine(Engine):
             fig = plt.figure(figsize=(11.7, 8.3))
             fig.text(.06, .93, f"Dataset coverage index | {tile}", fontsize=17, color="#173247")
             fig.text(.06, .86, "\n\n".join(textwrap.fill(line, 115) for line in lines[start:start+14]), va="top", fontsize=8, parse_math=False)
+            _add_report_date(fig, pdf)
             pdf.savefig(fig)
             plt.close(fig)
 
@@ -1922,6 +1883,7 @@ class MLRasterExportEngine(Engine):
                     fig = plt.figure(figsize=(11.7, 8.3))
                     fig.text(.06, .88, f"{region} | {tile} | No model summaries found", fontsize=18)
                     fig.text(.06, .75, "No training or prediction year pairs are available for this tile.", fontsize=11)
+                    _add_report_date(fig, pdf)
                     pdf.savefig(fig)
                     plt.close(fig)
                 for pair, paths in sorted(sources.items()):
@@ -1962,7 +1924,7 @@ class MLRasterExportEngine(Engine):
         candidates = {pair: set(tiles) for pair, tiles in self.report_candidates.items()}
         available = {}
         # List each role once, avoiding an S3 existence request per product/tile.
-        for role, products in (("training", TRAIN_PRODUCTS), ("prediction", PRED_PRODUCTS)):
+        for role, products in (("prediction", PRED_PRODUCTS),):
             folder = "Training" if role == "training" else "Prediction"
             for path in self.raster_out_dir.glob(f"*/{folder}/*.tif"):
                 tile_id = path.parent.parent.name
@@ -2007,18 +1969,10 @@ class MLRasterExportEngine(Engine):
             root = Path(tmp)
             report_names = []
             scale_metadata = {}
-            # Exclude unwanted regional PDFs; tile raster exports remain available.
-            excluded_reports = {
-                ("training", "bathy_t"),
-                ("training", "mean_predicted_bathy_t1"),
-                ("training", "delta_bathy"),
-                ("training", "mean_predicted_change"),
-                ("training", "uncertainty_sd_bathy_t1"),
-                ("training", "mean_predicted_rate"),
-                ("prediction", "survey_year_bin_code"),
-            }
+            # Regional mosaics and PDFs are prediction-only.
+            excluded_reports = {("prediction", "survey_year_bin_code")}
             report_groups = [(role, column, products)
-                             for role, products in (("training", TRAIN_PRODUCTS), ("prediction", PRED_PRODUCTS))
+                             for role, products in (("prediction", PRED_PRODUCTS),)
                              for column in products if (role, column) not in excluded_reports]
             for variable_number, (role, column, products) in enumerate(report_groups, 1):
                 variable_entries, ranges = [], {}
@@ -2027,11 +1981,12 @@ class MLRasterExportEngine(Engine):
                 self.write_message(f"Preparing report {variable_number}/{len(report_groups)}: {region}/{role}/{column}; all year pairs. PDF destination: {destination / report_name}", OUTPUTS)
                 for pair, tiles in sorted(candidates.items()):
                     title, family, units = REPORT_PRODUCTS[column]
-                    name = f"MOSAIC_{role}_{column}_{pair}"
+                    name = (f"MOSAIC_prediction_UC_SD_t1_{pair}"
+                            if column == "uncertainty_sd_bathy_t1"
+                            else f"MOSAIC_{column}_{pair}")
                     entry = dict(pair=pair, role=role, column=column, included_tiles=[], skipped_tiles=[],
-                                 data_path=f"{name}.tif", styled_path=f"{name}_colored.tif")
+                                 data_path=f"{name}.tif")
                     mosaic = np.ma.masked_all((height, width), dtype="float32")
-                    gap_probes, gap_probe_errors = [], 0
 
                     def log_tile_progress(tile_id: str, skipped: dict | None = None) -> None:
                         included_count = len(entry["included_tiles"])
@@ -2075,10 +2030,6 @@ class MLRasterExportEngine(Engine):
                             entry["skipped_tiles"].append(dict(tile_id=tile_id, category=_export_problem_category(str(read_error)), reason=str(read_error)))
                             log_tile_progress(tile_id, entry["skipped_tiles"][-1])
                             continue
-                        data, probes, probe_error, restored = data
-                        entry["native_center_restored"] = entry.get("native_center_restored", 0) + restored
-                        gap_probes.extend(probes)
-                        gap_probe_errors += int(probe_error is not None)
                         usable = ~np.ma.getmaskarray(data)
                         if not usable.any():
                             entry["skipped_tiles"].append(dict(tile_id=tile_id, category="No overview data", reason=f"No finite cells remain at report resolution ({width} x {height}). A small valid footprint may disappear during resampling. Source TIFF: {uri}"))
@@ -2094,37 +2045,6 @@ class MLRasterExportEngine(Engine):
                         mosaic.mask[take] = False
                         entry["included_tiles"].append(tile_id)
                         log_tile_progress(tile_id)
-                    self.write_message(f"REPORT COVERAGE REPAIR {region}/{role}/{column} | {pair}: "
-                                       f"{entry.get('native_center_restored', 0):,} per-tile blank report cells restored from valid native center pixels (may overlap across tiles); stored overviews disabled.", OUTPUTS)
-                    # Only count sampled gaps still blank after ALL tiles have been merged.
-                    blank = np.ma.getmaskarray(mosaic)
-                    gap_cells = {}
-                    for row, col, native_valid, nearby_valid, edge in gap_probes:
-                        if blank[row, col] and mask[row, col]:
-                            previous = gap_cells.get((row, col), (False, False, False))
-                            gap_cells[row, col] = tuple(a or b for a, b in zip(previous, (native_valid, nearby_valid, edge)))
-                    native_valid_count = sum(item[0] for item in gap_cells.values())
-                    nearby_only_count = sum(not item[0] and item[1] for item in gap_cells.values())
-                    native_nodata_count = sum(not item[1] for item in gap_cells.values())
-                    edge_count = sum(item[2] for item in gap_cells.values())
-                    inside_count = int(np.count_nonzero(mask))
-                    blank_inside = int(np.count_nonzero(blank & mask))
-                    entry["gap_check"] = dict(sampled_blank_cells=len(gap_cells), native_valid=native_valid_count,
-                                              native_nodata=native_nodata_count, nearby_only=nearby_only_count,
-                                              source_edge_samples=edge_count, blank_inside_mask=blank_inside,
-                                              mask_cells=inside_count, failed_tile_checks=gap_probe_errors)
-                    self.write_message(
-                        f"GAP CHECK {region}/{role}/{column} | {pair}: {blank_inside:,}/{inside_count:,} "
-                        f"report cells inside the mask are blank ({100 * blank_inside / max(inside_count, 1):.2f}%). "
-                        "This is report-grid coverage, not native missing area.", OUTPUTS)
-                    self.write_message(
-                        f"GAP SOURCE TEST: {len(gap_cells)} sampled final blanks inside the mask: "
-                        f"{native_valid_count} have valid native centers (resampling/overview/grid alignment loss); "
-                        f"{nearby_only_count} have blank centers but valid 3x3 neighbors (narrow native gaps or edges); "
-                        f"{native_nodata_count} have no valid native 3x3 pixels (source NoData at sampled locations). "
-                        f"{edge_count} samples lie within one native pixel of a TIFF edge; "
-                        f"{gap_probe_errors} tile checks failed. Samples are not area percentages. "
-                        "A missing source outside sampled TIFF footprints is not tested; zero samples is inconclusive.", OUTPUTS)
                     entry["previous_export_tiles"] = [tile for tile in entry["included_tiles"] if audit_by_tile[tile, pair]["status"] != "Exported"]
                     entry["included_count"] = len(entry["included_tiles"])
                     entry["skipped_count"] = len(entry["skipped_tiles"])
@@ -2132,14 +2052,15 @@ class MLRasterExportEngine(Engine):
                     if mosaic.count():
                         values = mosaic.compressed()
                         lo, hi = float(values.min()), float(values.max())
-                        p02, median, p98 = np.percentile(values, [2, 50, 98])
-                        zero_count = int(np.count_nonzero(values == 0))
-                        entry["value_summary"] = dict(min=lo, max=hi, p02=float(p02), median=float(median),
-                                                     p98=float(p98), zero_cells=zero_count, valid_cells=int(values.size))
+                        p25, median, p95 = np.percentile(values, [25, 50, 95])
+                        # Retain the existing display scale independently of report statistics.
+                        p02, p98 = np.percentile(values, [2, 98])
+                        entry["value_summary"] = dict(min=lo, max=hi, p25=float(p25), median=float(median),
+                                                     p95=float(p95))
                         self.write_message(
-                            f"VALUE CHECK {region}/{role}/{column} | {pair}: min={lo:g}, p02={p02:g}, "
-                            f"median={median:g}, p98={p98:g}, max={hi:g}; zero cells={zero_count:,}/{values.size:,}. "
-                            "These are report-resolution mosaic values. A much wider min/max than p02/p98 can compress map colors.", OUTPUTS)
+                            f"VALUE CHECK {region}/{role}/{column} | {pair}: min={lo:g}, p25={p25:g}, "
+                            f"median={median:g}, p95={p95:g}, max={hi:g}. "
+                            "Statistics describe the report-resolution mosaic.", OUTPUTS)
                         del values
                         # Envelope of each pair's percentiles keeps year-pair pages comparable
                         # without allowing isolated extreme values to flatten every map.
@@ -2159,16 +2080,6 @@ class MLRasterExportEngine(Engine):
                     for category, count in sorted(entry["skip_categories"].items()):
                         self.write_message(f"  {name}: {category}: {count} tile(s)", OUTPUTS)
 
-                for checked_entry in variable_entries:
-                    gap = checked_entry.get("gap_check")
-                    context = f"{region}/{role}/{column} | {checked_entry['pair']}"
-                    if gap is None:
-                        print(f"PDF GAP SUMMARY {context}: NOT AVAILABLE — no diagnostic result recorded.", flush=True)
-                    else:
-                        print(f"PDF GAP SUMMARY {context}: sampled={gap['sampled_blank_cells']}; "
-                              f"native-valid={gap['native_valid']}; neighbors-only={gap['nearby_only']}; "
-                              f"native-3x3-empty={gap['native_nodata']}; TIFF-edge={gap['source_edge_samples']}; "
-                              f"failed-checks={gap['failed_tile_checks']}. Full counts are in the PDF summary.", flush=True)
                 self.write_message(f"Creating {region}/{role}/{column} PDF from {len(variable_entries)} completed mosaics.", OUTPUTS)
                 with PdfPages(root / report_name) as pdf:
                     pdf.infodict().update(Title=f"{region} {role.title()} {REPORT_PRODUCTS[column][0]} - all year pairs", Author="Hydro Health")
@@ -2181,16 +2092,7 @@ class MLRasterExportEngine(Engine):
                             scale_metadata[scale_key]["classes"] = SURVEY_LABELS
                         with rasterio.open(root / entry["data_path"], "r+") as source:
                             grid = source.read(1, masked=True)
-                            source.update_tags(display_min=norm.vmin, display_max=norm.vmax, display_cmap=cmap.name,
-                                               display_note="Use the matching _colored.tif for fixed RGB rendering")
-                        rgba = cmap(norm(grid.filled(0)), bytes=True)
-                        rgba[np.ma.getmaskarray(grid)] = 0
-                        color_profile = dict(profile, count=4, dtype="uint8", nodata=None, photometric="RGB", alpha="YES")
-                        with rasterio.open(root / entry["styled_path"], "w", **color_profile) as output:
-                            output.write(np.moveaxis(rgba, -1, 0))
-                            output.colorinterp = (ColorInterp.red, ColorInterp.green, ColorInterp.blue, ColorInterp.alpha)
-                            output.update_tags(display_min=norm.vmin, display_max=norm.vmax, display_cmap=cmap.name,
-                                               source_values=entry["data_path"])
+                            source.update_tags(display_min=norm.vmin, display_max=norm.vmax, display_cmap=cmap.name)
                         _render_mosaic_page(pdf, entry, grid, profile, mask, basemap, cmap, norm, region,
                                             number + summary_pages, len(variable_entries) + summary_pages)
                 # Close the complete PDF, then publish it before starting the next variable.
@@ -2215,7 +2117,9 @@ class MLRasterExportEngine(Engine):
             files = sorted(path for path in root.iterdir() if path.name not in report_set)
             for path in files:
                 target = destination / path.name
-                if target.exists():
+                # Mosaic TIFFs are regenerated and replaced on every report run,
+                # independently of the inherited per-tile self.overwrite setting.
+                if path.suffix.lower() not in (".tif", ".tiff") and target.exists():
                     continue
                 _copy_file(str(path), str(target))
         results = [str(destination / name) for name in report_names]
