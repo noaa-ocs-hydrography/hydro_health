@@ -46,6 +46,27 @@ NON_PREDICTORS = {
     "sample_weight",
 }
 
+def _nodata_sentinels(nodata_value: float = -9999.0) -> list[float]:
+    """Recognize both historical sentinels and the inherited engine NoData."""
+
+    values = {9999.0, -9999.0}
+    if nodata_value is not None and np.isfinite(float(nodata_value)):
+        values.add(float(nodata_value))
+    return sorted(values)
+
+
+def _clean_model_values(frame: pd.DataFrame, columns, nodata_value: float = -9999.0) -> pd.DataFrame:
+    """Normalize model values without changing identifiers or valid coordinates."""
+
+    out = frame.copy()
+    sentinels = _nodata_sentinels(nodata_value)
+    for column in dict.fromkeys(columns):
+        if column in out:
+            values = pd.to_numeric(out[column], errors="raise")
+            out[column] = values.mask(values.isin(sentinels), np.nan)
+    return out
+
+
 def _xgb_params(model_cfg: dict, seed: int) -> dict:
     """Build the shared XGBoost parameters for CV and bootstrap training."""
 
@@ -391,11 +412,21 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
     )
     return max(floor, selected) if mode == "cv_with_floor" else max(50, selected)
 
-def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarray, interval_years: np.ndarray, horizon: float) -> dict:
+def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarray, interval_years: np.ndarray, horizon: float, nodata_value: float = -9999.0) -> dict:
     """Derive later-minus-earlier change, annualized rate and standardized horizon values. """
 
-    delta = predicted_bathy - baseline_bathy
-    rate = delta / interval_years
+    sentinels = _nodata_sentinels(nodata_value)
+    predicted_bathy, baseline_bathy, interval_years = (
+        np.asarray(values, dtype=float).copy()
+        for values in (predicted_bathy, baseline_bathy, interval_years)
+    )
+    for values in (predicted_bathy, baseline_bathy, interval_years):
+        values[np.isin(values, sentinels) | ~np.isfinite(values)] = np.nan
+    valid = (np.isfinite(predicted_bathy) & np.isfinite(baseline_bathy)
+             & np.isfinite(interval_years) & (interval_years > 0))
+    predicted_bathy = np.where(valid, predicted_bathy, np.nan)
+    delta = np.where(valid, predicted_bathy - baseline_bathy, np.nan)
+    rate = np.divide(delta, interval_years, out=np.full_like(delta, np.nan), where=valid)
     standard_delta = rate * np.float32(horizon)
     return {
         "mean_predicted_bathy_t1": predicted_bathy,
@@ -447,7 +478,7 @@ def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndar
         raise ValueError("Calculated weights must be finite and positive")
     return w
 
-def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, locked_predictors: list[str]) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame, pd.DataFrame | None, list[str]]:
+def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, locked_predictors: list[str], nodata_value: float = -9999.0) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame, pd.DataFrame | None, list[str]]:
     """Use DataPrep's ordered schema: bathy_t plus drivers predicts bathy_t1.
 
     Keep predictor NAs and all prediction rows. No silent feature
@@ -480,13 +511,17 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
     }
     if missing := (required_train | set(predictors)) - set(train_df.columns):
         raise ValueError(f"Missing required ML-ready training columns: {sorted(missing)}")
+    train_df = _clean_model_values(
+        train_df, predictors + ["bathy_t", "bathy_t1", "interval_years", "delta_bathy", "delta_rate"],
+        nodata_value,
+    )
     essential = np.isfinite(
         train_df[["X", "Y", "bathy_t", "bathy_t1", "interval_years"]].to_numpy()
     ).all(axis=1)
     essential &= train_df["interval_years"].to_numpy() > 0
     if not essential.all():
         raise ValueError(
-            'ML-ready training has invalid essential fields; rerun DataPrep instead of dropping rows'
+            'ML-ready training has invalid essential fields (including NoData); rerun DataPrep instead of dropping rows'
         )
     train_df = train_df.reset_index(drop=True)
     _validate_training_changes(train_df)
@@ -498,10 +533,10 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
             'Predictors contain infinity; diagnose source data rather than impute it'
         )
     
-    pred_df, pred_features = _prepare_prediction_data(pred_df, predictors)
+    pred_df, pred_features = _prepare_prediction_data(pred_df, predictors, nodata_value)
     return train_df, pred_df, train_features, pred_features, predictors
 
-def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str]) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str], nodata_value: float = -9999.0) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Validate deployment rows independently of the availability of training data."""
     if pred_df is None:
         return None, None
@@ -513,7 +548,9 @@ def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str]
             f'Training-first schema cannot deploy; missing prediction fields: {sorted(missing)}'
         )
     
-    pred_df = pred_df.reset_index(drop=True)
+    pred_df = _clean_model_values(
+        pred_df, predictors + ["bathy_t", "interval_years"], nodata_value,
+    ).reset_index(drop=True)
     usable = np.isfinite(
         pred_df[["X", "Y", "bathy_t", "interval_years"]].to_numpy()
     ).all(axis=1)
@@ -768,7 +805,13 @@ def _fit_bootstrap_ensemble(inputs: ModelInputs, cfg: dict, best_rounds: int, se
 def _prediction_summary(frame: pd.DataFrame, mean: np.ndarray, m2: np.ndarray, model_cfg: dict, training: bool = False) -> pd.DataFrame:
     """Build shared prediction/change/rate columns for either dataset role."""
 
-    summary = frame.copy()
+    nodata_value = model_cfg.get("nodata_value", -9999.0)
+    summary = _clean_model_values(
+        frame, ["bathy_t", "bathy_t1", "interval_years", "delta_bathy", "delta_rate"], nodata_value,
+    )
+    mean = np.asarray(mean, dtype=float).copy()
+    if "prediction_row_usable" in summary:
+        mean[~summary.prediction_row_usable.eq(True).to_numpy()] = np.nan
     n_boot = model_cfg["n_boot"]
     sd = (
         np.sqrt(np.maximum(m2, np.float32(0)) / np.float32(n_boot - 1))
@@ -780,11 +823,17 @@ def _prediction_summary(frame: pd.DataFrame, mean: np.ndarray, m2: np.ndarray, m
         summary.bathy_t.to_numpy(),
         summary.interval_years.to_numpy(),
         model_cfg["standard_horizon_years"],
+        nodata_value,
     ).items():
         summary[column] = values
+    sd = np.where(np.isfinite(summary.mean_predicted_bathy_t1.to_numpy()), sd, np.nan)
     summary["uncertainty_sd_bathy_t1"] = sd
     summary["uncertainty_sd_change"] = sd
-    summary["uncertainty_sd_rate"] = sd / summary.interval_years.to_numpy()
+    intervals = summary.interval_years.to_numpy(dtype=float)
+    summary["uncertainty_sd_rate"] = np.divide(
+        sd, intervals, out=np.full_like(sd, np.nan, dtype=float),
+        where=np.isfinite(intervals) & (intervals > 0),
+    )
     if training:
         summary["delta_residual"] = summary.delta_bathy - summary.mean_predicted_change
         summary["prediction_residual"] = summary.bathy_t1 - summary.mean_predicted_bathy_t1
@@ -917,7 +966,7 @@ def _load_model_inputs(cfg: dict) -> ModelInputs:
             cfg["prediction_geoparquet"] = None
     else:
         _write_task_progress(cfg, "No matching prediction input; continuing with training only.")
-    inputs = ModelInputs(*_prepare_model_data(train, prediction, schema.predictor.tolist()))
+    inputs = ModelInputs(*_prepare_model_data(train, prediction, schema.predictor.tolist(), cfg["model_config"].get("nodata_value", -9999.0)))
     inputs.train["sample_weight"] = _calculate_model_weights(
         inputs.train.delta_bathy.to_numpy(), cfg["model_config"]
     )
@@ -957,7 +1006,7 @@ def _predict_saved_tile_task(cfg: dict) -> dict:
         _write_task_progress(cfg, "SKIPPING prediction: summary exists and overwrite=False.")
         return dict(identity, ok=True, skipped=True, reason="outputs_complete")
     frame = _load_prepared_frame(cfg["prediction_geoparquet"], "prediction", cfg)
-    frame, features = _prepare_prediction_data(frame, predictors)
+    frame, features = _prepare_prediction_data(frame, predictors, cfg["model_config"].get("nodata_value", -9999.0))
     usable = frame.prediction_row_usable.to_numpy(dtype=bool)
     mean = np.where(usable, np.float32(0.0), np.float32(np.nan))
     m2 = mean.copy()
@@ -1107,6 +1156,7 @@ class XGBoostModelingEngine(Engine):
         self.tile_id = None
         self.pair = None
         self.model_config = {
+            "nodata_value": float(self.nodata_value),  # Workers also recognize both 9999 and -9999 as missing.
             "max_depth": 4,  # Maximum depth of each tree; deeper trees learn more complex patterns but can overfit.
             "eta": 0.01,  # Learning rate: scales each tree's contribution; smaller values usually need more rounds.
             "gamma": 1.0,  # Minimum loss reduction required for a split; higher values discourage additional splits.

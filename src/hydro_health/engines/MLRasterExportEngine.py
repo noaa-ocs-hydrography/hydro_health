@@ -172,38 +172,57 @@ def _check_native_raster_values(source) -> None:
     raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
 
 
-def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> np.ma.MaskedArray:
-    """Read one tile onto the bounded report grid, preserving NoData coverage."""
+def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> dict:
+    """Aggregate every valid native pixel into the report grid, including narrow coastlines.
 
-    method = Resampling.mode if categorical else Resampling.average
+    Forward mapping prevents subpixel footprints disappearing in inverse resampling.
+    Counts and category votes allow all contributing tiles to be merged together.
+    """
+
+    height, width = profile["height"], profile["width"]
+    size = height * width
+    sums = np.zeros(size, dtype="float64")
+    counts = np.zeros(size, dtype="uint64")
+    votes = Counter()
+    inverse = ~profile["transform"]
     with rasterio.open(_report_raster_path(uri), OVERVIEW_LEVEL="NONE") as source:
         if source.crs is None:
             raise ValueError("Source raster has no CRS")
-        _check_native_raster_values(source)
-        with WarpedVRT(source, crs=profile["crs"], transform=profile["transform"],
-                       width=profile["width"], height=profile["height"], dtype="float32",
-                       nodata=float("nan"), resampling=method) as overview:
-            data = np.ma.masked_invalid(overview.read(1, masked=True))
-        # Recover only blank cells whose exact map-center native pixel is valid.
-        # This is source sampling, not interpolation or neighborhood gap filling.
-        rows, cols = np.where(np.ma.getmaskarray(data))
-        # Restrict candidates before coordinate transformation to the TIFF bounds.
-        bounds = transform_bounds(source.crs, profile["crs"], *source.bounds, densify_pts=21)
-        xs, ys = rasterio.transform.xy(profile["transform"], rows, cols)
-        xs, ys = np.asarray(xs), np.asarray(ys)
-        inside = (xs >= bounds[0]) & (xs < bounds[2]) & (ys > bounds[1]) & (ys <= bounds[3])
-        rows, cols, xs, ys = rows[inside], cols[inside], xs[inside], ys[inside]
-        for start in range(0, len(rows), 4096):
-            stop = start + 4096
-            sx, sy = transform_coordinates(profile["crs"], source.crs, xs[start:stop].tolist(), ys[start:stop].tolist())
-            samples = np.ma.vstack(list(source.sample(zip(sx, sy), indexes=1, masked=True)))[:, 0]
-            samples = np.ma.masked_invalid(samples)
-            valid = ~np.ma.getmaskarray(samples)
-            rr, cc = rows[start:stop][valid], cols[start:stop][valid]
-            data.data[rr, cc] = samples.data[valid]
-            data.mask[rr, cc] = False
-        return data
-
+        same_crs = source.crs == rasterio.crs.CRS.from_user_input(profile["crs"])
+        # Bounded native reads: no overviews, point thinning, or neighborhood filling.
+        for row_start in range(0, source.height, 512):
+            for col_start in range(0, source.width, 512):
+                window = Window(col_start, row_start, min(512, source.width-col_start),
+                                min(512, source.height-row_start))
+                native = source.read(1, window=window, masked=True)
+                valid = (~np.ma.getmaskarray(native) & np.isfinite(native.data)
+                         & (native.data != 9999) & (native.data != -9999))
+                rr, cc = np.where(valid)
+                if not len(rr):
+                    continue
+                values = native.data[rr, cc].astype("float64")
+                x, y = source.transform * (cc + col_start + .5, rr + row_start + .5)
+                if not same_crs:
+                    x, y = transform_coordinates(source.crs, profile["crs"], x.tolist(), y.tolist())
+                    x, y = np.asarray(x), np.asarray(y)
+                cols, rows = inverse * (x, y)
+                inside = (np.isfinite(rows) & np.isfinite(cols) & (rows >= 0) & (rows < height)
+                          & (cols >= 0) & (cols < width))
+                if not inside.all():
+                    # The template defines the extent; report out-of-bounds pixels rather than silently dropping them.
+                    raise ValueError(f"{int((~inside).sum())} valid native pixels fall outside the mosaic grid or have invalid transformed coordinates")
+                cells = np.floor(rows).astype("int64") * width + np.floor(cols).astype("int64")
+                indices, groups, totals = np.unique(cells, return_inverse=True, return_counts=True)
+                sums[indices] += np.bincount(groups, weights=values)
+                counts[indices] += totals.astype("uint64")
+                if categorical:
+                    pairs, frequency = np.unique(np.column_stack((cells, values)), axis=0, return_counts=True)
+                    votes.update({(int(cell), float(value)): int(n)
+                                  for (cell, value), n in zip(pairs, frequency)})
+    if not counts.any():
+        raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
+    return {"sums": sums.reshape(height, width), "counts": counts.reshape(height, width),
+            "votes": dict(votes) if categorical else None}
 
 
 def _read_report_tile(tile_id: str, uri: str | None, expected_path: str, profile: dict, categorical: bool) -> tuple:
@@ -699,22 +718,29 @@ def _build_overviews_and_cog(raw_tif: Path, cog_tif: Path, cfg: dict) -> None:
         if src.tags(ns="IMAGE_STRUCTURE").get("LAYOUT") != "COG":
             raise RuntimeError("Output does not advertise COG layout")
 
-def _survey_codes(series: pd.Series, legacy_offset: bool) -> np.ndarray:
-    """Translate the R survey-year bins; optionally preserve its +800 legacy fix.
+def _survey_years(series: pd.Series, legacy_offset: bool) -> np.ndarray:
+    """Decode individual survey years, keeping invalid dates as NaN."""
 
-    YYYY and YYYY.fraction are accepted. ISO strings are decoded as dates.
-    Numeric epoch dates are deliberately not guessed.
-    """
-
-    year = pd.to_numeric(series, errors="coerce").astype(float)
-    if not pd.api.types.is_numeric_dtype(series):
-        iso = series.astype(str).str.match(r"^\d{4}-\d{2}-\d{2}", na=False)
-        year.loc[iso] = pd.to_datetime(series.loc[iso], errors="coerce").dt.year
+    if pd.api.types.is_datetime64_any_dtype(series):
+        year = series.dt.year.astype(float)
+    else:
+        year = pd.to_numeric(series, errors="coerce").astype(float)
+        if not pd.api.types.is_numeric_dtype(series):
+            iso = series.astype(str).str.match(r"^\d{4}-\d{2}-\d{2}", na=False)
+            year.loc[iso] = pd.to_datetime(series.loc[iso], errors="coerce").dt.year
     if legacy_offset:
         legacy = (year >= 1000) & (year < 1800)
         year.loc[legacy] += 800
     year = np.floor(year.to_numpy())
     valid = np.isfinite(year) & (year >= 1800) & (year <= 2100)
+    return np.where(valid, year, np.nan)
+
+
+def _survey_codes(series: pd.Series, legacy_offset: bool) -> np.ndarray:
+    """Translate the R survey-year bins for existing raster exports."""
+
+    year = _survey_years(series, legacy_offset)
+    valid = np.isfinite(year)
     code = np.full(len(year), np.nan)
     for i, condition in enumerate([year >= 2025, year == 2024, year == 2023,
         year == 2022, year == 2021, year == 2020,
@@ -1157,6 +1183,8 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
         water[role] = frame.loc[np.isfinite(depth) & (depth < 0)].copy()
         if "survey_end_date" in water[role]:
             water[role]["survey_year_bin_code"] = _survey_codes(water[role]["survey_end_date"], settings["legacy_survey_year_offset"])
+        elif "survey_year_bin_code" not in water[role]:
+            water[role]["survey_year_bin_code"] = np.nan
 
     def limits(columns, symmetric=False):
         arrays = [_diagnostic_values(frame, col) for frame in water.values() for col in columns]
@@ -1181,8 +1209,8 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
         ("prediction", "mean_predicted_bathy_t1"): "Pred Mean Prediction (t1)",
         ("prediction", "mean_predicted_change"): "Predicted Change [t1 – t]",
         ("prediction", "survey_year_bin_code"): "Prediction Survey End Date",
-        ("training", "uncertainty_sd_bathy_t1"): "Train Uncertainty (SD from bootstraps)",
-        ("prediction", "uncertainty_sd_bathy_t1"): "Prediction Uncertainty (SD from bootstraps)",
+        ("training", "uncertainty_sd_bathy_t1"): "Train Uncertainty\n(SD from bootstraps)",
+        ("prediction", "uncertainty_sd_bathy_t1"): "Prediction Uncertainty\n(SD from bootstraps)",
         ("prediction", "UC_t"): "BlueTopo Uncertainty (UC_t)",
     }
     uncertainty_max = max(limits(["uncertainty_sd_bathy_t1", "UC_t"])[1], 1e-6)
@@ -1194,7 +1222,8 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
             fourth = ("uncertainty_sd_bathy_t1" if role == "training" or "UC_t" not in frame else "UC_t") if uncertainty else ("delta_bathy" if role == "training" else "survey_year_bin_code")
             for ax, column in zip(axes[row], ["bathy_t", "mean_predicted_bathy_t1", "mean_predicted_change", fourth]):
                 title, family, label = REPORT_PRODUCTS[column]
-                ax.set_title(panel_titles[role, column], fontsize=9, fontweight="bold", loc="left")
+                panel_title = "\n".join(textwrap.fill(line, 28) for line in panel_titles[role, column].splitlines())
+                ax.set_title(panel_title, fontsize=9, fontweight="bold", loc="left", pad=12)
                 x, y, z = (_diagnostic_values(frame, name) for name in ("X", "Y", column))
                 valid = np.isfinite(x) & np.isfinite(y) & np.isfinite(z)
                 if not valid.any():
@@ -1204,7 +1233,8 @@ def _render_tile_diagnostics(pdf: PdfPages, frames: dict, shap: pd.DataFrame, no
                     continue
                 indices = np.flatnonzero(valid)
                 if family == "survey":
-                    cmap, norm = plt.get_cmap("viridis", len(SURVEY_LABELS)), BoundaryNorm(np.arange(-.5, len(SURVEY_LABELS)+.5), len(SURVEY_LABELS))
+                    cmap = plt.get_cmap("viridis", len(SURVEY_LABELS))
+                    norm = BoundaryNorm(np.arange(len(SURVEY_LABELS) + 1) - .5, len(SURVEY_LABELS))
                 else:
                     bounds = depth_limits if family == "depth" else change_limits if family == "change" else (0., uncertainty_max)
                     cmap, norm = _report_color_scale(family, list(bounds))
@@ -1538,14 +1568,15 @@ class MLRasterExportEngine(Engine):
             "diagnostic_tile_id": "BH4S556X_3",  # None disables the separate tile PDF; does not filter regional reports.
             "create_model_tifs": False,  # False: skip tile exports and rebuild the PDF from existing TIFFs.
             "legacy_survey_year_offset": True,
-            "raster_workers": 32,
-            "raster_threads_per_worker": 1,  # In-flight limit = workers * threads (32).
+            "raster_workers": 16,
+            "raster_threads_per_worker": 1,  # In-flight limit = workers * threads (16).
+            "create_mosaics": True,  # False skips regional mosaics and their PDFs; tile diagnostics remain enabled.
             "mosaic_report": True, "report_max_dimension": 1600,
             "report_progress_interval": 250,  # Log aggregate progress every 250 files, including skipped tiles.
             "report_basemap_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Base/MapServer",
             "report_basemap_reference_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Reference/MapServer",
             "report_basemap_timeout": 20,
-            "memory_limit": "1GB", "raster_processes": True,
+            "memory_limit": "2GB", "raster_processes": True,
             "plot_max_dimension": 1000, "plot_max_points": 50000,
             "raster_config": {
                 "nodata": self.nodata_value, "compress": "DEFLATE", "blocksize": 512,
@@ -1579,6 +1610,15 @@ class MLRasterExportEngine(Engine):
         bucket = get_config_item("SHARED", "OUTPUT_BUCKET")
         s3_dir_base = f"s3://{bucket}/{self.output_prefix}/{region}" if self.output_prefix else f"s3://{bucket}/{region}"
 
+        train_dir = str(get_config_item("MODEL", "ML_PREP_TRAIN_DIR"))
+        pred_dir = str(get_config_item("MODEL", "ML_PREP_PRED_DIR"))
+        self.ml_prep_train_dir = (UPath(train_dir) if "://" in train_dir or Path(train_dir).is_absolute()
+                                  else UPath(f"{s3_dir_base}/{train_dir}") if self.is_aws
+                                  else UPath(self.outputs_dir / train_dir))
+        self.ml_prep_pred_dir = (UPath(pred_dir) if "://" in pred_dir or Path(pred_dir).is_absolute()
+                                 else UPath(f"{s3_dir_base}/{pred_dir}") if self.is_aws
+                                 else UPath(self.outputs_dir / pred_dir))
+
         model_dir = get_config_item("MODEL", "XGB_OUTPUT_DIR")
         self.model_out_dir = UPath(f"{s3_dir_base}/{model_dir}") if self.is_aws else UPath(self.outputs_dir / model_dir)
 
@@ -1594,7 +1634,7 @@ class MLRasterExportEngine(Engine):
         self.write_message(f"{region}: training rasters: {self.raster_out_dir / '{tile_id}' / 'Training'}", OUTPUTS)
         self.write_message(f"{region}: prediction rasters: {self.raster_out_dir / '{tile_id}' / 'Prediction'}", OUTPUTS)
         self.write_message(f"{region}: diagnostic plots: {self.raster_out_dir / '{tile_id}' / 'Training' / 'diagnostic_plots'}", OUTPUTS)
-        if self.settings["mosaic_report"]:
+        if self.settings["create_mosaics"] and self.settings["mosaic_report"]:
             self.write_message(f"{region}: mosaics and PDF report: {self.raster_out_dir / 'mosaic_report'}", OUTPUTS)
 
         template = get_config_item("MASK", "MASK_PRED_PATH")
@@ -1716,6 +1756,7 @@ class MLRasterExportEngine(Engine):
         fig.subplots_adjust(left=.07, right=.48, bottom=.27, top=.86)
         fig.suptitle(f"Dataset coverage | {region} | {tile}", x=.06, ha="left", fontsize=18, color="#173247")
         records, counts = [], Counter()
+        ambiguous_year_files = []
         try:
             grid = self.load_tile_grid()
             selected = grid.loc[grid[self.settings["tile_id_column"]].astype(str) == tile]
@@ -1760,6 +1801,7 @@ class MLRasterExportEngine(Engine):
                 years = re.findall(r"(?<![0-9])(?:19|20)[0-9]{2}(?![0-9])", path.stem)
                 if len(years) != 1:
                     counts["Missing/ambiguous year"] += 1
+                    ambiguous_year_files.append(path.name)
                     continue
                 jobs.append((path, years[0]))
             years = sorted({year for _, year in jobs})
@@ -1851,7 +1893,10 @@ class MLRasterExportEngine(Engine):
         self.write_message(f"DATASET COVERAGE {region}/{tile}: {dict(counts)}; source: {self.resampled_mosaics_dir}", OUTPUTS)
         # Index identifies datasets individually even where outlines overlap.
         lines = [f"{year} | {name} | {pixel_note}" for year, name, pixel_note in sorted(records)]
-        lines += [f"{reason}: {count}" for reason, count in sorted(counts.items())]
+        for reason, count in sorted(counts.items()):
+            lines.append(f"{reason}: {count}")
+            if reason == "Missing/ambiguous year":
+                lines.extend(f"File with missing/ambiguous year: {name}" for name in ambiguous_year_files)
         for start in range(0, len(lines), 14):
             fig = plt.figure(figsize=(11.7, 8.3))
             fig.text(.06, .93, f"Dataset coverage index | {tile}", fontsize=17, color="#173247")
@@ -1859,6 +1904,99 @@ class MLRasterExportEngine(Engine):
             _add_report_date(fig, pdf)
             pdf.savefig(fig)
             plt.close(fig)
+
+    def render_tile_ml_ready_inputs(self, pdf: PdfPages, region: str, tile: str, pair: str) -> None:
+        """Append one all-column page of the first rows that fit from each pair's input files."""
+
+        for role, base in (("training", self.ml_prep_train_dir),
+                           ("prediction", self.ml_prep_pred_dir)):
+            path = base / tile / f"ML_ready_{role}_{pair}.geoparquet"
+            frame = None
+            error = None
+            try:
+                if not path.exists():
+                    error = "File missing: no ML-ready input values are available."
+                else:
+                    with LocalizedFile(str(path)) as source:
+                        frame = gpd.read_parquet(source)
+            except Exception as exc:
+                error = f"File unreadable: {type(exc).__name__}: {exc}"
+            if error:
+                self.write_message(f"Tile ML-ready inputs {region}/{tile} | {role}/{pair}: {error} ({path})", OUTPUTS)
+
+            shown = 0 if frame is None else len(frame)
+            columns = 0 if frame is None else len(frame.columns)
+            # A3 landscape: every source column stays on the same page as its row.
+            page_width, page_height = 16.54, 11.69
+            font_size = min(5.5, max(2.5, 145 / (columns + 1)))
+            column_width = .96 / (columns + 1)
+            wrap_width = max(5, int(column_width * page_width * 72 / (font_size * .65)))
+            line_height = font_size * 1.35 / (page_height * 72)
+
+            def wrap(value):
+                return "\n".join(textwrap.wrap(str(value), width=wrap_width,
+                                                break_long_words=True, break_on_hyphens=False))
+
+            headers = ["Row / index"]
+            if frame is not None:
+                headers += [wrap(f"{column}\n[{frame.iloc[:, position].dtype}]")
+                            for position, column in enumerate(frame.columns)]
+            header_height = max(.03, (max(label.count("\n") + 1 for label in headers) + 1) * line_height)
+            row = 0
+            while True:
+                rows, heights = [], []
+                used_height = header_height
+                while row < shown and columns:
+                    values = [wrap(f"{row + 1} / {frame.index[row]}")]
+                    values += [wrap(frame.iloc[row, position]) for position in range(columns)]
+                    height = max(.014, (max(value.count("\n") + 1 for value in values) + 1) * line_height)
+                    if rows and used_height + height > .72:
+                        break
+                    rows.append(values)
+                    heights.append(height)
+                    used_height += height
+                    row += 1
+                fig = plt.figure(figsize=(page_width, page_height))
+                try:
+                    fig.text(.02, .95, f"{region} | {tile} | ML-ready {role} inputs | {pair}", fontsize=13)
+                    summary = (error if frame is None else
+                               f"Total rows: {len(frame):,} | Columns: {columns:,} | Showing first {row:,} rows | "
+                               "One page per file; as many first rows as fit.")
+                    fig.text(.02, .92, summary, fontsize=8)
+                    fig.text(.02, .895, textwrap.fill(f"Source: {path}", 180), fontsize=6, va="top", parse_math=False)
+                    if frame is None or not columns:
+                        fig.text(.02, .80, error or "No columns in this file.", fontsize=9, wrap=True)
+                    else:
+                        if not rows:
+                            rows = [["(empty)"] + [""] * columns]
+                            heights = [.025]
+                        table_height = header_height + sum(heights)
+                        ax = fig.add_axes([0, 0, 1, 1])
+                        ax.set_axis_off()
+                        table = ax.table(cellText=rows, colLabels=headers, cellLoc="left", colLoc="left",
+                                         colWidths=[column_width] * (columns + 1),
+                                         bbox=[.02, .80 - table_height, .96, table_height])
+                        table.auto_set_font_size(False)
+                        table.set_fontsize(font_size)
+                        for (r, c), cell in table.get_celld().items():
+                            cell.set_height(header_height if r == 0 else heights[r - 1])
+                            cell.set_edgecolor("#b9c5cf")
+                            cell.set_linewidth(.25)
+                            cell.PAD = .035
+                            cell.get_text().set_parse_math(False)
+                            if r == 0:
+                                cell.set_facecolor("#e3edf4")
+                                cell.get_text().set_fontweight("bold")
+                            elif r % 2 == 0:
+                                cell.set_facecolor("#f4f7fa")
+                    fig.text(.02, .025, "All source columns appear together. Raw input values, including NoData, are retained. Long values wrap within their cells.", fontsize=7)
+                    _add_report_date(fig, pdf)
+                    pdf.savefig(fig)
+                finally:
+                    plt.close(fig)
+                # Stop after one page for this file; row count depends only on available page space.
+                break
+            del frame
 
     def generate_tile_diagnostic_report(self, region: str) -> str | None:
         """Publish one tile's all-pairs diagnostic PDF before regional mosaics."""
@@ -1873,20 +2011,27 @@ class MLRasterExportEngine(Engine):
                 match = re.fullmatch(rf"LOCAL_{role}_summary_(\d{{4}}_\d{{4}})\.geoparquet", path.name)
                 if match:
                     sources.setdefault(match[1], {})[role] = path
+        pairs = set(sources)
+        for role, base in (("training", self.ml_prep_train_dir), ("prediction", self.ml_prep_pred_dir)):
+            for path in (base / tile).glob(f"ML_ready_{role}_*.geoparquet"):
+                match = re.fullmatch(rf"ML_ready_{role}_(\d{{4}}_\d{{4}})\.geoparquet", path.name)
+                if match:
+                    pairs.add(match[1])
         destination = self.raster_out_dir / "mosaic_report" / f"{region}_{tile}_diagnostics.pdf"
-        self.write_message(f"Creating tile diagnostic PDF: {destination} ({len(sources)} year pairs).", OUTPUTS)
+        self.write_message(f"Creating tile diagnostic PDF: {destination} ({len(pairs)} year pairs).", OUTPUTS)
         with tempfile.TemporaryDirectory(prefix="hh_tile_diagnostic_") as tmp:
             local = Path(tmp) / destination.name
             with _PLOT_LOCK, PdfPages(local) as pdf:
                 self.render_tile_dataset_coverage(pdf, region, tile)
-                if not sources:
+                if not pairs:
                     fig = plt.figure(figsize=(11.7, 8.3))
                     fig.text(.06, .88, f"{region} | {tile} | No model summaries found", fontsize=18)
                     fig.text(.06, .75, "No training or prediction year pairs are available for this tile.", fontsize=11)
                     _add_report_date(fig, pdf)
                     pdf.savefig(fig)
                     plt.close(fig)
-                for pair, paths in sorted(sources.items()):
+                for pair in sorted(pairs):
+                    paths = sources.get(pair, {})
                     frames, notes = {}, []
                     for role in ("training", "prediction"):
                         frames[role] = pd.DataFrame()
@@ -1909,7 +2054,8 @@ class MLRasterExportEngine(Engine):
                     except Exception as exc:
                         notes.append(f"SHAP summary unreadable: {type(exc).__name__}: {str(exc)[:250]}")
                     _render_tile_diagnostics(pdf, frames, shap, notes, region, tile, pair, self.settings)
-                    self.write_message(f"Tile diagnostics {region}/{tile} | {pair}: pages completed; {len(notes)} input issue(s).", OUTPUTS)
+                    self.render_tile_ml_ready_inputs(pdf, region, tile, pair)
+                    self.write_message(f"Tile diagnostics {region}/{tile} | {pair}: plots and input tables completed; {len(notes)} input issue(s).", OUTPUTS)
             _copy_file(str(local), str(destination))
         self.write_message(f"Published tile diagnostic PDF: {destination}", OUTPUTS)
         return str(destination)
@@ -1917,7 +2063,8 @@ class MLRasterExportEngine(Engine):
     def generate_mosaic_report(self, region: str, records: list[dict]) -> list[str]:
         """Build one PDF per role and variable, covering all year pairs."""
 
-        if not self.settings["mosaic_report"]:
+        if not self.settings["create_mosaics"] or not self.settings["mosaic_report"]:
+            self.write_message(f"{region}: regional mosaics and mosaic PDFs disabled; skipping mosaic generation.", OUTPUTS)
             return []
         read_limit = self.settings["raster_workers"] * self.settings["raster_threads_per_worker"]
         self.write_message(f"Building regional mosaic report for {region}: shared Dask workers, up to {read_limit} TIFF reads in flight; progress every {self.settings['report_progress_interval']} tiles.", OUTPUTS)
@@ -1944,16 +2091,26 @@ class MLRasterExportEngine(Engine):
             self.write_message(f"Skipping regional mosaic report for {region}: no tile/year pairs found.", OUTPUTS)
             return []
         meta = self.template_metadata
-        factor = max(1., max(meta["height"], meta["width"]) / self.settings["report_max_dimension"])
-        height, width = max(1, math.ceil(meta["height"] / factor)), max(1, math.ceil(meta["width"] / factor))
-        transform = meta["transform"] * Affine.scale(meta["width"] / width, meta["height"] / height)
+        extent = rasterio.transform.array_bounds(meta["height"], meta["width"], meta["transform"])
+        # Use the existing template extent; no preliminary source-TIFF bounds scan.
+        left, bottom, right, top = extent
+        native_x, native_y = abs(meta["transform"].a), abs(meta["transform"].e)
+        factor = max(1., (right-left) / native_x / self.settings["report_max_dimension"],
+                     (top-bottom) / native_y / self.settings["report_max_dimension"])
+        pixel_x, pixel_y = native_x * factor, native_y * factor
+        height = max(1, math.ceil((top-bottom) / pixel_y))
+        width = max(1, math.ceil((right-left) / pixel_x))
+        transform = Affine(pixel_x, 0, left, 0, -pixel_y, top)
         profile = dict(driver="GTiff", count=1, dtype="float32", crs=meta["crs"], transform=transform,
                        width=width, height=height, nodata=self.nodata_value, compress="DEFLATE", tiled=True,
                        blockxsize=256, blockysize=256)
         bounds = rasterio.transform.array_bounds(height, width, transform)
-        # Read the mask directly at the bounded overview size using categorical sampling.
+        self.write_message(f"MOSAIC GRID {region}: {width} x {height}; using template bounds; combining tile TIFFs directly without a preliminary extent scan.", OUTPUTS)
+        # The prediction mask is reprojected for its reference outline, never used to clip values.
         with rasterio.open(_report_raster_path(self.template_path)) as source:
-            mask_data = source.read(1, out_shape=(height, width), masked=True, resampling=Resampling.nearest)
+            with WarpedVRT(source, crs=profile["crs"], transform=transform, width=width, height=height,
+                           dtype="float32", nodata=float("nan"), resampling=Resampling.nearest) as vrt:
+                mask_data = np.ma.masked_invalid(vrt.read(1, masked=True))
         mask = ~np.ma.getmaskarray(mask_data) & np.isfinite(mask_data.data) & (mask_data.data != 0)
         basemap = None
         try:
@@ -1987,6 +2144,9 @@ class MLRasterExportEngine(Engine):
                     entry = dict(pair=pair, role=role, column=column, included_tiles=[], skipped_tiles=[],
                                  data_path=f"{name}.tif")
                     mosaic = np.ma.masked_all((height, width), dtype="float32")
+                    mosaic_sums = np.zeros((height, width), dtype="float64")
+                    mosaic_counts = np.zeros((height, width), dtype="uint64")
+                    mosaic_votes = Counter()
 
                     def log_tile_progress(tile_id: str, skipped: dict | None = None) -> None:
                         included_count = len(entry["included_tiles"])
@@ -2030,21 +2190,31 @@ class MLRasterExportEngine(Engine):
                             entry["skipped_tiles"].append(dict(tile_id=tile_id, category=_export_problem_category(str(read_error)), reason=str(read_error)))
                             log_tile_progress(tile_id, entry["skipped_tiles"][-1])
                             continue
-                        usable = ~np.ma.getmaskarray(data)
+                        usable = data["counts"] > 0
                         if not usable.any():
-                            entry["skipped_tiles"].append(dict(tile_id=tile_id, category="No overview data", reason=f"No finite cells remain at report resolution ({width} x {height}). A small valid footprint may disappear during resampling. Source TIFF: {uri}"))
+                            entry["skipped_tiles"].append(dict(tile_id=tile_id, category="No usable raster data", reason=f"No valid native pixels in source TIFF: {uri}"))
                             log_tile_progress(tile_id, entry["skipped_tiles"][-1])
                             continue
-                        # A mosaic uses the first valid tile in sorted ID order at overlaps.
-                        take = usable & np.ma.getmaskarray(mosaic)
-                        if not take.any():
-                            entry["skipped_tiles"].append(dict(tile_id=tile_id, category="Covered by earlier tiles", reason=f"All {int(usable.sum())} usable overview cells are already covered by earlier tiles in sorted ID order; the TIFF exists and is readable. Source TIFF: {uri}"))
-                            log_tile_progress(tile_id, entry["skipped_tiles"][-1])
-                            continue
-                        mosaic.data[take] = data.data[take]
-                        mosaic.mask[take] = False
+                        # All source pixels contribute, including tiles sharing a coarse display cell.
+                        mosaic_sums += data["sums"]
+                        mosaic_counts += data["counts"]
+                        if data["votes"] is not None:
+                            mosaic_votes.update(data["votes"])
                         entry["included_tiles"].append(tile_id)
                         log_tile_progress(tile_id)
+                    populated = mosaic_counts > 0
+                    mosaic.mask = ~populated
+                    if family in ("survey", "count"):
+                        winning_votes = np.zeros(height * width, dtype="uint64")
+                        # Lower category wins ties, matching a deterministic mode.
+                        for (cell, value), votes in sorted(mosaic_votes.items()):
+                            if votes > winning_votes[cell]:
+                                winning_votes[cell] = votes
+                                mosaic.data.flat[cell] = value
+                    else:
+                        mosaic.data[populated] = mosaic_sums[populated] / mosaic_counts[populated]
+                    entry["native_valid_pixels"] = int(mosaic_counts.sum())
+                    del mosaic_sums, mosaic_counts, mosaic_votes
                     entry["previous_export_tiles"] = [tile for tile in entry["included_tiles"] if audit_by_tile[tile, pair]["status"] != "Exported"]
                     entry["included_count"] = len(entry["included_tiles"])
                     entry["skipped_count"] = len(entry["skipped_tiles"])
@@ -2060,7 +2230,7 @@ class MLRasterExportEngine(Engine):
                         self.write_message(
                             f"VALUE CHECK {region}/{role}/{column} | {pair}: min={lo:g}, p25={p25:g}, "
                             f"median={median:g}, p95={p95:g}, max={hi:g}. "
-                            "Statistics describe the report-resolution mosaic.", OUTPUTS)
+                            "Statistics describe the report-resolution mosaic; every valid native pixel contributes.", OUTPUTS)
                         del values
                         # Envelope of each pair's percentiles keeps year-pair pages comparable
                         # without allowing isolated extreme values to flatten every map.
@@ -2071,8 +2241,14 @@ class MLRasterExportEngine(Engine):
                         output.write(mosaic.filled(profile["nodata"]), 1)
                         output.update_tags(region=region, pair=pair, role=role, value_column=column,
                                            included_tiles=entry["included_count"], skipped_tiles=entry["skipped_count"],
-                                           resampling="mode" if family in ("survey", "count") else "average",
-                                           overlap_rule="first valid tile in sorted tile ID order")
+                                           resampling="native_pixel_mode" if family in ("survey", "count") else "native_pixel_mean",
+                                           native_valid_pixels=entry["native_valid_pixels"],
+                                           overlap_rule="all valid source pixels contribute; categorical ties use lower value")
+                    # Publish immediately so each completed mosaic is available before its PDF.
+                    mosaic_path = str(destination / entry["data_path"])
+                    _copy_file(str(root / entry["data_path"]), mosaic_path)
+                    entry["saved_path"] = mosaic_path
+                    self.write_message(f"SAVED MOSAIC {region}/{role}/{column} | {pair}: {mosaic_path}", OUTPUTS)
                     entry["skip_categories"] = dict(Counter(item["category"] for item in entry["skipped_tiles"]))
                     entries.append(entry)
                     variable_entries.append(entry)
@@ -2101,7 +2277,7 @@ class MLRasterExportEngine(Engine):
                 report_names.append(report_name)
                 self.write_message(f"Published {region}/{role}/{column} PDF: {report_path} ({len(variable_entries)} mosaic pages across all year pairs, plus {summary_pages} count-summary pages).", OUTPUTS)
             inventory = dict(region=region, mask_uri=str(self.template_path),
-                             counts_note="Per mosaic: included tiles contribute finite overview cells; skipped tiles are missing, unreadable or contribute no cells. Existing exports count as included.",
+                             counts_note="Per mosaic: all valid native source pixels contribute to the mean or mode of their report cell. Bounds come from the existing template; no preliminary source-TIFF extent scan is performed. Skips indicate missing, unreadable or no valid native data. Existing exports count as included.",
                              mask_used_for_export_eligibility=False, mask_validity="report outline only: unmasked, finite, nonzero", mask_outline="nearest sampled at report resolution",
                              scale_note="Each role/variable uses one shared scale across all of its year pairs.",
                              basemap_available=basemap is not None, reports=report_names, export_summary=export_audit["pairs"], color_scales=scale_metadata, mosaics=entries)
@@ -2122,6 +2298,8 @@ class MLRasterExportEngine(Engine):
                 if path.suffix.lower() not in (".tif", ".tiff") and target.exists():
                     continue
                 _copy_file(str(path), str(target))
+                if path.suffix.lower() in (".tif", ".tiff"):
+                    self.write_message(f"FINALIZED MOSAIC (shared display scale): {target}", OUTPUTS)
         results = [str(destination / name) for name in report_names]
         self.write_message(f"Successfully generated {len(results)} variable PDFs for {region}: {destination}.", OUTPUTS)
         return results
@@ -2199,7 +2377,7 @@ class MLRasterExportEngine(Engine):
         records = []
         try:
             settings = self.settings
-            if settings["create_model_tifs"] or settings["mosaic_report"] or settings["diagnostic_tile_id"]:
+            if settings["create_model_tifs"] or (settings["create_mosaics"] and settings["mosaic_report"]) or settings["diagnostic_tile_id"]:
                 self.setup_dask(self.param_lookup["env"], processes=settings["raster_processes"],
                                 n_workers=settings["raster_workers"], threads_per_worker=settings["raster_threads_per_worker"],
                                 memory_limit=settings["memory_limit"])
@@ -2230,5 +2408,5 @@ class MLRasterExportEngine(Engine):
                     self.write_message(f"Mosaic report failed for {eco_region}: {type(exc).__name__}: {exc}", OUTPUTS)
             return records
         finally:
-            if self.settings["create_model_tifs"] or self.settings["mosaic_report"] or self.settings["diagnostic_tile_id"]:
+            if self.settings["create_model_tifs"] or (self.settings["create_mosaics"] and self.settings["mosaic_report"]) or self.settings["diagnostic_tile_id"]:
                 self.cleanup_resources(OUTPUTS)
