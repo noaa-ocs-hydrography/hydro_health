@@ -19,10 +19,12 @@ os.environ['GDAL_DISABLE_READDIR_ON_OPEN'] = 'EMPTY_DIR'
 os.environ['GDAL_HTTP_MERGE_CONSECUTIVE_RANGES'] = 'YES'
 os.environ['GDAL_HTTP_MULTIPLEX'] = 'YES'
 
+from distributed.scheduler import KilledWorker
 from distributed import as_completed  # noqa: E402
 import geopandas as gpd  # noqa: E402
 import numpy as np  # noqa: E402
 import rasterio  # noqa: E402
+from rasterio.windows import Window
 from rasterio.features import rasterize  # noqa: E402
 from scipy.spatial import cKDTree  # noqa: E402
 from shapely.geometry import box  # noqa: E402
@@ -99,15 +101,24 @@ def _process_tile(param_inputs: list) -> dict:
     water_mask = None
     distance_raster_path = None
     shoreline_vertices = None
+    local_input_copy = None
 
     try:
         geotiff_path = pathlib.Path(geotiff_string)
         temp_path = pathlib.Path(temp_path)
         raster_stem = geotiff_path.stem
 
+        # Resolve output subfolder from the original S3/source path before switching to local scratch
         output_subfolder = engine.get_output_subfolder(geotiff_path)
         tile_dir = temp_path / output_subfolder
         tile_dir.mkdir(parents=True, exist_ok=True)
+
+        # Download S3 input to local NVMe once instead of streaming range requests via /vsis3/
+        if geotiff_string.startswith("/vsis3/"):
+            s3_key = geotiff_string.removeprefix("/vsis3/")
+            local_input_copy = tile_dir / geotiff_path.name
+            s3fs.S3FileSystem().get(s3_key, str(local_input_copy))
+            geotiff_path = local_input_copy
 
         ecoregion_gdf = _get_worker_ecoregion_gdf(ecoregion_gdf_path)
 
@@ -125,7 +136,7 @@ def _process_tile(param_inputs: list) -> dict:
             if valid_cells == 0:
                 if water_mask:
                     pathlib.Path(water_mask).unlink(missing_ok=True)
-                return {"status": "skipped", "file": str(geotiff_path)}
+                return {"status": "skipped", "file": geotiff_string}
 
             if local_npy_path and pathlib.Path(local_npy_path).exists():
                 shoreline_vertices = np.load(local_npy_path, mmap_mode="r")
@@ -150,19 +161,21 @@ def _process_tile(param_inputs: list) -> dict:
             pathlib.Path(distance_raster_path).unlink(missing_ok=True)
             distance_raster_path = None
 
-        return {"status": "success", "file": str(geotiff_path)}
+        return {"status": "success", "file": geotiff_string}
 
     except Exception:
         error_trace = traceback.format_exc()
-        print(f"Error processing {geotiff_path}:\n{error_trace}")
+        print(f"Error processing {geotiff_string}:\n{error_trace}")
 
         if water_mask:
             pathlib.Path(water_mask).unlink(missing_ok=True)
         if param_lookup['env'] == 'aws' and distance_raster_path:
             pathlib.Path(distance_raster_path).unlink(missing_ok=True)
 
-        return {"status": "error", "file": str(geotiff_path), "error": error_trace}
+        return {"status": "error", "file": geotiff_string, "error": error_trace}
     finally:
+        if local_input_copy:
+            local_input_copy.unlink(missing_ok=True)
         del shoreline_vertices
         gc.collect()
         _trim_memory()
@@ -289,7 +302,11 @@ class DistanceToShoreEngine(Engine):
         """Slices an X-sorted memmap array via binary search and builds a tiny local cKDTree."""
 
         if buffer_m is None:
-            subset = np.ascontiguousarray(vertices, dtype=np.float64)
+            subset = (
+                vertices
+                if (vertices.dtype == np.float64 and vertices.flags["C_CONTIGUOUS"])
+                else np.ascontiguousarray(vertices, dtype=np.float64)
+            )
         else:
             # Binary search on sorted X column: touches only ~30 memory pages instead of the whole file
             lo = int(np.searchsorted(vertices[:, 0], bounds.left - buffer_m, side="left"))
@@ -332,12 +349,12 @@ class DistanceToShoreEngine(Engine):
         dist_in_meters = np.full(water_data.shape, -9999.0, dtype=np.float32)
 
         num_rows, num_cols = water_data.shape
-        step = 500
+        step = 2000
         a, b, c = transform.a, transform.b, transform.c
         d, e, f = transform.d, transform.e, transform.f
 
         # Start with a 5 km box; expand only if a water pixel's nearest point exceeds buffer_m
-        buffer_tiers = (5_000.0, 25_000.0, 100_000.0, None)
+        buffer_tiers = (50_000.0, 150_000.0, None)
 
         for idx, buffer_m in enumerate(buffer_tiers):
             tree = self._build_bounded_tree(shoreline_vertices, bounds, buffer_m)
@@ -361,7 +378,7 @@ class DistanceToShoreEngine(Engine):
                 ys = f + d * col_c + e * row_c
 
                 water_points = np.column_stack((xs, ys))
-                distances, _ = tree.query(water_points, workers=1)
+                distances, _ = tree.query(water_points, workers=2)
 
                 # Verify no shoreline vertex outside the search box could possibly be closer
                 if buffer_m is not None and distances.max() > buffer_m and idx < len(buffer_tiers) - 1:
@@ -413,7 +430,7 @@ class DistanceToShoreEngine(Engine):
         current_ecoregion_gdf: gpd.GeoDataFrame,
         output_dir: str | pathlib.Path,
     ) -> tuple:
-        """Creates a clean binary water mask written directly into output_dir without extra subfolders."""
+        """Creates a clean binary water mask in memory-safe row strips."""
 
         raster_path = pathlib.Path(raster_path)
         tile_output_path = pathlib.Path(output_dir)
@@ -425,28 +442,16 @@ class DistanceToShoreEngine(Engine):
         print(f"  - Creating water mask: {raster_path.name} -> {output_name}")
 
         with rasterio.open(str(raster_path)) as src:
-            bathy_data = src.read(1)
             profile = src.profile.copy()
             src_crs = src.crs
 
             if src_crs and src_crs.is_geographic:
                 raise ValueError(f"- Bathymetry ({raster_path.name}) must be projected, not geographic!")
 
-            # Only select water pixels (negative)
-            water_mask = np.where(
-                np.isfinite(bathy_data) & (bathy_data != src.nodata) & (bathy_data < 0),
-                1,
-                255,
-            ).astype(np.uint8)
-
-            del bathy_data
-
-            # Spatial clipping using tile bounding box
             bounds = src.bounds
             tile_poly = box(bounds.left, bounds.bottom, bounds.right, bounds.top)
 
             if current_ecoregion_gdf.crs != src_crs:
-                # BlueTopo dynamic branch: reproject bounding box to GDF CRS
                 tile_poly_gdf_crs = gpd.GeoSeries([tile_poly], crs=src_crs).to_crs(current_ecoregion_gdf.crs).iloc[0]
                 intersecting = current_ecoregion_gdf[current_ecoregion_gdf.intersects(tile_poly_gdf_crs)]
                 eco_proj = (
@@ -455,22 +460,10 @@ class DistanceToShoreEngine(Engine):
                     else gpd.GeoDataFrame(geometry=[], crs=src_crs)
                 )
             else:
-                # DigitalCoast streamlined branch: matching EPSG:32617
                 eco_proj = current_ecoregion_gdf[current_ecoregion_gdf.intersects(tile_poly)]
 
-            if not eco_proj.empty:
-                boundary_mask = rasterize(
-                    shapes=eco_proj.geometry,
-                    out_shape=src.shape,
-                    transform=src.transform,
-                    fill=0,
-                    default_value=1,
-                    dtype=np.uint8,
-                )
-                water_mask[boundary_mask == 0] = 255
-                del boundary_mask
-            else:
-                water_mask[:] = 255
+            if eco_proj.empty:
+                return None, 0
 
             profile.update(
                 driver="GTiff",
@@ -482,11 +475,39 @@ class DistanceToShoreEngine(Engine):
             )
 
             self.write_message(f'- writing ocean mask raster to: {output_file}', str(OUTPUTS))
-            with rasterio.open(output_file, "w", **profile) as dst:
-                dst.write(water_mask, 1)
+            valid_cells = 0
+            strip_rows = 2048
 
-            valid_cells = int(np.sum(water_mask == 1))
-            del water_mask
+            with rasterio.open(output_file, "w", **profile) as dst:
+                for r_start in range(0, src.height, strip_rows):
+                    win_height = min(strip_rows, src.height - r_start)
+                    win = Window(0, r_start, src.width, win_height)
+
+                    bathy_strip = src.read(1, window=win)
+                    mask_strip = np.full(bathy_strip.shape, 255, dtype=np.uint8)
+
+                    valid = np.isfinite(bathy_strip)
+                    if src.nodata is not None:
+                        valid &= (bathy_strip != src.nodata)
+                    valid &= (bathy_strip < 0)
+                    mask_strip[valid] = 1
+                    del bathy_strip, valid
+
+                    boundary_strip = rasterize(
+                        shapes=eco_proj.geometry,
+                        out_shape=mask_strip.shape,
+                        transform=src.window_transform(win),
+                        fill=0,
+                        default_value=1,
+                        dtype=np.uint8,
+                    )
+                    mask_strip[boundary_strip == 0] = 255
+                    del boundary_strip
+
+                    valid_cells += int(np.count_nonzero(mask_strip == 1))
+                    dst.write(mask_strip, 1, window=win)
+                    del mask_strip
+
             gc.collect()
             _trim_memory()
 
@@ -640,7 +661,7 @@ class DistanceToShoreEngine(Engine):
 
         print("Starting Distance To Shore engine")
 
-        self.setup_dask(self.param_lookup['env'], n_workers=3, threads_per_worker=1, memory_limit="36GB")
+        self.setup_dask(self.param_lookup['env'], n_workers=8, threads_per_worker=1, memory_limit="13GB")
 
         master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
         ecoregions = self.param_lookup['eco_regions'].value
@@ -702,23 +723,42 @@ class DistanceToShoreEngine(Engine):
             print(f" - Submitting {len(param_inputs)} tiles to Dask cluster...")
 
             # Keep a bounded set of in-flight futures (2 in-flight tasks max)
-            batch_limit = 2
+            batch_limit = 12
             task_iter = iter(param_inputs)
-            in_flight = set(self.client.map(_process_tile, list(islice(task_iter, batch_limit))))
+            in_flight = set()
+            future_to_file = {}
+
+            for param in islice(task_iter, batch_limit):
+                fut = self.client.submit(_process_tile, param)
+                in_flight.add(fut)
+                future_to_file[fut] = param[0]
 
             results = []
             seq = as_completed(in_flight)
+            skip_log = OUTPUTS / f"{ecoregion}_{self.data_type}_skipped_tiles.txt"
 
             for future in seq:
-                res = future.result()
-                results.append(res)
-                in_flight.remove(future)
+                tile_path = future_to_file.pop(future, "unknown_file")
+                try:
+                    res = future.result()
+                    results.append(res)
+                    if res.get("status") in ("skipped", "error"):
+                        with open(skip_log, "a") as f:
+                            f.write(f"{res['status']}\t{tile_path}\n")
+                except KilledWorker as exc:
+                    print(f" - [KILLED_WORKER] {tile_path}: {exc}")
+                    with open(skip_log, "a") as f:
+                        f.write(f"killed_worker\t{tile_path}\n")
+                    results.append({"status": "error", "file": tile_path, "error": str(exc)})
+                finally:
+                    in_flight.remove(future)
 
                 next_param = list(islice(task_iter, 1))
                 if next_param:
                     new_future = self.client.submit(_process_tile, next_param[0])
                     seq.add(new_future)
                     in_flight.add(new_future)
+                    future_to_file[new_future] = next_param[0][0]
 
             success_count = sum(1 for r in results if r.get('status') == 'success')
             print(f" - Completed {success_count}/{len(results)} tiles successfully for {ecoregion}.")
