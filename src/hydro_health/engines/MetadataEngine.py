@@ -72,7 +72,7 @@ class MetadataEngine(Engine):
         """Parallel process and download metadata dates"""
 
         label, download_link, provider_folder, outputs = param_inputs
-        provider_stem = pathlib.PurePosixPath(str(provider_folder)).name
+        provider_stem = provider_folder.name
         self.write_message(f' - getting metadata: {provider_stem}', outputs)
 
         if label in {'Metadata', 'ISO metadata'}:

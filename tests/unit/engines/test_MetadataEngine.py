@@ -12,14 +12,16 @@ HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[3] / 'src'
 sys.path.append(str(HYDRO_HEALTH_MODULE))
 
 from hydro_health.engines.MetadataEngine import MetadataEngine
+from hydro_health.helpers.tools import Param
 
 METADATA_PATH = 'hydro_health.engines.MetadataEngine'
+OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 
 
 @pytest.fixture
 def victim():
     """Fixture returning a local MetadataEngine instance with mocked side effects."""
-    engine = MetadataEngine({'env': 'local'})
+    engine = MetadataEngine({'env': 'local', 'output_directory': Param(OUTPUTS)})
     engine.write_message = MagicMock()
     engine.write_run_manifest = MagicMock()
     return engine
@@ -29,7 +31,7 @@ def victim():
 def s3_victim():
     """Fixture returning an AWS/S3 MetadataEngine instance with mocked S3FileSystem."""
     with patch(f'{METADATA_PATH}.s3fs.S3FileSystem') as mock_s3_cls:
-        engine = MetadataEngine({'env': 'aws'})
+        engine = MetadataEngine({'env': 'aws', 'output_directory': Param(OUTPUTS)})
         engine.write_message = MagicMock()
         engine.write_run_manifest = MagicMock()
         engine.s3_files = mock_s3_cls.return_value
@@ -66,16 +68,16 @@ def test_download_metadata_success(victim, tmp_path):
         assert victim.write_message.call_count == 2
 
 
-def test_download_metadata_s3_success(s3_victim):
-    """Tests writing metadata.txt via s3fs when env is 'aws'."""
-    provider_folder = pathlib.Path("my-bucket\\ER1\\sub\\DigitalCoast\\provider_dir")
-    param_inputs = ['Metadata', 'http://example.com', provider_folder, "s3://my-bucket/out"]
+def test_download_metadata_s3_fallback_description(s3_victim):
+    """Tests S3 write and fallback to provider folder name when <description> is absent."""
+    provider_folder = pathlib.Path('my-bucket/ER1/sub/DigitalCoast/provider_dir')
+    param_inputs = ['Metadata', 'http://example.com', provider_folder, 's3://my-bucket/out']
 
     xml_payload = (
-        b"<root><time-frame>"
-        b"<start-date-time>2022-01-01</start-date-time>"
-        b"<end-date-time>2022-12-31</end-date-time>"
-        b"</time-frame></root>"
+        b'<root><time-frame>'
+        b'<start-date-time>2022-01-01</start-date-time>'
+        b'<end-date-time>2022-12-31</end-date-time>'
+        b'</time-frame></root>'
     )
     mock_response = MagicMock(content=xml_payload)
     mock_s3_stream = mock_open()
@@ -221,10 +223,10 @@ def test_run_without_prefix(victim, tmp_path):
          patch.object(victim, '_find_files', return_value=['file1.txt']), \
          patch(f'{METADATA_PATH}.get_config_item', return_value="subfolder"):
 
-        victim.run(mock_gdf, output_prefix=False, outputs=str(tmp_path))
+        victim.run(mock_gdf, output_prefix=False)
 
-        expected_path = tmp_path / "ER1" / "subfolder" / "DigitalCoast"
-        mock_read_json.assert_called_once_with(expected_path, str(tmp_path))
+        expected_path = OUTPUTS / "ER1/subfolder/DigitalCoast"
+        mock_read_json.assert_called_once_with(expected_path, OUTPUTS)
         victim.write_run_manifest.assert_called_once_with(
             pathlib.Path("ER1/subfolder/DigitalCoast"), {'metadata': 1}
         )
@@ -244,10 +246,10 @@ def test_run_s3_with_prefix(s3_victim):
          patch.object(s3_victim, '_find_files', return_value=['a', 'b']), \
          patch(f'{METADATA_PATH}.get_config_item', side_effect=fake_config):
 
-        s3_victim.run(mock_gdf, output_prefix="prefix_dir", outputs="unused")
+        s3_victim.run(mock_gdf, output_prefix="prefix_dir")
 
         expected_s3_path = "s3://my-bucket/prefix_dir/ER1/subfolder/DigitalCoast"
-        mock_read_json.assert_called_once_with(expected_s3_path, "unused")
+        mock_read_json.assert_called_once_with(expected_s3_path, OUTPUTS)
         s3_victim.write_run_manifest.assert_called_once_with(
             pathlib.Path("prefix_dir/ER1/subfolder/DigitalCoast"), {'metadata': 2}
         )
