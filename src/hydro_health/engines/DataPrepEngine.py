@@ -1,6 +1,6 @@
 """Prepare all training and prediction tile/year pairs independently.
 
-Prediction export is skipped when any expected predictor is at least 20%
+Prediction export is skipped when any expected predictor is at least 70%
 missing (prediction_max_missing_fraction). Skipped roles produce no cleaned
 or auxiliary files; stale outputs are removed. Training with too few eligible
 rows is also skipped. Each cleaned parquet is written before its auxiliaries.
@@ -40,8 +40,8 @@ DYNAMIC_BASES = ('hurr_strength_mean', 'tsm_mean')
 NON_PREDICTORS = {
     'X', 'Y', 'FID', 'tile_id', 'source', 'dataset_role',
     'year_t', 'year_t1', 'year_t1', 'interval_years', 'pair_id',
-    'bathy_t1', 'bathy_t1', 'delta_bathy', 'delta_rate', 'survey_end_date',
-    'geometry', 'prediction_row_usable', 'sample_weight',
+    'bathy_t1', 'bathy_t1', 'delta_bathy', 'delta_rate', 'distance_from_shore', 'survey_end_date',
+    'geometry', 'prediction_row_usable', 'sample_weight', 
 }
 
 def _pair_duration_years(pair: str) -> float:
@@ -457,7 +457,7 @@ class DataPrepEngine(Engine):
             'max_weight': 2.0, 'minimum_training_rows': 100, 'verbose_logging': True,
             'write_unusable_prediction': True,
             'missingness_warning_fraction': 0.20, 'worker_temp_dir': None,
-            'prediction_max_missing_fraction': 0.20,
+            'prediction_max_missing_fraction': 0.70,
             'n_workers': 16, 'threads_per_worker': 2, 'memory_limit': '6GB',
             'raise_on_failure': True,
         }
@@ -557,7 +557,7 @@ class DataPrepEngine(Engine):
     def collect_prediction_files(self) -> list:
         return self._collect_batches(self.prediction_tiles_dir, 'prediction')
 
-    def _build_task_params(self, training_files: list | None = None, overwrite: bool = True) -> list[dict]:
+    def _build_task_params(self, training_files: list | None = None) -> list[dict]:
         master = self._load_master_predictors()
         inventory = {'training': {}, 'prediction': {}}
         for role, directory in [('training', self.training_tiles_dir), ('prediction', self.prediction_tiles_dir)]:
@@ -604,7 +604,7 @@ class DataPrepEngine(Engine):
         for tile, pair in identities:
             task = {'tile_id': tile, 'pair': pair, 'region': self.region, 'sources': {}, 'input_errors': {},
                     'predictors': schemas[pair], 'cfg': self.settings, 'crs': str(self.target_crs),
-                    'is_aws': self.is_aws, 'overwrite': overwrite,
+                    'is_aws': self.is_aws, 'overwrite': self.overwrite,
                     'directories': {'training': str(self.ml_prep_train_dir / tile), 'prediction': str(self.ml_prep_pred_dir / tile)}}
             for role in ('training', 'prediction'):
                 candidates = inventory[role].get((tile, pair), [])
@@ -626,9 +626,9 @@ class DataPrepEngine(Engine):
                      'discovery_issues': [item for item in self.discovery_issues if item['region'] == region],
                      'results': results}, path, self.is_aws)
 
-    def execute_tasks(self, training_files: list | None = None, overwrite: bool = True) -> list[dict]:
+    def execute_tasks(self, training_files: list | None = None) -> list[dict]:
         from dask.distributed import as_completed
-        tasks = self._build_task_params(training_files, overwrite)
+        tasks = self._build_task_params(training_files)
         self.write_message(f'Submitting {len(tasks)} union training/prediction preparation tasks for {self.region}...', OUTPUTS)
         results = []
         futures = {future: task for future, task in zip(self.client.map(_prep_tile_task, tasks, pure=False), tasks)}
@@ -656,7 +656,7 @@ class DataPrepEngine(Engine):
                 future.release()
         return results
 
-    def run(self, overwrite: bool = True) -> list[dict]:
+    def run(self) -> list[dict]:
         self.results, self.discovery_issues = [], []
         regions = self.param_lookup['eco_regions'].value
         if regions is None or isinstance(regions, (str, bytes)):
@@ -674,7 +674,7 @@ class DataPrepEngine(Engine):
                     self._resolve_paths(eco_region)
                     summary_path = self.reports_dir / f'data_prep_run_{self.run_id}.json'
                     self._write_run_summary(summary_path, eco_region, [], 'running')
-                    self.execute_tasks(overwrite=overwrite)
+                    self.execute_tasks()
                 except Exception as exc:
                     self.discovery_issues.append({'region': eco_region, 'reason': f'{type(exc).__name__}: {exc}'})
                     self.write_message(f'[FAIL] {eco_region}: {exc}', OUTPUTS)

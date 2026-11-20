@@ -15,7 +15,7 @@ HURRICANE:
 LIDAR_PLOTS:
   INPUT_VRTS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\raw\DigitalCoast
   PLOT_OUTPUTS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\raw\DigitalCoast_plots
-  RESAMPLED_VRTS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\raw\DigitalCoast_resampled  
+  RESAMPLED_MOSAICS: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\model_variables\Prediction\raw\DigitalCoast_resampled  
 MASK:
   SUBFOLDER: masks
   MASK_PRED_PATH: \\nos.noaa\ocs\CSDL\Projects\Hydro_Health_Model\HHM2025\working\HHM_Run\pilot\masks\prediction_mask_pilot.tif

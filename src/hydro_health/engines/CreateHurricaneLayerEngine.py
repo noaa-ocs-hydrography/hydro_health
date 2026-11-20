@@ -38,64 +38,69 @@ OUTPUTS = pathlib.Path(__file__).parents[3] / 'outputs'
 class CreateHurricaneLayerEngine(Engine):
     """Class to hold the logic for processing the Hurricane layer"""
 
-    def __init__(self, param_lookup: dict, output_prefix: str | bool = False) -> None:
+    def __init__(self):
         super().__init__()
-        self.param_lookup = param_lookup
-        self.output_prefix = output_prefix
-        self.is_aws = param_lookup.get('env', 'local') == 'aws'
-        self.overwrite = True
-
-    def _resolve_paths(self, region: str) -> None:
-        """Resolve paths dynamically for aws or local environments and the given eco region."""
-        self.region = region
-        self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
-        self.write_message(f'CreateHurricaneLayerEngine resolved outputs_dir for region {region}: {self.outputs_dir}', OUTPUTS)
-
-        bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        s3_dir_base = f's3://{bucket}/{region}'
-
-        data_path = get_config_item('HURRICANE', 'DATA_PATH')
-        local_data_base = OUTPUTS / self.output_prefix if self.output_prefix else OUTPUTS
-        self.txt_data_path = UPath(f's3://{bucket}/{data_path}') if self.is_aws else UPath(local_data_base / data_path)
-
-        gpkg_path = get_config_item('HURRICANE', 'GPKG_PATH')
-        self.hurricane_data_path = UPath(f's3://{bucket}/{gpkg_path}') if self.is_aws else UPath(local_data_base / gpkg_path)
-
-        year_pair_raster_path = get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH')
-        self.year_pair_raster_path = UPath(f'{s3_dir_base}/{year_pair_raster_path}') if self.is_aws else UPath(self.outputs_dir / year_pair_raster_path)
-
-        raster_path = get_config_item('HURRICANE', 'RASTER_PATH')
-        self.raster_path = UPath(f'{s3_dir_base}/{raster_path}') if self.is_aws else UPath(self.outputs_dir / raster_path)
-
-        count_raster_path = get_config_item('HURRICANE', 'COUNT_RASTER_PATH')
-        self.count_raster_path = UPath(f'{s3_dir_base}/{count_raster_path}') if self.is_aws else UPath(self.outputs_dir / count_raster_path)
-
-        cumulative_raster_path = get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH')
-        self.cumulative_raster_path = UPath(f'{s3_dir_base}/{cumulative_raster_path}') if self.is_aws else UPath(self.outputs_dir / cumulative_raster_path)
-
-        prediction_mask_path = get_config_item('MASK', 'MASK_PRED_PATH')
-        self.mask_pred_path = UPath(f'{s3_dir_base}/{prediction_mask_path}') if self.is_aws else UPath(self.outputs_dir / prediction_mask_path)
-
-        master_grids_path = str(get_config_item('SHARED', 'MASTER_GRIDS'))
         
-        self.coast_boundary_path = UPath(master_grids_path) if '://' in master_grids_path else UPath(INPUTS / master_grids_path)
-        if not self.is_aws:
-            self.hurricane_data_path.parent.mkdir(parents=True, exist_ok=True)
-            self.txt_data_path.mkdir(parents=True, exist_ok=True)
-            self.year_pair_raster_path.mkdir(parents=True, exist_ok=True)
-            self.raster_path.mkdir(parents=True, exist_ok=True)
-            self.count_raster_path.mkdir(parents=True, exist_ok=True)
-            self.cumulative_raster_path.mkdir(parents=True, exist_ok=True)
+        self.is_aws = (get_environment() == 'aws')
+        
+        # --- Setup Logging ---
+        self.log_file = pathlib.Path.home() / 'hurricane_engine.log'
+        self.logger = logging.getLogger('HurricaneEngine')
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Prevent duplicate loggers if instantiated multiple times
+        if not self.logger.handlers:
+            fh = logging.FileHandler(self.log_file)
+            fh.setLevel(logging.DEBUG)
+            ch = logging.StreamHandler(sys.stdout)
+            ch.setLevel(logging.INFO)
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            fh.setFormatter(formatter)
+            ch.setFormatter(formatter)
+            self.logger.addHandler(fh)
+            self.logger.addHandler(ch)
+            
+        self.logger.info(f"Logging initialized. Writing logs to {self.log_file}")
+        # ---------------------
 
-    def _read_ecoregion(self) -> gpd.GeoDataFrame:
-        """Read the selected region using its identifier column in the master grids."""
+        self.sediment_data = None
+        self.create_file_paths()
 
-        eco_gdf = self._read_gpkg_layer(get_config_item('SHARED', 'ENHANCED_ECOREGIONS'), self.coast_boundary_path)
-        region_column = get_config_item('SHARED', 'ECOREGION_COLUMN')
-        eco_gdf = eco_gdf.loc[eco_gdf[region_column].astype(str).str.strip().eq(self.region)].copy()
-        if eco_gdf.empty:
-            raise ValueError(f"Ecoregion {self.region!r} was not found in Enhanced_EcoRegions")
-        return eco_gdf.to_crs(self.target_crs)
+    def create_file_paths(self):
+        """Creates Universal Paths based on the environment."""
+        inputs_root = pathlib.Path(__file__).parents[4] / 'inputs'
+        MASTER_GRIDS = inputs_root / 'Master_Grids.gpkg'
+
+        if self.is_aws:
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            # Disable directory caching since GDAL writes files outside of Python's fsspec awareness
+            kwargs = {"use_listings_cache": False}
+            
+            # Use lstrip('/') to prevent 's3://bucket//path' double-slash S3 key errors
+            self.hurricane_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'GPKG_PATH')).lstrip('/')}", **kwargs)
+            self.txt_data_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'DATA_PATH')).lstrip('/')}", **kwargs)
+            self.year_pair_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH')).lstrip('/')}", **kwargs)
+            self.coast_boundary_path = UPath(MASTER_GRIDS) # Local EC2 repo path
+            self.raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'RASTER_PATH')).lstrip('/')}", **kwargs)
+            self.mask_pred_path = UPath(f"s3://{bucket}/{str(get_config_item('MASK', 'MASK_PRED_PATH')).lstrip('/')}", **kwargs)
+            self.count_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'COUNT_RASTER_PATH')).lstrip('/')}", **kwargs)
+            self.cumulative_raster_path = UPath(f"s3://{bucket}/{str(get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH')).lstrip('/')}", **kwargs)
+        else:
+            self.hurricane_data_path = UPath(get_config_item('HURRICANE', 'GPKG_PATH'))
+            self.txt_data_path = UPath(get_config_item('HURRICANE', 'DATA_PATH'))
+            self.year_pair_raster_path = UPath(get_config_item('HURRICANE', 'YEAR_PAIR_RASTER_PATH'))
+            self.coast_boundary_path = UPath(MASTER_GRIDS) # Local dev repo path
+            self.raster_path = UPath(get_config_item('HURRICANE', 'RASTER_PATH'))
+            self.mask_pred_path = UPath(get_config_item('MASK', 'MASK_PRED_PATH'))
+            self.count_raster_path = UPath(get_config_item('HURRICANE', 'COUNT_RASTER_PATH'))
+            self.cumulative_raster_path = UPath(get_config_item('HURRICANE', 'CUMULATIVE_RASTER_PATH'))
+
+        self.logger.info("--- Hurricane Engine File Paths ---")
+        self.logger.info(f"GPKG Data Path: {self.hurricane_data_path}")
+        self.logger.info(f"TXT Data Path: {self.txt_data_path}")
+        self.logger.info(f"Raster Base Path: {self.raster_path}")
+        self.logger.info(f"Overwrite Existing Files: {self.overwrite}")
+        self.logger.info("-----------------------------------")
 
     def _get_gdal_path(self, path_obj: UPath | str) -> str:
         """Convert UPath to GDAL-compatible virtual file string if on AWS."""
@@ -126,31 +131,55 @@ class CreateHurricaneLayerEngine(Engine):
         self.write_message(f"Saving layer '{layer_name}' to {self.hurricane_data_path}...", OUTPUTS)
         if not self.is_aws:
             self.hurricane_data_path.parent.mkdir(parents=True, exist_ok=True)
-        temp_parent = None if self.is_aws else str(self.hurricane_data_path.parent)
-        with tempfile.TemporaryDirectory(dir=temp_parent) as tmpdir:
-            local_gpkg = os.path.join(tmpdir, 'hurricane.gpkg')
-            if self.hurricane_data_path.exists():
-                with self.hurricane_data_path.open('rb') as src, open(local_gpkg, 'wb') as dst:
-                    shutil.copyfileobj(src, dst)
-                existing_layers = {name for name, _ in pyogrio.list_layers(local_gpkg)}
-                if not self.overwrite and layer_name in existing_layers:
-                    self.write_message(f"Skipping existing GeoPackage layer: {layer_name}", OUTPUTS)
-                    return
-            gdf.to_file(local_gpkg, layer=layer_name, driver='GPKG', engine='pyogrio', mode='w')
-            if self.is_aws:
-                with open(local_gpkg, 'rb') as src, self.hurricane_data_path.open('wb') as dst:
-                    shutil.copyfileobj(src, dst)
-            else:
-                os.replace(local_gpkg, str(self.hurricane_data_path))
-        self.write_message(f"Successfully saved layer '{layer_name}'.", OUTPUTS)
+            
+            if file_exists:
+                write_kwargs["mode"] = "a"
+                write_kwargs["layer_options"] = {"OVERWRITE": "YES"}
+                
+            try:
+                # Explicitly cast to string to prevent C-engine errors
+                gdf.to_file(str(self.hurricane_data_path), **write_kwargs)
+            except Exception as e:
+                self.logger.warning(f"Failed to append to GPKG ({e}). File may be corrupted. Recreating...")
+                if self.hurricane_data_path.exists():
+                    self.hurricane_data_path.unlink()
+                # Strip out append options and force a new file creation
+                write_kwargs.pop("mode", None)
+                write_kwargs.pop("layer_options", None)
+                gdf.to_file(str(self.hurricane_data_path), **write_kwargs)
+            
+        self.logger.info(f"Successfully saved layer '{layer_name}'.")
 
-    def year_pair_rasters(self, start_year: int, end_year: int) -> None:
-        """Align annual rasters to the first year's grid and average valid values, including zeros."""
-        if end_year < start_year:
-            raise ValueError('end_year must be greater than or equal to start_year')
-        output_path = self.year_pair_raster_path / f'hurr_strength_mean_{start_year}_{end_year}.tif'
-        if not self.overwrite and output_path.exists():
-            self.write_message(f"Skipping existing year-pair raster: {output_path}", OUTPUTS)
+    def average_rasters(self, input_folder, start_year, end_year, output_name) -> None:
+        """
+        Average and sum rasters for a given year range and save the results.
+        
+        Note: Despite the function name, this method calculates and outputs BOTH the 
+        average (mean) raster and the cumulative (sum) raster for the specified year range.
+        """
+
+        output_folder = self.year_pair_raster_path
+        output_folder.mkdir(parents=True, exist_ok=True)
+
+        mean_output_path = output_folder / f"{output_name}_mean_{start_year}_{end_year}.tif"
+        cumulative_output_path = output_folder / f"{output_name}_cumulative_{start_year}_{end_year}.tif"
+
+        if not self.overwrite and mean_output_path.exists():
+            self.logger.info(f"Skipping mean raster - already exists at {mean_output_path}.")
+            return
+
+        try:
+            # Safely grab matching raster files and keep track of which years were found
+            raster_files = []
+            found_years = set()
+            for f in input_folder.rglob("*.tif"):
+                for year in range(start_year, end_year + 1):
+                    if str(year) in f.name:
+                        raster_files.append(f)
+                        found_years.add(year)
+                        break
+        except Exception as e:
+            self.logger.error(f"Error accessing {input_folder}: {e}")
             return
         raster_files = [self.cumulative_raster_path / f'cumulative_windspeed_{year}.tif'
                         for year in range(start_year, end_year + 1)]
@@ -649,11 +678,11 @@ class CreateHurricaneLayerEngine(Engine):
             output_folder = self.raster_path / str(year)
             output_folder.mkdir(parents=True, exist_ok=True)
             raster_file = output_folder / f"{safe_name}_{area_date}.tif"
-
-            # Prevent overwriting existing individual rasters
+            
+            # Skip existing individual rasters when overwrite is disabled.
             if not self.overwrite and raster_file.exists():
-                self.write_message(f"Skipping individual raster {safe_name}_{area_date}.tif ({year}) - already exists.", OUTPUTS)
-                continue
+                self.logger.info(f"Skipping individual raster {safe_name}_{area_date}.tif ({year}) - already exists.")
+                continue  
 
             s_minx, s_miny, s_maxx, s_maxy = group.total_bounds
 
@@ -712,8 +741,66 @@ class CreateHurricaneLayerEngine(Engine):
                 data.append(row)
         return data
 
-    def save_raster(self, data: np.ndarray, path_obj: UPath, height: int, width: int, transform: Affine, crs: rasterio.crs.CRS | str) -> None:
+    def run(self):
+        """Entrypoint for processing the Hurricane layer"""
+        self.logger.info("Starting Hurricane Layer Engine processing...")
+
+        if self.overwrite or not self.hurricane_data_path.exists():
+            if self.overwrite:
+                self.logger.info("Removing existing GeoPackage to pull the latest dataset...")
+                try:
+                    if self.hurricane_data_path.exists():
+                        self.hurricane_data_path.unlink()
+                except Exception as e:
+                    self.logger.warning(f"Could not delete existing GPKG: {e}")
+
+            self.download_hurricane_data()    
+        
+            # Parse points once and pass the Dataframe down the chain
+            point_gdf = self.convert_text_to_gpkg()
+            self.create_line_layer(point_gdf)
+            self.create_overlapping_buffers(point_gdf)
+        
+            self.clip_polygons()
+        else:
+            self.logger.info(f"Reusing existing GeoPackage: {self.hurricane_data_path}")
+
+        self.polygons_to_raster()
+
+        self.generate_cumulative_rasters(
+            output_folder=self.count_raster_path,
+            value="cumulative_count")
+
+        self.generate_cumulative_rasters(
+            output_folder=self.cumulative_raster_path,
+            value="cumulative_windspeed")
+
+        self.logger.info("Averaging rasters for defined year ranges...")
+        for start_year, end_year in self.year_ranges:
+            
+            # COMMENTED OUT: We are skipping hurr_count per request
+            # self.average_rasters(
+            #     input_folder=self.count_raster_path,
+            #     start_year=start_year,
+            #     end_year=end_year,
+            #     output_name=f"hurr_count"
+            # )
+
+            self.average_rasters(
+                input_folder=self.cumulative_raster_path,
+                start_year=start_year,
+                end_year=end_year,
+                output_name=f"hurr_strength"
+            )
+        
+        self.logger.info("Hurricane Layer Engine processing complete.")
+
+    def save_raster(self, data, path_obj, height, width, transform, crs) -> None:
         """Save the raster data to a file safely using a local temp file."""
+        if not self.overwrite and path_obj.exists():
+            self.logger.info(f"Skipping raster - already exists at {path_obj}.")
+            return
+
         with tempfile.TemporaryDirectory() as tmpdir:
             local_raster = os.path.join(tmpdir, "temp.tif")
             with rasterio.open(
@@ -737,28 +824,14 @@ class CreateHurricaneLayerEngine(Engine):
             else:
                 shutil.copy(local_raster, path_obj)
 
-    def run(self) -> None:
-        """Prepare shared hurricane data once, then process each configured region."""
-        eco_regions = list(self.param_lookup['eco_regions'].value)
-        if not eco_regions:
-            return
-        self._resolve_paths(str(eco_regions[0]))
-        self.download_hurricane_data()
-        if self.overwrite or not self.hurricane_data_path.exists():
-            point_gdf = self.convert_text_to_gpkg()
-            self.create_overlapping_buffers(point_gdf)
-            self.clip_polygons()
-        else:
-            # Verify reusable inputs rather than silently proceeding with an incomplete file.
-            self._read_gpkg_layer('atlantic_hurricane_points')
-            self._read_gpkg_layer('trimmed_polygons')
-            self.write_message(f"Reusing shared hurricane GeoPackage: {self.hurricane_data_path}", OUTPUTS)
-        for eco_region in eco_regions:
-            self._resolve_paths(str(eco_region))
-            self.write_message(f"Processing hurricane layers for {eco_region}...", OUTPUTS)
-            self.polygons_to_raster()
-            self.generate_cumulative_rasters(self.count_raster_path, 'cumulative_count')
-            self.generate_cumulative_rasters(self.cumulative_raster_path, 'cumulative_windspeed')
-            for start_year, end_year in self.year_ranges:
-                self.year_pair_rasters(start_year, end_year)
-            self.write_message(f"Hurricane processing complete for {eco_region}.", OUTPUTS)
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateHurricaneLayerEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  

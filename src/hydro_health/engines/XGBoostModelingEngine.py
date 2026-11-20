@@ -46,6 +46,27 @@ NON_PREDICTORS = {
     "sample_weight",
 }
 
+def _nodata_sentinels(nodata_value: float = -9999.0) -> list[float]:
+    """Recognize both historical sentinels and the inherited engine NoData."""
+
+    values = {9999.0, -9999.0}
+    if nodata_value is not None and np.isfinite(float(nodata_value)):
+        values.add(float(nodata_value))
+    return sorted(values)
+
+
+def _clean_model_values(frame: pd.DataFrame, columns, nodata_value: float = -9999.0) -> pd.DataFrame:
+    """Normalize model values without changing identifiers or valid coordinates."""
+
+    out = frame.copy()
+    sentinels = _nodata_sentinels(nodata_value)
+    for column in dict.fromkeys(columns):
+        if column in out:
+            values = pd.to_numeric(out[column], errors="raise")
+            out[column] = values.mask(values.isin(sentinels), np.nan)
+    return out
+
+
 def _xgb_params(model_cfg: dict, seed: int) -> dict:
     """Build the shared XGBoost parameters for CV and bootstrap training."""
 
@@ -331,7 +352,7 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
     audit["grid_origin"] = (
         coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)
         + (coordinates[["X", "Y"]].max().to_numpy(dtype=np.float32)
-           - coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)) / 2
+        - coordinates[["X", "Y"]].min().to_numpy(dtype=np.float32)) / 2
     ).tolist()
     audit["folds"] = pd.DataFrame(
         {
@@ -391,11 +412,21 @@ def _choose_rounds_spatial_cv(coordinates: pd.DataFrame, features: pd.DataFrame,
     )
     return max(floor, selected) if mode == "cv_with_floor" else max(50, selected)
 
-def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarray, interval_years: np.ndarray, horizon: float) -> dict:
+def _translate_predictions(predicted_bathy: np.ndarray, baseline_bathy: np.ndarray, interval_years: np.ndarray, horizon: float, nodata_value: float = -9999.0) -> dict:
     """Derive later-minus-earlier change, annualized rate and standardized horizon values. """
 
-    delta = predicted_bathy - baseline_bathy
-    rate = delta / interval_years
+    sentinels = _nodata_sentinels(nodata_value)
+    predicted_bathy, baseline_bathy, interval_years = (
+        np.asarray(values, dtype=float).copy()
+        for values in (predicted_bathy, baseline_bathy, interval_years)
+    )
+    for values in (predicted_bathy, baseline_bathy, interval_years):
+        values[np.isin(values, sentinels) | ~np.isfinite(values)] = np.nan
+    valid = (np.isfinite(predicted_bathy) & np.isfinite(baseline_bathy)
+             & np.isfinite(interval_years) & (interval_years > 0))
+    predicted_bathy = np.where(valid, predicted_bathy, np.nan)
+    delta = np.where(valid, predicted_bathy - baseline_bathy, np.nan)
+    rate = np.divide(delta, interval_years, out=np.full_like(delta, np.nan), where=valid)
     standard_delta = rate * np.float32(horizon)
     return {
         "mean_predicted_bathy_t1": predicted_bathy,
@@ -447,7 +478,7 @@ def _calculate_model_weights(change_vec: np.ndarray, model_cfg: dict) -> np.ndar
         raise ValueError("Calculated weights must be finite and positive")
     return w
 
-def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, locked_predictors: list[str]) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame, pd.DataFrame | None, list[str]]:
+def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, locked_predictors: list[str], nodata_value: float = -9999.0) -> tuple[pd.DataFrame, pd.DataFrame | None, pd.DataFrame, pd.DataFrame | None, list[str]]:
     """Use DataPrep's ordered schema: bathy_t plus drivers predicts bathy_t1.
 
     Keep predictor NAs and all prediction rows. No silent feature
@@ -480,13 +511,17 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
     }
     if missing := (required_train | set(predictors)) - set(train_df.columns):
         raise ValueError(f"Missing required ML-ready training columns: {sorted(missing)}")
+    train_df = _clean_model_values(
+        train_df, predictors + ["bathy_t", "bathy_t1", "interval_years", "delta_bathy", "delta_rate"],
+        nodata_value,
+    )
     essential = np.isfinite(
         train_df[["X", "Y", "bathy_t", "bathy_t1", "interval_years"]].to_numpy()
     ).all(axis=1)
     essential &= train_df["interval_years"].to_numpy() > 0
     if not essential.all():
         raise ValueError(
-            'ML-ready training has invalid essential fields; rerun DataPrep instead of dropping rows'
+            'ML-ready training has invalid essential fields (including NoData); rerun DataPrep instead of dropping rows'
         )
     train_df = train_df.reset_index(drop=True)
     _validate_training_changes(train_df)
@@ -498,10 +533,10 @@ def _prepare_model_data(train_df: pd.DataFrame, pred_df: pd.DataFrame | None, lo
             'Predictors contain infinity; diagnose source data rather than impute it'
         )
     
-    pred_df, pred_features = _prepare_prediction_data(pred_df, predictors)
+    pred_df, pred_features = _prepare_prediction_data(pred_df, predictors, nodata_value)
     return train_df, pred_df, train_features, pred_features, predictors
 
-def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str]) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str], nodata_value: float = -9999.0) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """Validate deployment rows independently of the availability of training data."""
     if pred_df is None:
         return None, None
@@ -513,7 +548,9 @@ def _prepare_prediction_data(pred_df: pd.DataFrame | None, predictors: list[str]
             f'Training-first schema cannot deploy; missing prediction fields: {sorted(missing)}'
         )
     
-    pred_df = pred_df.reset_index(drop=True)
+    pred_df = _clean_model_values(
+        pred_df, predictors + ["bathy_t", "interval_years"], nodata_value,
+    ).reset_index(drop=True)
     usable = np.isfinite(
         pred_df[["X", "Y", "bathy_t", "interval_years"]].to_numpy()
     ).all(axis=1)
@@ -768,7 +805,13 @@ def _fit_bootstrap_ensemble(inputs: ModelInputs, cfg: dict, best_rounds: int, se
 def _prediction_summary(frame: pd.DataFrame, mean: np.ndarray, m2: np.ndarray, model_cfg: dict, training: bool = False) -> pd.DataFrame:
     """Build shared prediction/change/rate columns for either dataset role."""
 
-    summary = frame.copy()
+    nodata_value = model_cfg.get("nodata_value", -9999.0)
+    summary = _clean_model_values(
+        frame, ["bathy_t", "bathy_t1", "interval_years", "delta_bathy", "delta_rate"], nodata_value,
+    )
+    mean = np.asarray(mean, dtype=float).copy()
+    if "prediction_row_usable" in summary:
+        mean[~summary.prediction_row_usable.eq(True).to_numpy()] = np.nan
     n_boot = model_cfg["n_boot"]
     sd = (
         np.sqrt(np.maximum(m2, np.float32(0)) / np.float32(n_boot - 1))
@@ -780,11 +823,17 @@ def _prediction_summary(frame: pd.DataFrame, mean: np.ndarray, m2: np.ndarray, m
         summary.bathy_t.to_numpy(),
         summary.interval_years.to_numpy(),
         model_cfg["standard_horizon_years"],
+        nodata_value,
     ).items():
         summary[column] = values
+    sd = np.where(np.isfinite(summary.mean_predicted_bathy_t1.to_numpy()), sd, np.nan)
     summary["uncertainty_sd_bathy_t1"] = sd
     summary["uncertainty_sd_change"] = sd
-    summary["uncertainty_sd_rate"] = sd / summary.interval_years.to_numpy()
+    intervals = summary.interval_years.to_numpy(dtype=float)
+    summary["uncertainty_sd_rate"] = np.divide(
+        sd, intervals, out=np.full_like(sd, np.nan, dtype=float),
+        where=np.isfinite(intervals) & (intervals > 0),
+    )
     if training:
         summary["delta_residual"] = summary.delta_bathy - summary.mean_predicted_change
         summary["prediction_residual"] = summary.bathy_t1 - summary.mean_predicted_bathy_t1
@@ -917,7 +966,7 @@ def _load_model_inputs(cfg: dict) -> ModelInputs:
             cfg["prediction_geoparquet"] = None
     else:
         _write_task_progress(cfg, "No matching prediction input; continuing with training only.")
-    inputs = ModelInputs(*_prepare_model_data(train, prediction, schema.predictor.tolist()))
+    inputs = ModelInputs(*_prepare_model_data(train, prediction, schema.predictor.tolist(), cfg["model_config"].get("nodata_value", -9999.0)))
     inputs.train["sample_weight"] = _calculate_model_weights(
         inputs.train.delta_bathy.to_numpy(), cfg["model_config"]
     )
@@ -957,7 +1006,7 @@ def _predict_saved_tile_task(cfg: dict) -> dict:
         _write_task_progress(cfg, "SKIPPING prediction: summary exists and overwrite=False.")
         return dict(identity, ok=True, skipped=True, reason="outputs_complete")
     frame = _load_prepared_frame(cfg["prediction_geoparquet"], "prediction", cfg)
-    frame, features = _prepare_prediction_data(frame, predictors)
+    frame, features = _prepare_prediction_data(frame, predictors, cfg["model_config"].get("nodata_value", -9999.0))
     usable = frame.prediction_row_usable.to_numpy(dtype=bool)
     mean = np.where(usable, np.float32(0.0), np.float32(np.nan))
     m2 = mean.copy()
@@ -984,7 +1033,7 @@ def _predict_saved_tile_task(cfg: dict) -> dict:
     deployment_metadata = dict(metadata, tile_id=cfg["tile_id"], source_model_tile=source_tile,
         source_model_distance=cfg.get("source_model_distance", 0.0), source_metadata_path=str(metadata_path),
         n_prediction_rows=len(frame), n_prediction_usable=int(usable.sum()),
-        prediction_model_source="tile_native" if source_tile == cfg["tile_id"] else "nearest_local_model")
+    prediction_model_source="tile_native" if source_tile == cfg["tile_id"] else "nearest_local_model")
     _save_json(deployment_metadata, str(UPath(cfg["prediction_output_dir"]) / f"LOCAL_prediction_metadata_{cfg['pair']}.json"))
     _write_task_progress(cfg, f"Completed prediction from saved ensemble: {int(usable.sum()):,}/{len(frame):,} usable rows.")
     return dict(identity, ok=True, skipped=False, task_type="prediction_only", n_prediction_rows=len(frame), n_prediction_usable=int(usable.sum()))
@@ -1033,9 +1082,9 @@ def _train_tile_task(cfg: dict) -> dict:
                     metadata = json.load(stream)
                 models = metadata.get("model_uris", [])
                 if (metadata.get("tile_id") == cfg["tile_id"] and metadata.get("pair") == cfg["pair"]
-                        and metadata.get("crs") == cfg["crs"] and metadata.get("target") == "bathy_t1"
-                        and models and len(models) == metadata.get("n_boot")
-                        and len(set(models)) == len(models) and all(UPath(uri).exists() for uri in models)):
+                    and metadata.get("crs") == cfg["crs"] and metadata.get("target") == "bathy_t1"
+                    and models and len(models) == metadata.get("n_boot")
+                and len(set(models)) == len(models) and all(UPath(uri).exists() for uri in models)):
                     _write_task_progress(cfg, "SKIPPING training: complete saved ensemble exists; missing predictions are handled during deployment.")
                     return dict(ok=True, skipped=True, reason="saved_ensemble_exists", region=cfg["region"], tile_id=cfg["tile_id"], pair=cfg["pair"])
             existing = [path for path in cfg["owned_outputs"] if UPath(path).exists()]
@@ -1107,6 +1156,7 @@ class XGBoostModelingEngine(Engine):
         self.tile_id = None
         self.pair = None
         self.model_config = {
+            "nodata_value": float(self.nodata_value),  # Workers also recognize both 9999 and -9999 as missing.
             "max_depth": 4,  # Maximum depth of each tree; deeper trees learn more complex patterns but can overfit.
             "eta": 0.01,  # Learning rate: scales each tree's contribution; smaller values usually need more rounds.
             "gamma": 1.0,  # Minimum loss reduction required for a split; higher values discourage additional splits.
@@ -1136,7 +1186,6 @@ class XGBoostModelingEngine(Engine):
             "minimum_training_rows": 100,  # Custom: the minimum eligible observations required to train a model.
             "global_seed": 12345,  # Custom: random seed for reproducibility where your code passes it to random operations.
             "shap_sample_rows": 1000,  # Custom: the number, or maximum number, of rows used for SHAP explanations.
-            "overwrite": False, # Custom: whether to overwrite existing outputs; if False, existing outputs may be reused or skipped.
             "xgb_workers": 16,  # Custom: number of parallel workers available for model tasks.
             "xgb_memory_limit": "4GB",  # Custom: memory allowance per worker; confirm whether enforced by your scheduler.
             "xgb_threads_per_worker": 2,  # Custom: CPU threads allocated to XGBoost within each worker.
@@ -1365,11 +1414,11 @@ class XGBoostModelingEngine(Engine):
                 source = min(donor_ids[int(index)] for index in nearest)
             distance = float(points[tile].distance(points[source]))
             self.task_configs.append(dict(cfg, training_geoparquet=None,
-                source_model_tile=source, source_model_distance=distance, source_metadata_path=candidates[source]))
+            source_model_tile=source, source_model_distance=distance, source_metadata_path=candidates[source]))
             self.write_message(f"Deploying {tile}/{pair} from {source} ({distance:.1f} m)", self.outputs_dir)
         return results
 
-    def execute_tasks(self, overwrite: bool = False) -> list[dict]:
+    def execute_tasks(self) -> list[dict]:
         """Submit configurable batches across the available Dask worker threads."""
 
         results = []
@@ -1380,7 +1429,7 @@ class XGBoostModelingEngine(Engine):
             jobs = [
                 dict(
                     cfg,
-                    overwrite=overwrite,
+                    overwrite=self.overwrite,
                     task_number=start + offset + 1,
                     task_total=total,
                 )
@@ -1408,11 +1457,10 @@ class XGBoostModelingEngine(Engine):
                     future.release()
         return results
 
-    def run(self, overwrite: bool | None = None) -> list[dict]:
+    def run(self) -> list[dict]:
         """Set up Dask, process ecoregions and always close the worker pool."""
 
         results = []
-        overwrite = self.model_config["overwrite"] if overwrite is None else overwrite
         try:
             cfg = self.model_config
             self.setup_dask(
@@ -1432,13 +1480,13 @@ class XGBoostModelingEngine(Engine):
                 all_configs = self.task_configs
                 self.task_configs = [job for job in all_configs if job["training_geoparquet"]]
                 self.write_message(f"{eco_region} | STAGE 1/2: MODEL TRAINING — {len(self.task_configs)} tasks; fit local ensembles or reuse existing models.", OUTPUTS)
-                training_results = self.execute_tasks(overwrite)
+                training_results = self.execute_tasks()
                 results.extend(training_results)
                 failed_training = {(row["tile_id"], row["pair"]) for row in training_results if not row.get("ok")}
                 self.write_message(f"{eco_region} | STAGE 2/2: PREDICTION DEPLOYMENT — assigning saved local models to prediction tiles.", OUTPUTS)
                 results.extend(self.prepare_deployment_tasks(all_configs, failed_training))
                 self.write_message(f"{eco_region} | PREDICTION DEPLOYMENT: {len(self.task_configs)} tasks; apply saved ensembles without training new models.", OUTPUTS)
-                results.extend(self.execute_tasks(overwrite))
+                results.extend(self.execute_tasks())
             return results
         finally:
             self.cleanup_resources(OUTPUTS)

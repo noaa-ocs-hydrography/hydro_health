@@ -139,7 +139,7 @@ def _process_training_raster(params: list) -> None:
         total_count,
         is_aws,
         local_tmp_dir_str,
-    ) = params
+    ), overwrite = params
 
     raster_name = pathlib.Path(raster_path).name.lower()
     open_path = str(raster_path)
@@ -151,7 +151,7 @@ def _process_training_raster(params: list) -> None:
         else ""
     )
 
-    if output_path.exists():
+    if not overwrite and output_path.exists():
         Engine.write_message_dask(
             f" - [SKIP]{progress_str} File already exists: {raster_name}",
             str(OUTPUTS),
@@ -448,7 +448,8 @@ class TrainingRastersEngine(Engine):
                 i + 1,
                 total_train,
                 self.is_aws,
-                str(self.local_tmp_dir)
+                str(self.local_tmp_dir),
+                self.overwrite
             ]
             for i, file_path in enumerate(training_files)
         ]

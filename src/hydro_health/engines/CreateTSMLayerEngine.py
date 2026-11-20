@@ -78,186 +78,40 @@ class CreateTSMLayerEngine(Engine):
         self.ftp_directory_cache = {}
         self.output_folder = OUTPUTS
         
-        # Flag to control whether to overwrite existing NC files or just check for new ones
-        self.force_download = False
-        # Independently control replacement of annual and year-pair rasters.
-        self.overwrite_existing = True
-        # Window size bounds raster read/write and year-pair averaging allocations.
-        self.chunk_size = 512
+        # Setup paths
+        tsm_data_path = get_config_item("TSM", "DATA_PATH")
         
-    def _resolve_paths(self, region: str) -> None:
-        """Resolve paths dynamically for aws or local environments and the given eco region."""
+        if get_environment() in ["local", "remote"]:
+            base_raster = OUTPUTS / 'ER_3' / get_config_item("TSM", "SUBFOLDER")
+            self.raster_path = base_raster / 'mean_rasters'
+            self.year_pair_path = base_raster / 'TSM_year_pair_rasters'
+            self.nc_files_path = self.output_folder / str(tsm_data_path).lstrip('/')
+        else:
+            bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
+            subfolder = get_config_item('TSM', 'SUBFOLDER')
+            self.raster_path = f"{bucket}/ER_3/{subfolder}/mean_rasters"
+            self.year_pair_path = f"{bucket}/ER_3/{subfolder}/TSM_year_pair_rasters"
+            self.nc_files_path = f"{bucket}/{tsm_data_path}"
 
-        self.outputs_dir = OUTPUTS / self.output_prefix / region if self.output_prefix else OUTPUTS / region
-        self.write_message(f"CreateTSMLayerEngine resolved outputs_dir for region {region}: {self.outputs_dir}", OUTPUTS)
+    def _save_raster_data(self, data: np.array, path: str|pathlib.Path, transform: rasterio.transform.Affine, crs: str, nodata_val: float) -> None:
+        """Standardized Rasterio write method"""
 
-        bucket = str(get_config_item('SHARED', 'OUTPUT_BUCKET'))
-        s3_dir_base = f"s3://{bucket}/{region}"
-
-        # Shared NetCDF downloads and local download log
-        self.output_folder = OUTPUTS / self.output_prefix if self.output_prefix else OUTPUTS
-        self.download_log_path = self.output_folder / 'downloaded_files.txt'
-        tsm_data_path = get_config_item('TSM', 'DATA_PATH')
-        self.nc_files_path = UPath(f"s3://{bucket}/{tsm_data_path}") if self.is_aws else UPath(self.output_folder / tsm_data_path)
-
-        # Region-specific TSM raster directories
-        subfolder = get_config_item('TSM', 'SUBFOLDER')
-        self.raster_path = UPath(f"{s3_dir_base}/{subfolder}/mean_rasters") if self.is_aws else UPath(self.outputs_dir / subfolder / 'mean_rasters')
-        self.year_pair_path = UPath(f"{s3_dir_base}/{subfolder}/TSM_year_pair_rasters") if self.is_aws else UPath(self.outputs_dir / subfolder / 'TSM_year_pair_rasters')
-
-        # Prediction mask
-        mask_path = get_config_item('MASK', 'MASK_PRED_PATH')
-        self.prediction_mask_path = UPath(f"{s3_dir_base}/{mask_path}") if self.is_aws else UPath(self.outputs_dir / mask_path)
-
-        self.filesystem = s3fs.S3FileSystem() if self.is_aws else fsspec.filesystem('file', auto_mkdir=True)
-
-        if not self.is_aws:
-            self.nc_files_path.mkdir(parents=True, exist_ok=True)
-            self.raster_path.mkdir(parents=True, exist_ok=True)
-            self.year_pair_path.mkdir(parents=True, exist_ok=True)
-
-    def _open_raster(self, path: str | pathlib.Path) -> gdal.Dataset:
-        """Open local or S3 rasters with GDAL."""
-
-        path = str(path)
-        if path.startswith('s3://'):
-            path = path.replace('s3://', '/vsis3/', 1)
-        dataset = gdal.Open(path, gdal.GA_ReadOnly)
-        if dataset is None:
-            raise OSError(f'Cannot open raster: {path}')
-        return dataset
-
-    def _prepare_region_mask(self) -> None:
-        """Read only the prediction raster's extent and CRS; ignore pixel values."""
-
-        src = self._open_raster(self.prediction_mask_path)
-        try:
-            if not src.GetProjection():
-                raise ValueError('Prediction raster must have a CRS')
-            transform = src.GetGeoTransform()
-            if transform[2] != 0 or transform[4] != 0 or transform[1] <= 0 or transform[5] >= 0:
-                raise ValueError('Prediction raster must use a north-up, unrotated grid')
-            self.region_transform = transform
-            self.region_projection = src.GetProjection()
-            self.region_shape = (src.RasterYSize, src.RasterXSize)
-        finally:
-            src = None
-
-    def _native_crop(self, shape: tuple[int, int], transform: tuple[float, ...], crs: str) -> tuple[slice, slice, tuple[float, ...]]:
-        """Transform densified mask bounds and snap outward to native pixels."""
-
-        source_crs = osr.SpatialReference()
-        source_crs.ImportFromWkt(self.region_projection)
-        native_crs = osr.SpatialReference()
-        if native_crs.SetFromUserInput(str(crs)) != 0:
-            raise ValueError(f'Invalid native CRS: {crs}')
-        source_crs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        native_crs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        conversion = osr.CoordinateTransformation(source_crs, native_crs)
-        t = self.region_transform
-        height, width = self.region_shape
-        left, top = t[0], t[3]
-        right, bottom = left + width * t[1], top + height * t[5]
-        points = []
-        for fraction in np.linspace(0, 1, 101):
-            x = left + fraction * (right - left)
-            y = bottom + fraction * (top - bottom)
-            points.extend([(x, bottom), (x, top), (left, y), (right, y)])
-        projected = np.asarray(conversion.TransformPoints(points))[:, :2]
-        if not np.all(np.isfinite(projected)):
-            raise ValueError('Could not transform prediction mask bounds to the native CRS')
-        xmin, ymin = projected.min(axis=0)
-        xmax, ymax = projected.max(axis=0)
-        col_start = max(0, int(np.floor((xmin - transform[0]) / transform[1])))
-        col_stop = min(shape[1], int(np.ceil((xmax - transform[0]) / transform[1])))
-        row_start = max(0, int(np.floor((ymax - transform[3]) / transform[5])))
-        row_stop = min(shape[0], int(np.ceil((ymin - transform[3]) / transform[5])))
-        if col_start >= col_stop or row_start >= row_stop:
-            raise ValueError('Prediction mask bounds do not overlap the native TSM grid')
-        cropped_transform = (
-            transform[0] + col_start * transform[1], transform[1], 0.0,
-            transform[3] + row_start * transform[5], 0.0, transform[5],
-        )
-        return slice(row_start, row_stop), slice(col_start, col_stop), cropped_transform
-
-    def _windows(self, height: int, width: int) -> Iterator[tuple[int, int, int, int]]:
-        """Yield GDAL x/y offsets and widths/heights."""
-
-        for row in range(0, height, self.chunk_size):
-            for col in range(0, width, self.chunk_size):
-                yield col, row, min(self.chunk_size, width - col), min(self.chunk_size, height - row)
-
-    def _read_window(self, dataset: gdal.Dataset, window: tuple[int, int, int, int]) -> np.ndarray:
-        """Read a single-band chunk and honor its NoData and validity mask."""
-
-        band = dataset.GetRasterBand(1)
-        values = band.ReadAsArray(*window)
-        if values is None:
-            raise OSError('GDAL failed to read raster window')
-        values = values.astype(np.float32, copy=False)
-        nodata = band.GetNoDataValue()
-        if nodata is not None:
-            values[values == nodata] = np.nan
-        if not (band.GetMaskFlags() & gdal.GMF_ALL_VALID):
-            valid = band.GetMaskBand().ReadAsArray(*window)
-            if valid is None:
-                raise OSError('GDAL failed to read validity mask')
-            values[valid == 0] = np.nan
-        return values
-
-    def _create_raster(self, path: str | pathlib.Path, shape: tuple[int, int], transform: tuple[float, ...], projection: str, nodata: float = np.nan) -> gdal.Dataset:
-        """Create a tiled on-disk Float32 raster."""
-
-        dst = gdal.GetDriverByName('GTiff').Create(
-            str(path), shape[1], shape[0], 1, gdal.GDT_Float32,
-            options=['TILED=YES', 'BLOCKXSIZE=512', 'BLOCKYSIZE=512',
-                     'COMPRESS=DEFLATE', 'BIGTIFF=IF_SAFER'],
-        )
-        if dst is None:
-            raise OSError(f'Cannot create raster: {path}')
-        dst.SetGeoTransform(transform)
-        dst.SetProjection(projection)
-        dst.GetRasterBand(1).SetNoDataValue(float(nodata))
-        return dst
-
-    def _list_files(self, directory: str | pathlib.Path, suffix: str) -> list[str]:
-        """List files using the configured filesystem and base directory."""
-
-        if not self.filesystem.exists(str(directory)):
-            return []
-        return [
-            f'{directory}/{pathlib.PurePosixPath(path).name}'
-            for path in self.filesystem.ls(str(directory), detail=False)
-            if path.endswith(suffix)
-        ]
-
-    def _store_raster_data(self, data: np.ndarray, directory: str | pathlib.Path, filename: str, transform: tuple[float, ...], crs: str, nodata_val: float) -> None:
-        """Crop annual means to transformed mask bounds without resampling or masking."""
-
-        rows, cols, transform = self._native_crop(data.shape, transform, crs)
-        data = data[rows, cols]
-
-        destination = f'{directory}/{filename}'
-        self.filesystem.makedirs(str(directory), exist_ok=True)
-        source_crs = osr.SpatialReference()
-        if source_crs.SetFromUserInput(str(crs)) != 0:
-            raise ValueError(f'Invalid source CRS: {crs}')
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            output_path = pathlib.Path(temporary_dir) / filename
-            dst = None
-            try:
-                dst = self._create_raster(
-                    output_path, data.shape, transform, source_crs.ExportToWkt(), nodata_val
-                )
-                for col, row, width, height in self._windows(*data.shape):
-                    if dst.GetRasterBand(1).WriteArray(
-                        data[row:row + height, col:col + width], col, row
-                    ) != 0:
-                        raise OSError('GDAL failed to write annual mean window')
-                dst.FlushCache()
-            finally:
-                dst = None
-            self.filesystem.put_file(str(output_path), destination)
+        with rasterio.open(
+            path, 
+            'w',
+            driver='GTiff',
+            height=data.shape[0],
+            width=data.shape[1],
+            count=1,
+            dtype='float32',
+            crs=crs,
+            transform=transform,
+            nodata=nodata_val,
+            compress='deflate',
+            tiled=True,
+            zlevel=9
+        ) as dst:
+            dst.write(data, 1)
 
     def extract_start_date(self, filename: str) -> str:
         """Parse file name for start date"""
@@ -309,16 +163,26 @@ class CreateTSMLayerEngine(Engine):
                             if file_date > datetime.datetime(2018, 5, 1):
                                 continue
 
-                    self.ftp_file_paths[name] = item_path
-                    destination = f'{self.nc_files_path}/{name}'
-                    self.filesystem.makedirs(str(self.nc_files_path), exist_ok=True)
-                    if not self.force_download and self.filesystem.exists(str(destination)):
-                        self.write_message(f"File {name} already exists at {destination}. Skipping download.", OUTPUTS)
-                        continue
-
-                    self.write_message(f"Downloading {name} to: {destination}...", OUTPUTS)
-                    self._download_verified_nc(ftp, item_path, destination)
-                    self.downloaded_files.append(name)
+                    if get_environment() == 'aws':
+                        s3_files = s3fs.S3FileSystem()
+                        s3_prefix = f'{self.nc_files_path}/{name}'
+                        
+                        # Never redownload an existing NetCDF file.
+                        if not s3_files.exists(s3_prefix):
+                            print(f"Downloading {name} to S3...")
+                            with s3_files.open(s3_prefix, 'wb') as writer:
+                                ftp.retrbinary(f'RETR {name}', writer.write)
+                            self.downloaded_files.append(name)
+                    else:
+                        local_path = self.nc_files_path / name
+                        self.nc_files_path.mkdir(parents=True, exist_ok=True)
+                        
+                        # Never redownload an existing NetCDF file.
+                        if not local_path.exists():
+                            print(f"Downloading {name} locally...")
+                            with open(local_path, 'wb') as f:
+                                ftp.retrbinary(f'RETR {name}', f.write)
+                            self.downloaded_files.append(name)
         except Exception as e:
             self.write_message(f"Error accessing {current_dir}: {e}", OUTPUTS)
 
@@ -468,16 +332,25 @@ class CreateTSMLayerEngine(Engine):
         nodata_val = np.nan
 
         for year in range(1998, 2025):
-            filename = f'TSM_mean_{year}.tif'
-            destination = f'{self.raster_path}/{filename}'
-            if not self.overwrite_existing and self.filesystem.exists(destination):
-                self.write_message(f'Annual raster already exists: {destination}. Skipping.', OUTPUTS)
-                continue
-            nc_files = [
-                path for path in self._list_files(self.nc_files_path, '.nc')
-                if f"L3m_{year}" in pathlib.PurePosixPath(str(path)).name
-            ]
-            self.write_message(f'Processing year: {year} ({len(nc_files)} NetCDF files found)', OUTPUTS)
+            filename = f"TSM_mean_{year}.tif"
+            if not self.overwrite:
+                if get_environment() in ['local', 'remote']:
+                    output_exists = (self.raster_path / filename).exists()
+                else:
+                    output_exists = s3_files.exists(f"s3://{self.raster_path}/{filename}")
+                if output_exists:
+                    print(f"Skipping existing annual raster: {filename}")
+                    continue
+
+            print(f'Processing year: {year}')
+            if get_environment() in ['local', 'remote']:
+                if not self.nc_files_path.exists():
+                    print(f'  No NetCDF files found for {year}')
+                    continue
+                nc_files = [f for f in os.listdir(self.nc_files_path) if f"L3m_{year}" in f and f.endswith('.nc')]
+            else:
+                s3_tsm_files = s3_files.ls(self.nc_files_path)
+                nc_files = [p for p in s3_tsm_files if f"L3m_{year}" in p and p.endswith('.nc')]
 
             if not nc_files:
                 self.write_message(f'  No NetCDF files found for {year}', OUTPUTS)
@@ -503,90 +376,87 @@ class CreateTSMLayerEngine(Engine):
             if running_sum is None:
                 continue
 
-            # Reuse the sum buffer instead of allocating another global float array.
-            has_data = valid_count > 0
-            np.divide(running_sum, valid_count, out=running_sum, where=has_data)
-            running_sum[~has_data] = nodata_val
-            annual_mean = running_sum
-            del valid_count, has_data
+            annual_mean = np.where(valid_count > 0, running_sum / valid_count, nodata_val)
 
-            self._store_raster_data(
-                annual_mean, self.raster_path, filename, transform, crs, nodata_val
-            )
+            if get_environment() in ['local', 'remote']:
+                self.raster_path.mkdir(parents=True, exist_ok=True)
+                self._save_raster_data(annual_mean, self.raster_path / filename, transform, crs, nodata_val)
+            else:
+                with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp:
+                    tmp_path = tmp.name
+                try:
+                    self._save_raster_data(annual_mean, tmp_path, transform, crs, nodata_val)
+                    s3_dest = f"s3://{self.raster_path}/{filename}"
+                    s3_files.put(tmp_path, s3_dest)
+                finally:
+                    if os.path.exists(tmp_path): os.remove(tmp_path)
 
     def year_pair_rasters(self, start_year: int, end_year: int) -> None:
-        """Average native annual rasters in chunks, cropped to prediction bounds."""
+        """Build and store year-pair mean and cumulative rasters"""
 
+        s3_files = s3fs.S3FileSystem()
         out_name_mean = f'tsm_mean_{start_year}_{end_year}.tif'
-        destination = f'{self.year_pair_path}/{out_name_mean}'
-        if not self.overwrite_existing and self.filesystem.exists(destination):
-            self.write_message(f'Year-pair raster already exists: {destination}. Skipping.', OUTPUTS)
-            return
+        if not self.overwrite:
+            if get_environment() in ['local', 'remote']:
+                output_exists = (self.year_pair_path / out_name_mean).exists()
+            else:
+                output_exists = s3_files.exists(f"s3://{self.year_pair_path}/{out_name_mean}")
+            if output_exists:
+                print(f"Skipping existing year-pair raster: {out_name_mean}")
+                return
 
-        raster_files = [
-            path for path in self._list_files(self.raster_path, '.tif')
-            if any(str(year) in pathlib.PurePosixPath(str(path)).name
-                   for year in range(start_year, end_year + 1))
-        ]
+        if get_environment() in ['local', 'remote']:
+            raster_files = [os.path.join(self.raster_path, f) for f in os.listdir(self.raster_path)
+                            if f.endswith(".tif") and any(str(y) in f for y in range(start_year, end_year + 1))]
+        else:
+            s3_list = s3_files.ls(self.raster_path)
+            raster_files = [f"s3://{f}" for f in s3_list if f.endswith(".tif") 
+                            and any(str(y) in f for y in range(start_year, end_year + 1))]
 
         if not raster_files: return
 
-        self.filesystem.makedirs(str(self.year_pair_path), exist_ok=True)
-        with tempfile.TemporaryDirectory() as temporary_dir:
-            output_path = pathlib.Path(temporary_dir) / out_name_mean
-            sources = []
-            first = source = dst = None
-            try:
-                for path in raster_files:
-                    source = self._open_raster(path)
-                    sources.append(source)
-                    actual_crs = osr.SpatialReference()
-                    actual_crs.ImportFromWkt(source.GetProjection())
-                    expected_crs = osr.SpatialReference()
-                    expected_crs.SetFromUserInput('EPSG:4326')
-                    native_transform = source.GetGeoTransform()
-                    if (not actual_crs.IsSame(expected_crs)
-                            or not np.allclose(
-                                [native_transform[1], native_transform[5]],
-                                [360.0 / 8640, -180.0 / 4320], rtol=0, atol=1e-12
-                            ) or native_transform[2] != 0 or native_transform[4] != 0):
-                        raise ValueError(f'Annual mean must use the native CRS and resolution: {path}')
-                first = sources[0]
-                for source in sources[1:]:
-                    if (source.RasterXSize != first.RasterXSize
-                            or source.RasterYSize != first.RasterYSize
-                            or not np.allclose(source.GetGeoTransform(), first.GetGeoTransform(), rtol=0, atol=1e-9)):
-                        raise ValueError('Annual mean grids differ; rebuild annual means consistently')
-                rows, cols, output_transform = self._native_crop(
-                    (first.RasterYSize, first.RasterXSize),
-                    first.GetGeoTransform(), first.GetProjection(),
-                )
-                output_shape = (rows.stop - rows.start, cols.stop - cols.start)
-                dst = self._create_raster(
-                    output_path, output_shape, output_transform, first.GetProjection()
-                )
-                for window in self._windows(*output_shape):
-                    source_window = (
-                        window[0] + cols.start, window[1] + rows.start, window[2], window[3]
-                    )
-                    shape = (window[3], window[2])
-                    total = np.zeros(shape, dtype=np.float32)
-                    count = np.zeros(shape, dtype=np.uint16)
-                    for source in sources:
-                        values = self._read_window(source, source_window)
-                        valid = np.isfinite(values)
-                        np.add(total, values, out=total, where=valid)
-                        np.add(count, 1, out=count, where=valid)
-                    has_data = count > 0
-                    np.divide(total, count, out=total, where=has_data)
-                    total[~has_data] = np.nan
-                    if dst.GetRasterBand(1).WriteArray(total, window[0], window[1]) != 0:
-                        raise OSError('GDAL failed to write year-pair window')
-                dst.FlushCache()
-            finally:
-                first = source = dst = None
-                sources.clear()
-            self.filesystem.put_file(str(output_path), destination)
+        with rasterio.open(raster_files[0]) as src:
+            meta = src.meta.copy()
+            sum_array = np.zeros(src.shape, dtype=np.float32)
+            count_array = np.zeros(src.shape, dtype=np.int32)
+
+        for f in raster_files:
+            with rasterio.open(f) as src:
+                data = src.read(1)
+                mask = ~np.isnan(data)
+                sum_array[mask] += data[mask]
+                count_array[mask] += 1
+
+        # Calculate average and cumulative arrays
+        avg_array = np.where(count_array > 0, sum_array / count_array, np.nan)
+        # cumulative_array = np.where(count_array > 0, sum_array, np.nan)
+
+        # Output filenames place year pairs at the end
+        # out_name_cumulative = f'tsm_cumulative_{start_year}_{end_year}.tif'
+
+        if get_environment() in ['local', 'remote']:
+            self.year_pair_path.mkdir(parents=True, exist_ok=True)
+            # Save Mean
+            self._save_raster_data(avg_array, os.path.join(self.year_pair_path, out_name_mean), meta['transform'], meta['crs'], meta['nodata'])
+            
+            # Save Cumulative
+            # self._save_raster_data(cumulative_array, os.path.join(self.year_pair_path, out_name_cumulative), meta['transform'], meta['crs'], meta['nodata'])
+        else:
+            # Save Mean to S3
+            with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_mean:
+                self._save_raster_data(avg_array, tmp_mean.name, meta['transform'], meta['crs'], meta['nodata'])
+                s3_dest_mean = f"s3://{self.year_pair_path}/{out_name_mean}"
+                s3_files.put(tmp_mean.name, s3_dest_mean)
+                print(f"Mean raster saved: {s3_dest_mean}")    
+            os.remove(tmp_mean.name)
+
+            # Save Cumulative to S3
+            # with tempfile.NamedTemporaryFile(suffix='.tif', delete=False) as tmp_cumul:
+            #     self._save_raster_data(cumulative_array, tmp_cumul.name, meta['transform'], meta['crs'], meta['nodata'])
+            #     s3_dest_cumul = f"s3://{self.year_pair_path}/{out_name_cumulative}"
+            #     s3_files.put(tmp_cumul.name, s3_dest_cumul)
+            #     print(f"Cumulative raster saved: {s3_dest_cumul}")    
+            # os.remove(tmp_cumul.name)
 
     def run(self) -> None:
         """Main entry point for the engine; orchestrates downloading, processing, and raster creation."""

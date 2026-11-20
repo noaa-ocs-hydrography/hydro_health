@@ -52,12 +52,12 @@ def _chunked_fill_holes(block: np.ndarray) -> np.ndarray:
 
 def _process_gap_fill(params: list) -> tuple:
     """Worker function: Performs iterative focal fill on a single raster using Dask and rioxarray."""
-    input_path, output_path, max_iters, chunk_size, local_tmp_dir, is_aws = params
+    input_path, output_path, max_iters, chunk_size, local_tmp_dir, is_aws, overwrite = params
     raster_name = Path(input_path).name
     expected_path = UPath(output_path)
     
-    # Implicit skip pattern - verify if output already exists before doing any work
-    if expected_path.exists():
+    # Skip existing outputs when overwrite is disabled.
+    if not overwrite and expected_path.exists():
         Engine.write_message_dask(f"[SKIP] Gap fill already processed for {raster_name}. Output exists.", OUTPUTS)
         return True, str(output_path)
         
@@ -165,11 +165,11 @@ def _process_gap_fill(params: list) -> tuple:
 
 def _process_combine_group(params: list) -> tuple:
     """Worker function: Combines and averages multiple overlapping Lidar datasets."""
-    group_files, output_path, chunk_size, local_tmp_dir, is_aws = params
+    group_files, output_path, chunk_size, local_tmp_dir, is_aws, overwrite = params
     expected_path = UPath(output_path)
     
-    # Implicit skip pattern
-    if expected_path.exists():
+    # Skip existing outputs when overwrite is disabled.
+    if not overwrite and expected_path.exists():
         Engine.write_message_dask(f"[SKIP] Combined Lidar already processed. Output exists: {output_path}", OUTPUTS)
         return True, f"Already exists: {output_path}"
         
@@ -318,7 +318,8 @@ class LidarGapFillEngine(Engine):
                 max_iters,
                 chunk_size,
                 str(self.local_tmp_dir),
-                self.is_aws
+                self.is_aws,
+                self.overwrite
             ])
 
         # Execute map cleanly outside the object logic
@@ -376,7 +377,8 @@ class LidarGapFillEngine(Engine):
                 str(output_path),
                 chunk_size,
                 str(self.local_tmp_dir),
-                self.is_aws
+                self.is_aws,
+                self.overwrite
             ])
 
         # Execute map cleanly outside the object logic

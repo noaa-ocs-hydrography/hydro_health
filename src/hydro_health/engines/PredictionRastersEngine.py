@@ -183,22 +183,20 @@ def _warp_to_cutline(src_path: str, dst_path: str, cutline_path: str, task_tmp_d
             gdal.VSICurlClearCache()
 
 
-def _process_prediction_raster(params: list) -> None:
-    """Core worker task for processing prediction rasters. Designed for dask pickling."""
+def _prepare_prediction_raster(params: list) -> tuple | None:
+    """Check whether a source needs warping and return the inputs for the warp."""
     
-    raster_path, mask_bounds, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir = params
+    raster_path, mask_bounds, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir, overwrite = params
     raster_name = pathlib.Path(raster_path).name.lower()
     
-    # Implicit Skipping 
-    if UPath(output_path).exists():
+    # Skip existing outputs when overwrite is disabled.
+    if not overwrite and UPath(output_path).exists():
         Engine.write_message_dask(f"[SKIP] Output already exists for {raster_name}. Skipping computation.", OUTPUTS)
         return
 
     open_path = str(raster_path)
     if is_aws and open_path.startswith('s3://'):
         open_path = open_path.replace('s3://', '/vsis3/')
-        
-    Engine.write_message_dask(f"[STARTING] Worker executing prediction on: {raster_name}", OUTPUTS)
 
     try:
         with rasterio.open(open_path) as src:
@@ -234,7 +232,16 @@ def _process_prediction_raster(params: list) -> None:
             Engine.write_message_dask(f"[WARNING] Bounding box check failed for {raster_name}: {e}", OUTPUTS)
             return
 
-    Engine.write_message_dask(f"[PROCESSING] Starting warp on prediction file {raster_name}...", OUTPUTS)
+    return raster_path, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir, src_nodata
+
+
+def _process_prediction_raster(params: tuple, file_number: int, total_files: int) -> None:
+    """Warp one eligible prediction raster and log its position in the batch."""
+    raster_path, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir, src_nodata = params
+    raster_name = pathlib.Path(raster_path).name.lower()
+    Engine.write_message_dask(
+        f"[{file_number:,}/{total_files:,}] Executing warp on {raster_name}", OUTPUTS
+    )
     is_tsm = "tsm" in raster_name or "strength" in raster_name
 
     try:
@@ -346,13 +353,16 @@ class PredictionRastersEngine(Engine):
         return mask_pred_bounds, pred_cutline_path
 
 
-    def get_valid_source_files(self) -> list:
+    def get_valid_source_files(self, data_types: tuple[str, ...] | None = None) -> list:
         """Scan and filter input directories for valid TIFF files"""
 
         potential_files = []
         self.write_message("Scanning directories for source TIFF files", OUTPUTS)
 
-        for data_type, directory in self.preprocessed_subdirs.items():
+        if data_types is None:
+            data_types = tuple(self.preprocessed_subdirs)
+        for data_type in data_types:
+            directory = self.preprocessed_subdirs[data_type]
             self.write_message(f"-> [{data_type.upper()}] Scanning: {directory}", OUTPUTS)
             if directory.exists() or self.is_aws: 
                 found_files = [f for f in directory.rglob("*") if f.suffix.lower() in ['.tif', '.tiff']]
@@ -412,30 +422,46 @@ class PredictionRastersEngine(Engine):
 
                 self._resolve_paths(region_str)
                 mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks(region_str)
-                prediction_files = self.get_valid_source_files()
+                priority_sources = ("sediment", "hurricane", "tsm")
+                remaining_sources = tuple(
+                    name for name in self.preprocessed_subdirs if name not in priority_sources
+                )
+                for data_types in (priority_sources, remaining_sources):
+                    self.write_message(f"Processing prediction sources: {', '.join(data_types)}", OUTPUTS)
+                    prediction_files = self.get_valid_source_files(data_types)
 
-                self.write_message(f"Building task stream for {len(prediction_files)} files...", OUTPUTS)
-                
-                params_list = []
-                for file_path in prediction_files:
-                    base_out = self.uncombined_lidar_dir if "mosaic" in file_path.name.lower() else self.prediction_out_dir
-                    output_path = base_out / file_path.name
-                    
-                    params_list.append([
-                        str(file_path), 
-                        mask_pred_bounds, 
-                        str(output_path),
-                        pred_cutline_path,
-                        self.is_aws,
-                        self.target_crs,
-                        self.target_res,
-                        str(self.local_tmp_dir)
-                    ])
+                    self.write_message(f"Building task stream for {len(prediction_files)} files...", OUTPUTS)
 
-                if params_list:
-                    self.write_message(f"Submitting {len(params_list)} prediction tasks to Dask client map...", OUTPUTS)
-                    futures = self.client.map(_process_prediction_raster, params_list)
-                    self.client.gather(futures)
+                    params_list = []
+                    for file_path in prediction_files:
+                        base_out = self.uncombined_lidar_dir if "mosaic" in file_path.name.lower() else self.prediction_out_dir
+                        output_path = base_out / file_path.name
+
+                        params_list.append([
+                            str(file_path),
+                            mask_pred_bounds,
+                            str(output_path),
+                            pred_cutline_path,
+                            self.is_aws,
+                            self.target_crs,
+                            self.target_res,
+                            str(self.local_tmp_dir),
+                            self.overwrite
+                        ])
+
+                    warp_params = []
+                    if params_list:
+                        checks = self.client.map(_prepare_prediction_raster, params_list)
+                        warp_params = [params for params in self.client.gather(checks) if params is not None]
+
+                    total_files = len(warp_params)
+                    self.write_message(f"Prediction files to warp in this batch: {total_files:,}", OUTPUTS)
+                    if warp_params:
+                        futures = self.client.map(
+                            _process_prediction_raster, warp_params, range(1, total_files + 1),
+                            total_files=total_files,
+                        )
+                        self.client.gather(futures)
 
                 self.write_message(f"--- Finished Ecoregion: {region_str} ---", OUTPUTS)
                 self.write_message(self.log_system_metrics(), OUTPUTS)

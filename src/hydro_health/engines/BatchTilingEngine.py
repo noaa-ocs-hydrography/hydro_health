@@ -103,7 +103,7 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
         "bpi_broad", "bpi_fine", "curv_plan", "curv_profile",
         "curv_total", "flowacc", "flowdir", "gradmag", "rugosity",
         "shearproxy", "slope", "tci", "terrain_classification",
-        "unc", "uncertainty",
+        "unc", "uncertainty", "distance_to_shore",
     )
     shared_tokens = ("grain", "sed_size", "prim_sed", "sed_type", "survey")
 
@@ -244,6 +244,7 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
                 elif "gradmag" in base: pair_df['gradmag_t'] = wide_gdf[c]
                 elif "rugosity" in base: pair_df['rugosity_t'] = wide_gdf[c]
                 elif "shearproxy" in base: pair_df['shearproxy_t'] = wide_gdf[c]
+                elif "distance_to_shore" in base: pair_df['distance_to_shore_t'] = wide_gdf[c]
                 elif "slope_deg" in base: pair_df['slope_deg_t'] = wide_gdf[c]
                 elif "slope" in base: pair_df['slope_t'] = wide_gdf[c]
                 elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
@@ -273,7 +274,7 @@ def _process_training_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str, y
             'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
             'flowdir_cos_t', 'flowdir_sin_t', 'gradmag_t', 'rugosity_t', 
             'shearproxy_t', 'slope_t', 'slope_deg_t', 'tci_t', 
-            'terrain_classification_t', 'delta_bathy', 
+            'terrain_classification_t', 'delta_bathy', 'distance_to_shore_t',
             f'hurr_strength_mean_{y0_str}_{y1_str}', f'tsm_mean_{y0_str}_{y1_str}', 
             'grain_size_layer', 'prim_sed_layer', 'survey_end_date'
         ]
@@ -364,6 +365,7 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
         elif "gradmag" in base: pair_df['gradmag_t'] = wide_gdf[c]
         elif "rugosity" in base: pair_df['rugosity_t'] = wide_gdf[c]
         elif "shearproxy" in base: pair_df['shearproxy_t'] = wide_gdf[c]
+        elif "distance_to_shore" in base: pair_df['distance_to_shore_t'] = wide_gdf[c]
         elif "slope_deg" in base: pair_df['slope_deg_t'] = wide_gdf[c]
         elif "slope" in base and "deg" not in base: pair_df['slope_t'] = wide_gdf[c]
         elif "tci" in base: pair_df['tci_t'] = wide_gdf[c]
@@ -377,7 +379,8 @@ def _process_prediction_tile(gdf: pd.DataFrame, output_dir: str, tile_name: str,
         'X', 'Y', 'FID', 'tile_id', 'bathy_t', 'bpi_broad_t', 'bpi_fine_t', 
         'curv_plan_t', 'curv_profile_t', 'curv_total_t', 'flowacc_t', 
         'gradmag_t', 'rugosity_t', 'shearproxy_t', 'slope_t', 'slope_deg_t', 
-        'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t'
+        'tci_t', 'terrain_classification_t', 'uc_t', 'flowdir_sin_t', 'flowdir_cos_t',
+        'distance_to_shore_t'
     ]
 
     ordered_cols.extend([
@@ -516,8 +519,6 @@ class BatchTilingEngine(Engine):
         inherited_yr = getattr(self, 'year_ranges', [])
         yr_val = year_ranges if year_ranges is not None else param_lookup.get('year_ranges', inherited_yr)
         self.year_ranges = yr_val.value if hasattr(yr_val, 'value') else (yr_val if isinstance(yr_val, list) else inherited_yr)
-
-        self.overwrite_files = overwrite_files
         
         self.local_tmp_dir = pathlib.Path(
             tempfile.gettempdir()
@@ -586,7 +587,7 @@ class BatchTilingEngine(Engine):
                 i + 1,
                 total_files,
                 verbose_workers,
-                self.overwrite_files,
+                self.overwrite,
             ])
 
         batch_size = max(4, self._worker_count * 4)
@@ -621,7 +622,7 @@ class BatchTilingEngine(Engine):
         """Main entry point for executing the batch format transformations"""
         try:
             self.write_message(
-                f"Overwrite existing batch files: {self.overwrite_files}",
+                f"Overwrite existing batch files: {self.overwrite}",
                 OUTPUTS,
             )
             self.setup_dask(

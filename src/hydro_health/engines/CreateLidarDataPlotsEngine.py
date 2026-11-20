@@ -1126,7 +1126,7 @@ class CreateLidarDataPlotsEngine(Engine):
         """
 
         input_dir = get_config_item("LIDAR_PLOTS", "INPUT_VRTS")
-        output_dir = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
+        output_dir = get_config_item("LIDAR_PLOTS", "RESAMPLED_MOSAICS")
         
         input_dir_str = str(input_dir)
         parent = "/".join(input_dir_str.replace('\\', '/').rstrip('/').split('/')[:-1])
@@ -1547,11 +1547,11 @@ class CreateLidarDataPlotsEngine(Engine):
 
         if self.is_aws:
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-            raster_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'RESAMPLED_VRTS')}".replace('\\', '/')
+            raster_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'RESAMPLED_MOSAICS')}".replace('\\', '/')
             plot_output_folder = f"s3://{bucket}/{get_config_item('LIDAR_PLOTS', 'PLOT_OUTPUTS')}".replace('\\', '/')
             shp_path = f"s3://{bucket}/{get_config_item('MASK', 'COAST_BOUNDARY_PATH')}".replace('\\', '/')
         else:
-            raster_folder = get_config_item("LIDAR_PLOTS", "RESAMPLED_VRTS")
+            raster_folder = get_config_item("LIDAR_PLOTS", "RESAMPLED_MOSAICS")
             plot_output_folder = get_config_item("LIDAR_PLOTS", "PLOT_OUTPUTS") 
             shp_path = get_config_item("MASK", "COAST_BOUNDARY_PATH")
 
