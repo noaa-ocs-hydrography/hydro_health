@@ -36,6 +36,7 @@ logging.getLogger("pyproj").setLevel(logging.ERROR)
 
 def _trim_memory() -> None:
     """Forces Linux glibc to release unmanaged C/GDAL memory arenas back to the OS."""
+
     gc.collect()
     try:
         libc = ctypes.CDLL("libc.so.6")
@@ -53,6 +54,7 @@ def _reproject_raster_gdal(
     Native C++ streaming reprojection and COG conversion using gdal.Warp.
     Streams block-by-block with a strict 128MB warp cache limit.
     """
+
     src_path_str = str(src_path)
     dst_path_str = str(dst_path)
 
@@ -166,7 +168,7 @@ def _download_intersected_datasets_local(param_inputs: list) -> str:
                 engine.write_message(f' - ({i} of {len(urls)}) Skipping (already reprojected): {reprojected_output_file.stem}', outputs)
                 continue
 
-            # 1. Download to original/
+            # Download to original/
             if not os.path.exists(raw_target):
                 engine.write_message(f' - ({i} of {len(urls)}) Downloading original: {raw_output_file.stem}', outputs)
                 try:
@@ -192,7 +194,6 @@ def _download_intersected_datasets_local(param_inputs: list) -> str:
                 else:
                     return f'Failed to download: {cleansed_url}'
 
-            # 2. Native streaming reprojection
             try:
                 engine.write_message(f' - ({i} of {len(urls)}) Reprojecting to EPSG:32617: {reprojected_output_file.stem}', outputs)
                 _reproject_raster_gdal(raw_target, rep_target, target_crs="EPSG:32617")
@@ -274,21 +275,21 @@ def _download_intersected_datasets_s3(param_inputs: list) -> str:
                 local_parent_dir = shp_path_obj.parent
                 relative_s3_path = local_parent_dir.relative_to(temp_root)
 
-                # 1. Download directly to scratch file
+                # Download directly to scratch file
                 with request_session.get(cleansed_url, timeout=20, stream=True) as r:
                     r.raise_for_status()
                     with open(tmp_raw_path, 'wb') as f:
                         for chunk in r.iter_content(chunk_size=1024 * 1024): 
                             f.write(chunk)
 
-                # 2. Upload raw file to S3 under /original/
+                # Upload raw file to S3 under /original/
                 s3_original_prefix = f"{relative_s3_path.as_posix()}/original/{dataset_name}"
                 engine.upload_file_to_s3(str(tmp_raw_path), s3_original_prefix)
 
-                # 3. Stream warp to EPSG:32617 and build overviews
+                # Stream warp to EPSG:32617 and build overviews
                 _reproject_raster_gdal(tmp_raw_path, tmp_rep_path, target_crs="EPSG:32617")
 
-                # 4. Upload reprojected raster to S3
+                # Upload reprojected raster to S3
                 s3_prefix = f"{relative_s3_path.as_posix()}/{dataset_name}"
                 engine.upload_file_to_s3(str(tmp_rep_path), s3_prefix)
 
@@ -296,7 +297,6 @@ def _download_intersected_datasets_s3(param_inputs: list) -> str:
                 engine.write_message(f"Error processing {cleansed_url}: {e}", outputs)
                 continue
             finally:
-                # Always remove temp scratch files and trim memory
                 if tmp_raw_path.exists():
                     tmp_raw_path.unlink()
                 if tmp_rep_path.exists():
