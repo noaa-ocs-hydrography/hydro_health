@@ -441,7 +441,7 @@ def _create_classification_dictionary(bpi_broad_sample: np.ndarray, bpi_fine_sam
     return df
 
 
-def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_dir: str, best_radii: Dict[str, Tuple[int, int]], local_tmp_dir: str, prediction_output_dir: str = "", overwrite: bool = False) -> Tuple[bool, str]:
+def _create_regional_dictionary_worker(year: str, files: List[str], dictionary_dir: str, best_radii: Dict[str, Tuple[int, int]], local_tmp_dir: str, prediction_output_dir: str = "", *, overwrite: bool) -> Tuple[bool, str]:
     """Module-level worker to sample valid pixels and generate regional class limits."""
     dict_path = UPath(dictionary_dir) / f"dictionary_{year}.csv"
     
