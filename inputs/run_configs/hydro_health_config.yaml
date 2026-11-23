@@ -6,6 +6,8 @@ pilot_mode: false
 steps:
 - tool: run_bluetopo_tile_engine
   run: false
+- tool: run_digital_coast_engine
+  run: false
 - tool: run_distance_to_shore_engine
   run: true
 - tool: run_digital_coast_engine
@@ -25,7 +27,7 @@ steps:
 - tool: run_sediment_layer_engine
   run: false
 - tool: run_hurricane_layer_engine
-  run: true
+  run: false
 - tool: run_prediction_rasters_engine
   run: false
 - tool: run_lidar_gap_fill_engine
@@ -38,7 +40,6 @@ steps:
   run: false 
 - tool: run_data_prep_engine
   run: false
-  run: false 
 - tool: run_batch_tiling_engine
   run: false
 - tool: run_data_prep_engine

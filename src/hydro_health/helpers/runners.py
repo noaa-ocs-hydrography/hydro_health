@@ -8,7 +8,6 @@ from hydro_health.engines.BatchTilingEngine import BatchTilingEngine
 from hydro_health.engines.DataPrepEngine import DataPrepEngine
 from hydro_health.engines.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.MetadataEngine import MetadataEngine
-from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.LidarGapFillEngine import LidarGapFillEngine
@@ -79,12 +78,8 @@ def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
 def run_metadata_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of provider metadata"""
 
-    if param_lookup['env'] in ['local', 'remote']:
-        engine = MetadataEngine(param_lookup)
-    else:
-        engine = MetadataS3Engine(param_lookup)
-    outputs = param_lookup['output_directory'].valueAsText
-    engine.run(tiles, output_prefix, outputs)
+    engine = MetadataEngine(param_lookup)
+    engine.run(tiles, output_prefix)
 
 
 def run_prediction_rasters_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
