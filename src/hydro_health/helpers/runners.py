@@ -5,12 +5,14 @@ import pstats
 
 from hydro_health.engines.BlueTopoEngine import BlueTopoEngine
 from hydro_health.engines.BatchTilingEngine import BatchTilingEngine
+from hydro_health.engines.DataPrepEngine import DataPrepEngine
 from hydro_health.engines.DigitalCoastEngine import DigitalCoastEngine
 from hydro_health.engines.MetadataEngine import MetadataEngine
 from hydro_health.engines.MetadataS3Engine import MetadataS3Engine
 from hydro_health.engines.GridDigitalCoastEngine import GridDigitalCoastEngine
 from hydro_health.engines.LAZConversionEngine import LAZConversionEngine
 from hydro_health.engines.LidarGapFillEngine import LidarGapFillEngine
+from hydro_health.engines.MLRasterExportEngine import MLRasterExportEngine
 from hydro_health.engines.PredictionRastersEngine import PredictionRastersEngine
 from hydro_health.engines.SubgridTilingEngine import SubgridTilingEngine
 from hydro_health.engines.TrainingRastersEngine import TrainingRastersEngine
@@ -23,6 +25,7 @@ from hydro_health.engines.CreateHurricaneLayerEngine import CreateHurricaneLayer
 from hydro_health.engines.DistanceToShoreEngine import DistanceToShoreEngine
 from hydro_health.engines.RasterVRTEngine import RasterVRTEngine
 from hydro_health.engines.TerrainProductsEngine import TerrainProductsEngine
+from hydro_health.engines.XGBoostModelingEngine import XGBoostModelingEngine
 from hydro_health.helpers.tools import get_ecoregion_folders
 
 
@@ -154,6 +157,34 @@ def run_subgrid_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool)
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
 
 
+def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = DataPrepEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+
+
+def run_xgboost_modeling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the XGBoost modeling engine"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = XGBoostModelingEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)         
+
+
 def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the model data preprocessor"""
 
@@ -178,7 +209,21 @@ def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bo
     engine.run(output_prefix)
 
     engine = DistanceToShoreEngine(param_lookup, data_type='Digital_Coast_Manual_Downloads')
-    engine.run(output_prefix)
+    engine.run(output_prefix)      
+
+
+def run_ml_raster_export_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for running the model data preprocessor"""
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    processor = MLRasterExportEngine(param_lookup, output_prefix)
+
+    processor.run()
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
 
 
 def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
@@ -196,25 +241,24 @@ def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> N
         engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
 
 
-def run_tsm_layer_engine() -> None:
+def run_tsm_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of TSM model data"""
 
-    engine = CreateTSMLayerEngine()
+    engine = CreateTSMLayerEngine(param_lookup, output_prefix)
     engine.run()
 
 
-def run_sediment_layer_engine() -> None:
+def run_sediment_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for parallel processing of sediment model data"""
 
-    engine = CreateSedimentLayerEngine()
+    engine = CreateSedimentLayerEngine(param_lookup, output_prefix)
     engine.run()
 
+def run_hurricane_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
+    """Entry point for parallel processing of hurricane model data"""
 
-def run_hurricane_layer_engine() -> None:
-    """Entry point for parallel processing of sediment model data"""
-
-    engine = CreateHurricaneLayerEngine()
-    engine.run()    
+    engine = CreateHurricaneLayerEngine(param_lookup, output_prefix)
+    engine.run()
 
 
 def run_stofs_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
