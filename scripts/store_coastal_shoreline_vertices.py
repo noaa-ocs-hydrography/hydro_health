@@ -236,7 +236,7 @@ if __name__ == "__main__":
     """
     start = time.time()
     master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
-    ecoregions = ['ER_3']
+    ecoregions = ['ER_3']  # TODO Change ecoregion for new files needing .npy arrays created
 
     # Runs single-file header lookup for DigitalCoast
     precompute_shoreline_vertices(

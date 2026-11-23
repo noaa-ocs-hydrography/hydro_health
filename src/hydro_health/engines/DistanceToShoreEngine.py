@@ -657,7 +657,13 @@ class DistanceToShoreEngine(Engine):
         s3.put(str(distance_raster_path), s3_key)
 
     def run(self, output_prefix: str = '') -> None:
-        """Main function for processing Distance-to-Shore across local or S3 environments using Dask."""
+        """
+        Main function for processing Distance-to-Shore across local or S3 environments using Dask.
+        
+        - Engine requires a .npy shoreline vertice array for every geotiff unique CRS found.
+        - BlueTopo uses a few UTM zones, DigitalCoast is all projected to 32617.
+        - If new .npy files are needed for BlueTopo, run scripts\store_coastal_shoreline_vertices.py
+        """
 
         print("Starting Distance To Shore engine")
 
