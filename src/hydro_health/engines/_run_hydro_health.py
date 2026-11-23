@@ -95,11 +95,11 @@ def run_hydro_health(config_name: str) -> None:
             elif step["tool"] == "grid_digital_coast_files" and step["run"]:
                 runners.run_grid_digital_coast(param_lookup, output_prefix)
             elif step["tool"] == "run_tsm_layer_engine" and step["run"]:
-                runners.run_tsm_layer_engine()
+                runners.run_tsm_layer_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_sediment_layer_engine" and step["run"]:
-                runners.run_sediment_layer_engine()
+                runners.run_sediment_layer_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_hurricane_layer_engine" and step["run"]:
-                runners.run_hurricane_layer_engine()
+                runners.run_hurricane_layer_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_prediction_rasters_engine" and step["run"]:
                 runners.run_prediction_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_lidar_gap_fill_engine" and step["run"]:
@@ -110,6 +110,12 @@ def run_hydro_health(config_name: str) -> None:
                 runners.run_training_rasters_engine(param_lookup, output_prefix)
             elif step["tool"] == "run_subgrid_tiling_engine" and step["run"]:
                 runners.run_subgrid_tiling_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_data_prep_engine" and step["run"]:
+                runners.run_data_prep_engine(param_lookup, output_prefix)    
+            elif step["tool"] == "run_xgboost_modeling_engine" and step["run"]:
+                runners.run_xgboost_modeling_engine(param_lookup, output_prefix)
+            elif step["tool"] == "run_ml_raster_export_engine" and step["run"]:
+                runners.run_ml_raster_export_engine(param_lookup, output_prefix)        
             elif step["tool"] == "run_batch_tiling_engine" and step["run"]:
                 runners.run_batch_tiling_engine(param_lookup, output_prefix)    
 
