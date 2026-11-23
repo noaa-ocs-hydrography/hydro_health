@@ -661,8 +661,11 @@ class DistanceToShoreEngine(Engine):
 
         print("Starting Distance To Shore engine")
 
+        # 8 workers for most files and speed
         self.setup_dask(self.param_lookup['env'], n_workers=8, threads_per_worker=1, memory_limit="13GB")
-
+        # 1 worker with high RAM for large files that error to KilledWorker
+        # self.setup_dask(self.param_lookup['env'], n_workers=1, threads_per_worker=1, memory_limit="100GB")
+        
         master_gpkg = INPUTS / get_config_item('SHARED', 'MASTER_GRIDS')
         ecoregions = self.param_lookup['eco_regions'].value
 
