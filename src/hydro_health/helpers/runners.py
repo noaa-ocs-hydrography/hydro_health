@@ -197,36 +197,14 @@ def run_batch_tiling_engine(param_lookup: dict[dict], output_prefix: str|bool) -
 def run_distance_to_shore_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
     """Entry point for running the distance to shore raster creator"""
 
-    engine = DistanceToShoreEngine(param_lookup)
+    engine = DistanceToShoreEngine(param_lookup, data_type='BlueTopo')
     engine.run(output_prefix)
 
+    engine = DistanceToShoreEngine(param_lookup, data_type='DigitalCoast')
+    engine.run(output_prefix)
 
-def run_data_prep_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
-    """Entry point for running the model data preprocessor"""
-
-    profiler = cProfile.Profile()
-    profiler.enable()
-
-    processor = DataPrepEngine(param_lookup, output_prefix)
-
-    processor.run()
-    profiler.disable()
-    stats = pstats.Stats(profiler)
-    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
-
-
-def run_xgboost_modeling_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
-    """Entry point for running the model data preprocessor"""
-
-    profiler = cProfile.Profile()
-    profiler.enable()
-
-    processor = XGBoostModelingEngine(param_lookup, output_prefix)
-
-    processor.run()
-    profiler.disable()
-    stats = pstats.Stats(profiler)
-    stats.strip_dirs().sort_stats('cumulative').print_stats(10)     
+    engine = DistanceToShoreEngine(param_lookup, data_type='Digital_Coast_Manual_Downloads')
+    engine.run(output_prefix)      
 
 
 def run_ml_raster_export_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
