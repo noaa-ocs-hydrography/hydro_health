@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 import fiona
 import geopandas as gpd
+from hydro_health.engines import CreateHurricaneLayerEngine
 import numpy as np
 import pandas as pd
 import rasterio
@@ -770,3 +771,14 @@ class CreateDraftUKCEngine(Engine):
             )
 
         self.write_message("Finished processing the selected ecoregions.", OUTPUTS)
+
+if __name__ == '__main__':
+    profiler = cProfile.Profile()
+    profiler.enable()
+
+    engine = CreateDraftUKCEngine()
+    engine.run()
+
+    profiler.disable()
+    stats = pstats.Stats(profiler)
+    stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
