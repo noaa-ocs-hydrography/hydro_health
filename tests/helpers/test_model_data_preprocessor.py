@@ -1,13 +1,18 @@
 import os
+import pathlib
 import pytest
 import pandas as pd
 import numpy as np
+import sys
 import geopandas as gpd
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import Point, box
 from unittest.mock import patch, MagicMock
 
+HYDRO_HEALTH_MODULE = pathlib.Path(__file__).parents[2] / 'src'
+print(HYDRO_HEALTH_MODULE)
+sys.path.append(str(HYDRO_HEALTH_MODULE))
 from hydro_health.engines.ModelDataPreProcessor import ModelDataPreProcessor
 
 # ==========================================
