@@ -1,4 +1,3 @@
-import os
 import pathlib
 import shutil
 import tempfile
@@ -28,7 +27,7 @@ def _set_gdal_s3_options() -> None:
 
 
 def _read_geotiff_metadata(raw_prefix: str) -> dict:
-    """Read native CRS metadata over /vsis3/ via Dask workers."""
+    """Read native CRS and nodata metadata over /vsis3/ via Dask workers."""
 
     _set_gdal_s3_options()
 
@@ -122,6 +121,69 @@ class RasterVRTEngine(Engine):
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
 
+    def build_output_vrts(
+        self,
+        outputs: pathlib.Path,
+        output_geotiffs: dict,
+        data_type: str,
+        file_type: str = "",
+        s3_output_path: str = "",
+    ) -> None:
+        """Create Master VRT files with companion overview pyramids locally or in S3."""
+
+        _set_gdal_s3_options()
+        s3_client = boto3.client('s3')
+        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        for bin_key, info in output_geotiffs.items():
+            tifs = [str(t) for t in info['tiles']]
+            if not tifs:
+                continue
+
+            if data_type == 'DistanceToShore':
+                vrt_filename = outputs / f'mosaic_{bin_key}_DTS.vrt'
+            else:
+                vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
+
+            nodata = info.get('nodata_val', -9999.0)
+            if nodata is None:
+                nodata = -9999.0
+
+            if data_type == 'BlueTopo':
+                # Build native UTM VRT strictly within matched CRS group (No projection difference allowed)
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=False,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+            elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads', 'DistanceToShore']:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='near',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+            else:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+
+            vrt_ds = gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+            # Add statistics for AGS viewing support
+            if vrt_ds is not None:
+                vrt_ds.GetRasterBand(1).ComputeStatistics(True)
+                vrt_ds.FlushCache()
+                vrt_ds = None
+            if self.param_lookup['env'] == 'aws' and vrt_filename.exists():
+                s3_key = f'{s3_output_path}/{vrt_filename.name}'
+                print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
+                s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
+
+            print(f'- Finished Master VRT: {vrt_filename.name}')
+
     def get_local_bluetopo_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
         """Groups BlueTopo tiles strictly by their native EPSG UTM CRS code."""
 
@@ -177,7 +239,7 @@ class RasterVRTEngine(Engine):
         return output_dict
 
     def get_local_digitalcoast_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
-        """Reads metadata from local files to build DigitalCoast provider bins."""
+        """Reads metadata from local EPSG:32617 files to build DigitalCoast provider bins."""
 
         provider_bins = defaultdict(list)
         provider_nodata = defaultdict(lambda: None)
@@ -193,11 +255,8 @@ class RasterVRTEngine(Engine):
 
                 src_srs = ds.GetSpatialRef()
                 epsg_code = None
-                raw_wkt = None
-
                 if src_srs:
                     src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-                    raw_wkt = src_srs.ExportToWkt()
                     try:
                         src_srs.AutoIdentifyEPSG()
                         auth_code = (
@@ -219,6 +278,10 @@ class RasterVRTEngine(Engine):
                         if raw_code and raw_code.isdigit():
                             epsg_code = int(raw_code)
 
+                if epsg_code != 32617:
+                    detected_crs = f"EPSG:{epsg_code}" if epsg_code else "UNKNOWN_CRS"
+                    self.write_message(f"Warning: {geotiff_path} has CRS {detected_crs} (expected EPSG:32617)")
+
                 parts = geotiff_path.parts
                 try:
                     if 'Digital_Coast_Manual_Downloads' in parts:
@@ -231,12 +294,7 @@ class RasterVRTEngine(Engine):
                 except (ValueError, IndexError):
                     provider = parts[-4] if len(parts) >= 4 else "UnknownProvider"
 
-                provider_bins[provider].append({
-                    'path': str(geotiff_path),
-                    'epsg': epsg_code,
-                    'wkt': raw_wkt,
-                    'nodata': nodata
-                })
+                provider_bins[provider].append(str(geotiff_path))
 
                 if provider_nodata[provider] is None and nodata is not None:
                     provider_nodata[provider] = nodata
@@ -247,22 +305,14 @@ class RasterVRTEngine(Engine):
                 ds = None
 
         output_geotiffs = {}
-        for provider, tile_list in provider_bins.items():
-            if not tile_list:
+        for provider, tile_paths in provider_bins.items():
+            if not tile_paths:
                 continue
 
-            epsg_counts = defaultdict(int)
-            for t in tile_list:
-                key = t['epsg'] if t['epsg'] is not None else 'UNKNOWN_WKT'
-                epsg_counts[key] += 1
-
-            primary_key = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
-            primary_crs = f"EPSG:{primary_key}" if isinstance(primary_key, int) else "CUSTOM_WKT"
-
             output_geotiffs[provider] = {
-                'tiles': [t['path'] for t in tile_list],
+                'tiles': tile_paths,
                 'nodata_val': provider_nodata[provider],
-                'primary_crs': primary_crs
+                'primary_crs': 'EPSG:32617'
             }
 
         return output_geotiffs
@@ -291,172 +341,57 @@ class RasterVRTEngine(Engine):
 
         return output_dict
 
-    def get_s3_digitalcoast_geotiffs(self, geotiffs: list, temp_dir: pathlib.Path, outputs: str = "") -> dict:
-        """Bins tiles by provider, selects majority CRS, and reprojects ONLY non-matching tiles."""
+    def get_s3_digitalcoast_geotiffs(self, geotiffs: list) -> dict:
+        """Bins EPSG:32617 DigitalCoast tiles by provider and reads nodata metadata."""
 
         _set_gdal_s3_options()
-        s3_client = boto3.client('s3')
-        s3_bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
 
-        clean_geotiffs = [gt for gt in geotiffs if '/reprojected/' not in gt]
-
+        clean_geotiffs = [gt for gt in geotiffs if '/original/' not in gt]
         results = [r for r in self.client.gather(self.client.map(_read_geotiff_metadata, clean_geotiffs)) if r is not None]
 
         provider_bins = defaultdict(list)
         provider_nodata = defaultdict(lambda: None)
 
         for res in results:
+            if res['epsg'] != 32617:
+                detected_crs = f"EPSG:{res['epsg']}" if res['epsg'] else "UNKNOWN_CRS"
+                self.write_message(f"Warning: {res['relative_s3_key']} has CRS {detected_crs} (expected EPSG:32617)")
+
             provider = res['bin_key']
-            provider_bins[provider].append(res)
+            provider_bins[provider].append(res['vsi_path'])
 
             if provider_nodata[provider] is None and res['nodata'] is not None:
                 provider_nodata[provider] = res['nodata']
 
         output_geotiffs = {}
-
-        for provider, tile_list in provider_bins.items():
-            if not tile_list:
+        for provider, tile_paths in provider_bins.items():
+            if not tile_paths:
                 continue
 
-            epsg_counts = defaultdict(int)
-            for t in tile_list:
-                key = t['epsg'] if t['epsg'] is not None else 'UNKNOWN_WKT'
-                epsg_counts[key] += 1
-
-            primary_key = max(epsg_counts.keys(), key=lambda e: epsg_counts[e])
-            nodata_val = provider_nodata[provider] if provider_nodata[provider] is not None else -9999.0
-
-            target_srs = osr.SpatialReference()
-
-            if isinstance(primary_key, int):
-                primary_epsg = primary_key
-                primary_crs = f"EPSG:{primary_epsg}"
-                target_srs.ImportFromEPSG(primary_epsg)
-            else:
-                primary_epsg = None
-                primary_crs = "CUSTOM_WKT"
-                first_wkt = next((t['wkt'] for t in tile_list if t.get('wkt')), None)
-                if not first_wkt:
-                    print(f" - Error: No valid WKT or EPSG found for provider {provider}")
-                    continue
-                target_srs.ImportFromWkt(first_wkt)
-
-            target_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-            print(f"\n -> [{provider}] Target Primary CRS set to: {primary_crs}")
-            print(f" -> EPSG/WKT Counts: {dict(epsg_counts)}")
-
-            final_vsi_tiles = []
-            for tile in tile_list:
-                tile_epsg = tile['epsg']
-                tile_wkt = tile.get('wkt')
-                vsi_path = tile['vsi_path']
-                relative_s3_key = tile.get('relative_s3_key') or tile.get('s3_prefix')
-
-                parts = relative_s3_key.split('/')
-                filename = parts[-1]
-                parent_prefix = '/'.join(parts[:-1])
-
-                is_match = (tile_epsg == primary_epsg) if primary_epsg is not None else (tile_wkt == first_wkt)
-
-                if is_match:
-                    final_vsi_tiles.append(vsi_path)
-                else:
-                    reprojected_s3_key = f"{parent_prefix}/reprojected/{filename}"
-                    reprojected_vsi_path = f"/vsis3/{s3_bucket}/{reprojected_s3_key}"
-
-                    try:
-                        s3_client.head_object(Bucket=s3_bucket, Key=reprojected_s3_key)
-                        print(f" - Found existing reprojected GeoTIFF: {reprojected_s3_key}")
-                    except Exception:
-                        print(f" - Reprojecting {filename} ({tile_epsg or 'CUSTOM_WKT'} -> {primary_crs}) to S3: {reprojected_s3_key}")
-
-                        src_srs = osr.SpatialReference()
-                        if tile_epsg is not None:
-                            src_srs.ImportFromEPSG(tile_epsg)
-                        elif tile_wkt:
-                            src_srs.ImportFromWkt(tile_wkt)
-
-                        src_srs.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-                        local_tif_path = temp_dir / filename
-                        warp_options = gdal.WarpOptions(
-                            format='GTiff',
-                            srcSRS=src_srs,
-                            dstSRS=target_srs,
-                            resampleAlg='near',
-                            srcNodata=nodata_val,
-                            dstNodata=nodata_val,
-                            creationOptions=['COMPRESS=LZW', 'TILED=YES']
-                        )
-
-                        warped_ds = gdal.Warp(str(local_tif_path), vsi_path, options=warp_options)
-                        warped_ds = None
-
-                        s3_client.upload_file(str(local_tif_path), s3_bucket, reprojected_s3_key)
-
-                        if local_tif_path.exists():
-                            os.remove(local_tif_path)
-
-                    final_vsi_tiles.append(reprojected_vsi_path)
-
+            print(f" -> [{provider}] Collected {len(tile_paths)} tiles (EPSG:32617)")
             output_geotiffs[provider] = {
-                'tiles': final_vsi_tiles,
+                'tiles': tile_paths,
                 'nodata_val': provider_nodata[provider],
-                'primary_crs': primary_crs
+                'primary_crs': 'EPSG:32617'
             }
 
         return output_geotiffs
 
-    def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict, data_type: str, s3_output_path: str = "") -> None:
-        """Create Master VRT files with companion overview pyramids locally or in S3."""
-
-        _set_gdal_s3_options()
-        s3_client = boto3.client('s3')
-        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        for bin_key, info in output_geotiffs.items():
-            tifs = [str(t) for t in info['tiles']]
-            if not tifs:
-                continue
-
-            vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
-            nodata = info.get('nodata_val', -9999.0)
-            if nodata is None:
-                nodata = -9999.0
-
-            if data_type == 'BlueTopo':
-                # Build native UTM VRT strictly within matched CRS group (No projection difference allowed)
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg='bilinear',
-                    allowProjectionDifference=False,
-                    srcNodata=nodata,
-                    VRTNodata=nodata
-                )
-            elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg='near',
-                    allowProjectionDifference=True,
-                    srcNodata=nodata,
-                    VRTNodata=nodata
-                )
-            else:
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg='bilinear',
-                    allowProjectionDifference=True,
-                    srcNodata=nodata,
-                    VRTNodata=nodata
-                )
-
-            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
-            if self.param_lookup['env'] == 'aws' and vrt_filename.exists():
-                s3_key = f'{s3_output_path}/{vrt_filename.name}'
-                print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
-                s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
-
-            print(f'- Finished Master VRT: {vrt_filename.name}')
-
-    def run(self, output_folder: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str = "", manual_downloads: bool = False) -> None:
+    def run(
+        self,
+        output_folder: str,
+        ecoregion: str,
+        data_type: str,
+        file_type: str = "",
+        output_prefix: str = "",
+        manual_downloads: bool = False,
+    ) -> None:
         """Main method for running VRT Engine locally or in AWS."""
+
+        if data_type != 'DistanceToShore' and not file_type:
+            raise ValueError(f"file_type is required when data_type is '{data_type}'")
+
+        base_folder_type = 'DigitalCoast' if data_type == 'DistanceToShore' else data_type
 
         if self.param_lookup['env'] == 'aws':
             _set_gdal_s3_options()
@@ -467,11 +402,11 @@ class RasterVRTEngine(Engine):
 
             s3_files = s3fs.S3FileSystem()
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-            subfolder = get_config_item(data_type.upper(), 'SUBFOLDER')
+            subfolder = get_config_item(base_folder_type.upper(), 'SUBFOLDER')
 
             prefix_segment = f"{output_prefix}/" if output_prefix else ""
-            base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{subfolder}/{data_type}"
-            s3_output_path = f"{prefix_segment}{ecoregion}/{subfolder}/{data_type}"
+            base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{subfolder}/{base_folder_type}"
+            s3_output_path = f"{prefix_segment}{ecoregion}/{subfolder}/{base_folder_type}"
 
             if data_type == 'BlueTopo':
                 raw_geotiffs = s3_files.glob(f"{base_s3}/**/{self.glob_lookup[file_type]}")
@@ -493,9 +428,15 @@ class RasterVRTEngine(Engine):
                 if geotiffs:
                     output_geotiffs = self.get_s3_bluetopo_geotiffs(geotiffs)
                     with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
-                        self.build_output_vrts(pathlib.Path(td), file_type, output_geotiffs, data_type, s3_output_path=s3_output_path)
+                        self.build_output_vrts(
+                            pathlib.Path(td),
+                            output_geotiffs,
+                            data_type,
+                            file_type=file_type,
+                            s3_output_path=s3_output_path,
+                        )
             else:
-                providers_to_process = [(folder, data_type, s3_output_path) for folder in s3_files.glob(f"{base_s3}/*")]
+                providers_to_process = [(folder, base_folder_type, s3_output_path) for folder in s3_files.glob(f"{base_s3}/*")]
                 if manual_downloads:
                     manual_data_type = 'Digital_Coast_Manual_Downloads'
                     manual_base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{subfolder}/{manual_data_type}"
@@ -506,29 +447,44 @@ class RasterVRTEngine(Engine):
 
                 for provider_path, current_datatype, current_out_path in providers_to_process:
                     print(f'running: {provider_path}')
-                    geotiffs = [
-                        gt for gt in s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
-                        if '/reprojected/' not in gt
-                    ]
+                    if data_type == 'DistanceToShore':
+                        raw_geotiffs = s3_files.glob(f"{provider_path}/**/distance_to_shore/*.tif*")
+                        geotiffs = [
+                            gt for gt in raw_geotiffs
+                            if '/original/' not in gt and gt.lower().endswith(('.tif', '.tiff'))
+                        ]
+                    else:
+                        raw_geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
+                        geotiffs = [
+                            gt for gt in raw_geotiffs
+                            if '/original/' not in gt and '/distance_to_shore/' not in gt
+                        ]
 
                     if not geotiffs:
                         continue
 
+                    vrt_data_type = 'DistanceToShore' if data_type == 'DistanceToShore' else current_datatype
+                    output_geotiffs = self.get_s3_digitalcoast_geotiffs(geotiffs)
+
                     with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
-                        temp_path = pathlib.Path(td)
-                        output_geotiffs = self.get_s3_digitalcoast_geotiffs(geotiffs, temp_path, output_folder)
-                        self.build_output_vrts(temp_path, file_type, output_geotiffs, current_datatype, s3_output_path=current_out_path)
+                        self.build_output_vrts(
+                            pathlib.Path(td),
+                            output_geotiffs,
+                            vrt_data_type,
+                            file_type=file_type,
+                            s3_output_path=current_out_path,
+                        )
 
             shutil.rmtree(local_tmp_path, ignore_errors=True)
             self.close_dask()
 
         else:
-            subfolder = get_config_item(data_type.upper(), 'SUBFOLDER')
+            subfolder = get_config_item(base_folder_type.upper(), 'SUBFOLDER')
 
             if output_prefix:
-                outputs = pathlib.Path(output_folder) / output_prefix / ecoregion / subfolder / data_type
+                outputs = pathlib.Path(output_folder) / output_prefix / ecoregion / subfolder / base_folder_type
             else:
-                outputs = pathlib.Path(output_folder) / ecoregion / subfolder / data_type
+                outputs = pathlib.Path(output_folder) / ecoregion / subfolder / base_folder_type
 
             outputs.mkdir(parents=True, exist_ok=True)
 
@@ -545,12 +501,27 @@ class RasterVRTEngine(Engine):
 
                 if geotiffs:
                     output_geotiffs = self.get_local_bluetopo_geotiffs(geotiffs)
-                    self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
+                    self.build_output_vrts(outputs, output_geotiffs, data_type, file_type=file_type)
             else:
                 provider_folders = [f for f in outputs.glob('*') if f.is_dir() and 'unused_providers' not in f.name]
                 for provider_path in provider_folders:
-                    geotiffs = [g for g in provider_path.rglob(self.glob_lookup[file_type]) if not g.name.startswith('mask_')]
+                    if data_type == 'DistanceToShore':
+                        raw_geotiffs = provider_path.rglob('distance_to_shore/*.tif*')
+                        geotiffs = [
+                            g for g in raw_geotiffs
+                            if not g.name.startswith('mask_')
+                            and 'original' not in g.parts
+                            and g.suffix.lower() in ('.tif', '.tiff')
+                        ]
+                    else:
+                        raw_geotiffs = provider_path.rglob(self.glob_lookup[file_type])
+                        geotiffs = [
+                            g for g in raw_geotiffs
+                            if not g.name.startswith('mask_')
+                            and not any(d in g.parts for d in ('distance_to_shore', 'original'))
+                        ]
+
                     if not geotiffs:
                         continue
                     output_geotiffs = self.get_local_digitalcoast_geotiffs(geotiffs)
-                    self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
+                    self.build_output_vrts(outputs, output_geotiffs, data_type, file_type=file_type)
