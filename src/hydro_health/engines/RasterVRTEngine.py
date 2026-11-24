@@ -171,7 +171,12 @@ class RasterVRTEngine(Engine):
                     VRTNodata=nodata
                 )
 
-            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+            vrt_ds = gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+            # Add statistics for AGS viewing support
+            if vrt_ds is not None:
+                vrt_ds.GetRasterBand(1).ComputeStatistics(True)
+                vrt_ds.FlushCache()
+                vrt_ds = None
             if self.param_lookup['env'] == 'aws' and vrt_filename.exists():
                 s3_key = f'{s3_output_path}/{vrt_filename.name}'
                 print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
