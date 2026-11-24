@@ -144,7 +144,7 @@ def _process_tile(param_inputs: list) -> dict:
             else:
                 shoreline_vertices = engine.get_shoreline_vertices(geotiff_path, ecoregion)
 
-            distance_raster_path = engine.build_distance_from_shoreline(
+            distance_raster_path = engine.build_distance_to_shoreline(
                 shoreline_vertices,
                 water_mask,
                 tile_dir,
@@ -331,7 +331,7 @@ class DistanceToShoreEngine(Engine):
         del subset
         return tree
 
-    def build_distance_from_shoreline(
+    def build_distance_to_shoreline(
         self,
         shoreline_vertices: np.ndarray,
         water_mask: pathlib.Path,
@@ -412,7 +412,7 @@ class DistanceToShoreEngine(Engine):
             "tiled": True,
         }
 
-        distance_raster_path = tile_folder / f"{raster_filename}_distance_from_shore.tif"
+        distance_raster_path = tile_folder / f"{raster_filename}_DTS.tif"
         distance_raster_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.write_message(f'- writing distance raster to: {distance_raster_path}', str(OUTPUTS))
@@ -532,7 +532,7 @@ class DistanceToShoreEngine(Engine):
         if self.param_lookup['env'] == 'aws':
             s3 = s3fs.S3FileSystem()
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-            s3_search_prefix = f"{bucket}/{ecoregion_path}/{subfolder_key}/{self.data_type}/**/*_distance_from_shore.tif"
+            s3_search_prefix = f"{bucket}/{ecoregion_path}/{subfolder_key}/{self.data_type}/**/*_DTS.tif"
 
             print(f" - Checking existing outputs in S3: s3://{s3_search_prefix}...")
             existing_outputs = set(s3.glob(s3_search_prefix))
@@ -543,7 +543,7 @@ class DistanceToShoreEngine(Engine):
                 output_subfolder = self.get_output_subfolder(p)
                 expected_s3_key = (
                     f"{bucket}/{ecoregion_path}/{subfolder_key}/"
-                    f"{self.data_type}/{output_subfolder}/{p.stem}_distance_from_shore.tif"
+                    f"{self.data_type}/{output_subfolder}/{p.stem}_DTS.tif"
                 )
                 if expected_s3_key not in existing_outputs:
                     unprocessed.append(gp)
@@ -553,7 +553,7 @@ class DistanceToShoreEngine(Engine):
             for gp in geotiff_paths:
                 p = pathlib.Path(gp)
                 output_subfolder = self.get_output_subfolder(p)
-                expected_local_file = temp_path / output_subfolder / f"{p.stem}_distance_from_shore.tif"
+                expected_local_file = temp_path / output_subfolder / f"{p.stem}_DTS.tif"
                 if not expected_local_file.exists():
                     unprocessed.append(gp)
 
@@ -599,7 +599,7 @@ class DistanceToShoreEngine(Engine):
             if 'ISS' not in raster.name
             and 'original' not in raster.parts
             and 'distance_to_shore' not in raster.parts
-            and not raster.name.lower().endswith(('_distance_from_shore.tif', '_ocean_mask.tif'))
+            and not raster.name.lower().endswith(('_dts.tif', '_ocean_mask.tif'))
         ]
 
         print(f"- Discovered {len(raster_files)} local {self.data_type} file(s)")
@@ -630,7 +630,7 @@ class DistanceToShoreEngine(Engine):
                 for raw_path in raw_paths
                 if 'original' not in pathlib.PurePosixPath(raw_path).parts
                 and 'distance_to_shore' not in pathlib.PurePosixPath(raw_path).parts
-                and not raw_path.lower().endswith(('_distance_from_shore.tif', '_ocean_mask.tif'))
+                and not raw_path.lower().endswith(('_dts.tif', '_ocean_mask.tif'))
             ]
 
         vsi_geotiff_paths = [
