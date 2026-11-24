@@ -95,6 +95,7 @@ def _process_tile(param_inputs: list) -> dict:
         local_npy_path,
     ) = param_inputs
 
+    geotiff_string = str(geotiff_string)
     _set_gdal_s3_options()
     engine = DistanceToShoreEngine(param_lookup, data_type)
 
@@ -575,7 +576,7 @@ class DistanceToShoreEngine(Engine):
 
         return temp_path, geotiff_paths
 
-    def get_local_geotiff_files(self, ecoregion: str, output_prefix: str = "") -> list[pathlib.Path]:
+    def get_local_geotiff_files(self, ecoregion: str, output_prefix: str = "") -> list[str]:
         """Search for local data type geotiffs."""
 
         subfolder = self._get_subfolder()
@@ -587,10 +588,13 @@ class DistanceToShoreEngine(Engine):
         if self.data_type == 'BlueTopo':
             candidates = list(data_type_folder.rglob("*[0-9].tiff"))
         else:
-            candidates = list(data_type_folder.rglob("*.tif")) + list(data_type_folder.rglob("*.tiff"))
+            candidates = [
+                p for p in data_type_folder.rglob("*")
+                if p.suffix.lower() in ('.tif', '.tiff')
+            ]
 
         raster_files = [
-            raster
+            str(raster)
             for raster in candidates
             if 'ISS' not in raster.name
             and 'original' not in raster.parts

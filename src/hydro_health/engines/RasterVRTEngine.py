@@ -107,7 +107,7 @@ def _read_geotiff_metadata(raw_prefix: str) -> dict:
 class RasterVRTEngine(Engine):
     """Class for handling VRT creation keeping native GeoTIFF CRS locally or via S3."""
 
-    def __init__(self, param_lookup) -> None:
+    def __init__(self, param_lookup) -> None:   
         super().__init__()
         self.param_lookup = param_lookup
         self.glob_lookup = {
@@ -121,6 +121,64 @@ class RasterVRTEngine(Engine):
             'NCMP': '*.tif'
         }
         self.all_crs = query_crs_info(auth_name="EPSG", pj_types=[PJType.PROJECTED_CRS])
+
+    def build_output_vrts(
+        self,
+        outputs: pathlib.Path,
+        output_geotiffs: dict,
+        data_type: str,
+        file_type: str = "",
+        s3_output_path: str = "",
+    ) -> None:
+        """Create Master VRT files with companion overview pyramids locally or in S3."""
+
+        _set_gdal_s3_options()
+        s3_client = boto3.client('s3')
+        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
+        for bin_key, info in output_geotiffs.items():
+            tifs = [str(t) for t in info['tiles']]
+            if not tifs:
+                continue
+
+            if data_type == 'DistanceToShore':
+                vrt_filename = outputs / f'mosaic_{bin_key}_DTS.vrt'
+            else:
+                vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
+
+            nodata = info.get('nodata_val', -9999.0)
+            if nodata is None:
+                nodata = -9999.0
+
+            if data_type == 'BlueTopo':
+                # Build native UTM VRT strictly within matched CRS group (No projection difference allowed)
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=False,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+            elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads', 'DistanceToShore']:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='near',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+            else:
+                vrt_options = gdal.BuildVRTOptions(
+                    resampleAlg='bilinear',
+                    allowProjectionDifference=True,
+                    srcNodata=nodata,
+                    VRTNodata=nodata
+                )
+
+            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
+            if self.param_lookup['env'] == 'aws' and vrt_filename.exists():
+                s3_key = f'{s3_output_path}/{vrt_filename.name}'
+                print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
+                s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
+
+            print(f'- Finished Master VRT: {vrt_filename.name}')
 
     def get_local_bluetopo_geotiffs(self, geotiffs: list[pathlib.Path]) -> dict:
         """Groups BlueTopo tiles strictly by their native EPSG UTM CRS code."""
@@ -408,55 +466,21 @@ class RasterVRTEngine(Engine):
 
         return output_geotiffs
 
-    def build_output_vrts(self, outputs: pathlib.Path, file_type: str, output_geotiffs: dict, data_type: str, s3_output_path: str = "") -> None:
-        """Create Master VRT files with companion overview pyramids locally or in S3."""
-
-        _set_gdal_s3_options()
-        s3_client = boto3.client('s3')
-        bucket_name = get_config_item('SHARED', 'OUTPUT_BUCKET')
-        for bin_key, info in output_geotiffs.items():
-            tifs = [str(t) for t in info['tiles']]
-            if not tifs:
-                continue
-
-            vrt_filename = outputs / f'mosaic_{file_type}_{bin_key}.vrt'
-            nodata = info.get('nodata_val', -9999.0)
-            if nodata is None:
-                nodata = -9999.0
-
-            if data_type == 'BlueTopo':
-                # Build native UTM VRT strictly within matched CRS group (No projection difference allowed)
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg='bilinear',
-                    allowProjectionDifference=False,
-                    srcNodata=nodata,
-                    VRTNodata=nodata
-                )
-            elif data_type in ['DigitalCoast', 'Digital_Coast_Manual_Downloads']:
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg='near',
-                    allowProjectionDifference=True,
-                    srcNodata=nodata,
-                    VRTNodata=nodata
-                )
-            else:
-                vrt_options = gdal.BuildVRTOptions(
-                    resampleAlg='bilinear',
-                    allowProjectionDifference=True,
-                    srcNodata=nodata,
-                    VRTNodata=nodata
-                )
-
-            gdal.BuildVRT(str(vrt_filename), tifs, options=vrt_options)
-            if self.param_lookup['env'] == 'aws' and vrt_filename.exists():
-                s3_key = f'{s3_output_path}/{vrt_filename.name}'
-                print(f' - Uploading Master VRT: s3://{bucket_name}/{s3_key}')
-                s3_client.upload_file(str(vrt_filename), bucket_name, s3_key)
-
-            print(f'- Finished Master VRT: {vrt_filename.name}')
-
-    def run(self, output_folder: str, file_type: str, ecoregion: str, data_type: str, output_prefix: str = "", manual_downloads: bool = False) -> None:
+    def run(
+        self,
+        output_folder: str,
+        ecoregion: str,
+        data_type: str,
+        file_type: str = "",
+        output_prefix: str = "",
+        manual_downloads: bool = False,
+    ) -> None:
         """Main method for running VRT Engine locally or in AWS."""
+
+        if data_type != 'DistanceToShore' and not file_type:
+            raise ValueError(f"file_type is required when data_type is '{data_type}'")
+
+        base_folder_type = 'DigitalCoast' if data_type == 'DistanceToShore' else data_type
 
         if self.param_lookup['env'] == 'aws':
             _set_gdal_s3_options()
@@ -467,11 +491,11 @@ class RasterVRTEngine(Engine):
 
             s3_files = s3fs.S3FileSystem()
             bucket = get_config_item('SHARED', 'OUTPUT_BUCKET')
-            subfolder = get_config_item(data_type.upper(), 'SUBFOLDER')
+            subfolder = get_config_item(base_folder_type.upper(), 'SUBFOLDER')
 
             prefix_segment = f"{output_prefix}/" if output_prefix else ""
-            base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{subfolder}/{data_type}"
-            s3_output_path = f"{prefix_segment}{ecoregion}/{subfolder}/{data_type}"
+            base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{subfolder}/{base_folder_type}"
+            s3_output_path = f"{prefix_segment}{ecoregion}/{subfolder}/{base_folder_type}"
 
             if data_type == 'BlueTopo':
                 raw_geotiffs = s3_files.glob(f"{base_s3}/**/{self.glob_lookup[file_type]}")
@@ -493,9 +517,15 @@ class RasterVRTEngine(Engine):
                 if geotiffs:
                     output_geotiffs = self.get_s3_bluetopo_geotiffs(geotiffs)
                     with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
-                        self.build_output_vrts(pathlib.Path(td), file_type, output_geotiffs, data_type, s3_output_path=s3_output_path)
+                        self.build_output_vrts(
+                            pathlib.Path(td),
+                            output_geotiffs,
+                            data_type,
+                            file_type=file_type,
+                            s3_output_path=s3_output_path,
+                        )
             else:
-                providers_to_process = [(folder, data_type, s3_output_path) for folder in s3_files.glob(f"{base_s3}/*")]
+                providers_to_process = [(folder, base_folder_type, s3_output_path) for folder in s3_files.glob(f"{base_s3}/*")]
                 if manual_downloads:
                     manual_data_type = 'Digital_Coast_Manual_Downloads'
                     manual_base_s3 = f"s3://{bucket}/{prefix_segment}{ecoregion}/{subfolder}/{manual_data_type}"
@@ -506,29 +536,45 @@ class RasterVRTEngine(Engine):
 
                 for provider_path, current_datatype, current_out_path in providers_to_process:
                     print(f'running: {provider_path}')
-                    geotiffs = [
-                        gt for gt in s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
-                        if '/reprojected/' not in gt
-                    ]
+                    if data_type == 'DistanceToShore':
+                        raw_geotiffs = s3_files.glob(f"{provider_path}/**/distance_to_shore/*.tif*")
+                        geotiffs = [
+                            gt for gt in raw_geotiffs
+                            if '/reprojected/' not in gt and gt.lower().endswith(('.tif', '.tiff'))
+                        ]
+                    else:
+                        raw_geotiffs = s3_files.glob(f"{provider_path}/**/{self.glob_lookup[file_type]}")
+                        geotiffs = [
+                            gt for gt in raw_geotiffs
+                            if '/reprojected/' not in gt and '/distance_to_shore/' not in gt
+                        ]
 
                     if not geotiffs:
                         continue
 
+                    vrt_data_type = 'DistanceToShore' if data_type == 'DistanceToShore' else current_datatype
+
                     with tempfile.TemporaryDirectory(dir=local_tmp_path) as td:
                         temp_path = pathlib.Path(td)
                         output_geotiffs = self.get_s3_digitalcoast_geotiffs(geotiffs, temp_path, output_folder)
-                        self.build_output_vrts(temp_path, file_type, output_geotiffs, current_datatype, s3_output_path=current_out_path)
+                        self.build_output_vrts(
+                            temp_path,
+                            output_geotiffs,
+                            vrt_data_type,
+                            file_type=file_type,
+                            s3_output_path=current_out_path,
+                        )
 
             shutil.rmtree(local_tmp_path, ignore_errors=True)
             self.close_dask()
 
         else:
-            subfolder = get_config_item(data_type.upper(), 'SUBFOLDER')
+            subfolder = get_config_item(base_folder_type.upper(), 'SUBFOLDER')
 
             if output_prefix:
-                outputs = pathlib.Path(output_folder) / output_prefix / ecoregion / subfolder / data_type
+                outputs = pathlib.Path(output_folder) / output_prefix / ecoregion / subfolder / base_folder_type
             else:
-                outputs = pathlib.Path(output_folder) / ecoregion / subfolder / data_type
+                outputs = pathlib.Path(output_folder) / ecoregion / subfolder / base_folder_type
 
             outputs.mkdir(parents=True, exist_ok=True)
 
@@ -545,12 +591,24 @@ class RasterVRTEngine(Engine):
 
                 if geotiffs:
                     output_geotiffs = self.get_local_bluetopo_geotiffs(geotiffs)
-                    self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
+                    self.build_output_vrts(outputs, output_geotiffs, data_type, file_type=file_type)
             else:
                 provider_folders = [f for f in outputs.glob('*') if f.is_dir() and 'unused_providers' not in f.name]
                 for provider_path in provider_folders:
-                    geotiffs = [g for g in provider_path.rglob(self.glob_lookup[file_type]) if not g.name.startswith('mask_')]
+                    if data_type == 'DistanceToShore':
+                        raw_geotiffs = provider_path.rglob('distance_to_shore/*.tif*')
+                        geotiffs = [
+                            g for g in raw_geotiffs
+                            if not g.name.startswith('mask_') and g.suffix.lower() in ('.tif', '.tiff')
+                        ]
+                    else:
+                        raw_geotiffs = provider_path.rglob(self.glob_lookup[file_type])
+                        geotiffs = [
+                            g for g in raw_geotiffs
+                            if not g.name.startswith('mask_') and 'distance_to_shore' not in g.parts
+                        ]
+
                     if not geotiffs:
                         continue
                     output_geotiffs = self.get_local_digitalcoast_geotiffs(geotiffs)
-                    self.build_output_vrts(outputs, file_type, output_geotiffs, data_type)
+                    self.build_output_vrts(outputs, output_geotiffs, data_type, file_type=file_type)
