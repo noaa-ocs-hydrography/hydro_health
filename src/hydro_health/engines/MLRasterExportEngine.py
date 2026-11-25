@@ -57,6 +57,7 @@ from hydro_health.helpers.tools import get_config_item
 
 _PLOT_LOCK = SerializableLock("hydro_health_raster_plotting")
 
+INPUTS = Path(__file__).parents[3] / "inputs"
 OUTPUTS = Path(__file__).parents[3] / "outputs"
 
 TRAIN_PRODUCTS = {
@@ -172,7 +173,7 @@ def _check_native_raster_values(source) -> None:
     raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
 
 
-def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> dict:
+def _read_report_grid(uri: str, profile: dict, categorical: bool = False, clip_to_grid: bool = False) -> dict:
     """Aggregate every valid native pixel into the report grid, including narrow coastlines.
 
     Forward mapping prevents subpixel footprints disappearing in inverse resampling.
@@ -208,7 +209,9 @@ def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> dic
                 cols, rows = inverse * (x, y)
                 inside = (np.isfinite(rows) & np.isfinite(cols) & (rows >= 0) & (rows < height)
                           & (cols >= 0) & (cols < width))
-                if not inside.all():
+                if clip_to_grid:
+                    rows, cols, values = rows[inside], cols[inside], values[inside]
+                elif not inside.all():
                     # The template defines the extent; report out-of-bounds pixels rather than silently dropping them.
                     raise ValueError(f"{int((~inside).sum())} valid native pixels fall outside the mosaic grid or have invalid transformed coordinates")
                 cells = np.floor(rows).astype("int64") * width + np.floor(cols).astype("int64")
@@ -219,13 +222,79 @@ def _read_report_grid(uri: str, profile: dict, categorical: bool = False) -> dic
                     pairs, frequency = np.unique(np.column_stack((cells, values)), axis=0, return_counts=True)
                     votes.update({(int(cell), float(value)): int(n)
                                   for (cell, value), n in zip(pairs, frequency)})
-    if not counts.any():
+    if not clip_to_grid and not counts.any():
         raise ValueError("No valid raster values: all source cells are NoData, NaN or infinite")
     return {"sums": sums.reshape(height, width), "counts": counts.reshape(height, width),
             "votes": dict(votes) if categorical else None}
 
 
-def _read_report_tile(tile_id: str, uri: str | None, expected_path: str, profile: dict, categorical: bool) -> tuple:
+def _bounds_inside_grid(bounds, profile):
+    left, bottom, right, top = rasterio.transform.array_bounds(
+        profile["height"], profile["width"], profile["transform"])
+    return bounds.left >= left and bounds.bottom >= bottom and bounds.right <= right and bounds.top <= top
+
+
+def _read_mosaic_window(uri: str, profile: dict, categorical=False, clip_to_grid=True):
+    """Return native-pixel sums and counts for just the covered 500 m window."""
+    with rasterio.open(_report_raster_path(uri), OVERVIEW_LEVEL="NONE") as src:
+        if src.crs is None:
+            raise ValueError(f"Missing CRS: {uri}")
+        affine = src.transform
+        same = src.crs == rasterio.crs.CRS.from_user_input(profile["crs"])
+        inverse = ~profile["transform"]
+        width, height = profile["width"], profile["height"]
+        if (same and affine.b == 0 and affine.d == 0 and
+                (clip_to_grid or _bounds_inside_grid(src.bounds, profile))):
+            xs = affine.c + affine.a * (np.arange(src.width) + .5)
+            ys = affine.f + affine.e * (np.arange(src.height) + .5)
+            cols = np.floor(inverse.a * xs + inverse.c).astype("int64")
+            rows = np.floor(inverse.e * ys + inverse.f).astype("int64")
+            x0, x1 = max(0, cols.min()), min(width, cols.max() + 1)
+            y0, y1 = max(0, rows.min()), min(height, rows.max() + 1)
+            if x1 <= x0 or y1 <= y0:
+                return None
+            votes = Counter() if categorical else None
+            shape = (y1-y0, x1-x0)
+            sums = np.zeros(shape, dtype="float64")
+            counts = np.zeros(shape, dtype="uint64")
+            for row in range(0, src.height, 512):
+                rr = rows[row:row+512, None]
+                for col in range(0, src.width, 512):
+                    cc = cols[None, col:col+512]
+                    inside = (rr >= y0) & (rr < y1) & (cc >= x0) & (cc < x1)
+                    if not inside.any():
+                        continue
+                    window = Window(col, row, cc.size, rr.size)
+                    native = src.read(1, window=window, masked=True)
+                    values = native.data
+                    valid = (inside & ~np.ma.getmaskarray(native) & np.isfinite(values)
+                             & (values != 9999) & (values != -9999))
+                    cells = ((rr-y0) * shape[1] + cc-x0)[valid]
+                    if cells.size:
+                        if categorical:
+                            global_cells = (cells // shape[1] + y0) * width + cells % shape[1] + x0
+                            pairs, freq = np.unique(np.column_stack((global_cells, values[valid])),
+                                                    axis=0, return_counts=True)
+                            votes.update({(int(cell), float(value)): int(n)
+                                          for (cell, value), n in zip(pairs, freq)})
+                        start = cells.min()
+                        offsets = cells - start
+                        totals = np.bincount(offsets)
+                        end = start + totals.size
+                        sums.ravel()[start:end] += np.bincount(offsets, weights=values[valid])
+                        counts.ravel()[start:end] += totals.astype("uint64")
+            return int(y0), int(x0), sums, counts, votes
+
+    # Reuse the exact per-pixel transformation for rotated or reprojected sources.
+    data = _read_report_grid(uri, profile, categorical, clip_to_grid)
+    rr, cc = np.nonzero(data["counts"])
+    if not rr.size:
+        return None
+    window = np.s_[rr.min():rr.max()+1, cc.min():cc.max()+1]
+    return int(rr.min()), int(cc.min()), data["sums"][window].copy(), data["counts"][window].copy(), data["votes"]
+
+
+def _read_report_tile(tile_id: str, uri: str | None, expected_path: str, profile: dict, categorical: bool, clip_to_grid: bool = False) -> tuple:
     """Resolve and read one independent TIFF; return failures for per-tile reporting."""
 
     try:
@@ -233,33 +302,33 @@ def _read_report_tile(tile_id: str, uri: str | None, expected_path: str, profile
             if not UPath(expected_path).exists():
                 return tile_id, None, None, None
             uri = expected_path
-        return tile_id, uri, _read_report_grid(uri, profile, categorical), None
+        return tile_id, uri, _read_mosaic_window(uri, profile, categorical, clip_to_grid), None
     except (OSError, ValueError, rasterio.errors.RasterioError) as exc:
         return tile_id, uri or expected_path, None, exc
 
 
-def _iter_report_tiles(jobs: Iterator[tuple], profile: dict, categorical: bool, client, limit: int) -> Iterator[tuple]:
-    """Use the shared Dask workers, bounding reads and preserving tile overlap order."""
-
+def _iter_report_tiles(jobs: Iterator[tuple], profile: dict, categorical: bool, client, limit: int, clip_to_grid: bool = False) -> Iterator[tuple]:
+    """Refill the shared worker queue as each tile completes."""
     jobs = iter(jobs)
-    pending = deque()
+    pending = set()
+    completed = as_completed([])
+
+    def submit_next():
+        job = next(jobs, None)
+        if job is not None:
+            future = client.submit(_read_report_tile, *job, profile, categorical, clip_to_grid, pure=False)
+            pending.add(future)
+            completed.add(future)
+
     try:
         for _ in range(limit):
-            job = next(jobs, None)
-            if job is None:
-                break
-            pending.append(client.submit(_read_report_tile, *job, profile, categorical, pure=False))
-        while pending:
-            future = pending.popleft()
-            try:
-                result = future.result()
-            finally:
-                future.release()
+            submit_next()
+        for future in completed:
+            result = future.result()
+            pending.remove(future)
+            future.release()
+            submit_next()
             yield result
-            del result
-            job = next(jobs, None)
-            if job is not None:
-                pending.append(client.submit(_read_report_tile, *job, profile, categorical, pure=False))
     finally:
         if pending:
             try:
@@ -1569,14 +1638,14 @@ class MLRasterExportEngine(Engine):
             "create_model_tifs": False,  # False: skip tile exports and rebuild the PDF from existing TIFFs.
             "legacy_survey_year_offset": True,
             "raster_workers": 16,
-            "raster_threads_per_worker": 1,  # In-flight limit = workers * threads (16).
+            "raster_threads_per_worker": 2,  # 16 workers x 2 threads = 32 jobs in flight.
             "create_mosaics": True,  # False skips regional mosaics and their PDFs; tile diagnostics remain enabled.
             "mosaic_report": True, "report_max_dimension": 1600,
             "report_progress_interval": 250,  # Log aggregate progress every 250 files, including skipped tiles.
             "report_basemap_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Base/MapServer",
             "report_basemap_reference_service": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Reference/MapServer",
             "report_basemap_timeout": 20,
-            "memory_limit": "2GB", "raster_processes": True,
+            "memory_limit": "4GB", "raster_processes": True,
             "plot_max_dimension": 1000, "plot_max_points": 50000,
             "raster_config": {
                 "nodata": self.nodata_value, "compress": "DEFLATE", "blocksize": 512,
@@ -1618,6 +1687,11 @@ class MLRasterExportEngine(Engine):
         self.ml_prep_pred_dir = (UPath(pred_dir) if "://" in pred_dir or Path(pred_dir).is_absolute()
                                  else UPath(f"{s3_dir_base}/{pred_dir}") if self.is_aws
                                  else UPath(self.outputs_dir / pred_dir))
+
+        source_dir = str(get_config_item("MODEL", "PREDICTION_OUTPUT_DIR"))
+        self.prediction_output_dir = (UPath(source_dir) if "://" in source_dir or Path(source_dir).is_absolute()
+                                      else UPath(s3_dir_base) / source_dir if self.is_aws
+                                      else UPath(self.outputs_dir / source_dir))
 
         model_dir = get_config_item("MODEL", "XGB_OUTPUT_DIR")
         self.model_out_dir = UPath(f"{s3_dir_base}/{model_dir}") if self.is_aws else UPath(self.outputs_dir / model_dir)
@@ -2060,6 +2134,88 @@ class MLRasterExportEngine(Engine):
         self.write_message(f"Published tile diagnostic PDF: {destination}", OUTPUTS)
         return str(destination)
 
+    def generate_bluetopo_mosaics(self, profile: dict, read_limit: int) -> None:
+        pattern = re.compile(r"BlueTopo_[A-Za-z0-9]+_[0-9]{8}(?:_(distance_from_shore|survey_end_date))?\.tiff?", re.I)
+        sources = {"depth": [], "distance_from_shore": [], "survey_end_date": []}
+        for path in self.prediction_output_dir.iterdir():
+            match = pattern.fullmatch(path.name)
+            if match:
+                sources[(match.group(1) or "depth").lower()].append(path)
+        destination = self.raster_out_dir / "mosaic_report"
+        destination.mkdir(parents=True, exist_ok=True)
+        shape = (profile["height"], profile["width"])
+        if any(sources.values()):
+            configured = str(get_config_item("SHARED", "MASTER_GRIDS"))
+            boundary_path = UPath(configured) if "://" in configured else UPath(INPUTS / configured)
+            self.write_message(f"Clipping BlueTopo mosaics with Enhanced_EcoRegions_50m from {boundary_path}", OUTPUTS)
+            boundary = gpd.read_file(str(boundary_path), layer="Enhanced_EcoRegions_50m", engine="pyogrio")
+            boundaries = boundary.to_crs(profile["crs"]).geometry
+            polygons = boundaries[boundaries.geom_type.isin(["Polygon", "MultiPolygon"]) & ~boundaries.is_empty]
+            if polygons.empty:
+                raise ValueError(f"Enhanced_EcoRegions_50m contains no polygons: {boundary_path}")
+            inside = geometry_mask(polygons, out_shape=shape, transform=profile["transform"],
+                                   invert=True, all_touched=False)
+        for product, paths in sources.items():
+            if not paths:
+                self.write_message(f"No BlueTopo {product} files in {self.prediction_output_dir}", OUTPUTS)
+                continue
+            is_date = product == "survey_end_date"
+            date_votes = Counter()
+            sums = np.zeros(shape, dtype="float64")
+            counts = np.zeros(shape, dtype="uint64")
+            paths_iter = iter(enumerate(sorted(paths, key=str), 1))
+            completed = as_completed([])
+            pending = set()
+
+            def submit_next():
+                item = next(paths_iter, None)
+                if item is None:
+                    return
+                index, path = item
+                self.write_message(f"Submitting BlueTopo {product} {index}/{len(paths)}: {path}", OUTPUTS)
+                future = self.client.submit(_read_mosaic_window, str(path), profile, categorical=is_date, pure=False)
+                pending.add(future)
+                completed.add(future)
+
+            try:
+                for _ in range(min(read_limit, len(paths))):
+                    submit_next()
+                for future in completed:
+                    data = future.result()
+                    pending.remove(future)
+                    future.release()
+                    submit_next()
+                    if data is not None:
+                        row, col, tile_sums, tile_counts, votes = data
+                        if is_date:
+                            date_votes.update(votes)
+                            continue
+                        h, w = tile_counts.shape
+                        sums[row:row+h, col:col+w] += tile_sums
+                        counts[row:row+h, col:col+w] += tile_counts
+            finally:
+                if pending:
+                    self.client.cancel(list(pending))
+                    for future in pending:
+                        future.release()
+            result = np.full(shape, profile["nodata"], dtype="float64" if is_date else "float32")
+            if is_date:
+                # Use the most frequent source date, breaking ties by larger date value.
+                for (cell, value), frequency in date_votes.items():
+                    if inside.flat[cell] and (frequency > counts.flat[cell] or
+                            (frequency == counts.flat[cell] and value > result.flat[cell])):
+                        counts.flat[cell] = frequency
+                        result.flat[cell] = value
+            else:
+                np.divide(sums, counts, out=result, where=(counts > 0) & inside)
+            name = f"MOSAIC_BlueTopo_{product}.tif"
+            with tempfile.TemporaryDirectory() as tmp:
+                local = Path(tmp) / name
+                with rasterio.open(local, "w", **dict(profile, dtype=result.dtype.name)) as output:
+                    output.write(result, 1)
+                _copy_file(str(local), str(destination / name))
+            self.write_message(f"SAVED MOSAIC: {destination / name}", OUTPUTS)
+
     def generate_mosaic_report(self, region: str, records: list[dict]) -> list[str]:
         """Build one PDF per role and variable, covering all year pairs."""
 
@@ -2067,43 +2223,47 @@ class MLRasterExportEngine(Engine):
             self.write_message(f"{region}: regional mosaics and mosaic PDFs disabled; skipping mosaic generation.", OUTPUTS)
             return []
         read_limit = self.settings["raster_workers"] * self.settings["raster_threads_per_worker"]
-        self.write_message(f"Building regional mosaic report for {region}: shared Dask workers, up to {read_limit} TIFF reads in flight; progress every {self.settings['report_progress_interval']} tiles.", OUTPUTS)
-        candidates = {pair: set(tiles) for pair, tiles in self.report_candidates.items()}
-        available = {}
-        # List each role once, avoiding an S3 existence request per product/tile.
-        for role, products in (("prediction", PRED_PRODUCTS),):
-            folder = "Training" if role == "training" else "Prediction"
-            for path in self.raster_out_dir.glob(f"*/{folder}/*.tif"):
-                tile_id = path.parent.parent.name
-                if self.settings["tile_id"] and tile_id != self.settings["tile_id"]:
-                    continue
-                for column, stem in products.items():
-                    match = re.fullmatch(re.escape(stem) + r"_(\d{4}_\d{4})\.tif", path.name)
-                    if match is None:
-                        continue
-                    pair = match[1]
-                    if self.settings["pair"] and pair != self.settings["pair"]:
-                        continue
-                    candidates.setdefault(pair, set()).add(tile_id)
-                    available[tile_id, pair, role, column] = str(path)
-                    break
-        if not candidates:
-            self.write_message(f"Skipping regional mosaic report for {region}: no tile/year pairs found.", OUTPUTS)
-            return []
+        self.write_message(f"Starting BlueTopo mosaics for {region}: listing {self.prediction_output_dir}; up to {read_limit} TIFF reads in flight.", OUTPUTS)
         meta = self.template_metadata
         extent = rasterio.transform.array_bounds(meta["height"], meta["width"], meta["transform"])
         # Use the existing template extent; no preliminary source-TIFF bounds scan.
         left, bottom, right, top = extent
-        native_x, native_y = abs(meta["transform"].a), abs(meta["transform"].e)
-        factor = max(1., (right-left) / native_x / self.settings["report_max_dimension"],
-                     (top-bottom) / native_y / self.settings["report_max_dimension"])
-        pixel_x, pixel_y = native_x * factor, native_y * factor
+        grid_crs = rasterio.crs.CRS.from_user_input(meta["crs"])
+        if not grid_crs.is_projected:
+            grid_crs = rasterio.crs.CRS.from_epsg(6933)
+            left, bottom, right, top = transform_bounds(meta["crs"], grid_crs, *extent)
+        pixel_x = pixel_y = 500.0 / grid_crs.linear_units_factor[1]
         height = max(1, math.ceil((top-bottom) / pixel_y))
         width = max(1, math.ceil((right-left) / pixel_x))
         transform = Affine(pixel_x, 0, left, 0, -pixel_y, top)
-        profile = dict(driver="GTiff", count=1, dtype="float32", crs=meta["crs"], transform=transform,
+        profile = dict(driver="GTiff", count=1, dtype="float32", crs=grid_crs.to_string(), transform=transform,
                        width=width, height=height, nodata=self.nodata_value, compress="DEFLATE", tiled=True,
                        blockxsize=256, blockysize=256)
+        self.generate_bluetopo_mosaics(profile, read_limit)
+        candidates = {pair: set(tiles) for pair, tiles in self.report_candidates.items()}
+        available = {}
+        columns = {stem: column for column, stem in PRED_PRODUCTS.items()}
+        selected_tile = self.settings["tile_id"]
+        selected_pair = self.settings["pair"]
+        search_root = self.raster_out_dir / selected_tile if selected_tile else self.raster_out_dir
+        pattern = "Prediction/*.tif" if selected_tile else "*/Prediction/*.tif"
+        self.write_message(f"Inventorying model prediction TIFFs for {region} under {search_root}", OUTPUTS)
+        for checked, path in enumerate(search_root.glob(pattern), 1):
+            if checked % self.settings["report_progress_interval"] == 0:
+                self.write_message(f"Model mosaic inventory {region}: checked {checked:,} TIFFs", OUTPUTS)
+            match = re.fullmatch(r"(.+)_(\d{4}_\d{4})\.tif", path.name)
+            if not match:
+                continue
+            stem, pair = match.groups()
+            column = columns.get(stem)
+            if column is None or (selected_pair and pair != selected_pair):
+                continue
+            tile_id = path.parent.parent.name
+            candidates.setdefault(pair, set()).add(tile_id)
+            available[tile_id, pair, "prediction", column] = str(path)
+        if not candidates:
+            self.write_message(f"Skipping regional mosaic report for {region}: no tile/year pairs found.", OUTPUTS)
+            return []
         bounds = rasterio.transform.array_bounds(height, width, transform)
         self.write_message(f"MOSAIC GRID {region}: {width} x {height}; using template bounds; combining tile TIFFs directly without a preliminary extent scan.", OUTPUTS)
         # The prediction mask is reprojected for its reference outline, never used to clip values.
@@ -2190,16 +2350,17 @@ class MLRasterExportEngine(Engine):
                             entry["skipped_tiles"].append(dict(tile_id=tile_id, category=_export_problem_category(str(read_error)), reason=str(read_error)))
                             log_tile_progress(tile_id, entry["skipped_tiles"][-1])
                             continue
-                        usable = data["counts"] > 0
-                        if not usable.any():
+                        if data is None or not data[3].any():
                             entry["skipped_tiles"].append(dict(tile_id=tile_id, category="No usable raster data", reason=f"No valid native pixels in source TIFF: {uri}"))
                             log_tile_progress(tile_id, entry["skipped_tiles"][-1])
                             continue
                         # All source pixels contribute, including tiles sharing a coarse display cell.
-                        mosaic_sums += data["sums"]
-                        mosaic_counts += data["counts"]
-                        if data["votes"] is not None:
-                            mosaic_votes.update(data["votes"])
+                        row, col, sums, counts, votes = data
+                        h, w = counts.shape
+                        mosaic_sums[row:row+h, col:col+w] += sums
+                        mosaic_counts[row:row+h, col:col+w] += counts
+                        if votes is not None:
+                            mosaic_votes.update(votes)
                         entry["included_tiles"].append(tile_id)
                         log_tile_progress(tile_id)
                     populated = mosaic_counts > 0

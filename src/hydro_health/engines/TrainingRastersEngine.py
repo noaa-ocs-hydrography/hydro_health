@@ -474,7 +474,7 @@ class TrainingRastersEngine(Engine):
     def run(self) -> None:
         """Main entry point for evaluating training masks and processing rasters in parallel"""
         try:
-            self.setup_dask(self.param_lookup['env'], n_workers=2, threads_per_worker=1, memory_limit="12GB")
+            self.setup_dask(self.param_lookup['env'], n_workers=10, threads_per_worker=1, memory_limit="12GB")
             
             for eco_region in self.param_lookup['eco_regions'].value: 
                 self._resolve_paths(eco_region)

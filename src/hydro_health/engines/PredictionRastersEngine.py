@@ -8,7 +8,6 @@ import pathlib
 import tempfile
 import logging
 import numpy as np
-import pandas as pd
 import geopandas as gpd
 import rasterio
 import s3fs
@@ -46,6 +45,7 @@ def _apply_tsm_smoothing(gdal_dst_str: str, src_str: str, warp_opts: dict) -> No
     with rasterio.open(gdal_dst_str) as src:
         kwargs = src.meta.copy()
         kwargs.update({
+            'nodata': warp_opts['dstNodata'],
             'dtype': 'float32', 
             'tiled': True,
             'blockxsize': 512,
@@ -53,7 +53,7 @@ def _apply_tsm_smoothing(gdal_dst_str: str, src_str: str, warp_opts: dict) -> No
             'compress': 'lzw', 
             'bigtiff': 'yes' 
         })
-        nodata = src.nodata if src.nodata is not None else warp_opts.get('dstNodata', warp_opts.get('srcNodata', -9999.0))
+        nodata = kwargs['nodata']
         
         block_size = 1024
         total_chunks_x = (src.width + block_size - 1) // block_size
@@ -87,37 +87,29 @@ def _apply_tsm_smoothing(gdal_dst_str: str, src_str: str, warp_opts: dict) -> No
                             read_bottom - read_yoff
                         )
                         
-                        array = src.read(1, window=read_window).astype(np.float32)
+                        for band in src.indexes:
+                            values = src.read(band, window=read_window, masked=True)
+                            valid = ~np.ma.getmaskarray(values) & np.isfinite(values.data)
+                            array = np.where(valid, values, 0).astype(np.float32)
+                            valid_mask = valid.astype(np.float32)
+                            smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
+                            weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
                         
-                        if pd.isna(nodata):
-                            valid_mask = (~np.isnan(array)).astype(np.float32)
-                            array[np.isnan(array)] = 0
-                        else:
-                            valid_mask = ((array != nodata) & ~np.isnan(array)).astype(np.float32)
-                            array[array == nodata] = 0
-                            array[np.isnan(array)] = 0
-
-                        smoothed = uniform_filter(array, size=size, mode='constant', cval=0.0)
-                        weights = uniform_filter(valid_mask, size=size, mode='constant', cval=0.0)
+                            with np.errstate(divide='ignore', invalid='ignore'):
+                                final_array = np.where(weights > 0, smoothed / weights, nodata)
                         
-                        with np.errstate(divide='ignore', invalid='ignore'):
-                            final_array = np.where(weights > 0, smoothed / weights, nodata)
+                            row_offset = int(y - read_yoff)
+                            col_offset = int(x - read_xoff)
+                            core_array = final_array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
                         
-                        row_offset = int(y - read_yoff)
-                        col_offset = int(x - read_xoff)
-                        core_array = final_array[row_offset:row_offset + core_height, col_offset:col_offset + core_width]
-                        
-        # Allow smoothing to fill originally missing cells where valid neighbors exist.
-         # The weighted average excludes nodata values. Cells with no valid neighbors
-        # retain nodata through the weights > 0 condition above.
-                        dst.write(core_array.astype(kwargs['dtype']), 1, window=window)
+                            dst.write(core_array.astype(kwargs['dtype']), band, window=window)
 
     if os.path.exists(gdal_dst_str):
         os.remove(gdal_dst_str)
     shutil.move(smoothed_tmp, gdal_dst_str)
 
 
-def _warp_to_cutline(src_path: str, dst_path: str, cutline_path: str, task_tmp_dir: str, is_aws: bool, target_crs: str, target_res: float, src_nodata, is_tsm: bool) -> None:
+def _warp_to_cutline(src_path: str, dst_path: str, cutline_path: str, task_tmp_dir: str, is_aws: bool, target_crs: str, target_res: float, is_tsm: bool) -> None:
     """Helper to handle GDAL Warp boilerplate."""
     
     src_str = str(src_path)
@@ -133,7 +125,7 @@ def _warp_to_cutline(src_path: str, dst_path: str, cutline_path: str, task_tmp_d
 
     warp_opts = {
         'cutlineDSName': cutline_path,
-        'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE'],
+        'warpOptions': ['CUTLINE_ALL_TOUCHED=TRUE', 'UNIFIED_SRC_NODATA=NO'],
         'creationOptions': [
             'TILED=YES', 
             'BLOCKXSIZE=512',
@@ -147,14 +139,12 @@ def _warp_to_cutline(src_path: str, dst_path: str, cutline_path: str, task_tmp_d
         'outputType': gdal.GDT_Float32,
         'resampleAlg': 'bilinear',
         'dstSRS': target_crs,
+        'dstNodata': -9999.0,
         'xRes': target_res,
         'yRes': target_res,
         'cropToCutline': any(k in os.path.basename(src_str).lower() for k in ["tsm", "sed", "hurr"]),
     }
     
-    if src_nodata is not None:
-        warp_opts['srcNodata'] = src_nodata
-
     try:
         ds = gdal.Warp(gdal_dst_str, src_str, **warp_opts)
 
@@ -200,7 +190,6 @@ def _prepare_prediction_raster(params: list) -> tuple | None:
 
     try:
         with rasterio.open(open_path) as src:
-            src_nodata = src.nodata
             raster_crs = src.crs
             raster_bounds = src.bounds
     except Exception as e:
@@ -232,12 +221,18 @@ def _prepare_prediction_raster(params: list) -> tuple | None:
             Engine.write_message_dask(f"[WARNING] Bounding box check failed for {raster_name}: {e}", OUTPUTS)
             return
 
-    return raster_path, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir, src_nodata
+    try:
+        size_bytes = UPath(raster_path).stat().st_size
+    except (OSError, ValueError, KeyError) as exc:
+        Engine.write_message_dask(f"[WARNING] Could not determine size for {raster_path}: {exc}. Queuing last in batch.", OUTPUTS)
+        size_bytes = float("inf")
+
+    return size_bytes, (raster_path, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir)
 
 
 def _process_prediction_raster(params: tuple, file_number: int, total_files: int) -> None:
     """Warp one eligible prediction raster and log its position in the batch."""
-    raster_path, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir, src_nodata = params
+    raster_path, output_path, cutline_path, is_aws, target_crs, target_res, local_tmp_dir = params
     raster_name = pathlib.Path(raster_path).name.lower()
     Engine.write_message_dask(
         f"[{file_number:,}/{total_files:,}] Executing warp on {raster_name}", OUTPUTS
@@ -254,7 +249,6 @@ def _process_prediction_raster(params: tuple, file_number: int, total_files: int
                 is_aws=is_aws,
                 target_crs=target_crs,
                 target_res=target_res,
-                src_nodata=src_nodata,
                 is_tsm=is_tsm
             )
     except Exception as e:
@@ -409,7 +403,7 @@ class PredictionRastersEngine(Engine):
         self.write_message("Initializing Cluster and Processing Masks", OUTPUTS)
         
         try:
-            self.setup_dask(self.env, n_workers=4, threads_per_worker=1, memory_limit="6GB")
+            self.setup_dask(self.env, n_workers=10, threads_per_worker=2, memory_limit="6GB")
             
             regions = self.param_lookup.get('eco_regions', [])
             if not isinstance(regions, list):
@@ -422,7 +416,7 @@ class PredictionRastersEngine(Engine):
 
                 self._resolve_paths(region_str)
                 mask_pred_bounds, pred_cutline_path = self.prepare_spatial_masks(region_str)
-                priority_sources = ("sediment", "hurricane", "tsm")
+                priority_sources = ("bluetopo", "lidar")
                 remaining_sources = tuple(
                     name for name in self.preprocessed_subdirs if name not in priority_sources
                 )
@@ -452,15 +446,19 @@ class PredictionRastersEngine(Engine):
                     warp_params = []
                     if params_list:
                         checks = self.client.map(_prepare_prediction_raster, params_list)
-                        warp_params = [params for params in self.client.gather(checks) if params is not None]
+                        eligible = (item for item in self.client.gather(checks) if item is not None)
+                        warp_params = [params for _, params in sorted(eligible, key=lambda item: (item[0], item[1][0]))]
 
                     total_files = len(warp_params)
                     self.write_message(f"Prediction files to warp in this batch: {total_files:,}", OUTPUTS)
                     if warp_params:
-                        futures = self.client.map(
-                            _process_prediction_raster, warp_params, range(1, total_files + 1),
-                            total_files=total_files,
-                        )
+                        futures = [
+                            self.client.submit(
+                                _process_prediction_raster, params, number, total_files,
+                                priority=-number,
+                            )
+                            for number, params in enumerate(warp_params, start=1)
+                        ]
                         self.client.gather(futures)
 
                 self.write_message(f"--- Finished Ecoregion: {region_str} ---", OUTPUTS)

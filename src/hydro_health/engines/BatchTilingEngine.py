@@ -103,7 +103,7 @@ def _read_required_columns(f_path: str, mode: str, year_ranges: list) -> pd.Data
         "bpi_broad", "bpi_fine", "curv_plan", "curv_profile",
         "curv_total", "flowacc", "flowdir", "gradmag", "rugosity",
         "shearproxy", "slope", "tci", "terrain_classification",
-        "unc", "uncertainty", "distance_to_shore",
+        "unc", "uncertainty", "DTS",
     )
     shared_tokens = ("grain", "sed_size", "prim_sed", "sed_type", "survey")
 
