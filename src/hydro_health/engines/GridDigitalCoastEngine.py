@@ -13,6 +13,44 @@ from hydro_health.helpers.tools import get_config_item, get_approved_providers
 INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 
 
+def _is_dts_vrt(stem: str) -> bool:
+    """Check whether a VRT stem ends with _DTS."""
+
+    return stem.upper().endswith('_DTS')
+
+
+def _strip_dts_suffix(stem: str) -> str:
+    """Strip _DTS suffix for provider and shapefile lookups."""
+
+    return stem[:-4] if _is_dts_vrt(stem) else stem
+
+
+def _build_output_filename(vrt_stem: str, tile_id: str) -> str:
+    """Format output GeoTIFF filename, keeping _DTS at the very end."""
+
+    base_stem = _strip_dts_suffix(vrt_stem)
+    dts_suffix = "_DTS" if _is_dts_vrt(vrt_stem) else ""
+    return f"{base_stem}_{tile_id}{dts_suffix}.tiff"
+
+
+def _get_warp_params(ds) -> tuple:
+    """Determine NoData value and DEFLATE predictor from the VRT's first raster band."""
+    
+    band = ds.GetRasterBand(1)
+    src_nodata = band.GetNoDataValue()
+    nodata_val = src_nodata if src_nodata is not None else -9999
+
+    predictor = "3" if band.DataType in (gdal.GDT_Float32, gdal.GDT_Float64) else "2"
+    creation_options = [
+        "COMPRESS=DEFLATE",
+        f"PREDICTOR={predictor}",
+        "TILED=YES",
+        "BLOCKXSIZE=512",
+        "BLOCKYSIZE=512",
+    ]
+    return nodata_val, creation_options
+
+
 def _is_raster_empty(ds, nodata_val=-9999) -> bool:
     """Helper to check if a warped dataset is a 1x1 placeholder or pure NoData"""
 
@@ -46,18 +84,21 @@ def _grid_single_vrt_s3(params: list) -> str:
     s3_files = s3fs.S3FileSystem()
     gdal.SetConfigOption('CPL_VSIL_USE_TEMP_FILE_FOR_RANDOM_WRITE', 'YES')
     gdal.SetConfigOption('CPL_VSIL_S3_WRITE_SUPPORT', 'YES')
-    gdal.SetCacheMax(536870912) # 512MB
+    gdal.SetCacheMax(536870912)  # 512MB
     gdal.UseExceptions()
 
     vrt_ds = None
     vrt_stem = pathlib.Path(vrt_s3_path).stem
+    base_stem = _strip_dts_suffix(vrt_stem)
     vsi_vrt_path = f"/vsis3/{vrt_s3_path}"
     
     try:
         vrt_ds = gdal.Open(vsi_vrt_path)
         vrt_projection = vrt_ds.GetProjection()
+        nodata_val, creation_options = _get_warp_params(vrt_ds)
         
-        provider_folder_name = '_'.join(vrt_stem.split('_')[2:])
+        # Start at year: e.g. 2016_DEM_NOAA_NGS_48372
+        provider_folder_name = '_'.join(base_stem.split('_')[1:])
         digital_coast_folder = pathlib.Path(vrt_s3_path).parents[0]
         
         shp_search_path = f"{digital_coast_folder}/{provider_folder_name}/**/*.shp"
@@ -96,10 +137,12 @@ def _grid_single_vrt_s3(params: list) -> str:
             (blue_topo_gdf.intersects(dissolve_geom))
         ]
 
+        tiled_sub = get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER')
+
         for _, tile_row in intersecting_tiles.iterrows():
             folder_name = tile_row['tile']
-            tiled_sub = get_config_item('DIGITALCOAST', 'TILED_SUBFOLDER')
-            s3_out_file = f"{ecoregion_prefix}/{tiled_sub}/{folder_name}/{vrt_stem}_{folder_name}.tiff"
+            out_filename = _build_output_filename(vrt_stem, folder_name)
+            s3_out_file = f"{ecoregion_prefix}/{tiled_sub}/{folder_name}/{out_filename}"
 
             if s3_files.exists(s3_out_file):
                 continue
@@ -117,20 +160,14 @@ def _grid_single_vrt_s3(params: list) -> str:
             gdal.Warp(
                 local_tmp_path, vrt_ds, format='GTiff',
                 cutlineDSName=in_memory_geojson, cropToCutline=True,
-                dstNodata=-9999, srcSRS=vrt_projection, dstSRS=vrt_projection,
+                dstNodata=nodata_val, srcSRS=vrt_projection, dstSRS=vrt_projection,
                 cutlineSRS=blue_topo_gdf.crs.to_wkt(),
-                creationOptions=[
-                    "COMPRESS=DEFLATE", 
-                    "PREDICTOR=3", 
-                    "TILED=YES", 
-                    "BLOCKXSIZE=512", 
-                    "BLOCKYSIZE=512"
-                ]
+                creationOptions=creation_options
             )
 
             # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
             check_ds = gdal.Open(local_tmp_path, gdal.GA_ReadOnly)
-            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=nodata_val)
             check_ds = None
 
             if empty_tile:
@@ -167,11 +204,14 @@ def _grid_single_vrt_local(params: list) -> str:
     
     try:
         vrt = pathlib.Path(vrt_path)
+        base_stem = _strip_dts_suffix(vrt.stem)
         vrt_ds = gdal.Open(str(vrt))
         vrt_proj = vrt_ds.GetProjection()
+        nodata_val, creation_options = _get_warp_params(vrt_ds)
         
         outputs = param_lookup['output_directory'].valueAsText
-        vrt_data_folder = vrt.parent / '_'.join(vrt.stem.split('_')[2:])
+        # Start at year: e.g. 2016_DEM_NOAA_NGS_48372
+        vrt_data_folder = vrt.parent / '_'.join(base_stem.split('_')[1:])
         
         # Look for tileindex shapefiles first, fall back to any shapefile if needed
         shp_list = list(vrt_data_folder.rglob('tileindex*.shp'))
@@ -211,7 +251,7 @@ def _grid_single_vrt_local(params: list) -> str:
             folder_name = tile_row['tile']
             out_dir = ecoregion / tiled_sub / folder_name
             engine.write_message(f'output_dir:{out_dir}', outputs)
-            out_file = out_dir / f'{vrt.stem}_{folder_name}.tiff'
+            out_file = out_dir / _build_output_filename(vrt.stem, folder_name)
             engine.write_message(f'out file:{out_file}', outputs)
             
             if out_file.exists():
@@ -229,20 +269,14 @@ def _grid_single_vrt_local(params: list) -> str:
             gdal.Warp(
                 str(out_file), vrt_ds, format='GTiff',
                 cutlineDSName=in_memory_geojson, cropToCutline=True,
-                dstNodata=-9999, srcSRS=vrt_proj, dstSRS=vrt_proj,
+                dstNodata=nodata_val, srcSRS=vrt_proj, dstSRS=vrt_proj,
                 cutlineSRS=blue_topo_gdf.crs.to_wkt(),
-                creationOptions=[
-                    "COMPRESS=DEFLATE", 
-                    "PREDICTOR=3", 
-                    "TILED=YES", 
-                    "BLOCKXSIZE=512", 
-                    "BLOCKYSIZE=512"
-                ]
+                creationOptions=creation_options
             )
 
             # POST Warp check for BT tile that intersected provider tile scheme, but not valid data areas
             check_ds = gdal.Open(str(out_file), gdal.GA_ReadOnly)
-            empty_tile = _is_raster_empty(check_ds, nodata_val=-9999)
+            empty_tile = _is_raster_empty(check_ds, nodata_val=nodata_val)
             check_ds = None
 
             if empty_tile:
@@ -272,7 +306,7 @@ class GridDigitalCoastEngine(Engine):
         super().__init__()
         self.param_lookup = param_lookup
 
-    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, manual_downloads: bool, output_prefix: str) -> None:
+    def process_s3_vrt_gridding(self, blue_topo_gdf_future, outputs: str, data_type: str, output_prefix: str) -> None:
         """Processor for gridding S3 VRT files with dask (Approved providers only)"""
 
         s3_files = s3fs.S3FileSystem()
@@ -283,6 +317,9 @@ class GridDigitalCoastEngine(Engine):
         else:
             ecoregion_paths = s3_files.glob(f"{bucket}/ER_*")
 
+        folders = ['DigitalCoast', 'Digital_Coast_Manual_Downloads'] if data_type == 'DistanceToShore' else [data_type]
+        is_dts = data_type == 'DistanceToShore'
+
         for ecoregion_prefix in ecoregion_paths:
             ecoregion_stem = ecoregion_prefix.rsplit('/', 1)[-1]
             print(f"Gridding S3 ecoregion: {ecoregion_prefix} ({ecoregion_stem})")
@@ -292,8 +329,9 @@ class GridDigitalCoastEngine(Engine):
             bluetopo_grids = [p.split('/')[-1] for p in s3_files.ls(blue_topo_search) if s3_files.isdir(p)]
             
             dc_sub = get_config_item('DIGITALCOAST', 'SUBFOLDER')
-            digital_coast_folder = 'Digital_Coast_Manual_Downloads' if manual_downloads else 'DigitalCoast'
-            vrt_files = s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{digital_coast_folder}/*.vrt")
+            vrt_files = []
+            for folder in folders:
+                vrt_files.extend(s3_files.glob(f"{ecoregion_prefix}/{dc_sub}/{folder}/*.vrt"))
             
             if vrt_files:
                 approved_providers = [p.lower() for p in get_approved_providers(ecoregion_stem)]
@@ -301,11 +339,15 @@ class GridDigitalCoastEngine(Engine):
                 
                 for vrt in vrt_files:
                     vrt_stem = pathlib.Path(vrt).stem
-                    vrt_provider = '_'.join(vrt_stem.split('_')[3:])  # Start after year
+                    if _is_dts_vrt(vrt_stem) != is_dts:
+                        continue
+
+                    base_stem = _strip_dts_suffix(vrt_stem)
+                    vrt_provider = '_'.join(base_stem.split('_')[2:])  # Start after year
                     if vrt_provider.lower() in approved_providers:
                         approved_vrt_files.append(vrt)
                     else:
-                        self.write_message(f" - Skipping unapproved {digital_coast_folder} S3 provider: {vrt_provider}", outputs)
+                        self.write_message(f" - Skipping unapproved {data_type} S3 provider: {vrt_provider}", outputs)
 
                 if approved_vrt_files:
                     params = [[vrt, ecoregion_prefix, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for vrt in approved_vrt_files]
@@ -313,11 +355,11 @@ class GridDigitalCoastEngine(Engine):
                     tile_results = self.client.gather(future_tiles)
                     self.print_async_results(tile_results, outputs)
                 else:
-                    print(f" - No approved VRTs found for {ecoregion_stem} in S3.")
+                    print(f" - No approved {data_type} VRTs found for {ecoregion_stem} in S3.")
             else:
                 print(f" - No VRTs found for {ecoregion_prefix} in S3.")
 
-    def process_local_vrt_gridding(self, blue_topo_gdf_future, outputs: str, output_prefix: str) -> None:
+    def process_local_vrt_gridding(self, blue_topo_gdf_future, outputs: str, data_type: str, output_prefix: str) -> None:
         """Processor for gridding local VRT files with dask"""
 
         base_path = pathlib.Path(outputs)
@@ -326,33 +368,50 @@ class GridDigitalCoastEngine(Engine):
         else:
             ecoregions = [ecoregion for ecoregion in base_path.glob('ER_*') if ecoregion.is_dir()]
 
+        folders = ['DigitalCoast', 'Digital_Coast_Manual_Downloads'] if data_type == 'DistanceToShore' else [data_type]
+        is_dts = data_type == 'DistanceToShore'
+
         for ecoregion in ecoregions:
             print(f"Gridding local ecoregion: {ecoregion.stem}")
             
             bt_sub_path = ecoregion / get_config_item('BLUETOPO', 'SUBFOLDER') / 'BlueTopo'
             bluetopo_grids = [f.stem for f in bt_sub_path.iterdir() if f.is_dir()] if bt_sub_path.exists() else []
             
-            dc_sub_path = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER') / 'DigitalCoast'
-            vrt_files = list(dc_sub_path.glob('*.vrt'))
+            dc_sub_path = ecoregion / get_config_item('DIGITALCOAST', 'SUBFOLDER')
+            vrt_files = []
+            for folder in folders:
+                vrt_files.extend((dc_sub_path / folder).glob('*.vrt'))
 
             if vrt_files:
                 approved_providers = [provider.lower() for provider in get_approved_providers(ecoregion.stem)]
                 approved_vrt_files = []
                 for vrt in vrt_files:
-                    vrt_provider = '_'.join(vrt.stem.split('_')[2:])
+                    if _is_dts_vrt(vrt.stem) != is_dts:
+                        continue
+
+                    base_stem = _strip_dts_suffix(vrt.stem)
+                    vrt_provider = '_'.join(base_stem.split('_')[2:])  # Start after year
                     if vrt_provider.lower() in approved_providers:
                         approved_vrt_files.append(vrt)
-                params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in approved_vrt_files]
-                future_tiles = self.client.map(_grid_single_vrt_local, params)
-                tile_results = self.client.gather(future_tiles)
-                self.print_async_results(tile_results, outputs)
+
+                if approved_vrt_files:
+                    params = [[str(v), ecoregion, bluetopo_grids, blue_topo_gdf_future, self.param_lookup] for v in approved_vrt_files]
+                    future_tiles = self.client.map(_grid_single_vrt_local, params)
+                    tile_results = self.client.gather(future_tiles)
+                    self.print_async_results(tile_results, outputs)
+                else:
+                    print(f" - No approved {data_type} VRTs found for {ecoregion.stem} locally.")
             else:
                 print(f" - No VRTs found for {ecoregion.stem} locally.")
 
-    def run(self, output_prefix: str, manual_downloads=False) -> None:
+    def run(self, output_prefix: str, data_type: str = 'DigitalCoast') -> None:
         """Main execution method routing control using structural parameters"""
 
-        print('Starting GridDigitalCoastEngine')
+        valid_types = ['DigitalCoast', 'Digital_Coast_Manual_Downloads', 'DistanceToShore']
+        if data_type not in valid_types:
+            raise ValueError(f"Invalid data_type '{data_type}'. Must be one of {valid_types}")
+
+        print(f'Starting GridDigitalCoastEngine ({data_type})')
         outputs = self.param_lookup['output_directory'].valueAsText
 
         self.setup_dask(self.param_lookup['env'])
@@ -364,10 +423,10 @@ class GridDigitalCoastEngine(Engine):
         [blue_topo_gdf_future] = self.client.scatter([blue_topo_gdf], broadcast=True)
 
         if self.param_lookup['env'] in ['local', 'remote']:
-            print('- Beginning local VRT gridding')
-            self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, output_prefix)
+            print(f'- Beginning local {data_type} VRT gridding')
+            self.process_local_vrt_gridding(blue_topo_gdf_future, outputs, data_type, output_prefix)
         else:
-            print('- Beginning local VRT gridding')
-            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, manual_downloads, output_prefix)
+            print(f'- Beginning S3 {data_type} VRT gridding')
+            self.process_s3_vrt_gridding(blue_topo_gdf_future, outputs, data_type, output_prefix)
 
         self.close_dask()

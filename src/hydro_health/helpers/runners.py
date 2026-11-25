@@ -62,10 +62,13 @@ def run_grid_digital_coast(param_lookup: dict[dict], output_prefix: str) -> None
     """Entry poiint for gridding DigitalCoast tiles to BlueTopo polygons"""
 
     engine = GridDigitalCoastEngine(param_lookup)
-    engine.run(output_prefix)
+    engine.run(output_prefix, data_type='DigitalCoast')
 
     engine = GridDigitalCoastEngine(param_lookup)
-    engine.run(output_prefix, manual_downloads=True)
+    engine.run(output_prefix, data_type='Digital_Coast_Manual_Downloads')
+
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run(output_prefix, data_type='DistanceToShore')
 
 
 def run_laz_conversion_engine(tiles: gpd.GeoDataFrame, outputs: str) -> None:
@@ -221,19 +224,20 @@ def run_ml_raster_export_engine(param_lookup: dict[dict], output_prefix: str|boo
     stats.strip_dirs().sort_stats('cumulative').print_stats(10)  
 
 
-def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str|bool) -> None:
+def run_raster_vrt_engine(param_lookup: dict[str], output_prefix: str | bool) -> None:
     """Entry point for building VRT files for BlueTopo and Digital Coast data"""
     
     engine = RasterVRTEngine(param_lookup)
 
-    # TODO move this logic into each run()
+    output_directory = param_lookup['output_directory'].valueAsText
     for ecoregion in get_ecoregion_folders(param_lookup, output_prefix):
-        # for dataset in ['elevation', 'slope', 'rugosity', 'uncertainty', 'shore', 'catzoc_score_all', 'catzoc_score_latest', 'catzoc_decay_all', 'catzoc_decay_latest']:
         for file_type in ['elevation', 'slope', 'uncertainty', 'shore']:
-            print(f'Starting {engine.__class__.__name__} for {ecoregion} - {file_type}')
-            engine.run(param_lookup['output_directory'].valueAsText, file_type, ecoregion, 'BlueTopo', output_prefix=output_prefix)
-        print(f'Starting {engine.__class__.__name__} for {ecoregion}')
-        engine.run(param_lookup['output_directory'].valueAsText, 'NCMP', ecoregion, 'DigitalCoast', output_prefix=output_prefix, manual_downloads=True)
+            engine.run(output_directory, ecoregion, 'BlueTopo', file_type=file_type, output_prefix=output_prefix)
+
+        engine.run(output_directory, ecoregion, 'DigitalCoast', 
+                   file_type='NCMP', output_prefix=output_prefix, manual_downloads=True)
+        engine.run(output_directory, ecoregion, 'DistanceToShore', 
+                   output_prefix=output_prefix, manual_downloads=True)
 
 
 def run_tsm_layer_engine(param_lookup: dict[dict], output_prefix: str|bool) -> None:
