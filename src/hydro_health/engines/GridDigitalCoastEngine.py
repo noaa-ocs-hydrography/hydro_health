@@ -15,16 +15,19 @@ INPUTS = pathlib.Path(__file__).parents[3] / 'inputs'
 
 def _is_dts_vrt(stem: str) -> bool:
     """Check whether a VRT stem ends with _DTS."""
+
     return stem.upper().endswith('_DTS')
 
 
 def _strip_dts_suffix(stem: str) -> str:
     """Strip _DTS suffix for provider and shapefile lookups."""
+
     return stem[:-4] if _is_dts_vrt(stem) else stem
 
 
 def _build_output_filename(vrt_stem: str, tile_id: str) -> str:
     """Format output GeoTIFF filename, keeping _DTS at the very end."""
+
     base_stem = _strip_dts_suffix(vrt_stem)
     dts_suffix = "_DTS" if _is_dts_vrt(vrt_stem) else ""
     return f"{base_stem}_{tile_id}{dts_suffix}.tiff"
@@ -32,6 +35,7 @@ def _build_output_filename(vrt_stem: str, tile_id: str) -> str:
 
 def _get_warp_params(ds) -> tuple:
     """Determine NoData value and DEFLATE predictor from the VRT's first raster band."""
+    
     band = ds.GetRasterBand(1)
     src_nodata = band.GetNoDataValue()
     nodata_val = src_nodata if src_nodata is not None else -9999
