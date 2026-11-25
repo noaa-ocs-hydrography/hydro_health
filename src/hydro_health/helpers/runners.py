@@ -61,11 +61,11 @@ def run_digital_coast_engine(tiles: gpd.GeoDataFrame, param_lookup: dict[dict], 
 def run_grid_digital_coast(param_lookup: dict[dict], output_prefix: str) -> None:
     """Entry poiint for gridding DigitalCoast tiles to BlueTopo polygons"""
 
-    # engine = GridDigitalCoastEngine(param_lookup)
-    # engine.run(output_prefix, data_type='DigitalCoast')
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run(output_prefix, data_type='DigitalCoast')
 
-    # engine = GridDigitalCoastEngine(param_lookup)
-    # engine.run(output_prefix, data_type='Digital_Coast_Manual_Downloads')
+    engine = GridDigitalCoastEngine(param_lookup)
+    engine.run(output_prefix, data_type='Digital_Coast_Manual_Downloads')
 
     engine = GridDigitalCoastEngine(param_lookup)
     engine.run(output_prefix, data_type='DistanceToShore')
